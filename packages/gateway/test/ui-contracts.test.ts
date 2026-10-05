@@ -130,7 +130,7 @@ beforeAll(async () => {
     session: "ui-contracts-dedup-session",
     scope: "project",
   });
-  ltm.create({
+  const cacheWarming = ltm.create({
     id: crypto.randomUUID(),
     projectPath: SEEDED.dedupProjectPath,
     category: "gotcha",
@@ -139,6 +139,47 @@ beforeAll(async () => {
     session: "ui-contracts-dedup-session",
     scope: "project",
   });
+  // A private entry that duplicates a promoted (shared) entry of another
+  // project — produces a `pool: "project_shared"` preview group.
+  const otherDedupPath = "/test/ui-contracts/dedup-preview-other";
+  ensureProject(otherDedupPath, "ui-contracts-dedup-other");
+  const tenantQuotaPrivate = ltm.create({
+    id: crypto.randomUUID(),
+    projectPath: SEEDED.dedupProjectPath,
+    category: "gotcha",
+    title: "Tenant quota eviction ordering rule across projects",
+    content: "Evict lowest-quota tenants first.",
+    session: "ui-contracts-dedup-session",
+    scope: "project",
+  });
+  const tenantQuotaShared = ltm.create({
+    id: crypto.randomUUID(),
+    projectPath: otherDedupPath,
+    category: "gotcha",
+    title: "Tenant quota eviction ordering rule across projects shared",
+    content: "Evict lowest-quota tenants first, everywhere.",
+    session: "ui-contracts-dedup-session",
+    scope: "project",
+    crossProject: true,
+  });
+  // /knowledge pages sort by `updated_at DESC, id DESC`, and every seed lands
+  // in the same millisecond — the tiebreak is a coin flip between random-v4
+  // ids. Pin the new dedup seeds to a strictly older timestamp and bump "Cache
+  // warming" ahead of every other seed so the limit:1 first page is
+  // deterministically the same entry as on main.
+  db()
+    .query(
+      "UPDATE knowledge SET created_at = ?, updated_at = ? WHERE id IN (?, ?)",
+    )
+    .run(
+      1700000000000 - 86_400_000,
+      1700000000000 - 86_400_000,
+      tenantQuotaPrivate,
+      tenantQuotaShared,
+    );
+  db()
+    .query("UPDATE knowledge SET updated_at = ? WHERE id = ?")
+    .run(Date.now() + 86_400_000, cacheWarming);
   for (const i of [0, 1]) {
     temporal.store({
       projectPath: SEEDED.projectPath,
@@ -272,7 +313,9 @@ function makeNormaliser() {
         if (!tag) tmIds.set(value, (tag = `<tm-${tmN++}>`));
         return tag;
       }
-      const groupMatch = /^(project|global):[0-9a-f]{16}$/.exec(value);
+      const groupMatch = /^(project_shared|project|global):[0-9a-f]{16}$/.exec(
+        value,
+      );
       if (groupMatch) {
         const scope = groupMatch[1];
         if (scope) {
@@ -405,6 +448,29 @@ describe("ui contracts against the real gateway", () => {
       dedupPreviewResponse,
       { method: "POST", ...JSON_BODY({}) },
     );
+    // The seed includes a private entry duplicating another project's
+    // promoted entry — the preview must surface it as a project_shared group
+    // that also parses against the contract (checked by contractRoute above).
+    const res = await api(v1(["projects", SEEDED.dedupProjectId, "dedup"]), {
+      method: "POST",
+      ...JSON_BODY({}),
+    });
+    const preview = (await res.json()) as {
+      groups: Array<{
+        pool: string;
+        scope: string;
+        candidates: Array<{ scope: string }>;
+        suggested_keep_id: string;
+      }>;
+    };
+    const sharedGroup = preview.groups.find(
+      (group) => group.pool === "project_shared",
+    );
+    expect(sharedGroup).toBeDefined();
+    expect(sharedGroup?.scope).toBe("project");
+    expect(
+      sharedGroup?.candidates.some((candidate) => candidate.scope === "shared"),
+    ).toBe(true);
   });
 
   it("GET /knowledge first cross-project page", async () => {

@@ -716,6 +716,7 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
   type Group = {
     group_id: string;
     scope: "project" | "global";
+    pool: "project" | "shared" | "project_shared";
     project_id: string | null;
     candidates: Candidate[];
     suggested_keep_id: string;
@@ -725,10 +726,20 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     groups: Group[];
     project: { clusters: unknown[]; totalRemoved: number };
     global: { clusters: unknown[]; totalRemoved: number };
+    project_shared: { clusters: unknown[]; totalRemoved: number };
   };
   type Receipt = {
     operationId: string;
-    applied: Array<{ keepId: string; merged: Array<{ id: string }> }>;
+    applied: Array<{
+      keepId: string;
+      merged: Array<{ id: string }>;
+      contentFrom?: {
+        id: string;
+        revision: number;
+        replacedKeepRevision: number;
+        keepVersionId: string;
+      };
+    }>;
     refused: Array<{
       groupIndex: number;
       keepId: string;
@@ -807,6 +818,10 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
       clusters: expect.any(Array),
       totalRemoved: expect.any(Number),
     });
+    expect(preview.project_shared).toMatchObject({
+      clusters: expect.any(Array),
+      totalRemoved: expect.any(Number),
+    });
 
     const group = groupFor(preview, projectId);
     expect(group.group_id).toMatch(/^project:[0-9a-f]{16}$/);
@@ -876,6 +891,353 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
         expect.objectContaining({ scope: "shared", project_id: null }),
       ]),
     );
+  });
+
+  it("offers a private↔promoted duplicate as a project_shared group and applies it under the route project", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-ps-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project-shared");
+    const otherPath = `/test/api/dedup-ps-q-${Date.now()}-${seq++}`;
+    const otherId = ensureProject(otherPath, "dedup-other");
+    const title = "Connection pool sizing formula for bursty tenant loads";
+    const priv = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Pool size = peak concurrency times two.",
+      session: "test-session",
+      scope: "project",
+    });
+    const promoted = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: otherPath,
+      category: "gotcha",
+      title: `${title} shared`,
+      content: "Same rule, promoted for every project.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const groups = preview.groups.filter(
+      (g) =>
+        g.candidates.some((c) => c.logical_id === priv) ||
+        g.candidates.some((c) => c.logical_id === promoted),
+    );
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    expect(group.pool).toBe("project_shared");
+    expect(group.scope).toBe("project");
+    expect(group.project_id).toBe(projectId);
+    expect(group.group_id).toMatch(/^project_shared:[0-9a-f]{16}$/);
+    // The shared entry is always the suggested keeper.
+    expect(group.suggested_keep_id).toBe(promoted);
+    const byId = Object.fromEntries(
+      group.candidates.map((c) => [c.logical_id, c] as const),
+    );
+    expect(byId[priv]).toMatchObject({
+      scope: "project",
+      project_id: projectId,
+    });
+    expect(byId[promoted]).toMatchObject({
+      scope: "shared",
+      project_id: otherId,
+    });
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [decisionFrom(group)],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    // The private entry merged away; the shared keeper is live and unchanged.
+    expect(ltm.get(priv)).toBeNull();
+    const keeper = ltm.getByLogical(promoted);
+    expect(keeper).toMatchObject({
+      id: promoted,
+      project_id: otherId,
+      cross_project: 1,
+    });
+  });
+
+  it("applies a project_shared group with contentFromId, replacing the shared survivor's content", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-cf-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-cf-project");
+    const otherPath = `/test/api/dedup-cf-q-${Date.now()}-${seq++}`;
+    const otherId = ensureProject(otherPath, "dedup-cf-other");
+    const title = "Rate limit retry budget for chatty downstream services";
+    const priv = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Retry at most twice with jitter.",
+      session: "test-session",
+      scope: "project",
+    });
+    const promoted = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: otherPath,
+      category: "gotcha",
+      title: `${title} shared`,
+      content: "Shared wording of the retry rule.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const group = preview.groups.find(
+      (g) =>
+        g.pool === "project_shared" &&
+        g.candidates.some((c) => c.logical_id === priv) &&
+        g.candidates.some((c) => c.logical_id === promoted),
+    );
+    if (!group) throw new Error("expected a project_shared group");
+    const privCandidate = group.candidates.find((c) => c.logical_id === priv)!;
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [{ ...decisionFrom(group), contentFromId: privCandidate.id }],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(receipt.applied[0].contentFrom).toMatchObject({
+      id: privCandidate.id,
+      revision: privCandidate.revision,
+    });
+
+    // The shared keeper took the private entry's content, kept its scope.
+    const keeper = ltm.getByLogical(promoted);
+    expect(keeper).toMatchObject({
+      title,
+      content: "Retry at most twice with jitter.",
+      project_id: otherId,
+      cross_project: 1,
+    });
+    expect(ltm.get(priv)).toBeNull();
+    const doc = await api(`/api/v1/knowledge/${ltm.logicalIdOf(promoted)}`);
+    expect(doc.status).toBe(200);
+    expect(await doc.json()).toMatchObject({
+      project_id: otherId,
+      cross_project: 1,
+    });
+  });
+
+  it("returns 400 when contentFromId is not one of mergeIds", async () => {
+    const { projectId } = await seedDuplicates();
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [
+        {
+          keepId: "k",
+          mergeIds: ["m"],
+          expectedRevisions: { k: 1, m: 1 },
+          contentFromId: "not-a-merge",
+        },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as ApiError;
+    expect(err.error.type).toBe("invalid_request");
+  });
+
+  it("offers promoted↔promoted duplicates only in the shared pool, applied with projectId null", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-pp-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project");
+    const qPath = `/test/api/dedup-pp-q-${Date.now()}-${seq++}`;
+    const rPath = `/test/api/dedup-pp-r-${Date.now()}-${seq++}`;
+    const title = "Batch write window amortizes fsync across tenant commits";
+    const promotedQ = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: qPath,
+      category: "gotcha",
+      title,
+      content: "Batch for 5ms.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+    const promotedR = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: rPath,
+      category: "gotcha",
+      title: `${title} duplicate`,
+      content: "Batch for five milliseconds.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const groups = preview.groups.filter(
+      (g) =>
+        g.candidates.some((c) => c.logical_id === promotedQ) ||
+        g.candidates.some((c) => c.logical_id === promotedR),
+    );
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    expect(group.pool).toBe("shared");
+    expect(group.scope).toBe("global");
+    expect(group.project_id).toBeNull();
+    expect(group.group_id).toMatch(/^global:[0-9a-f]{16}$/);
+    for (const c of group.candidates) expect(c.scope).toBe("shared");
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      projectId: null,
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [decisionFrom(group)],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+  });
+
+  it("never offers the same logical id in two preview groups across pools", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-x-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project");
+    const qPath = `/test/api/dedup-x-q-${Date.now()}-${seq++}`;
+    const title = "Lease renewal must precede lock expiry under failover";
+    ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Renew at half the TTL.",
+      session: "test-session",
+      scope: "project",
+    });
+    ltm.create({
+      id: crypto.randomUUID(),
+      category: "gotcha",
+      title: `${title} global`,
+      content: "Renew at half the TTL.",
+      session: "test-session",
+      scope: "global",
+      crossProject: true,
+    });
+    ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: qPath,
+      category: "gotcha",
+      title: `${title} promoted`,
+      content: "Renew at half the TTL.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const seen = new Set<string>();
+    for (const group of preview.groups) {
+      for (const c of group.candidates) {
+        expect(seen.has(c.logical_id)).toBe(false);
+        seen.add(c.logical_id);
+      }
+    }
+  });
+
+  it("excludes a clustered shared entry by logical id when it was edited between runs", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-edit-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project");
+    const otherPath = `/test/api/dedup-edit-q-${Date.now()}-${seq++}`;
+    ensureProject(otherPath, "dedup-other");
+    const title = "Shared title edited between dedup preview runs";
+    ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Private copy of the shared rule.",
+      session: "test-session",
+      scope: "project",
+    });
+    // Promoted shared entry S (clusters in the shared run with N) and a NULL
+    // shared entry N duplicating it.
+    const sharedV1 = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: otherPath,
+      category: "gotcha",
+      title,
+      content: "The shared rule, promoted.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+    const nullShared = ltm.create({
+      id: crypto.randomUUID(),
+      category: "gotcha",
+      title,
+      content: "The shared rule, global.",
+      session: "test-session",
+      scope: "global",
+      crossProject: true,
+    });
+    // S is edited after the shared run snapshots it: the snapshot holds v2
+    // while v3 is already current — same logical id, still duplicating A.
+    const sharedV2 = ltm.appendVersion(sharedV1, {
+      content: "The shared rule, promoted. Edited once.",
+    })!;
+    const sharedV3 = ltm.appendVersion(sharedV1, {
+      content: "The shared rule, promoted. Edited twice.",
+    })!;
+    const sharedLogical = ltm.logicalIdOf(sharedV3);
+    // Simulate the race: the shared run clustered S's now-stale v2 id.
+    vi.spyOn(ltm, "deduplicateGlobal").mockResolvedValueOnce({
+      clusters: [
+        {
+          surviving: { id: sharedV2, title },
+          merged: [{ id: nullShared, title }],
+        },
+      ],
+      totalRemoved: 1,
+      pairSimilarities: new Map(),
+      entryTitles: new Map(),
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+
+    const seen = new Set<string>();
+    for (const group of preview.groups) {
+      for (const c of group.candidates) {
+        expect(seen.has(c.logical_id)).toBe(false);
+        seen.add(c.logical_id);
+      }
+    }
+    const sharedGroups = preview.groups.filter(
+      (g) =>
+        g.pool === "shared" &&
+        g.candidates.some((c) => c.logical_id === sharedLogical),
+    );
+    expect(sharedGroups).toHaveLength(1);
   });
 
   it("preview never writes", async () => {

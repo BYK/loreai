@@ -115,6 +115,7 @@ describe("api client: happy path", () => {
           groups: [],
           project: { clusters: [], totalRemoved: 0 },
           global: { clusters: [], totalRemoved: 0 },
+          project_shared: { clusters: [], totalRemoved: 0 },
         });
       },
     });

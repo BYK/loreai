@@ -5,7 +5,7 @@
     "name": "ui-contracts-dedup",
     "git_remote": null,
     "created_at": 1700000000000,
-    "knowledge_count": 2,
+    "knowledge_count": 3,
     "session_count": 0,
     "message_count": 0,
     "distillation_count": 0,
@@ -22,5 +22,17 @@
     "message_count": 2,
     "distillation_count": 1,
     "last_activity": 1700000003000
+  },
+  {
+    "id": "<uuid-2>",
+    "path": "/tmp/<project-2>",
+    "name": "ui-contracts-dedup-other",
+    "git_remote": null,
+    "created_at": 1700000004000,
+    "knowledge_count": 1,
+    "session_count": 0,
+    "message_count": 0,
+    "distillation_count": 0,
+    "last_activity": 1700000005000
   }
 ]

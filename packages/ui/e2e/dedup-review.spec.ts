@@ -55,7 +55,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
     await expect(review).toBeVisible();
-    await expect(review.getByTestId("duplicate-group")).toHaveCount(2);
+    await expect(review.getByTestId("duplicate-group")).toHaveCount(3);
     await expect(
       review
         .getByText("Duplicate review evidence sample candidate alpha")
@@ -90,7 +90,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
       hasText: "Shared duplicate review evidence sample candidate alpha",
     });
     await sharedGroup.click();
-    await expect(review.getByText("Shared (no project)").first()).toBeVisible();
+    await expect(review.getByText("Shared").first()).toBeVisible();
     await expect(review).not.toContainText(/\bglobal\b/i);
     await expect(review.getByText("Shared scope").first()).toBeVisible();
     await expect(
@@ -121,6 +121,12 @@ test.describe("read-only duplicate review (MEM-01)", () => {
       expect(Math.abs(firstBox.y - secondBox.y)).toBeLessThan(4);
     }
 
+    const projectSharedGroup = review.getByTestId("duplicate-group").filter({
+      hasText: "Cross pool duplicate tenant eviction ordering evidence",
+    });
+    await projectSharedGroup.click();
+    await expect(review.getByText("Project + shared").first()).toBeVisible();
+
     await review
       .getByTestId("duplicate-group")
       .filter({
@@ -150,7 +156,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page.getByTestId("review-summary")).toContainText("1 skipped");
     await page.keyboard.press("u");
     await expect(page.getByTestId("review-summary")).toContainText(
-      "1 accepted · 0 skipped · 1 pending",
+      "1 accepted · 0 skipped · 2 pending",
     );
 
     const afterResponse = await page.request.get(knowledgePath);

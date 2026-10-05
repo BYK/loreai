@@ -54,15 +54,18 @@ function candidate(
 function group(
   groupId = "project:group-1",
   candidates = [candidate("knowledge-a"), candidate("knowledge-b")],
+  overrides: Partial<DedupPreviewGroup> = {},
 ): DedupPreviewGroup {
   const suggested = candidates[0];
   if (!suggested) throw new Error("A duplicate group needs a candidate");
   return {
     group_id: groupId,
     scope: "project",
+    pool: "project",
     project_id: projectId,
     candidates,
     suggested_keep_id: suggested.id,
+    ...overrides,
   };
 }
 
@@ -72,6 +75,7 @@ function response(groups: DedupPreviewGroup[]): DedupPreviewResponse {
     groups,
     project: { clusters: [], totalRemoved: 0 },
     global: { clusters: [], totalRemoved: 0 },
+    project_shared: { clusters: [], totalRemoved: 0 },
   };
 }
 
@@ -201,6 +205,7 @@ describe("DuplicateReview", () => {
             }),
           ]),
           scope: "global",
+          pool: "shared",
           project_id: null,
         },
       ]),
@@ -210,9 +215,7 @@ describe("DuplicateReview", () => {
       await screen.findByText("Full content for knowledge-b"),
     ).toBeInTheDocument();
     expect(screen.getByText("Shared scope")).toBeInTheDocument();
-    expect(screen.getAllByText("Shared (no project)").length).toBeGreaterThan(
-      0,
-    );
+    expect(screen.getAllByText("Shared").length).toBeGreaterThan(0);
     expect(screen.getByText("session-1")).toBeInTheDocument();
     const candidates = screen.getAllByTestId("duplicate-candidate");
     expect(screen.getByText("86% match")).toHaveAttribute(
@@ -257,7 +260,13 @@ describe("DuplicateReview", () => {
     mount(
       makeClient({
         previewDedup: async () =>
-          response([group("global:link-targets", [otherProject, projectless])]),
+          response([
+            group("global:link-targets", [otherProject, projectless], {
+              scope: "global",
+              pool: "shared",
+              project_id: null,
+            }),
+          ]),
         listKnowledgeVersions: async (id) => {
           const item = [otherProject, projectless].find(
             (value) => value.logical_id === id,
@@ -498,11 +507,57 @@ describe("DuplicateReview", () => {
     );
   });
 
+  it("labels groups by dedup pool: Project, Project + shared, Shared", async () => {
+    mount(
+      makeClient({
+        previewDedup: async () =>
+          response([
+            group("project:pool-project"),
+            group(
+              "project_shared:pool-project-shared",
+              [
+                candidate("knowledge-ps-private"),
+                candidate("knowledge-ps-shared", {
+                  scope: "shared",
+                  project_id: "project-2",
+                }),
+              ],
+              { pool: "project_shared" },
+            ),
+            group(
+              "global:pool-shared",
+              [
+                candidate("knowledge-s-a", {
+                  scope: "shared",
+                  project_id: null,
+                }),
+                candidate("knowledge-s-b", {
+                  scope: "shared",
+                  project_id: null,
+                }),
+              ],
+              { scope: "global", pool: "shared", project_id: null },
+            ),
+          ]),
+      }),
+    );
+    await screen.findByTestId("duplicate-review");
+    const groups = await screen.findAllByTestId("duplicate-group");
+    expect(groups).toHaveLength(3);
+    expect(groups[0]).toHaveTextContent("Project");
+    expect(groups[1]).toHaveTextContent("Project + shared");
+    expect(groups[2]).toHaveTextContent("Shared");
+  });
+
   it("moves between groups and selects a keeper with numbered shortcuts", async () => {
-    const second = group("global:second", [
-      candidate("knowledge-c", { scope: "shared", project_id: null }),
-      candidate("knowledge-d", { scope: "shared", project_id: null }),
-    ]);
+    const second = group(
+      "global:second",
+      [
+        candidate("knowledge-c", { scope: "shared", project_id: null }),
+        candidate("knowledge-d", { scope: "shared", project_id: null }),
+      ],
+      { scope: "global", pool: "shared", project_id: null },
+    );
     const candidates = [...group().candidates, ...second.candidates];
     mount(
       makeClient({

@@ -4,6 +4,7 @@
     {
       "group_id": "project:group-0",
       "scope": "project",
+      "pool": "project",
       "project_id": "<uuid-0>",
       "candidates": [
         {
@@ -42,6 +43,49 @@
         }
       ],
       "suggested_keep_id": "<uuid-1>"
+    },
+    {
+      "group_id": "project_shared:group-0",
+      "scope": "project",
+      "pool": "project_shared",
+      "project_id": "<uuid-0>",
+      "candidates": [
+        {
+          "id": "<uuid-3>",
+          "logical_id": "<uuid-3>",
+          "revision": 1,
+          "title": "Tenant quota eviction ordering rule across projects shared",
+          "content_excerpt": "Evict lowest-quota tenants first, everywhere.",
+          "scope": "shared",
+          "project_id": "<uuid-4>",
+          "category": "gotcha",
+          "confidence": 1,
+          "source_session": "ui-contracts-dedup-session",
+          "updated_at": 1700000002000,
+          "score": 1,
+          "reasons": [
+            "title_overlap"
+          ]
+        },
+        {
+          "id": "<uuid-5>",
+          "logical_id": "<uuid-5>",
+          "revision": 1,
+          "title": "Tenant quota eviction ordering rule across projects",
+          "content_excerpt": "Evict lowest-quota tenants first.",
+          "scope": "project",
+          "project_id": "<uuid-0>",
+          "category": "gotcha",
+          "confidence": 1,
+          "source_session": "ui-contracts-dedup-session",
+          "updated_at": 1700000003000,
+          "score": 1,
+          "reasons": [
+            "title_overlap"
+          ]
+        }
+      ],
+      "suggested_keep_id": "<uuid-3>"
     }
   ],
   "project": {
@@ -67,6 +111,26 @@
   "global": {
     "clusters": [],
     "totalRemoved": 0,
+    "pairSimilarities": {},
+    "entryTitles": {},
+    "pairMatches": {}
+  },
+  "project_shared": {
+    "clusters": [
+      {
+        "surviving": {
+          "id": "<uuid-3>",
+          "title": "Tenant quota eviction ordering rule across projects shared"
+        },
+        "merged": [
+          {
+            "id": "<uuid-5>",
+            "title": "Tenant quota eviction ordering rule across projects"
+          }
+        ]
+      }
+    ],
+    "totalRemoved": 1,
     "pairSimilarities": {},
     "entryTitles": {},
     "pairMatches": {}

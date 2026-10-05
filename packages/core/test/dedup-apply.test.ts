@@ -840,3 +840,522 @@ describe("recoverability and downstream effects", () => {
     ).toEqual({ n: 0 });
   });
 });
+
+describe("shared pool", () => {
+  const PROJECT_Q = join(ROOT, "project-q");
+  mkdirSync(PROJECT_Q, { recursive: true });
+
+  /** Promoted entry: project_id = its origin project, cross_project = 1. */
+  function createPromoted(title: string, projectPath = PROJECT_Q): string {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+    return id;
+  }
+
+  function row(id: string) {
+    return db()
+      .query(
+        "SELECT version, project_id, cross_project, is_deleted FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(ltm.logicalIdOf(id)) as {
+      version: number;
+      project_id: string | null;
+      cross_project: number;
+      is_deleted: number;
+    };
+  }
+
+  test("projectId null merges a promoted entry into a NULL keep", () => {
+    const keep = createGlobalEntry("Shared Pool Keep");
+    const dupe = createPromoted("Shared Pool Dupe");
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(dupe)).toBe(false);
+    // Keep row untouched: still version 1, still NULL/shared.
+    expect(row(keep)).toMatchObject({
+      version: 1,
+      project_id: null,
+      cross_project: 1,
+    });
+    expect(dedupProvenanceFor(receipt.operationId)[0]).toMatchObject({
+      keep_logical_id: keep,
+      merged_logical_id: dupe,
+    });
+    // Recoverable like any other merge: history ends in a tombstone and the
+    // last live version restores.
+    const history = ltm.versionHistory(dupe);
+    expect(history.at(-1)?.is_deleted).toBe(1);
+    const last = history[history.length - 2];
+    const restoredId = ltm.appendVersion(dupe, {
+      title: last.title,
+      content: last.content,
+      category: last.category,
+      isDeleted: false,
+    });
+    expect(restoredId).not.toBeNull();
+    expect(ltm.getByLogical(dupe)?.title).toBe("Shared Pool Dupe");
+    // The merged row was Q-promoted: Q's .lore.md still listed it.
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q);
+  });
+
+  test("projectId null refuses a P-private member and writes nothing", () => {
+    const keep = createGlobalEntry("Shared Null Keep");
+    const priv = createEntry("Shared Null Private");
+    const receipt = apply(request([decision(keep, priv)], { projectId: null }));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: priv, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(priv)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("projectId P merges P-private entries into shared keepers", () => {
+    const nullKeep = createGlobalEntry("P Null Keep");
+    const promotedKeep = createPromoted("P Promoted Keep");
+    const privA = createEntry("P Private Dupe A");
+    const privB = createEntry("P Private Dupe B");
+    const receipt = apply(
+      request([decision(nullKeep, privA), decision(promotedKeep, privB)]),
+    );
+
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(2);
+    expect(isLive(privA)).toBe(false);
+    expect(isLive(privB)).toBe(false);
+    // The shared keepers are untouched: same version, same scope fields.
+    expect(row(nullKeep)).toMatchObject({
+      version: 1,
+      project_id: null,
+      cross_project: 1,
+    });
+    expect(row(promotedKeep)).toMatchObject({
+      version: 1,
+      project_id: ensureProject(PROJECT_Q),
+      cross_project: 1,
+    });
+    const provenance = dedupProvenanceFor(receipt.operationId);
+    expect(provenance.map((p) => p.keep_logical_id)).toEqual([
+      nullKeep,
+      promotedKeep,
+    ]);
+    // The operation ran under the project scope, so P's .lore.md exports.
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT);
+  });
+
+  test("NULL merged into a P-private keep is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Priv Keep");
+    const global = createGlobalEntry("Scope Null Merge");
+    const receipt = apply(request([decision(keep, global)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(global)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("P-promoted merged into a P-private keep is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Priv Keep 2");
+    const promoted = createPromoted("Scope P-Promoted Merge", PROJECT);
+    const receipt = apply(request([decision(keep, promoted)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(promoted)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("NULL keep + Q-promoted merge under P is scope_mismatch and writes nothing", () => {
+    const keep = createGlobalEntry("Scope Null Keep Under P");
+    const merge = createPromoted("Scope Q-Promoted Merge");
+    const receipt = apply(request([decision(keep, merge)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: merge, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(merge)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("Q-private keep under P is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Q Keep", PROJECT_B);
+    const dupe = createEntry("Scope P Dupe");
+    const receipt = apply(request([decision(keep, dupe)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: keep, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(dupe)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+});
+
+describe("shared-pool merge exports", () => {
+  const PROJECT_Q2 = join(ROOT, "project-q2");
+  const PROJECT_R2 = join(ROOT, "project-r2");
+  mkdirSync(PROJECT_Q2, { recursive: true });
+  mkdirSync(PROJECT_R2, { recursive: true });
+
+  function createPromoted(title: string, projectPath: string): string {
+    return ltm.create({
+      id: uuidv7(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+  }
+
+  test("a shared-pool merge of a Q-promoted entry exports Q's .lore.md exactly once", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    const keep = createGlobalEntry("Export Null Keep");
+    const dupe = createPromoted("Export Q-Promoted Dupe", PROJECT_Q2);
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q2);
+  });
+
+  test("a shared-pool merge of two NULL entries exports nothing", () => {
+    const keep = createGlobalEntry("Export Null Keep 2");
+    const dupe = createGlobalEntry("Export Null Dupe 2");
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+
+  test("a mixed operation exports each origin project once", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    ensureProject(PROJECT_R2, "dedup-apply-r2");
+    const keepA = createGlobalEntry("Export Mixed Keep A");
+    const dupeQ = createPromoted("Export Mixed Dupe Q", PROJECT_Q2);
+    const keepB = createGlobalEntry("Export Mixed Keep B");
+    const dupeR = createPromoted("Export Mixed Dupe R", PROJECT_R2);
+    const receipt = apply(
+      request([decision(keepA, dupeQ), decision(keepB, dupeR)], {
+        projectId: null,
+      }),
+    );
+
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).toHaveBeenCalledTimes(2);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q2);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_R2);
+  });
+
+  test("a replayed operation does not export again", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    const keep = createGlobalEntry("Export Replay Keep");
+    const dupe = createPromoted("Export Replay Dupe", PROJECT_Q2);
+    const req = request([decision(keep, dupe)], { projectId: null });
+    apply(req);
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    exportLoreFile.mockClear();
+
+    const second = apply(req);
+    expect(second.replayed).toBe(true);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("keep content from a merged entry", () => {
+  const PROJECT_CF_Q = join(ROOT, "project-cf-q");
+  mkdirSync(PROJECT_CF_Q, { recursive: true });
+  let qProjectId = "";
+
+  function createPromoted(title: string): string {
+    return ltm.create({
+      id: uuidv7(),
+      projectPath: PROJECT_CF_Q,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+  }
+
+  function rowOf(id: string) {
+    return db()
+      .query(
+        "SELECT id, version, project_id, cross_project, is_deleted, title, content FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(ltm.logicalIdOf(id)) as {
+      id: string;
+      version: number;
+      project_id: string | null;
+      cross_project: number;
+      is_deleted: number;
+      title: string;
+      content: string;
+    };
+  }
+
+  const survivorCases: Array<{
+    label: string;
+    make: (title: string) => string;
+    /** Extra .lore.md export expected besides the request project's. */
+    extraExportPath: string | null;
+  }> = [
+    {
+      label: "NULL-project global survivor",
+      make: (title) => createGlobalEntry(title),
+      extraExportPath: null,
+    },
+    {
+      label: "promoted survivor from another project",
+      make: (title) => createPromoted(title),
+      extraExportPath: PROJECT_CF_Q,
+    },
+  ];
+
+  test.each(survivorCases)(
+    "$label: replaces the survivor's content and tombstones the source",
+    ({ make, extraExportPath }) => {
+      qProjectId = ensureProject(PROJECT_CF_Q, "dedup-apply-cf-q");
+      const s = make("CF Shared Survivor Title");
+      const sBefore = rowOf(s);
+      const p = createEntry("CF Private Source Title");
+      const pRevision = revisionOf(p);
+      const d = decision(s, p);
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+
+      expect(receipt.refused).toEqual([]);
+      expect(receipt.applied).toHaveLength(1);
+      const sAfter = rowOf(s);
+      // The survivor took p's title/content as a new version — scope untouched.
+      expect(sAfter.title).toBe("CF Private Source Title");
+      expect(sAfter.content).toBe(`Content for CF Private Source Title`);
+      expect(sAfter.project_id).toBe(sBefore.project_id);
+      expect(sAfter.cross_project).toBe(sBefore.cross_project);
+      expect(sAfter.version).toBe(sBefore.version + 1);
+      // The old version is still in history for recovery.
+      const history = ltm.versionHistory(ltm.logicalIdOf(s));
+      expect(
+        history.some(
+          (v) => v.version === sBefore.version && v.content === sBefore.content,
+        ),
+      ).toBe(true);
+      expect(isLive(p)).toBe(false);
+      const provenance = dedupProvenanceFor(receipt.operationId);
+      expect(provenance).toHaveLength(1);
+      expect(provenance[0]).toMatchObject({
+        keep_logical_id: ltm.logicalIdOf(s),
+        merged_logical_id: ltm.logicalIdOf(p),
+      });
+      const appliedGroup = receipt.applied[0];
+      expect(appliedGroup.keepRevision).toBe(sAfter.version);
+      expect(appliedGroup.contentFrom).toEqual({
+        id: p,
+        revision: pRevision,
+        replacedKeepRevision: sBefore.version,
+        keepVersionId: sAfter.id,
+      });
+      expect(exportLoreFile).toHaveBeenCalledWith(PROJECT);
+      expect(exportLoreFile).toHaveBeenCalledTimes(extraExportPath ? 2 : 1);
+      if (extraExportPath)
+        expect(exportLoreFile).toHaveBeenCalledWith(extraExportPath);
+      void qProjectId;
+    },
+  );
+
+  test.each(survivorCases)(
+    "$label: a stale survivor revision refuses and changes nothing",
+    ({ make }) => {
+      const s = make("CF Stale Survivor Title");
+      const p = createEntry("CF Stale Source Title");
+      const d = decision(s, p);
+      ltm.update(ltm.logicalIdOf(s), { content: "edited after preview" });
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+      expect(receipt.applied).toEqual([]);
+      expect(receipt.refused[0].error.code).toBe("stale_revision");
+      expect(rowOf(s).content).toBe("edited after preview");
+      expect(isLive(p)).toBe(true);
+      expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+      expect(exportLoreFile).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a stale source revision refuses and changes nothing", () => {
+    const s = createGlobalEntry("CF Stale Source Survivor");
+    const p = createEntry("CF Stale Source Entry");
+    const d = decision(s, p);
+    ltm.update(ltm.logicalIdOf(p), { content: "source edited after preview" });
+    const receipt = apply(request([{ ...d, contentFromId: p }], { projectId }));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("stale_revision");
+    expect(rowOf(s).title).toBe("CF Stale Source Survivor");
+    expect(isLive(p)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("the same request replays the receipt without re-applying", () => {
+    const s = createGlobalEntry("CF Replay Survivor Title");
+    const p = createEntry("CF Replay Source Title");
+    const req = request([{ ...decision(s, p), contentFromId: p }], {
+      projectId,
+    });
+    const first = apply(req);
+    expect(first.applied).toHaveLength(1);
+    const versionAfterFirst = rowOf(s).version;
+    exportLoreFile.mockClear();
+
+    const second = apply(req);
+    expect(second.replayed).toBe(true);
+    expect(second.applied).toEqual(first.applied);
+    expect(second.refused).toEqual(first.refused);
+    expect(rowOf(s).version).toBe(versionAfterFirst);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+
+  test.each(survivorCases)(
+    "$label: a same-scope title collision refuses the whole group",
+    ({ make }) => {
+      const s = make("CF Conflict Survivor Title");
+      const p = createEntry("CF Conflict Source Title");
+      // A third shared entry whose title equals the source's, case-insensitively.
+      const blocker = createGlobalEntry("cf conflict source title");
+      expect(ltm.getByLogical(ltm.logicalIdOf(blocker))).not.toBeNull();
+      expect(blocker).not.toBe(p);
+      const d = decision(s, p);
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+
+      expect(receipt.applied).toEqual([]);
+      const refused = receipt.refused[0];
+      expect(refused.error.code).toBe("title_conflict");
+      expect(refused.error.details).toEqual([
+        {
+          id: p,
+          reason: "title_conflict",
+          expectedRevision: d.expectedRevisions[p],
+        },
+      ]);
+      // Rolled back: the merges never committed, no provenance, no export.
+      const sAfter = rowOf(s);
+      expect(sAfter.version).toBe(1);
+      expect(sAfter.title).toBe("CF Conflict Survivor Title");
+      expect(isLive(p)).toBe(true);
+      expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+      expect(exportLoreFile).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a source title equal to the survivor's title applies cleanly", () => {
+    const s = createGlobalEntry("CF Same Title For Both");
+    const p = createEntry("CF Same Title For Both");
+    const receipt = apply(
+      request([{ ...decision(s, p), contentFromId: p }], { projectId }),
+    );
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(rowOf(s).content).toBe("Content for CF Same Title For Both");
+    expect(rowOf(s).title).toBe("CF Same Title For Both");
+  });
+
+  test("contentFromId outside mergeIds (and equal to keepId) is invalid", () => {
+    const base = {
+      projectId: "p",
+      operationId: "op-x",
+      reviewedAt: 1,
+      actor: "a",
+    };
+    const decisionBase = {
+      keepId: "k",
+      mergeIds: ["m"],
+      expectedRevisions: { k: 1, m: 1 },
+    };
+    expect(() =>
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "other" }],
+      }),
+    ).toThrowError(DedupApplyError);
+    expect(() =>
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "k" }],
+      }),
+    ).toThrowError(DedupApplyError);
+    try {
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "other" }],
+      });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect((e as DedupApplyError).code).toBe("invalid_request");
+    }
+  });
+
+  test("the payload hash is unchanged without contentFromId and differs with it", () => {
+    const fixed = {
+      projectId: "p1",
+      operationId: "op-hash-stability",
+      reviewedAt: 1700000000000,
+      actor: "tester",
+      decisions: [
+        {
+          keepId: "keep-1",
+          mergeIds: ["m1", "m2"],
+          expectedRevisions: { "keep-1": 2, m1: 1, m2: 3 },
+        },
+      ],
+    };
+    expect(dedupApplyPayloadHash(fixed)).toBe(
+      "5b9e4e6d4bc7abe7fc970750d6ec58aeef6f61fddaf9394ecfbc5276ce0170f0",
+    );
+    expect(
+      dedupApplyPayloadHash({
+        ...fixed,
+        decisions: [{ ...fixed.decisions[0], contentFromId: "m1" }],
+      }),
+    ).not.toBe(
+      "5b9e4e6d4bc7abe7fc970750d6ec58aeef6f61fddaf9394ecfbc5276ce0170f0",
+    );
+  });
+
+  test("private survivor takes a private source's content in the project pool", () => {
+    const p1 = createEntry("CF Private Keep Title");
+    const p2 = createEntry("CF Private Drop Title");
+    const receipt = apply(
+      request([{ ...decision(p1, p2), contentFromId: p2 }], { projectId }),
+    );
+    expect(receipt.refused).toEqual([]);
+    const after = rowOf(p1);
+    expect(after.title).toBe("CF Private Drop Title");
+    expect(after.content).toBe("Content for CF Private Drop Title");
+    expect(after.project_id).toBe(projectId);
+    expect(after.cross_project).toBe(0);
+    expect(isLive(p2)).toBe(false);
+  });
+});

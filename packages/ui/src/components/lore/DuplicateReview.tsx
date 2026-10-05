@@ -285,8 +285,11 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     return result;
   });
 
-  const scopeLabel = (group: DedupPreviewGroup) =>
-    group.scope === "global" ? "Shared (no project)" : "Project";
+  const scopeLabel = (group: DedupPreviewGroup) => {
+    if (group.pool === "shared") return "Shared";
+    if (group.pool === "project_shared") return "Project + shared";
+    return "Project";
+  };
 
   return (
     <main
