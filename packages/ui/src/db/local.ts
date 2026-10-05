@@ -26,6 +26,7 @@ export interface LocalDraft {
     confidence?: number;
     scope?: "project" | "shared";
   };
+  confidenceEdited?: boolean;
   baseRevision?: number;
   updatedAt: number;
 }
