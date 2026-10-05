@@ -43,6 +43,9 @@ interface RemoteRow extends Record<string, unknown> {
   updated_at: string;
 }
 const remote = new Map<string, RemoteRow[]>();
+const nonMemberScopes = new Set<string>();
+const deleteCalls: Array<{ table: string; filter: Record<string, string> }> =
+  [];
 let quotaTables = new Set<string>();
 let upsertError: { code?: string; message: string } | null = null;
 let updateError: { code?: string; message: string } | null = null;
@@ -333,6 +336,7 @@ function makeClient() {
         delete() {
           return {
             match(filter: Record<string, string>) {
+              deleteCalls.push({ table, filter: { ...filter } });
               const rows = tableRows(table);
               for (let i = rows.length - 1; i >= 0; i--) {
                 if (Object.entries(filter).every(([k, v]) => rows[i][k] === v))
@@ -352,6 +356,24 @@ function makeClient() {
           let lim = Infinity;
           const run = () => {
             let rows = tableRows(table).slice();
+            if (table === "scope_members") {
+              const scopeFilter = filters.find((f) => f.col === "scope_id");
+              if (scopeFilter && nonMemberScopes.has(scopeFilter.val)) {
+                rows = [];
+              } else if (
+                scopeFilter &&
+                !rows.some((r) => r.scope_id === scopeFilter.val)
+              ) {
+                rows = [
+                  {
+                    scope_id: scopeFilter.val,
+                    user_id: mockUserId ?? REMOTE_SCOPE,
+                    role: "admin",
+                    updated_at: new Date(clock).toISOString(),
+                  },
+                ];
+              }
+            }
             for (const f of filters) {
               rows = rows.filter((r) => {
                 const rv = r[f.col];
@@ -541,6 +563,8 @@ beforeEach(() => {
   // prior test installed) so tier-gated capture doesn't leak across tests (#826/D).
   reinstallSyncCapture();
   remote.clear();
+  nonMemberScopes.clear();
+  deleteCalls.length = 0;
   quotaTables = new Set();
   __resetQuotaWarnedTables(); // module-level dedupe state persists across tests
   upsertError = null;
@@ -3134,6 +3158,59 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     expect(rows).toHaveLength(1); // exactly one — no duplicate across scopes
     expect(rows[0].scope_id).toBe("T");
     expect(syncData.getSyncState("knowledge", id)?.scope_id).toBe("T");
+  });
+
+  test("keeps the team copy when a former member syncs a detached entry", async () => {
+    const pid = ensureProjectCore("/tmp/lore-f3leave");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/f3leave' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('TL','o','team','TL','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "TL");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f3leave",
+      category: "pattern",
+      title: "Detached",
+      content: "personal copy",
+      scope: "project",
+    });
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge").find((r) => r.id === id)?.scope_id).toBe(
+      REMOTE_SCOPE,
+    );
+
+    expect(ltm.approveForTeam(id, "u1")).toBe(true);
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge").filter((r) => r.id === id)).toMatchObject([
+      { scope_id: "TL" },
+    ]);
+
+    nonMemberScopes.add("TL");
+    const deletesBeforeLeave = deleteCalls.length;
+    setProjectScope(pid, null);
+    syncData.reseedProjectContent(pid);
+    await pushOnce(makeClient() as never);
+
+    expect(
+      deleteCalls
+        .slice(deletesBeforeLeave)
+        .some(
+          (call) => call.table === "knowledge" && call.filter.scope_id === "TL",
+        ),
+    ).toBe(false);
+    expect(
+      tableRows("knowledge")
+        .filter((r) => r.id === id)
+        .map((r) => r.scope_id)
+        .sort((a, b) => String(a).localeCompare(String(b))),
+    ).toEqual([REMOTE_SCOPE, "TL"].sort((a, b) => a.localeCompare(b)));
+    expect(syncData.getSyncState("knowledge", id)?.scope_id).toBeNull();
   });
 
   test("a pending entry is NOT team-scoped (stays personal until approved)", async () => {

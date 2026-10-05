@@ -19,6 +19,7 @@ import {
   db,
   keystore,
   setProjectScope,
+  syncData,
 } from "@loreai/core";
 import { getCurrentUser } from "./supabase";
 import { publishIdentityPub, pullOnce, pushOnce } from "./sync";
@@ -435,7 +436,10 @@ export async function removeTeamMember(
       const projects = db()
         .query("SELECT id FROM projects WHERE tenant_id = ? AND scope_id = ?")
         .all(currentTenantId(), scopeId) as { id: string }[];
-      for (const project of projects) setProjectScope(project.id, null);
+      for (const project of projects) {
+        setProjectScope(project.id, null);
+        syncData.reseedProjectContent(project.id);
+      }
       unlinkedProjects = projects.length;
     } else {
       keystore.persistScopeKeyRotation(scopeId, newEpoch, rotation);
