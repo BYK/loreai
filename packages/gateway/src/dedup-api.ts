@@ -182,11 +182,16 @@ export async function handleDedupPreview(
   // Exclude every id the other two runs already clustered so no logical id
   // appears in two preview groups (the pools overlap by design — a promoted
   // entry is visible to both the shared pool and a project's private↔shared
-  // pairing).
+  // pairing). Logical ids are excluded too: the runs are async, so a clustered
+  // entry may have been edited to a new version id by the project_shared run.
   const exclude = new Set<string>();
+  const excludeId = (id: string) => {
+    exclude.add(id);
+    exclude.add(ltm.logicalIdOf(id));
+  };
   for (const cluster of [...project.clusters, ...global.clusters]) {
-    exclude.add(cluster.surviving.id);
-    for (const member of cluster.merged) exclude.add(member.id);
+    excludeId(cluster.surviving.id);
+    for (const member of cluster.merged) excludeId(member.id);
   }
   const project_shared = await ltm.deduplicateAgainstShared(projectPath, {
     exclude,

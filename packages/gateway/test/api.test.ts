@@ -1063,6 +1063,84 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     }
   });
 
+  it("excludes a clustered shared entry by logical id when it was edited between runs", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-edit-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project");
+    const otherPath = `/test/api/dedup-edit-q-${Date.now()}-${seq++}`;
+    ensureProject(otherPath, "dedup-other");
+    const title = "Shared title edited between dedup preview runs";
+    ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Private copy of the shared rule.",
+      session: "test-session",
+      scope: "project",
+    });
+    // Promoted shared entry S (clusters in the shared run with N) and a NULL
+    // shared entry N duplicating it.
+    const sharedV1 = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: otherPath,
+      category: "gotcha",
+      title,
+      content: "The shared rule, promoted.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+    const nullShared = ltm.create({
+      id: crypto.randomUUID(),
+      category: "gotcha",
+      title,
+      content: "The shared rule, global.",
+      session: "test-session",
+      scope: "global",
+      crossProject: true,
+    });
+    // S is edited after the shared run snapshots it: the snapshot holds v2
+    // while v3 is already current — same logical id, still duplicating A.
+    const sharedV2 = ltm.appendVersion(sharedV1, {
+      content: "The shared rule, promoted. Edited once.",
+    })!;
+    const sharedV3 = ltm.appendVersion(sharedV1, {
+      content: "The shared rule, promoted. Edited twice.",
+    })!;
+    const sharedLogical = ltm.logicalIdOf(sharedV3);
+    // Simulate the race: the shared run clustered S's now-stale v2 id.
+    vi.spyOn(ltm, "deduplicateGlobal").mockResolvedValueOnce({
+      clusters: [
+        {
+          surviving: { id: sharedV2, title },
+          merged: [{ id: nullShared, title }],
+        },
+      ],
+      totalRemoved: 1,
+      pairSimilarities: new Map(),
+      entryTitles: new Map(),
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+
+    const seen = new Set<string>();
+    for (const group of preview.groups) {
+      for (const c of group.candidates) {
+        expect(seen.has(c.logical_id)).toBe(false);
+        seen.add(c.logical_id);
+      }
+    }
+    const sharedGroups = preview.groups.filter(
+      (g) =>
+        g.pool === "shared" &&
+        g.candidates.some((c) => c.logical_id === sharedLogical),
+    );
+    expect(sharedGroups).toHaveLength(1);
+  });
+
   it("preview never writes", async () => {
     const { projectPath, projectId } = await seedDuplicates();
     const { ltm } = await import("@loreai/core");
