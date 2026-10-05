@@ -378,7 +378,14 @@ export const KnowledgeEditor: Component<{
       setEditing(false);
       setSuccess(savedEffectText(result.effects, result.revision));
     } catch (error) {
-      if (isApiError(error) && error.errorType === "stale_revision") {
+      if (isApiError(error) && error.errorType === "deleted") {
+        await persistDraft();
+        setEditing(false);
+        setSaveError(
+          "This entry was deleted. Your draft is kept on this device; restore the entry from History to continue.",
+        );
+        props.reloadEntry();
+      } else if (isApiError(error) && error.errorType === "stale_revision") {
         await persistDraft();
         setConflict(
           "This entry changed since you started editing. Rebase your draft onto the latest revision before saving.",
@@ -493,6 +500,11 @@ export const KnowledgeEditor: Component<{
             "This entry changed. Could not reload its revision and effects; cancel and try again.",
           );
         }
+      } else if (isApiError(error) && error.errorType === "deleted") {
+        setDeleteDialog(false);
+        await ws.state.knowledge.remove(id());
+        await invalidateCollections(props.entry);
+        props.onDeleted?.();
       } else if (isApiError(error) && error.kind === "forbidden") {
         setLocked(true);
         setDeleteError("Editing is unavailable in hosted mode.");
