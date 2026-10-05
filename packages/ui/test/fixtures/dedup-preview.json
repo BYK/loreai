@@ -70,5 +70,6 @@
     "pairSimilarities": {},
     "entryTitles": {},
     "pairMatches": {}
-  }
+  },
+  "shared_title_conflicts": []
 }

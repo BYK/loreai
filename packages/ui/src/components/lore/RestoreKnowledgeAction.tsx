@@ -1,13 +1,16 @@
 import type { Component } from "solid-js";
 import { Show, createSignal } from "solid-js";
+import { A } from "@solidjs/router";
 
 import type {
+  ConflictingEntry,
   KnowledgeEffects,
   KnowledgeEntry,
   KnowledgeVersionHistory,
 } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import { isApiError } from "~/lib/api";
+import { duplicatesHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
@@ -57,6 +60,8 @@ export const RestoreKnowledgeAction: Component<{
   const [freshHistory, setFreshHistory] =
     createSignal<KnowledgeVersionHistory>();
   const [error, setError] = createSignal("");
+  const [conflictingEntry, setConflictingEntry] =
+    createSignal<ConflictingEntry>();
   const [locked, setLocked] = createSignal(false);
   const [notice, setNotice] = createSignal("");
   const target = () => {
@@ -85,8 +90,38 @@ export const RestoreKnowledgeAction: Component<{
   };
   const revision = () =>
     freshRevision() ?? currentRevision(freshHistory() ?? props.history.data());
+  const errorContent = () => {
+    const conflicting = conflictingEntry();
+    if (!conflicting) return error();
+    const projectId = effects()?.project_id ?? conflicting.project_id;
+    return (
+      <>
+        “{conflicting.title}” already uses this title among{" "}
+        {conflicting.scope === "shared" ? "shared entries" : "project entries"}.{" "}
+        <A
+          class="underline"
+          href={
+            conflicting.project_id
+              ? knowledgeHref(conflicting.project_id, conflicting.id)
+              : globalKnowledgeHref(conflicting.id)
+          }
+        >
+          Open “{conflicting.title}”
+        </A>
+        {projectId ? (
+          <>
+            {" · "}
+            <A class="underline" href={duplicatesHref(projectId)}>
+              Review duplicates
+            </A>
+          </>
+        ) : null}
+      </>
+    );
+  };
 
   const loadEffects = async () => {
+    setConflictingEntry(undefined);
     const expected = revision();
     if (expected === undefined || loading() || locked()) return;
     setLoading(true);
@@ -163,6 +198,7 @@ export const RestoreKnowledgeAction: Component<{
     if (expected === undefined || pending()) return;
     setPending(true);
     setError("");
+    setConflictingEntry(undefined);
     const previousScope = effects()?.scope;
     try {
       const result = await ws.tracked(() =>
@@ -181,6 +217,11 @@ export const RestoreKnowledgeAction: Component<{
       setNotice(successText(result.effects, result.revision));
       setOpen(false);
     } catch (reason) {
+      setConflictingEntry(
+        isApiError(reason) && reason.errorType === "title_conflict"
+          ? reason.conflictingEntry
+          : undefined,
+      );
       if (isApiError(reason) && reason.errorType === "stale_revision") {
         setError(
           "The entry changed after this confirmation opened. Its current revision and consequences have been reloaded; review them before restoring.",
@@ -194,7 +235,9 @@ export const RestoreKnowledgeAction: Component<{
         }
       } else if (isApiError(reason) && reason.errorType === "title_conflict") {
         setError(
-          "This title is now used by another entry in the target scope. Choose a different version or resolve the title conflict first.",
+          reason.conflictingEntry
+            ? "This title conflicts with another entry."
+            : "This title is now used by another entry in the target scope. Choose a different version or resolve the title conflict first.",
         );
       } else if (isApiError(reason) && reason.kind === "forbidden") {
         setLocked(true);
@@ -234,7 +277,7 @@ export const RestoreKnowledgeAction: Component<{
       </Show>
       <Show when={error() && !open()}>
         <span class="text-xs text-danger" role="alert">
-          {error()}
+          {errorContent()}
         </span>
       </Show>
       <ConfirmDialog
@@ -273,7 +316,7 @@ export const RestoreKnowledgeAction: Component<{
       >
         <Show when={error()}>
           <p class="text-sm text-danger" role="alert">
-            {error()}
+            {errorContent()}
           </p>
         </Show>
       </ConfirmDialog>

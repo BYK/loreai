@@ -368,6 +368,9 @@ describe("DuplicateReview", () => {
     expect(
       await screen.findByText("No duplicate candidates"),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
     emptyMount.unmount();
 
     const previewDedup = vi
@@ -383,6 +386,79 @@ describe("DuplicateReview", () => {
       await screen.findByText("No duplicate candidates"),
     ).toBeInTheDocument();
     expect(previewDedup).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows read-only shared-title conflicts with links and omits empty data", async () => {
+    const conflicts = [
+      {
+        title_key: "shared title",
+        entries: [
+          {
+            id: "project-shared-entry",
+            title: "Project-owned shared entry",
+            project_id: "project-2",
+            scope: "shared" as const,
+          },
+          {
+            id: "global-shared-entry",
+            title: "Global shared entry",
+            project_id: null,
+            scope: "shared" as const,
+          },
+        ],
+      },
+    ];
+    const withConflicts = mount(
+      makeClient({
+        previewDedup: async () => ({
+          ...response([]),
+          shared_title_conflicts: conflicts,
+        }),
+      }),
+    );
+    const section = await screen.findByTestId("shared-title-conflicts");
+    expect(section).toHaveTextContent(
+      "Lore does not merge, rename, or delete them automatically",
+    );
+    expect(section).toHaveTextContent(
+      "Rename, change scope, or delete one to resolve the conflict",
+    );
+    expect(
+      within(section).getByRole("link", { name: "Project-owned shared entry" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${knowledgeHref("project-2", "project-shared-entry")}`,
+    );
+    expect(
+      within(section).getByRole("link", { name: "Global shared entry" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${globalKnowledgeHref("global-shared-entry")}`,
+    );
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
+    withConflicts.unmount();
+
+    const missing = mount(
+      makeClient({ previewDedup: async () => response([]) }),
+    );
+    await screen.findByText("No duplicate candidates");
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
+    missing.unmount();
+
+    mount(
+      makeClient({
+        previewDedup: async () => ({
+          ...response([]),
+          shared_title_conflicts: [],
+        }),
+      }),
+    );
+    await screen.findByText("No duplicate candidates");
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
   });
 
   it("persists decisions and keeper selection, then marks changed revisions stale", async () => {

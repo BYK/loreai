@@ -877,6 +877,59 @@ describe("knowledge edit API client", () => {
     expect(error.status).toBe(409);
     expect(error.errorType).toBe("stale_revision");
   });
+
+  it("parses title conflict details separately and tolerates malformed details", async () => {
+    const payload = {
+      type: "error",
+      error: {
+        type: "title_conflict",
+        message: "Title is already used",
+        conflicting_entry: {
+          id: "existing-entry",
+          title: "Existing title",
+          project_id: "project-2",
+          scope: "shared",
+        },
+      },
+    };
+    const validClient = createApiClient({
+      fetch: async () => json(payload, 409),
+    });
+    const validError = await failure(
+      validClient.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(validError.errorType).toBe("title_conflict");
+    expect(validError.conflictingEntry).toEqual({
+      id: "existing-entry",
+      title: "Existing title",
+      project_id: "project-2",
+      scope: "shared",
+    });
+
+    const malformedClient = createApiClient({
+      fetch: async () =>
+        json(
+          {
+            ...payload,
+            error: {
+              ...payload.error,
+              conflicting_entry: {
+                id: "existing-entry",
+                title: "Existing title",
+                project_id: "project-2",
+                scope: "global",
+              },
+            },
+          },
+          409,
+        ),
+    });
+    const malformedError = await failure(
+      malformedClient.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(malformedError.errorType).toBe("title_conflict");
+    expect(malformedError.conflictingEntry).toBeUndefined();
+  });
 });
 
 describe("connection store", () => {

@@ -55,6 +55,17 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
     await expect(review).toBeVisible();
+    const sharedTitleConflicts = review.getByTestId("shared-title-conflicts");
+    await expect(sharedTitleConflicts).toBeVisible();
+    await expect(sharedTitleConflicts).toContainText(
+      "Lore does not merge, rename, or delete them automatically",
+    );
+    await expect(
+      sharedTitleConflicts.getByRole("link", {
+        name: "Shared title conflict legacy duplicate E2E",
+      }),
+    ).toHaveCount(2);
+    await expect(sharedTitleConflicts.getByRole("button")).toHaveCount(0);
     await expect(
       review.getByTestId("duplicate-group").filter({
         hasText: "Duplicate review evidence sample candidate alpha",

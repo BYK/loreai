@@ -22,6 +22,7 @@ import {
   crossProjectKnowledgeEntry,
   ApiError,
   apiErrorBody,
+  conflictingEntry,
   apiPath,
   cursorPage,
   circuitBreakerResetResult,
@@ -72,6 +73,7 @@ import {
   warmingSettingsResult,
   warmingSnapshot,
   type AccountStatus,
+  type ConflictingEntry,
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
@@ -155,16 +157,34 @@ async function readErrorDetails(res: Response): Promise<{
   message: string | null;
   errorType: string | null;
   isErrorEnvelope: boolean;
+  conflictingEntry?: ConflictingEntry;
 }> {
   const text = await res.text().catch(() => "");
   if (!text) return { message: null, errorType: null, isErrorEnvelope: false };
   try {
-    const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
+    const body: unknown = JSON.parse(text);
+    const parsed = safeParseContract("<error>", apiErrorBody, body);
     if (parsed.ok) {
+      const errorBody =
+        body !== null && typeof body === "object" && "error" in body
+          ? body.error
+          : undefined;
+      const conflictValue =
+        errorBody !== null &&
+        typeof errorBody === "object" &&
+        "conflicting_entry" in errorBody
+          ? errorBody.conflicting_entry
+          : undefined;
+      const conflict = safeParseContract(
+        "<conflicting_entry>",
+        conflictingEntry,
+        conflictValue,
+      );
       return {
         message: parsed.value.error.message,
         errorType: parsed.value.error.type,
         isErrorEnvelope: true,
+        ...(conflict.ok ? { conflictingEntry: conflict.value } : {}),
       };
     }
   } catch {
@@ -232,6 +252,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           details.message ?? "Gateway refused this operation",
           res.status,
           details.errorType ?? undefined,
+          details.conflictingEntry,
         );
       }
       if (details.message === null) {
@@ -275,6 +296,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           message,
           404,
           details.errorType ?? undefined,
+          details.conflictingEntry,
         );
       }
       throw new ApiError(
@@ -283,6 +305,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         message ?? `Gateway responded ${res.status}`,
         res.status,
         details.errorType ?? undefined,
+        details.conflictingEntry,
       );
     }
 

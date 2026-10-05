@@ -5,6 +5,7 @@ import {
   waitFor,
   within,
 } from "@solidjs/testing-library";
+import { createMemoryHistory, MemoryRouter, Route } from "@solidjs/router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignal } from "solid-js";
 
@@ -23,6 +24,7 @@ import {
   type LoreUiDb,
 } from "~/db";
 import { ApiError, type ApiClient } from "~/lib/api";
+import { duplicatesHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import type { Loader } from "~/lib/loader";
 import { useWorkspace, WorkspaceProvider } from "~/routes/workspace";
 
@@ -193,6 +195,8 @@ function mountEditor(
     "currentHistory" in options ? options.currentHistory : history(),
     options.onReload,
   );
+  const routerHistory = createMemoryHistory();
+  routerHistory.set({ value: "/ui/knowledge/knowledge-1" });
   const [currentEntry, setCurrentEntry] = createSignal(
     options.currentEntry ?? entry(),
   );
@@ -208,12 +212,19 @@ function mountEditor(
     );
   };
   const view = render(() => (
-    <WorkspaceProvider
-      client={options.client ?? makeClient()}
-      db={options.db ?? Promise.resolve(null)}
-    >
-      <Editor />
-    </WorkspaceProvider>
+    <MemoryRouter base="/ui" history={routerHistory}>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider
+            client={options.client ?? makeClient()}
+            db={options.db ?? Promise.resolve(null)}
+          >
+            <Editor />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
   ));
   return { ...view, versions, setEntry: setCurrentEntry };
 }
@@ -945,6 +956,45 @@ describe("KnowledgeEditor", () => {
     );
   });
 
+  it("links detailed title conflicts and renders existing titles as inert text", async () => {
+    const hostileTitle = '<img src=x onerror="window.__pwned=1">';
+    const titleConflict = makeClient({
+      editKnowledge: async () => {
+        throw new ApiError(
+          "http",
+          "/api/v1/knowledge/knowledge-1",
+          "title conflict",
+          409,
+          "title_conflict",
+          {
+            id: "conflicting-entry",
+            title: hostileTitle,
+            project_id: null,
+            scope: "shared",
+          },
+        );
+      },
+    });
+    const mounted = mountEditor({ client: titleConflict });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Conflicting title" },
+    });
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "already uses this title among shared entries",
+    );
+    expect(
+      within(alert).getByRole("link", { name: `Open “${hostileTitle}”` }),
+    ).toHaveAttribute("href", `/ui${globalKnowledgeHref("conflicting-entry")}`);
+    expect(
+      within(alert).getByRole("link", { name: "Review duplicates" }),
+    ).toHaveAttribute("href", `/ui${duplicatesHref("project-1")}`);
+    expect(mounted.container.querySelector("img")).toBeNull();
+  });
+
   it("locks the editor after a hosted-mode refusal", async () => {
     const hosted = makeClient({
       editKnowledge: async () => {
@@ -1270,5 +1320,71 @@ describe("RestoreKnowledgeAction", () => {
       expect(await repo.collection("project-1")).toBeUndefined();
       expect(await repo.collection("project-2")).toBeUndefined();
     });
+  });
+
+  it("links the conflicting entry and duplicate review after restore refusal", async () => {
+    const conflictingTitle = "Existing shared entry";
+    const restore = vi.fn(async () => {
+      throw new ApiError(
+        "http",
+        "/api/v1/knowledge/knowledge-1/restore",
+        "title conflict",
+        409,
+        "title_conflict",
+        {
+          id: "conflicting-entry",
+          title: conflictingTitle,
+          project_id: "project-2",
+          scope: "shared",
+        },
+      );
+    });
+    const versions = makeLoader(history(2, true));
+    const routerHistory = createMemoryHistory();
+    routerHistory.set({ value: "/ui/knowledge/knowledge-1" });
+    render(() => (
+      <MemoryRouter base="/ui" history={routerHistory}>
+        <Route
+          path="*"
+          component={() => (
+            <WorkspaceProvider
+              client={makeClient({
+                restoreKnowledge: restore,
+                getKnowledgeEffects: async () =>
+                  effects({ revision: 2, is_deleted: true }),
+              })}
+              db={Promise.resolve(null)}
+            >
+              <RestoreKnowledgeAction
+                id="knowledge-1"
+                history={versions.loader}
+                versionId="version-1"
+              />
+            </WorkspaceProvider>
+          )}
+        />
+      </MemoryRouter>
+    ));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restore v1…" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Restore version" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "already uses this title among shared entries",
+    );
+    expect(
+      within(alert).getByRole("link", {
+        name: `Open “${conflictingTitle}”`,
+      }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${knowledgeHref("project-2", "conflicting-entry")}`,
+    );
+    expect(
+      within(alert).getByRole("link", { name: "Review duplicates" }),
+    ).toHaveAttribute("href", `/ui${duplicatesHref("project-1")}`);
   });
 });

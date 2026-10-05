@@ -102,6 +102,8 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       ws.tracked(() => ws.client.previewDedup(projectId, signal)),
   );
   const rescan = preview.reload;
+  const sharedTitleConflicts = () =>
+    preview.data()?.shared_title_conflicts ?? [];
 
   const [marks, setMarks] = createSignal<DedupReviewMark[]>([]);
   const [pendingApplies, setPendingApplies] = createSignal<DedupApplyRecord[]>(
@@ -690,6 +692,49 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           </p>
         </Show>
       </section>
+
+      <Show when={sharedTitleConflicts().length > 0}>
+        <section
+          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-4"
+          aria-label="Shared title conflicts"
+          data-testid="shared-title-conflicts"
+        >
+          <h2 class="m-0 text-base font-semibold">Shared title conflicts</h2>
+          <p class="mt-2 text-sm text-muted">
+            These shared entries use the same title. Lore does not merge,
+            rename, or delete them automatically. Rename, change scope, or
+            delete one to resolve the conflict.
+          </p>
+          <For each={sharedTitleConflicts()}>
+            {(group) => (
+              <div class="mt-3 border-t border-line pt-3">
+                <p class="mb-2 text-xs text-muted">
+                  Title key <code>{group.title_key}</code>
+                </p>
+                <ul class="m-0 list-disc space-y-1 pl-5 text-sm">
+                  <For each={group.entries}>
+                    {(entry) => (
+                      <li>
+                        <A
+                          class="text-accent underline"
+                          href={
+                            entry.project_id
+                              ? knowledgeHref(entry.project_id, entry.id)
+                              : globalKnowledgeHref(entry.id)
+                          }
+                        >
+                          {entry.title}
+                        </A>{" "}
+                        <span class="text-xs text-muted">({entry.scope})</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            )}
+          </For>
+        </section>
+      </Show>
 
       <Show when={applyNotice()}>
         {(notice) => (

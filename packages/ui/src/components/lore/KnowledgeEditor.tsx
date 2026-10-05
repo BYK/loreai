@@ -7,8 +7,10 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
+import { A } from "@solidjs/router";
 
 import type {
+  ConflictingEntry,
   KnowledgeEffects,
   KnowledgeEntry,
   KnowledgeVersionHistory,
@@ -17,6 +19,7 @@ import type { Loader } from "~/lib/loader";
 import type { LocalDraft } from "~/db";
 import { isApiError } from "~/lib/api";
 import { formatConfidence, formatWhen } from "~/lib/format";
+import { duplicatesHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
@@ -125,6 +128,8 @@ export const KnowledgeEditor: Component<{
   const [saving, setSaving] = createSignal(false);
   const [saveError, setSaveError] = createSignal("");
   const [titleConflict, setTitleConflict] = createSignal("");
+  const [conflictingEntry, setConflictingEntry] =
+    createSignal<ConflictingEntry>();
   const [conflict, setConflict] = createSignal("");
   const [locked, setLocked] = createSignal(false);
   const [success, setSuccess] = createSignal("");
@@ -321,6 +326,7 @@ export const KnowledgeEditor: Component<{
     setSaving(true);
     setSaveError("");
     setTitleConflict("");
+    setConflictingEntry(undefined);
     setConflict("");
     setSuccess("");
     try {
@@ -396,8 +402,11 @@ export const KnowledgeEditor: Component<{
           setSaveError("Could not reload the latest revision. Try again.");
         }
       } else if (isApiError(error) && error.errorType === "title_conflict") {
+        setConflictingEntry(error.conflictingEntry);
         setTitleConflict(
-          "Another entry in this scope already uses this title.",
+          error.conflictingEntry
+            ? `“${error.conflictingEntry.title}” already uses this title among ${error.conflictingEntry.scope === "shared" ? "shared entries" : "project entries"}.`
+            : "Another entry in this scope already uses this title.",
         );
       } else if (isApiError(error) && error.kind === "forbidden") {
         await persistDraft();
@@ -611,13 +620,56 @@ export const KnowledgeEditor: Component<{
                   setTitle(event.currentTarget.value);
                   setDirty(true);
                   setTitleConflict("");
+                  setConflictingEntry(undefined);
                   setSuccess("");
                 }}
               />
               <Show when={titleConflict()}>
-                <span class="text-xs text-danger" role="alert">
-                  {titleConflict()}
-                </span>
+                {(message) => (
+                  <span class="text-xs text-danger" role="alert">
+                    {message()}
+                    <Show when={conflictingEntry()}>
+                      {(entry) => {
+                        const existing = entry();
+                        return (
+                          <>
+                            {" "}
+                            <A
+                              class="underline"
+                              href={
+                                existing.project_id
+                                  ? knowledgeHref(
+                                      existing.project_id,
+                                      existing.id,
+                                    )
+                                  : globalKnowledgeHref(existing.id)
+                              }
+                            >
+                              Open “{existing.title}”
+                            </A>
+                            <Show
+                              when={
+                                props.entry.project_id ?? existing.project_id
+                              }
+                            >
+                              {(projectId) => (
+                                <>
+                                  {" · "}
+                                  <A
+                                    class="underline"
+                                    href={duplicatesHref(projectId())}
+                                  >
+                                    Review duplicates
+                                  </A>
+                                </>
+                              )}
+                            </Show>
+                          </>
+                        );
+                      }}
+                    </Show>
+                  </span>
+                )}
               </Show>
             </label>
             <label class="grid gap-1 text-sm font-medium">

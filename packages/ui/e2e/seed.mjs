@@ -121,7 +121,7 @@ for (const viewport of ["desktop", "mobile"]) {
   }
 }
 
-const knowledgeEditFixtureCount = 12;
+const knowledgeEditFixtureCount = 20;
 for (const viewport of ["desktop", "mobile"]) {
   for (const run of [1, 2, 3]) {
     const projectPath = join(root, `dd-apply-${viewport}-${run}`);
@@ -136,8 +136,31 @@ for (const viewport of ["desktop", "mobile"]) {
         confidence: 0.82,
       });
     }
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: "Shared title conflict legacy duplicate E2E",
+      content: `Project-scoped title conflict fixture for ${viewport} ${run}.`,
+      scope: "project",
+      confidence: 0.82,
+    });
   }
 }
+core.ltm.create({
+  category: "decision",
+  title: "Shared title conflict legacy duplicate E2E",
+  content: "First shared entry in the seeded legacy duplicate group.",
+  scope: "global",
+  confidence: 0.82,
+});
+const legacySharedTitleB = core.ltm.create({
+  category: "decision",
+  title: `Temporary nonmatching seed ${crypto.randomUUID()}`,
+  content: "Second shared entry in the seeded legacy duplicate group.",
+  scope: "global",
+  confidence: 0.82,
+});
 
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no
@@ -759,6 +782,9 @@ const linkResult = db
 if (linkResult.changes !== 1) {
   throw new Error("expected to link exactly the seeded scratch project");
 }
+db.prepare(
+  "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+).run("Shared title conflict legacy duplicate E2E", legacySharedTitleB);
 db.prepare(
   `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
    VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, ?, 0, ?, ?, ?, ?, 'batch')`,
