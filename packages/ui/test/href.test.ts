@@ -3,6 +3,7 @@ import { DEFAULT_ALL_KNOWLEDGE_QUERY } from "~/contracts";
 import {
   allKnowledgeHref,
   buildHref,
+  duplicatesHref,
   entitiesHref,
   globalKnowledgeHref,
   importsHref,
@@ -29,6 +30,10 @@ describe("buildHref", () => {
 });
 
 describe("route hrefs", () => {
+  it("duplicatesHref encodes the project id as one route segment", () => {
+    expect(duplicatesHref("p/1")).toBe("/projects/p%2F1/duplicates");
+  });
+
   it("allKnowledgeHref serializes workspace filters", () => {
     expect(allKnowledgeHref()).toBe("/knowledge");
     expect(

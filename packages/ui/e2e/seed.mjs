@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Seeds the e2e gateway's database (LORE_DB_PATH) with two content projects,
- * a hostile-payload project, and 60 filler projects (so the desktop nav
- * overflows and must scroll), plus a handful of knowledge entries through
+ * Seeds the e2e gateway's database (LORE_DB_PATH) with content, duplicate-
+ * review and hostile-payload projects, plus 60 filler projects (so the
+ * desktop nav overflows and must scroll). Knowledge is created through
  * @loreai/core's public API — the same write path the curator uses — so the
  * specs browse real rows via /api/v1.
  *
@@ -32,6 +32,42 @@ mkdirSync(scratch, { recursive: true });
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
+const dedupReview = join(root, "dedup-review");
+mkdirSync(dedupReview, { recursive: true });
+core.ensureProject(dedupReview, "dedup-review", null);
+for (const [title, content, confidence] of [
+  [
+    "Duplicate review evidence sample candidate alpha",
+    "First project candidate with complete review evidence.",
+    0.86,
+  ],
+  [
+    "Duplicate review evidence sample candidate beta",
+    "Second project candidate with a separate full content body.",
+    0.82,
+  ],
+  [
+    "Shared duplicate review evidence sample candidate alpha",
+    "First shared candidate for the no-project duplicate group.",
+    0.91,
+  ],
+  [
+    'Shared duplicate review evidence sample <img src=x onerror="window.__pwned=1">',
+    'Hostile text stays inert in the review screen: <img src=x onerror="window.__pwned=1">',
+    0.88,
+  ],
+]) {
+  core.ltm.create({
+    id: crypto.randomUUID(),
+    projectPath: title.startsWith("Duplicate review") ? dedupReview : undefined,
+    category: "decision",
+    title,
+    content,
+    session: "e2e-dedup-review",
+    scope: title.startsWith("Duplicate review") ? "project" : "global",
+    confidence,
+  });
+}
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no
 // messages or knowledge, so `last_activity` is null and they sort last.

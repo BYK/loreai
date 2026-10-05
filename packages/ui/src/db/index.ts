@@ -23,9 +23,12 @@ export type { Repository } from "./repository";
 export {
   createDraftsStore,
   createPendingChangesStore,
+  createReviewDecisionsStore,
+  type DedupReviewMark,
   type LocalDraft,
   type LocalStore,
   type PendingChange,
+  type ReviewDecisionsStore,
 } from "./local";
 
 import type {

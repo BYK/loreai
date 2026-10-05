@@ -12,6 +12,7 @@ import {
   sessionsHref,
   sessionHref,
   searchHref,
+  duplicatesHref,
 } from "~/lib/href";
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
@@ -103,7 +104,16 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       </section>
       <ProjectActions project={props.project} />
       <section data-testid="health" class="border-b border-line py-5">
-        <div class="eyebrow mb-2">Memory health</div>
+        <div class="mb-2 flex items-center justify-between">
+          <div class="eyebrow">Memory health</div>
+          <A
+            class="text-xs text-accent underline"
+            data-testid="review-duplicates-link"
+            href={duplicatesHref(props.project.id)}
+          >
+            Review duplicates
+          </A>
+        </div>
         <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
           <span>{props.project.knowledge_count} knowledge</span>
           <span>{props.project.session_count} sessions</span>

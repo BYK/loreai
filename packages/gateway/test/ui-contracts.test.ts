@@ -45,6 +45,7 @@ import {
   syncStatus,
   teamList,
   costsSnapshot,
+  dedupPreviewResponse,
   projectClearResult,
   projectRenameResult,
   projectsMergeResult,
@@ -73,6 +74,8 @@ const SEEDED = {
   secondKnowledgeId: "",
   sessionId: "",
   entityId: "",
+  dedupProjectPath: "",
+  dedupProjectId: "",
 };
 
 beforeAll(async () => {
@@ -111,6 +114,29 @@ beforeAll(async () => {
     content:
       "Cursor values are server-issued tokens and should be passed back unchanged.",
     session: SEEDED.sessionId,
+    scope: "project",
+  });
+  SEEDED.dedupProjectPath = "/test/ui-contracts/dedup-preview";
+  SEEDED.dedupProjectId = ensureProject(
+    SEEDED.dedupProjectPath,
+    "ui-contracts-dedup",
+  );
+  ltm.create({
+    id: crypto.randomUUID(),
+    projectPath: SEEDED.dedupProjectPath,
+    category: "gotcha",
+    title: "Gateway cache warming threshold configuration",
+    content: "The cache warming threshold is configured per project.",
+    session: "ui-contracts-dedup-session",
+    scope: "project",
+  });
+  ltm.create({
+    id: crypto.randomUUID(),
+    projectPath: SEEDED.dedupProjectPath,
+    category: "gotcha",
+    title: "Cache warming threshold configuration",
+    content: "Duplicate threshold configuration.",
+    session: "ui-contracts-dedup-session",
     scope: "project",
   });
   for (const i of [0, 1]) {
@@ -232,6 +258,8 @@ function makeNormaliser() {
   const uuids = new Map<string, string>();
   const paths = new Map<string, string>();
   const tmIds = new Map<string, string>();
+  const groupIds = new Map<string, string>();
+  const groupCounts = new Map<string, number>();
   let uuidN = 0;
   let epochN = 0;
   let pathN = 0;
@@ -243,6 +271,20 @@ function makeNormaliser() {
         let tag = tmIds.get(value);
         if (!tag) tmIds.set(value, (tag = `<tm-${tmN++}>`));
         return tag;
+      }
+      const groupMatch = /^(project|global):[0-9a-f]{16}$/.exec(value);
+      if (groupMatch) {
+        const scope = groupMatch[1];
+        if (scope) {
+          let tag = groupIds.get(value);
+          if (!tag) {
+            const index = groupCounts.get(scope) ?? 0;
+            tag = `${scope}:group-${index}`;
+            groupIds.set(value, tag);
+            groupCounts.set(scope, index + 1);
+          }
+          return tag;
+        }
       }
       if (UUID_RE.test(value)) {
         let tag = uuids.get(value);
@@ -352,6 +394,16 @@ describe("ui contracts against the real gateway", () => {
       `/projects/${SEEDED.projectId}/knowledge`,
       v1(["projects", SEEDED.projectId, "knowledge"]),
       knowledgeList,
+    );
+  });
+
+  it("POST /projects/:id/dedup (preview)", async () => {
+    await contractRoute(
+      "dedup-preview.json",
+      `/projects/${SEEDED.dedupProjectId}/dedup`,
+      v1(["projects", SEEDED.dedupProjectId, "dedup"]),
+      dedupPreviewResponse,
+      { method: "POST", ...JSON_BODY({}) },
     );
   });
 

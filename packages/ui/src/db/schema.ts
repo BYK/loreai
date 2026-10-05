@@ -1,11 +1,11 @@
 /**
- * IndexedDB schema for the UI cache (`lore-ui`, version 3).
+ * IndexedDB schema for the UI cache (`lore-ui`, version 4).
  *
  * Everything in the entity stores is a disposable projection of `/api/v1`
  * responses — the gateway's SQLite store is the only authority. `drafts` and
- * `pendingChanges` are local working state on this device (see `local.ts`);
- * they are structurally different from every contract type and are never
- * merged into the entity stores.
+ * `pendingChanges` and `reviewDecisions` are local working state on this
+ * device (see `local.ts`); they are structurally different from every
+ * contract type and are never merged into the entity stores.
  */
 import type { DBSchema, IDBPDatabase } from "idb";
 
@@ -18,10 +18,14 @@ import type {
   TemporalMessage,
 } from "~/contracts";
 
-import type { LocalDraft, PendingChange } from "./local";
+import type {
+  DedupReviewMark as LocalDedupReviewMark,
+  LocalDraft,
+  PendingChange,
+} from "./local";
 
 export const LORE_DB_NAME = "lore-ui";
-export const LORE_DB_VERSION = 3;
+export const LORE_DB_VERSION = 4;
 
 /** A cached API record plus bookkeeping for TTL and LRU eviction. */
 export interface CachedRecord<T> {
@@ -119,6 +123,12 @@ export interface LoreUiSchema extends DBSchema {
     key: string;
     value: PendingChange;
     indexes: { "by-created": number };
+  };
+  /** Per-device, unapplied duplicate-review decisions. */
+  reviewDecisions: {
+    key: string;
+    value: LocalDedupReviewMark;
+    indexes: { "by-project": string };
   };
 }
 

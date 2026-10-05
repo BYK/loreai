@@ -3,10 +3,10 @@
  * into entity stores.
  *
  * `drafts` holds in-progress edits the user has not saved; `pendingChanges`
- * holds mutations queued for a write API that does not exist yet. Both are
- * structurally different from every contract type, so the entity
- * repositories (`repository.ts`) reject them at the type level — the
- * `// @ts-expect-error` assertions in `test/db.test.ts` keep that true.
+ * holds mutations queued for a write API that does not exist yet; and
+ * `reviewDecisions` holds duplicate-review marks. These are local working
+ * state, structurally distinct from every contract type, and never merged
+ * into entity stores.
  */
 import type { IndexNames } from "idb";
 
@@ -30,6 +30,25 @@ export interface PendingChange {
   payload: unknown;
   createdAt: number;
   attempts: number;
+}
+
+export interface DedupReviewMark {
+  key: string;
+  kind: "dedup";
+  projectId: string;
+  groupId: string;
+  decision: "accept" | "skip";
+  keepId: string;
+  mergeIds: string[];
+  expectedRevisions: Record<string, number>;
+  markedAt: number;
+}
+
+export interface ReviewDecisionsStore {
+  get(key: string): Promise<DedupReviewMark | undefined>;
+  put(value: DedupReviewMark): Promise<void>;
+  delete(key: string): Promise<void>;
+  list(projectId: string): Promise<DedupReviewMark[]>;
 }
 
 /**
@@ -106,4 +125,38 @@ export function createPendingChangesStore(
     "pendingChanges",
     "by-created",
   );
+}
+
+export function createReviewDecisionsStore(
+  db: LoreUiDb | null,
+): ReviewDecisionsStore {
+  const memory = new Map<string, DedupReviewMark>();
+  return {
+    async get(key) {
+      if (!db) return memory.get(key);
+      return db.get("reviewDecisions", key);
+    },
+    async put(value) {
+      if (!db) {
+        memory.set(value.key, value);
+        return;
+      }
+      await db.put("reviewDecisions", value);
+    },
+    async delete(key) {
+      if (!db) {
+        memory.delete(key);
+        return;
+      }
+      await db.delete("reviewDecisions", key);
+    },
+    async list(projectId) {
+      if (!db) {
+        return [...memory.values()].filter(
+          (mark) => mark.projectId === projectId,
+        );
+      }
+      return db.getAllFromIndex("reviewDecisions", "by-project", projectId);
+    },
+  };
 }

@@ -30,6 +30,7 @@ import { SearchResults } from "~/components/lore/SearchResults";
 import { WorkspaceSearch } from "~/components/lore/WorkspaceSearch";
 import { SessionList } from "~/components/lore/SessionList";
 import { ImportHistoryPage } from "~/components/lore/ImportHistoryPage";
+import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { errorStateFor } from "~/components/lore/ErrorState";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
@@ -111,6 +112,7 @@ export const Browse: Component<{
     | "entry"
     | "sessions"
     | "imports"
+    | "duplicates"
     | "search"
     | "workspace-search";
 }> = (props) => {
@@ -335,6 +337,9 @@ export const Browse: Component<{
             {(value) => <ProjectPage project={value()} />}
           </Show>
         );
+      case "duplicates":
+        if (!id) return projectFallback();
+        return <DuplicateReview projectId={id} />;
       case "knowledge-table":
         if (!id) return projectFallback();
         return (
@@ -451,6 +456,7 @@ export const Browse: Component<{
       case "sessions":
       case "knowledge-table":
       case "imports":
+      case "duplicates":
         return { href: projectHref(id), label: label() };
       case "project":
         return { href: "/", label: "Projects" };

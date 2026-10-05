@@ -99,6 +99,34 @@ async function failure(promise: Promise<unknown>): Promise<ApiError> {
 }
 
 describe("api client: happy path", () => {
+  it("previews project dedup with a validated POST and no apply request", async () => {
+    let request:
+      | { url: string; method: string | undefined; body: unknown }
+      | undefined;
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        request = {
+          url,
+          method: init?.method,
+          body: init?.body,
+        };
+        return json({
+          dry_run: true,
+          groups: [],
+          project: { clusters: [], totalRemoved: 0 },
+          global: { clusters: [], totalRemoved: 0 },
+        });
+      },
+    });
+    const response = await client.previewDedup("p/1");
+    expect(response.groups).toEqual([]);
+    expect(request).toEqual({
+      url: "/api/v1/projects/p%2F1/dedup",
+      method: "POST",
+      body: "{}",
+    });
+  });
+
   it("recalls with expansion disabled and project identity", async () => {
     const { client, calls } = clientFor(() =>
       json({

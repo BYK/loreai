@@ -29,6 +29,11 @@ test.describe("production route deep links", () => {
       ["/ui", "Memory connected", "welcome"],
       [`/ui/projects/${project.id}`, project.name, "health"],
       [`/ui/projects/${project.id}/knowledge`, entry.title, "text"],
+      [
+        `/ui/projects/${project.id}/duplicates`,
+        "Duplicate review",
+        "duplicate-review",
+      ],
       [`/ui/projects/${project.id}/knowledge/${entry.id}`, entry.title, "text"],
       [`/ui/projects/${project.id}/sessions`, session.session_id, "text"],
       [
@@ -62,14 +67,16 @@ test.describe("production route deep links", () => {
                   ? page.getByTestId("entity-page")
                   : kind === "contradictions"
                     ? page.getByTestId("contradictions-page")
-                    : kind === "warming"
-                      ? page.getByTestId("warming-page")
-                      : kind === "costs"
-                        ? page.getByTestId("costs-page")
-                        : page
-                            .locator("main:visible")
-                            .getByText(text, { exact: false })
-                            .first();
+                    : kind === "duplicate-review"
+                      ? page.getByTestId("duplicate-review")
+                      : kind === "warming"
+                        ? page.getByTestId("warming-page")
+                        : kind === "costs"
+                          ? page.getByTestId("costs-page")
+                          : page
+                              .locator("main:visible")
+                              .getByText(text, { exact: false })
+                              .first();
       await expect(target).toBeVisible();
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);
@@ -105,6 +112,7 @@ test.describe("production route deep links", () => {
       ["/ui", "connection-status"],
       [`/ui/projects/${project.id}`, "health"],
       [`/ui/projects/${project.id}/knowledge`, "knowledge-row"],
+      [`/ui/projects/${project.id}/duplicates`, "duplicate-review"],
       [
         `/ui/projects/${project.id}/knowledge/${entry.id}`,
         "knowledge-document",

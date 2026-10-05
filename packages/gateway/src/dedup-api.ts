@@ -27,6 +27,12 @@ export type DedupPreviewCandidate = {
   revision: number;
   title: string;
   content_excerpt: string;
+  scope: "project" | "shared";
+  project_id: string | null;
+  category: string;
+  confidence: number;
+  source_session: string | null;
+  updated_at: number | null;
   /** Strongest dedup signal between this entry and another group member. */
   score: number;
   reasons: string[];
@@ -121,6 +127,15 @@ export function dedupPreviewGroups(
         revision,
         title: entry.title,
         content_excerpt: excerpt(entry.content),
+        scope:
+          entry.project_id === null || entry.cross_project
+            ? "shared"
+            : "project",
+        project_id: entry.project_id,
+        category: entry.category,
+        confidence: entry.confidence,
+        source_session: entry.source_session,
+        updated_at: entry.updated_at,
         score: Number(score.toFixed(4)),
         reasons: [...reasons].sort(),
       });

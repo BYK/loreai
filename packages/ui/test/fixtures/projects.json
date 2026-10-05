@@ -2,13 +2,25 @@
   {
     "id": "<uuid-0>",
     "path": "/tmp/<project-0>",
+    "name": "ui-contracts-dedup",
+    "git_remote": null,
+    "created_at": 1700000000000,
+    "knowledge_count": 2,
+    "session_count": 0,
+    "message_count": 0,
+    "distillation_count": 0,
+    "last_activity": 1700000001000
+  },
+  {
+    "id": "<uuid-1>",
+    "path": "/tmp/<project-1>",
     "name": "ui-contracts",
     "git_remote": "git@github.com:test/ui-contracts.git",
-    "created_at": 1700000000000,
+    "created_at": 1700000002000,
     "knowledge_count": 2,
     "session_count": 1,
     "message_count": 2,
     "distillation_count": 1,
-    "last_activity": 1700000001000
+    "last_activity": 1700000003000
   }
 ]

@@ -1,0 +1,74 @@
+{
+  "dry_run": true,
+  "groups": [
+    {
+      "group_id": "project:group-0",
+      "scope": "project",
+      "project_id": "<uuid-0>",
+      "candidates": [
+        {
+          "id": "<uuid-1>",
+          "logical_id": "<uuid-1>",
+          "revision": 1,
+          "title": "Cache warming threshold configuration",
+          "content_excerpt": "Duplicate threshold configuration.",
+          "scope": "project",
+          "project_id": "<uuid-0>",
+          "category": "gotcha",
+          "confidence": 1,
+          "source_session": "ui-contracts-dedup-session",
+          "updated_at": 1700000000000,
+          "score": 1,
+          "reasons": [
+            "title_overlap"
+          ]
+        },
+        {
+          "id": "<uuid-2>",
+          "logical_id": "<uuid-2>",
+          "revision": 1,
+          "title": "Gateway cache warming threshold configuration",
+          "content_excerpt": "The cache warming threshold is configured per project.",
+          "scope": "project",
+          "project_id": "<uuid-0>",
+          "category": "gotcha",
+          "confidence": 1,
+          "source_session": "ui-contracts-dedup-session",
+          "updated_at": 1700000001000,
+          "score": 1,
+          "reasons": [
+            "title_overlap"
+          ]
+        }
+      ],
+      "suggested_keep_id": "<uuid-1>"
+    }
+  ],
+  "project": {
+    "clusters": [
+      {
+        "surviving": {
+          "id": "<uuid-1>",
+          "title": "Cache warming threshold configuration"
+        },
+        "merged": [
+          {
+            "id": "<uuid-2>",
+            "title": "Gateway cache warming threshold configuration"
+          }
+        ]
+      }
+    ],
+    "totalRemoved": 1,
+    "pairSimilarities": {},
+    "entryTitles": {},
+    "pairMatches": {}
+  },
+  "global": {
+    "clusters": [],
+    "totalRemoved": 0,
+    "pairSimilarities": {},
+    "entryTitles": {},
+    "pairMatches": {}
+  }
+}

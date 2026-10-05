@@ -704,6 +704,12 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     revision: number;
     title: string;
     content_excerpt: string;
+    scope: "project" | "shared";
+    project_id: string | null;
+    category: string;
+    confidence: number;
+    source_session: string | null;
+    updated_at: number | null;
     score: number;
     reasons: string[];
   };
@@ -814,6 +820,12 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
       expect(c.logical_id).toBe(c.id);
       expect(c.title).toContain("Cache warming");
       expect(c.content_excerpt.length).toBeLessThanOrEqual(200);
+      expect(c.scope).toBe("project");
+      expect(c.project_id).toBe(projectId);
+      expect(c.category).toBe("gotcha");
+      expect(c.confidence).toBe(1);
+      expect(c.source_session).toBe("test-session");
+      expect(c.updated_at).toEqual(expect.any(Number));
       expect(c.score).toBeGreaterThanOrEqual(0.7);
       expect(c.reasons).toEqual(["title_overlap"]);
     }
@@ -822,6 +834,48 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     expect(
       preview.groups.flatMap((g) => g.candidates.map((c) => c.id)),
     ).not.toContain(unrelated);
+  });
+
+  it("labels global duplicate candidates as shared with no project", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-global-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-global-project");
+    const title = "Shared cache warming slot configuration";
+    const sharedA = ltm.create({
+      id: crypto.randomUUID(),
+      category: "gotcha",
+      title,
+      content: "The shared cache warming slot uses a stable configuration.",
+      session: "shared-session",
+      scope: "global",
+    });
+    const sharedB = ltm.create({
+      id: crypto.randomUUID(),
+      category: "gotcha",
+      title: `${title} duplicate`,
+      content: "A duplicate shared cache warming slot configuration.",
+      session: "shared-session",
+      scope: "global",
+    });
+    const res = await post(`/api/v1/projects/${projectId}/dedup`, {});
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as Preview;
+    const group = preview.groups.find(
+      (candidateGroup) =>
+        candidateGroup.scope === "global" &&
+        candidateGroup.candidates.some((candidate) => candidate.id === sharedA),
+    );
+    if (!group) throw new Error("expected a shared duplicate group");
+    expect(group.project_id).toBeNull();
+    expect(group.candidates.map((candidate) => candidate.id).sort()).toEqual(
+      [sharedA, sharedB].sort(),
+    );
+    expect(group.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scope: "shared", project_id: null }),
+        expect.objectContaining({ scope: "shared", project_id: null }),
+      ]),
+    );
   });
 
   it("preview never writes", async () => {
