@@ -127,8 +127,10 @@ describe("sync conflict routes", () => {
         )
         .run(randomUUID(), Date.now()).lastInsertRowid,
     );
+    const remoteDeletedId = makeKnowledge();
+    ltm.remove(remoteDeletedId);
     const remoteDelete = recordKnowledgeConflict(
-      logicalId,
+      remoteDeletedId,
       { title: "Deleted local", content: "Some local text" },
       "remote_delete_wins",
     );
@@ -142,11 +144,15 @@ describe("sync conflict routes", () => {
       body.conflicts.map((conflict: { id: number }) => [conflict.id, conflict]),
     );
     expect(byId.get(remoteDelete)).toMatchObject({
-      recoverable: false,
-      unrecoverable_reason: "remote_delete",
+      recoverable: true,
+      unrecoverable_reason: null,
       local: {
         title: "Deleted local",
         content: "Some local text",
+      },
+      current: {
+        version_id: expect.any(String),
+        deleted: true,
       },
     });
     expect(byId.get(nonKnowledgeId)).toMatchObject({
@@ -185,6 +191,7 @@ describe("sync conflict routes", () => {
         content: "Current local content",
       },
     });
+    expect(recoverable.current).not.toHaveProperty("deleted");
     expect(
       body.conflicts.find(
         (conflict: { row_id: string }) => conflict.row_id === missing,
@@ -251,6 +258,82 @@ describe("sync conflict routes", () => {
     expect(syncData.getSyncConflict(id)).not.toBeNull();
   });
 
+  it("restores a remote-deleted snapshot only from the matching death certificate", async () => {
+    const logicalId = makeKnowledge();
+    ltm.remove(logicalId);
+    const deathCert = db()
+      .query(
+        "SELECT id, version FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(logicalId) as { id: string; version: number };
+    const id = recordKnowledgeConflict(
+      logicalId,
+      {
+        title: "Recovered title",
+        content: "Recovered local content",
+        category: "decision",
+        metadata: JSON.stringify({ gitHead: "b".repeat(40) }),
+      },
+      "remote_delete_wins",
+    );
+    const listed = await request("/api/v1/sync/conflicts");
+    const conflict = (await listed.json()).conflicts.find(
+      (entry: { id: number }) => entry.id === id,
+    );
+    expect(conflict).toMatchObject({
+      recoverable: true,
+      current: {
+        version_id: deathCert.id,
+        version: deathCert.version,
+        deleted: true,
+      },
+    });
+    expect(conflict.local).not.toHaveProperty("metadata");
+
+    const stale = await request(
+      `/api/v1/sync/conflicts/${id}/keep-local`,
+      "POST",
+      JSON.stringify({ expected_version_id: "stale-death-cert" }),
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        type: "stale_version",
+        current_version_id: deathCert.id,
+      },
+    });
+    expect(syncData.getSyncConflict(id)).not.toBeNull();
+
+    const response = await request(
+      `/api/v1/sync/conflicts/${id}/keep-local`,
+      "POST",
+      JSON.stringify({ expected_version_id: deathCert.id }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      kept: "local",
+      current: {
+        version_id: expect.any(String),
+        version: deathCert.version + 1,
+        title: "Recovered title",
+        content: "Recovered local content",
+      },
+    });
+    expect(syncData.getSyncConflict(id)).toBeNull();
+    expect(ltm.getByLogical(logicalId)).toMatchObject({
+      approval_status: "auto",
+      metadata: {
+        gitHead: "b".repeat(40),
+        recovered_from: {
+          kind: "sync_conflict_keep_local",
+          conflict_id: id,
+          remote_deleted_version_id: deathCert.id,
+          restored_at: expect.any(String),
+        },
+      },
+    });
+  });
+
   it("returns the actual title when a local rename collides with another entry", async () => {
     const logicalId = makeKnowledge();
     const collisionTitle = `Collision ${randomUUID()}`;
@@ -285,16 +368,30 @@ describe("sync conflict routes", () => {
 
   it("discards a conflict and rejects missing, malformed, and unrecoverable keep requests", async () => {
     const logicalId = makeKnowledge();
+    ltm.remove(logicalId);
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(logicalId) as { id: string };
     const unrecoverableId = recordKnowledgeConflict(
       logicalId,
-      { title: "Local", content: "Text" },
+      null,
       "remote_delete_wins",
     );
+    const listed = await request("/api/v1/sync/conflicts");
+    expect(
+      (await listed.json()).conflicts.find(
+        (entry: { id: number }) => entry.id === unrecoverableId,
+      ),
+    ).toMatchObject({
+      recoverable: false,
+      unrecoverable_reason: "unreadable",
+      local: null,
+    });
     const keep = await request(
       `/api/v1/sync/conflicts/${unrecoverableId}/keep-local`,
       "POST",
       JSON.stringify({
-        expected_version_id: currentEntry(logicalId).version_id,
+        expected_version_id: deathCert.id,
       }),
     );
     expect(keep.status).toBe(409);

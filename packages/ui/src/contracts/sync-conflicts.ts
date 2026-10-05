@@ -16,6 +16,7 @@ export const syncConflictCurrent = type({
   version: "number.integer >= 1",
   title: "string",
   content: "string",
+  "deleted?": "boolean",
 });
 
 export type SyncConflictCurrent = typeof syncConflictCurrent.infer;

@@ -122,7 +122,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.goto("/ui/team");
 
     await expect(page.getByTestId("team-members")).toBeVisible();
-    await expect(page.getByText("Teammate user-mem")).toHaveAttribute(
+    await expect(page.getByText("Former member")).toHaveAttribute(
       "title",
       "user-member-12345678",
     );
@@ -152,7 +152,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.goto("/ui/team");
 
     const role = page.getByRole("combobox", {
-      name: "Role for Teammate user-mem",
+      name: "Role for Former member",
     });
     await expect(role).toHaveValue("viewer");
     await role.selectOption("editor");
@@ -224,16 +224,106 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(page.getByTestId("conflict-card")).toBeVisible();
   });
 
+  test("a remote-deleted conflict can be restored with Keep mine", async ({
+    page,
+  }) => {
+    const conflict = {
+      id: 44,
+      table: "knowledge",
+      row_id: "knowledge-44",
+      detected_at: "2026-09-20T12:00:00.000Z",
+      resolution: "remote_delete_wins",
+      recoverable: true,
+      unrecoverable_reason: null,
+      local: {
+        title: "Local decision",
+        content: "Keep the local copy.",
+        category: "decision",
+      },
+      current: {
+        version_id: "death-cert-3",
+        version: 3,
+        title: "Local decision",
+        content: "The deleted local version.",
+        deleted: true,
+      },
+    };
+    await page.route("**/api/v1/sync/conflicts", (route) =>
+      route.fulfill({
+        json: { available: true, complete: true, conflicts: [conflict] },
+      }),
+    );
+    let expectedVersionId: string | undefined;
+    await page.route("**/api/v1/sync/conflicts/44/keep-local", (route) => {
+      expectedVersionId = route.request().postDataJSON().expected_version_id;
+      return route.fulfill({
+        json: {
+          kept: "local",
+          current: {
+            version_id: "restored-4",
+            version: 4,
+            title: "Local decision",
+            content: "Keep the local copy.",
+          },
+        },
+      });
+    });
+    await page.goto("/ui/conflicts");
+
+    const card = page.getByTestId("conflict-card");
+    await expect(card).toContainText("The remote entry was deleted.");
+    await expect(card).toContainText("deleted remotely");
+    await card.getByRole("button", { name: "Keep mine" }).click();
+    const dialog = page.getByTestId("conflict-action-confirmation");
+    await dialog.getByRole("button", { name: "Keep mine" }).click();
+
+    await expect(page.getByTestId("conflict-recovery-receipt")).toContainText(
+      "restored-4",
+    );
+    expect(expectedVersionId).toBe("death-cert-3");
+    await expect(page.getByTestId("conflict-card")).toHaveCount(0);
+  });
+
   test("conflicts route renders the saved local version beside the current one", async ({
     page,
   }) => {
     await page.goto("/ui/conflicts");
-    const card = page.getByTestId("conflict-card");
+    const card = page
+      .getByTestId("conflict-card")
+      .filter({ hasText: "Keep SQLite as the only store" });
     await expect(card).toBeVisible();
     await expect(card).toContainText("Your discarded version");
     await expect(card).toContainText("Keep the local-first database.");
     await expect(card).toContainText("Current version");
     await expect(card).toContainText("Keep SQLite as the only store");
+  });
+
+  test("seeded remote deletion is listed as recoverable in the conflict UI", async ({
+    page,
+  }) => {
+    await page.goto("/ui/conflicts");
+    const response = await page.request.get("/api/v1/sync/conflicts");
+    expect(response.ok()).toBe(true);
+    const result = (await response.json()) as {
+      conflicts: Array<{
+        resolution: string;
+        local: { content: string } | null;
+        current: { version_id: string; deleted?: boolean } | null;
+      }>;
+    };
+    const conflict = result.conflicts.find(
+      (item) => item.resolution === "remote_delete_wins",
+    );
+    expect(conflict?.local?.content).toBe("Keep the local-first database.");
+    expect(conflict?.current?.deleted).toBe(true);
+    if (!conflict?.current) throw new Error("seeded death certificate missing");
+
+    const card = page
+      .getByTestId("conflict-card")
+      .filter({ hasText: "The remote entry was deleted." });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Keep the local-first database.");
+    await expect(card.getByRole("button", { name: "Keep mine" })).toBeEnabled();
   });
 
   test("linked project can require review from the sharing panel", async ({
