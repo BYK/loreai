@@ -38,7 +38,7 @@ function reasonMessage(conflict: SyncConflict): string {
     case "not_knowledge":
       return `This conflict affects ${conflict.table}, not knowledge. Its local snapshot is hidden.`;
     case "remote_delete":
-      return "The remote entry was deleted; restoring it here is not supported.";
+      return "The remote entry was deleted, but this local snapshot cannot be restored.";
     case "entry_missing":
       return "The current knowledge entry no longer exists.";
     case "unreadable":
@@ -49,7 +49,7 @@ function reasonMessage(conflict: SyncConflict): string {
 }
 
 function versionSummary(current: SyncConflictCurrent): string {
-  return `Version ${current.version} · ${current.version_id}`;
+  return `Version ${current.version} · ${current.version_id}${current.deleted ? " · deleted remotely" : ""}`;
 }
 
 export const ConflictsPage: Component = () => {
@@ -337,6 +337,12 @@ export const ConflictsPage: Component = () => {
                     </div>
 
                     <Show when={conflict.recoverable}>
+                      <Show when={conflict.resolution === "remote_delete_wins"}>
+                        <p class="mt-3 text-sm text-muted">
+                          The remote entry was deleted. Keep mine to restore
+                          your local snapshot as a new version.
+                        </p>
+                      </Show>
                       <div class="mt-4 grid gap-3 md:grid-cols-2">
                         <section class="min-w-0 rounded-md border border-line bg-bg p-3">
                           <h3 class="text-sm font-semibold">
@@ -448,7 +454,9 @@ export const ConflictsPage: Component = () => {
             </DialogTitle>
             <DialogDescription>
               {confirmation()?.action === "keep"
-                ? "This creates a new current knowledge version from the saved local snapshot. The current title may remain unchanged if it conflicts with another entry."
+                ? confirmation()?.conflict.resolution === "remote_delete_wins"
+                  ? "This restores the saved local snapshot as a new current version after the remote deletion."
+                  : "This creates a new current knowledge version from the saved local snapshot. The current title may remain unchanged if it conflicts with another entry."
                 : "This permanently removes the saved local snapshot for this conflict."}
             </DialogDescription>
           </DialogHeader>

@@ -23,26 +23,42 @@ interface CurrentKnowledge {
   title: string;
   content: string;
   category: string;
+  is_deleted: number;
 }
 
-function currentKnowledge(logicalId: string): CurrentKnowledge | null {
+type RestoreMetadata = Parameters<
+  typeof ltm.restoreDeletedKnowledge
+>[1]["metadata"];
+
+function currentKnowledge(
+  logicalId: string,
+  includeDeleted = false,
+): CurrentKnowledge | null {
   return (
     (db()
       .query(
-        `SELECT id AS version_id, version, title, content, category
-           FROM knowledge_current
-          WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?
+        `SELECT id AS version_id, version, title, content, category, is_deleted
+           FROM knowledge
+          WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1
+            AND (? = 1 OR is_deleted = 0)
           LIMIT 1`,
       )
-      .get(currentTenantId(), logicalId) as unknown as
+      .get(currentTenantId(), logicalId, includeDeleted ? 1 : 0) as unknown as
       | CurrentKnowledge
       | undefined) ?? null
   );
 }
 
+interface ParsedLocalKnowledge {
+  title: string;
+  content: string;
+  category?: string;
+  metadata: RestoreMetadata;
+}
+
 function parseLocalKnowledge(
   content: string | null,
-): { title: string; content: string; category?: string } | null {
+): ParsedLocalKnowledge | null {
   if (content === null) return null;
   try {
     const parsed: unknown = JSON.parse(content);
@@ -55,25 +71,49 @@ function parseLocalKnowledge(
     ) {
       return null;
     }
+    const rawMetadata = (parsed as Record<string, unknown>).metadata;
+    let metadata: Record<string, unknown> | null = null;
+    if (typeof rawMetadata === "string") {
+      try {
+        const value: unknown = JSON.parse(rawMetadata);
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value)
+        ) {
+          metadata = value as RestoreMetadata;
+        }
+      } catch {
+        metadata = null;
+      }
+    } else if (
+      typeof rawMetadata === "object" &&
+      rawMetadata !== null &&
+      !Array.isArray(rawMetadata)
+    ) {
+      metadata = rawMetadata as Record<string, unknown>;
+    }
     return {
-      title: (parsed as Record<string, string>).title,
-      content: (parsed as Record<string, string>).content,
+      title: (parsed as Record<string, unknown>).title as string,
+      content: (parsed as Record<string, unknown>).content as string,
       ...(typeof (parsed as Record<string, unknown>).category === "string"
         ? { category: (parsed as Record<string, string>).category }
         : {}),
+      metadata,
     };
   } catch {
     return null;
   }
 }
 
-function currentShape(entry: CurrentKnowledge | null) {
+function currentShape(entry: CurrentKnowledge | null, showDeleted = false) {
   return entry
     ? {
         version_id: entry.version_id,
         version: entry.version,
         title: entry.title,
         content: entry.content,
+        ...(showDeleted && entry.is_deleted === 1 ? { deleted: true } : {}),
       }
     : null;
 }
@@ -94,12 +134,25 @@ function shapeConflict(row: ConflictRow) {
   }
 
   const parsed = parseLocalKnowledge(row.local_content);
-  const current = currentKnowledge(row.row_id);
+  const isRemoteDelete = row.resolution === "remote_delete_wins";
+  const current = currentKnowledge(row.row_id, isRemoteDelete);
   let reason: "remote_delete" | "entry_missing" | "unreadable" | null = null;
-  if (row.resolution === "remote_delete_wins") reason = "remote_delete";
-  else if (row.resolution !== "remote_upsert_wins" || parsed === null) {
+  if (
+    row.resolution === "remote_delete_wins" &&
+    parsed !== null &&
+    current === null
+  ) {
+    reason = "entry_missing";
+  } else if (
+    row.resolution === "remote_delete_wins" &&
+    parsed !== null &&
+    current !== null
+  ) {
+    reason = null;
+  } else if (row.resolution === "remote_delete_wins" || parsed === null) {
     reason = "unreadable";
   } else if (!current) reason = "entry_missing";
+  else if (row.resolution !== "remote_upsert_wins") reason = "unreadable";
 
   return {
     id: row.id,
@@ -111,11 +164,12 @@ function shapeConflict(row: ConflictRow) {
     unrecoverable_reason: reason,
     local: parsed
       ? {
-          ...parsed,
+          title: parsed.title,
+          content: parsed.content,
           category: parsed.category ?? current?.category ?? "",
         }
       : null,
-    current: currentShape(current),
+    current: currentShape(current, isRemoteDelete),
   };
 }
 
@@ -174,22 +228,6 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
       "This sync conflict cannot be restored as a knowledge entry.",
     );
   }
-  const current = currentKnowledge(conflict.row_id);
-  if (!current) {
-    return errorResponse(
-      409,
-      "not_recoverable",
-      "The current knowledge entry is no longer available.",
-    );
-  }
-  if (body.expected_version_id !== current.version_id) {
-    return errorResponse(
-      409,
-      "stale_version",
-      "Knowledge entry changed; reload the conflict.",
-      { current_version_id: current.version_id },
-    );
-  }
   const local = shaped.local;
   if (!local)
     return errorResponse(
@@ -197,10 +235,45 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
       "not_recoverable",
       "Local snapshot is unreadable.",
     );
-  ltm.update(conflict.row_id, {
-    title: local.title,
-    content: local.content,
-  });
+  if (conflict.resolution === "remote_delete_wins") {
+    const result = ltm.restoreDeletedKnowledge(conflict.row_id, {
+      expectedDeletedVersionId: body.expected_version_id,
+      conflictId: id,
+      title: local.title,
+      content: local.content,
+      metadata: parseLocalKnowledge(conflict.local_content)
+        ?.metadata as RestoreMetadata,
+    });
+    if (!result.ok) {
+      return errorResponse(
+        409,
+        "stale_version",
+        "Knowledge entry changed; reload the conflict.",
+        { current_version_id: result.currentVersionId },
+      );
+    }
+  } else {
+    const current = currentKnowledge(conflict.row_id);
+    if (!current) {
+      return errorResponse(
+        409,
+        "not_recoverable",
+        "The current knowledge entry is no longer available.",
+      );
+    }
+    if (body.expected_version_id !== current.version_id) {
+      return errorResponse(
+        409,
+        "stale_version",
+        "Knowledge entry changed; reload the conflict.",
+        { current_version_id: current.version_id },
+      );
+    }
+    ltm.update(conflict.row_id, {
+      title: local.title,
+      content: local.content,
+    });
+  }
   syncData.deleteSyncConflict(id);
   const updated = currentKnowledge(conflict.row_id);
   return updated

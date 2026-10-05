@@ -218,6 +218,64 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     // 22008/PGRST204'd otherwise — proven by r.pushed===1 above).
   });
 
+  it("pushes a live knowledge version after its remote death certificate", async () => {
+    syncData.enableSync("basic");
+    const projectPath = "/tmp/lore-engine-resurrection";
+    ensureProject(projectPath);
+    const logicalId = ltm.create({
+      projectPath,
+      category: "decision",
+      title: "Remote resurrection",
+      content: "Before deletion",
+      scope: "project",
+    });
+    const client = clientFor(uid);
+
+    expect((await pushOnce(client)).pushed).toBeGreaterThan(0);
+    ltm.remove(logicalId);
+    expect((await pushOnce(client)).pushed).toBeGreaterThan(0);
+    const tombstone = await h.asUser(uid, (c) =>
+      c
+        .query(
+          "select is_deleted, title, content from public.knowledge where id=$1",
+          [logicalId],
+        )
+        .then((result) => result.rows),
+    );
+    expect(tombstone).toMatchObject([
+      { is_deleted: true, title: "", content: "" },
+    ]);
+
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(logicalId) as { id: string };
+    const restored = ltm.restoreDeletedKnowledge(logicalId, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 50,
+      title: "Remote resurrection",
+      content: "Restored after deletion",
+      metadata: null,
+    });
+    expect(restored.ok).toBe(true);
+
+    expect((await pushOnce(client)).pushed).toBeGreaterThan(0);
+    const live = await h.asUser(uid, (c) =>
+      c
+        .query(
+          "select is_deleted, title, content from public.knowledge where id=$1",
+          [logicalId],
+        )
+        .then((result) => result.rows),
+    );
+    expect(live).toMatchObject([
+      {
+        is_deleted: false,
+        title: "Remote resurrection",
+        content: "Restored after deletion",
+      },
+    ]);
+  });
+
   it("pushes a join-table row (no content_hash/revision columns)", async () => {
     insertKnowledge("k1", "x");
     db()
@@ -541,8 +599,18 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(memberCount()).toBe(2); // admin + other
 
     // Admin removes `other` remotely (hard DELETE, no tombstone — the keyset pull could never see it).
+    const adminHasIdentity = await h.client
+      .query("select 1 from public.identity_pub where user_id=$1", [uid])
+      .then((response) => (response.rowCount ?? 0) > 0);
+    const wraps = adminHasIdentity
+      ? JSON.stringify([{ member_user_id: uid, wrapped_dek: "next-wrap" }])
+      : "[]";
     await h.asUser(uid, (c) =>
-      c.query("select public.remove_scope_member($1,$2)", [scopeId, other]),
+      c.query("select public.remove_scope_member_rotating($1,$2,0,$3::jsonb)", [
+        scopeId,
+        other,
+        wraps,
+      ]),
     );
     // The next authoritative refresh deletes the now-absent local row.
     await refreshRegistryMirror(clientFor(uid));

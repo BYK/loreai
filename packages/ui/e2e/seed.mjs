@@ -917,6 +917,36 @@ db.prepare(
     category: conflictEntry.category,
   }),
 );
+const remoteDeletedLogicalId = core.ltm.create({
+  id: "01996200-1823-7000-8000-000000000099",
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Remote-deleted decision",
+  content: "The remote copy was removed.",
+});
+core.ltm.remove(remoteDeletedLogicalId);
+const remoteDeathCert = db
+  .prepare(
+    `SELECT id FROM knowledge
+      WHERE COALESCE(logical_id, id) = ? AND is_current = 1 AND is_deleted = 1`,
+  )
+  .get(remoteDeletedLogicalId);
+if (!remoteDeathCert)
+  throw new Error("expected remote-delete death certificate");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_delete_wins', ?)`,
+).run(
+  remoteDeletedLogicalId,
+  Date.UTC(2026, 8, 20, 12, 30),
+  JSON.stringify({
+    title: "Keep the local copy",
+    content: "Keep the local-first database.",
+    category: "decision",
+  }),
+);
 db.prepare(
   "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
 ).run("Shared title conflict legacy duplicate E2E", legacySharedTitleB);
