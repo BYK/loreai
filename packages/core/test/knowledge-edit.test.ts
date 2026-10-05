@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { uuidv7 } from "uuidv7";
@@ -164,6 +164,26 @@ describe("revision-checked knowledge editing", () => {
     expect(restored.revision).toBe(3);
     expect(restored.effects.scope).toBe("project");
     expect(restored.restored_from).toEqual({ version_id: id, version: 1 });
+  });
+
+  test("exports a project-owned entry after changing its scope to shared", () => {
+    const id = createEntry();
+    const edited = knowledgeEdit.editKnowledge(id, {
+      expectedRevision: 1,
+      actor: "reviewer",
+      scope: "shared",
+    });
+
+    expect(edited.effects.project_id).toBe(projectId);
+    expect(edited.effects.scope).toBe("shared");
+    expect(edited.effects.lore_file).toMatchObject({
+      affected: true,
+      regenerated: true,
+    });
+    expect(knowledgeEdit.knowledgeEffects(id)?.lore_file.affected).toBe(true);
+    expect(readFileSync(join(PROJECT, ".lore.md"), "utf8")).toContain(
+      `<!-- lore:${id} -->`,
+    );
   });
 
   test("rejects changing a projectless shared entry to project scope", () => {

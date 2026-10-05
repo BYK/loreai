@@ -30,12 +30,8 @@ function entryScope(entry: KnowledgeEntry): "project" | "shared" {
     : "project";
 }
 
-function successText(
-  effects: KnowledgeEffects,
-  revision: number,
-  scopeChanged: boolean,
-): string {
-  const lore = loreEffectOutcome(effects, scopeChanged);
+function successText(effects: KnowledgeEffects, revision: number): string {
+  const lore = loreEffectOutcome(effects);
   const agents =
     effects.agents_file.mode === "pointer"
       ? "AGENTS.md pointer unchanged"
@@ -83,9 +79,7 @@ export const RestoreKnowledgeAction: Component<{
       lore_file: {
         ...current.lore_file,
         affected:
-          version.scope === "project" &&
-          current.project_id !== null &&
-          current.lore_file.path !== null,
+          current.project_id !== null && current.lore_file.path !== null,
       },
     };
   };
@@ -184,13 +178,7 @@ export const RestoreKnowledgeAction: Component<{
       props.history.reload();
       props.onRestored?.();
       setFreshRevision(result.revision);
-      setNotice(
-        successText(
-          result.effects,
-          result.revision,
-          previousScope !== result.effects.scope,
-        ),
-      );
+      setNotice(successText(result.effects, result.revision));
       setOpen(false);
     } catch (reason) {
       if (isApiError(reason) && reason.errorType === "stale_revision") {
@@ -263,11 +251,7 @@ export const RestoreKnowledgeAction: Component<{
             </p>
             <Show when={restoreEffects()}>
               {(value) => (
-                <KnowledgeEffectsSummary
-                  effects={value()}
-                  phase="confirm"
-                  scopeChanged={effects()?.scope !== value().scope}
-                />
+                <KnowledgeEffectsSummary effects={value()} phase="confirm" />
               )}
             </Show>
             <Show when={effects()?.is_deleted}>

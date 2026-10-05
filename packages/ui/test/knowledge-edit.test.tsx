@@ -24,7 +24,7 @@ import {
 } from "~/db";
 import { ApiError, type ApiClient } from "~/lib/api";
 import type { Loader } from "~/lib/loader";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { useWorkspace, WorkspaceProvider } from "~/routes/workspace";
 
 import { IDBFactory } from "./idb-globals";
 
@@ -186,6 +186,7 @@ function mountEditor(
     currentEntry?: KnowledgeEntry;
     currentHistory?: KnowledgeVersionHistory;
     onReload?: () => void;
+    onWorkspace?: (workspace: ReturnType<typeof useWorkspace>) => void;
   } = {},
 ) {
   const versions = makeLoader(
@@ -195,16 +196,23 @@ function mountEditor(
   const [currentEntry, setCurrentEntry] = createSignal(
     options.currentEntry ?? entry(),
   );
-  const view = render(() => (
-    <WorkspaceProvider
-      client={options.client ?? makeClient()}
-      db={options.db ?? Promise.resolve(null)}
-    >
+  const Editor = () => {
+    const workspace = useWorkspace();
+    options.onWorkspace?.(workspace);
+    return (
       <KnowledgeEditor
         entry={currentEntry()}
         versions={versions.loader}
         reloadEntry={options.onReload ?? vi.fn()}
       />
+    );
+  };
+  const view = render(() => (
+    <WorkspaceProvider
+      client={options.client ?? makeClient()}
+      db={options.db ?? Promise.resolve(null)}
+    >
+      <Editor />
     </WorkspaceProvider>
   ));
   return { ...view, versions, setEntry: setCurrentEntry };
@@ -280,6 +288,55 @@ describe("KnowledgeEditor", () => {
     expect(
       (await drafts.get("knowledge/knowledge-1"))?.body,
     ).not.toHaveProperty("confidence");
+  });
+
+  it("autosaves each later edit and coalesces edits within the debounce window", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("fake IndexedDB did not open");
+    const drafts = createDraftsStore(db);
+    let writeCount = 0;
+    mountEditor({
+      db: Promise.resolve(db),
+      onWorkspace: ({ state }) => {
+        const put = state.drafts.put.bind(state.drafts);
+        vi.spyOn(state.drafts, "put").mockImplementation(async (draft) => {
+          writeCount++;
+          return put(draft);
+        });
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Debounced title" },
+    });
+    await waitFor(async () => {
+      expect(writeCount).toBe(1);
+      expect(await drafts.get("knowledge/knowledge-1")).toMatchObject({
+        body: { title: "Debounced title" },
+      });
+    });
+
+    fireEvent.input(screen.getByLabelText("Content"), {
+      target: { value: "Debounced content" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    fireEvent.change(screen.getByLabelText("Category"), {
+      target: { value: "pattern" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(writeCount).toBe(1);
+
+    await waitFor(async () => {
+      expect(writeCount).toBe(2);
+      expect(await drafts.get("knowledge/knowledge-1")).toMatchObject({
+        body: {
+          title: "Debounced title",
+          content: "Debounced content",
+          category: "pattern",
+        },
+      });
+    });
   });
 
   it("does not treat an empty confidence field as zero or save it", async () => {
@@ -560,10 +617,11 @@ describe("KnowledgeEditor", () => {
     const changed = vi.fn(async () =>
       editResult(2, entry({ cross_project: 1 }), ["scope"], {
         scope: "shared",
+        project_id: "project-1",
         lore_file: {
           enabled: true,
           path: "/tmp/project/.lore.md",
-          affected: false,
+          affected: true,
           regenerated: true,
         },
       }),
@@ -578,6 +636,41 @@ describe("KnowledgeEditor", () => {
       expect(screen.getByTestId("knowledge-save-success")).toHaveTextContent(
         "Project .lore.md regenerated",
       ),
+    );
+  });
+
+  it("shows project export consequences for a project-owned shared entry", async () => {
+    const sharedEffects = effects({
+      scope: "shared",
+      lore_file: {
+        enabled: true,
+        path: "/tmp/project/.lore.md",
+        affected: true,
+        regenerated: false,
+      },
+    });
+    render(() => (
+      <WorkspaceProvider
+        client={makeClient({
+          getKnowledgeEffects: async () => sharedEffects,
+        })}
+        db={Promise.resolve(null)}
+      >
+        <KnowledgeEditor
+          entry={entry({ cross_project: 1 })}
+          versions={makeLoader(history()).loader}
+          reloadEntry={vi.fn()}
+        />
+      </WorkspaceProvider>
+    ));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "This project's .lore.md is regenerated (when .lore.md export is enabled)",
+    );
+    expect(dialog).not.toHaveTextContent(
+      ".lore.md files are not affected (entries without a project are not exported)",
     );
   });
 
@@ -862,9 +955,10 @@ describe("RestoreKnowledgeAction", () => {
         revision: 3,
         is_deleted: true,
         scope: "shared",
+        project_id: null,
         lore_file: {
           enabled: true,
-          path: "/tmp/project/.lore.md",
+          path: null,
           affected: false,
           regenerated: false,
         },
@@ -893,7 +987,7 @@ describe("RestoreKnowledgeAction", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("Current head: v3");
     expect(dialog).toHaveTextContent(
-      ".lore.md files are not affected (shared entries are not exported)",
+      ".lore.md files are not affected (entries without a project are not exported)",
     );
   });
 
@@ -958,7 +1052,7 @@ describe("RestoreKnowledgeAction", () => {
           lore_file: {
             enabled: true,
             path: "/tmp/project/.lore.md",
-            affected: false,
+            affected: true,
             regenerated: true,
           },
         }),

@@ -2,20 +2,10 @@ import type { Component } from "solid-js";
 
 import type { KnowledgeEffects } from "~/contracts";
 
-export function loreEffectOutcome(
-  effects: KnowledgeEffects,
-  scopeChanged = false,
-): string {
+export function loreEffectOutcome(effects: KnowledgeEffects): string {
   const lore = effects.lore_file;
-  if (scopeChanged && effects.project_id !== null) {
-    if (!lore.enabled) return ".lore.md export is off";
-    if (!lore.path) return "The project .lore.md file is unavailable";
-    return lore.regenerated
-      ? "Project .lore.md regenerated"
-      : "Project .lore.md was not regenerated";
-  }
-  if (effects.scope === "shared")
-    return ".lore.md files are not affected (shared entries are not exported)";
+  if (effects.project_id === null)
+    return ".lore.md files are not affected (entries without a project are not exported)";
   if (!lore.enabled) return ".lore.md export is off";
   if (!lore.affected) return "The project .lore.md file is unavailable";
   return lore.regenerated
@@ -26,28 +16,17 @@ export function loreEffectOutcome(
 export const KnowledgeEffectsSummary: Component<{
   effects: KnowledgeEffects;
   phase: "confirm" | "complete";
-  scopeChanged?: boolean;
 }> = (props) => {
   const loreText = () => {
     const lore = props.effects.lore_file;
-    if (
-      props.phase === "confirm" &&
-      props.scopeChanged &&
-      props.effects.project_id !== null
-    )
+    if (props.effects.project_id === null)
+      return ".lore.md files are not affected (entries without a project are not exported)";
+    if (props.phase === "confirm")
       return !lore.enabled
         ? ".lore.md export is off"
-        : !lore.path
+        : !lore.affected
           ? "The project .lore.md file is unavailable"
           : "This project's .lore.md is regenerated (when .lore.md export is enabled)";
-    if (props.phase === "confirm")
-      return props.effects.scope === "shared"
-        ? ".lore.md files are not affected (shared entries are not exported)"
-        : !lore.enabled
-          ? ".lore.md export is off"
-          : !lore.affected
-            ? "The project .lore.md file is unavailable"
-            : "This project's .lore.md is regenerated (when .lore.md export is enabled)";
     return loreEffectOutcome(props.effects);
   };
 
