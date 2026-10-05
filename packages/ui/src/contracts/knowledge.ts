@@ -90,3 +90,65 @@ export const knowledgeVersionHistory = type({
 });
 
 export type KnowledgeVersionHistory = typeof knowledgeVersionHistory.infer;
+
+export const knowledgeEffects = type({
+  scope: "'project' | 'shared'",
+  project_id: "string | null",
+  revision: "number.integer",
+  is_deleted: "boolean",
+  lore_file: {
+    enabled: "boolean",
+    path: "string | null",
+    affected: "boolean",
+    "regenerated?": "boolean",
+  },
+  agents_file: {
+    enabled: "boolean",
+    mode: "'pointer' | 'inline' | 'off'",
+    immediate: "boolean",
+  },
+  sync: { enabled: "boolean" },
+});
+
+export type KnowledgeEffects = typeof knowledgeEffects.infer;
+
+export const knowledgeEditResult = type({
+  id: nonEmptyString,
+  revision: "number.integer",
+  previous_revision: "number.integer",
+  version_id: nonEmptyString,
+  changed: "string[]",
+  effects: knowledgeEffects,
+  entry: knowledgeEntry.or("null"),
+});
+
+export type KnowledgeEditResult = typeof knowledgeEditResult.infer;
+
+export const knowledgeRestoreResult = type({
+  id: nonEmptyString,
+  revision: "number.integer",
+  previous_revision: "number.integer",
+  version_id: nonEmptyString,
+  changed: "string[]",
+  effects: knowledgeEffects,
+  restored_from: {
+    version_id: nonEmptyString,
+    version: "number.integer",
+  },
+  entry: knowledgeEntry.or("null"),
+});
+
+export type KnowledgeRestoreResult = typeof knowledgeRestoreResult.infer;
+
+export const knowledgeDeleteResult = type({
+  deleted: "true",
+  id: nonEmptyString,
+  revision: "number.integer",
+  previous_revision: "number.integer",
+  version_id: nonEmptyString,
+  changed: "string[]",
+  effects: knowledgeEffects,
+  entry: knowledgeEntry.or("null"),
+});
+
+export type KnowledgeDeleteResult = typeof knowledgeDeleteResult.infer;

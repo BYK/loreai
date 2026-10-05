@@ -1,4 +1,4 @@
-import type { Component } from "solid-js";
+import type { Component, JSX } from "solid-js";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
@@ -15,6 +15,7 @@ import { sessionHref } from "~/lib/href";
 import type {
   DistillationDetail,
   KnowledgeEntry,
+  KnowledgeVersion,
   ProjectSummary,
 } from "~/contracts";
 import type { EvidenceResult } from "~/state/sessions";
@@ -69,6 +70,8 @@ export const KnowledgeDocument: Component<{
   versions?: Loader<KnowledgeVersionHistory>;
   evidence?: Loader<EvidenceResult>;
   loadDistillation?: (id: string) => Promise<DistillationDetail>;
+  actions?: JSX.Element;
+  renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
   const isShared = () =>
     props.entry.project_id == null ||
@@ -125,6 +128,9 @@ export const KnowledgeDocument: Component<{
             <Badge variant="outline">{props.entry.approval_status}</Badge>
           </Show>
         </div>
+        <Show when={props.actions}>
+          <div class="mt-3">{props.actions}</div>
+        </Show>
       </DocHeader>
 
       <div class="mx-auto max-w-[940px] px-5 py-6 sm:px-7.5">
@@ -310,6 +316,7 @@ export const KnowledgeDocument: Component<{
               projectId={
                 props.project?.id ?? props.entry.project_id ?? undefined
               }
+              renderRestore={props.renderRestore}
             />
           )}
         </Show>
@@ -395,8 +402,8 @@ export const KnowledgeDocument: Component<{
         <div class="mt-7 border-t border-dashed border-line pt-5">
           <div class="eyebrow mb-1">Actions</div>
           <p class="m-0 text-xs text-muted">
-            Notes, agent requests and sharing arrive in later slices. Nothing on
-            this page writes to memory.
+            Edits and deletions are revision-checked; restores create a new
+            version.
           </p>
           <FutureActionRow actions={FUTURE_ACTIONS} primary="Ask agent" />
         </div>

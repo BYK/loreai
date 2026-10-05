@@ -556,6 +556,7 @@ export function appendVersion(
     title?: string;
     content?: string;
     category?: string;
+    crossProject?: boolean;
     isDeleted?: boolean;
     /**
      * Per-version metadata. Omit the property to forward-copy the current
@@ -608,7 +609,7 @@ export function appendVersion(
            logical_id, version, is_deleted, is_current)
          SELECT
             ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
+           source_session, COALESCE(?, cross_project), created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
            updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
@@ -620,6 +621,11 @@ export function appendVersion(
         overrides.category ?? null,
         overrides.title ?? null,
         overrides.content ?? null,
+        overrides.crossProject === undefined
+          ? null
+          : overrides.crossProject
+            ? 1
+            : 0,
         now,
         // A missing property forwards the prior version. An explicit empty/null
         // value clears it, which lets `.lore.md` remove an `enforce:` marker.
@@ -933,7 +939,7 @@ export function rejectForTeam(logicalId: string): boolean {
  */
 export function titleCollides(
   logicalId: string,
-  entry: KnowledgeEntry,
+  entry: Pick<KnowledgeEntry, "project_id" | "cross_project">,
   newTitle: string,
 ): boolean {
   const pid = entry.project_id;

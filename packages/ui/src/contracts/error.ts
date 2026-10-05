@@ -30,6 +30,7 @@ export class ApiError extends Error {
   readonly status: number | null;
   readonly path: string;
   readonly code: string | null;
+  readonly errorType: string | undefined;
 
   constructor(
     kind: ApiErrorKind,
@@ -44,6 +45,7 @@ export class ApiError extends Error {
     this.status = status;
     this.path = path;
     this.code = code;
+    this.errorType = code ?? undefined;
   }
 }
 

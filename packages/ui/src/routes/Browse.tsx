@@ -4,6 +4,7 @@ import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type {
   AllKnowledgeQuery,
+  KnowledgeVersion,
   ProjectSummary,
   RecallScope,
 } from "~/contracts";
@@ -26,6 +27,8 @@ import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
+import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
+import { RestoreKnowledgeAction } from "~/components/lore/RestoreKnowledgeAction";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
@@ -400,6 +403,27 @@ export const Browse: Component<{
               <DeletedKnowledgeDocument
                 history={deletedHistory}
                 projectId={projectId()}
+                restoreAction={
+                  <RestoreKnowledgeAction
+                    id={knowledgeId()!}
+                    history={deletedHistory}
+                    onRestored={() => {
+                      entry.loader.reload();
+                      versions.loader.reload();
+                    }}
+                  />
+                }
+                renderRestore={(version: KnowledgeVersion) => (
+                  <RestoreKnowledgeAction
+                    id={knowledgeId()!}
+                    history={deletedHistory}
+                    versionId={version.version_id}
+                    onRestored={() => {
+                      entry.loader.reload();
+                      versions.loader.reload();
+                    }}
+                  />
+                )}
               />
             </Match>
             <Match when={entry.loader.error() && !entry.loader.data()}>
@@ -416,18 +440,32 @@ export const Browse: Component<{
             </Match>
             <Match when={entry.loader.data()}>
               {(value) => (
-                <>
-                  <KnowledgeDocument
-                    entry={value()}
-                    project={projectForEntry()}
-                    versions={versions.loader}
-                    evidence={evidence.loader}
-                    loadDistillation={(id) =>
-                      ws.tracked(() => ws.client.getDistillation(id))
-                    }
-                  />
-                  <PromotionPanel knowledgeId={value().id} client={ws.client} />
-                </>
+                <KnowledgeDocument
+                  entry={value()}
+                  project={projectForEntry()}
+                  versions={versions.loader}
+                  evidence={evidence.loader}
+                  actions={
+                    <KnowledgeEditor
+                      entry={value()}
+                      versions={versions.loader}
+                      reloadEntry={entry.loader.reload}
+                      onDeleted={() => entry.loader.reload()}
+                    />
+                  }
+                  renderRestore={(version: KnowledgeVersion) => (
+                    <RestoreKnowledgeAction
+                      id={value().logical_id ?? value().id}
+                      history={versions.loader}
+                      versionId={version.version_id}
+                      onRestored={() => entry.loader.reload()}
+                    />
+                  )}
+                  loadDistillation={(id) =>
+                    ws.tracked(() => ws.client.getDistillation(id))
+                  }
+                />
+                <PromotionPanel knowledgeId={value().id} client={ws.client} />
               )}
             </Match>
           </Switch>

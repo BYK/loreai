@@ -1174,13 +1174,9 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(screen.getByTestId("knowledge-version-2")).toHaveTextContent(
       "Deleted",
     );
+    expect(screen.getByRole("button", { name: "Restore…" })).toBeEnabled();
     expect(
-      screen.getByText("Restoring arrives with knowledge editing (#1805)"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", {
-        name: "Restoring arrives with knowledge editing (#1805)",
-      }),
+      screen.queryByText("Restoring arrives with knowledge editing (#1805)"),
     ).not.toBeInTheDocument();
     expect(listKnowledgeVersions).toHaveBeenCalledWith(
       "k-merged",
@@ -1232,7 +1228,7 @@ describe("shell: empty, error, not-found and locked states", () => {
       screen.queryByTestId("deleted-knowledge-document"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText("Restoring arrives with knowledge editing (#1805)"),
+      screen.queryByRole("button", { name: "Restore…" }),
     ).not.toBeInTheDocument();
   });
 
