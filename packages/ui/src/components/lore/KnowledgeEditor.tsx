@@ -76,12 +76,8 @@ function currentRevision(
   return history?.versions.find((version) => version.is_current)?.version;
 }
 
-function savedEffectText(
-  effects: KnowledgeEffects,
-  revision: number,
-  changed: string[],
-): string {
-  const lore = loreEffectOutcome(effects, changed.includes("scope"));
+function savedEffectText(effects: KnowledgeEffects, revision: number): string {
+  const lore = loreEffectOutcome(effects);
   const agents =
     effects.agents_file.mode === "pointer"
       ? "AGENTS.md pointer unchanged"
@@ -206,6 +202,12 @@ export const KnowledgeEditor: Component<{
 
   createEffect(() => {
     if (!editing() || !dirty() || saving()) return;
+    title();
+    content();
+    category();
+    confidenceText();
+    confidenceEdited();
+    scope();
     const timer = setTimeout(() => void persistDraft(), 350);
     onCleanup(() => clearTimeout(timer));
   });
@@ -374,9 +376,7 @@ export const KnowledgeEditor: Component<{
         );
       setDirty(false);
       setEditing(false);
-      setSuccess(
-        savedEffectText(result.effects, result.revision, result.changed),
-      );
+      setSuccess(savedEffectText(result.effects, result.revision));
     } catch (error) {
       if (isApiError(error) && error.errorType === "stale_revision") {
         await persistDraft();

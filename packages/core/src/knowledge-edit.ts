@@ -185,8 +185,7 @@ function effectsFor(head: KnowledgeHead): KnowledgeEffects {
     lore_file: {
       enabled: loreEnabled,
       path: projectExists && path ? resolve(path, ".lore.md") : null,
-      affected:
-        projectExists && head.project_id !== null && head.cross_project === 0,
+      affected: projectExists && head.project_id !== null,
     },
     agents_file: {
       enabled: agentsEnabled,
