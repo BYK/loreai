@@ -647,6 +647,52 @@ describe("SharingPanel review action", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the review dialog open while the policy update is saving", async () => {
+    let resolvePolicy!: (status: SharingStatus) => void;
+    const pendingPolicy = new Promise<SharingStatus>((resolve) => {
+      resolvePolicy = resolve;
+    });
+    const requireProjectSharingReview = vi.fn<
+      ApiClient["requireProjectSharingReview"]
+    >(() => pendingPolicy);
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ requireProjectSharingReview }),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Require review" }),
+    );
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Require review" }),
+    );
+
+    expect(requireProjectSharingReview).toHaveBeenCalledWith("project-1", null);
+    expect(
+      within(dialog).getByRole("button", { name: "Saving…" }),
+    ).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(
+      screen.getByTestId("sharing-policy-confirmation"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "Saving…" }),
+    ).toBeVisible();
+
+    resolvePolicy(manualSharing);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("sharing-policy-confirmation"),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
+        "policy: manual",
+      ),
+    );
+  });
+
   it("keeps stale policy errors in the dialog and reloads from there", async () => {
     const getProjectSharing = vi
       .fn<ApiClient["getProjectSharing"]>()
