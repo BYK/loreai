@@ -61,12 +61,15 @@ import * as log from "./log";
 import { estimateTokens } from "./tokenize";
 import { currentTenantId } from "./tenant";
 
-const TITLE_KEY_SQL = (column: string): string =>
-  `LOWER(TRIM(${column}, ' ' || char(9) || char(10) || char(13)))`;
+export function titleKeySql(column: string): string {
+  return `LOWER(TRIM(${column}, ' ' || char(9) || char(10) || char(13)))`;
+}
 
 export function normalizeTitleKey(title: string): string {
   return title.trim().toLowerCase();
 }
+
+const TITLE_KEY_SQL = titleKeySql;
 
 /**
  * Cheap durable change stamp for a context-bound selection. Knowledge writes
@@ -936,7 +939,7 @@ export function findSharedTitleConflict(
         LIMIT 1`,
     )
     .get(...params) as TitleConflict | null;
-  return conflict;
+  return conflict ?? null;
 }
 
 /**
