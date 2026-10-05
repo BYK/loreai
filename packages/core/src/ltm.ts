@@ -545,8 +545,9 @@ export function create(input: {
  * NULL so the new content is re-embedded lazily. Returns the new version row id,
  * or `null` if `logicalId` has no current row.
  *
- * Low-level seam driving `ltm.update()` (content edits) and `ltm.remove()` (death-cert). A live
- * version in a team-bound project re-enters pending review; tombstones retain the prior decision.
+ * Low-level seam driving `ltm.update()` (content edits) and `ltm.remove()` (death-cert). The
+ * forward-copy SELECT carries all metadata — including `approval_status`/`approved_by`/`approved_at`
+ * — into the new version, so a team-approval survives a later content edit.
  */
 export function appendVersion(
   logicalId: string,
@@ -584,17 +585,6 @@ export function appendVersion(
       )
       .get(currentTenantId(), logicalId) as { id: string } | undefined;
     if (!cur) return false;
-    const resetsTeamApproval =
-      overrides.isDeleted !== true &&
-      Boolean(
-        db()
-          .query(
-            `SELECT 1 FROM knowledge k
-               JOIN projects p ON p.id = k.project_id AND p.tenant_id = k.tenant_id
-              WHERE k.id = ? AND p.scope_id IS NOT NULL`,
-          )
-          .get(cur.id),
-      );
     // vec0 layout has no `embedding` column on `knowledge` (dropped at cutover):
     // omit it from the forward-copy, and drop the demoted version's vec0 row so
     // knowledge_vec holds only current versions (the new version is re-embedded
@@ -619,10 +609,7 @@ export function appendVersion(
             ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
            source_session, cross_project, created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
            updated_by, sensitivity, promotion_status, promoted_at,
-           CASE WHEN ? THEN 'pending' ELSE approval_status END,
-           CASE WHEN ? THEN NULL ELSE approved_by END,
-           CASE WHEN ? THEN NULL ELSE approved_at END,
-           source_user_id, source_entry_id,
+           approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
            logical_id, version + 1, ?, 1
           FROM knowledge WHERE id = ? AND tenant_id = ?`,
@@ -639,9 +626,6 @@ export function appendVersion(
           ? 1
           : 0,
         stringifyMetadata(overrides.metadata),
-        resetsTeamApproval ? 1 : 0,
-        resetsTeamApproval ? 1 : 0,
-        resetsTeamApproval ? 1 : 0,
         overrides.isDeleted ? 1 : 0,
         cur.id,
         currentTenantId(),

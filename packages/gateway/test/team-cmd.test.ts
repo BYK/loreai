@@ -813,6 +813,32 @@ describe("server-backed promotion review and project sharing policy", () => {
     expect(logs.join("\n")).toContain("T  [pattern]  Reviewable  by @reviewer");
   });
 
+  it("review --project includes server proposals without a local entry", async () => {
+    vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
+      ok: true,
+      value: {
+        remote: "ok",
+        requests: [
+          {
+            id: "other-member-request",
+            logical_id: "other-member-entry",
+            category: "pattern",
+            title: "Other member proposal",
+            team: { id: "sc", name: "T" },
+            proposer: { id: "u2", label: "@other" },
+          } as never,
+        ],
+        complete: true,
+      },
+    });
+
+    await commandTeam(["review"], { project: PROJECT });
+
+    expect(promotions.listPromotionRequestsService).toHaveBeenCalledWith("sc");
+    expect(logs.join("\n")).toContain("other-member-request");
+    expect(logs.join("\n")).toContain("other-member-entry");
+  });
+
   it("review prints nothing-pending when clear", async () => {
     await commandTeam(["review"], { project: PROJECT });
     expect(logs.join("\n")).toMatch(/Nothing pending/);
@@ -899,12 +925,19 @@ describe("server-backed promotion review and project sharing policy", () => {
     await commandTeam(["approve", "missing-request"], {});
     expect(process.exitCode).toBe(1);
     expect(errs.join("\n")).toContain(`${failure.code}: ${failure.message}`);
+    expect(approvalOf(id)).toBe("pending");
   });
 
   it("proposes the current local version through the server service", async () => {
     await commandTeam(["propose", id], {});
     expect(process.exitCode).toBe(0);
     expect(promotions.proposePromotionService).toHaveBeenCalledWith(id, id);
+  });
+
+  it("propose exits 1 for an unknown logical id", async () => {
+    await commandTeam(["propose", "unknown-logical-id"], {});
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("No current knowledge entry");
   });
 
   it("withdraws a server promotion request", async () => {
@@ -926,6 +959,16 @@ describe("server-backed promotion review and project sharing policy", () => {
       "auto",
       "manual",
     );
+  });
+
+  it("review-policy exits 1 for an unknown team", async () => {
+    vi.mocked(team.listTeams).mockResolvedValue([]);
+
+    await commandTeam(["review-policy", "Missing", "required"], {});
+
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain('No team "Missing" found');
+    expect(promotions.setTeamReviewPolicyService).not.toHaveBeenCalled();
   });
 
   it("policy sets the project override", async () => {

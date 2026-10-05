@@ -35,8 +35,7 @@ create trigger promotion_requests_stamp before insert on public.promotion_reques
 alter table public.promotion_requests enable row level security;
 revoke all on public.promotion_requests from anon;
 revoke update, delete on public.promotion_requests from authenticated;
-grant select, insert on public.promotion_requests to authenticated;
-revoke insert on public.promotion_requests from authenticated;
+grant select on public.promotion_requests to authenticated;
 
 drop policy if exists promotion_requests_select on public.promotion_requests;
 create policy promotion_requests_select on public.promotion_requests

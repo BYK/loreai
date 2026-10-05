@@ -266,7 +266,7 @@ describe("E-5-F3-2 team-promotion review gate", () => {
     expect(rejectForTeam("nope")).toBe(false);
   });
 
-  it("team-bound content edits re-enter pending approval", () => {
+  it("approval survives a content edit (appendVersion copies it forward)", () => {
     const pid = ensureProject("/test/f3gate/edit");
     seedScope("sE", "Edit", "manual");
     setProjectScope(pid, "sE");
@@ -279,7 +279,7 @@ describe("E-5-F3-2 team-promotion review gate", () => {
     });
     expect(approveForTeam(id, "u1")).toBe(true);
     update(id, { content: "new content" }); // appends a new immutable version
-    expect(approvalOf(id)).toBe("pending");
+    expect(approvalOf(id)).toBe("approved");
   });
 
   it("review queue surfaces pre-existing 'auto' entries once linked, never personal knowledge", () => {

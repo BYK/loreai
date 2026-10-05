@@ -568,18 +568,11 @@ export async function commandTeam(
           }
           requests.push(...result.value.requests);
         }
-        const visibleRequests = proj
-          ? requests.filter(
-              (request) =>
-                ltm.teamPromotionCandidate(request.logical_id)?.projectId ===
-                proj,
-            )
-          : requests;
-        if (visibleRequests.length === 0) {
+        if (requests.length === 0) {
           console.log("Nothing pending team review.");
           break;
         }
-        for (const request of visibleRequests) {
+        for (const request of requests) {
           const teamName = request.team.name ?? request.team.id;
           console.log(
             `${request.id}  ${request.logical_id}  ${teamName}  [${request.category}]  ${request.title ?? "(sealed)"}  by ${request.proposer.label ?? "Former member"}`,
