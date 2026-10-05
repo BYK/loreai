@@ -708,6 +708,120 @@ describe("contradiction API client", () => {
   });
 });
 
+describe("promotion API client", () => {
+  it("uses the FOLK-02 routes and validates preview, list, and receipts", async () => {
+    const request = {
+      id: "request-id",
+      team: { id: "team-1", name: "Acme" },
+      logical_id: "knowledge-1",
+      entry_version_id: "version-1",
+      entry_version: 1,
+      category: "decision",
+      title: "Keep the local-first store",
+      content: "Use SQLite as the only store.",
+      sealed: false,
+      proposer: { id: "user-1", label: "Ada" },
+      mine: true,
+      status: "pending",
+      decided_by: { id: "user-2", label: null },
+      decided_at: null,
+      decision_note: null,
+      applied: null,
+      applied_at: null,
+      created_at: "2026-09-20T12:00:00.000Z",
+      can_decide: true,
+      decide_blocked_reason: null,
+    };
+    const responseFor = (index: number) => {
+      if (index === 0) {
+        return {
+          entry: {
+            id: "knowledge-1",
+            version_id: "version-1",
+            version: 1,
+            title: "Keep the local-first store",
+            content: "Use SQLite as the only store.",
+            category: "decision",
+            project_id: "project-1",
+            sensitivity: "normal",
+            approval_status: "pending",
+          },
+          team: { id: "team-1", name: "Acme" },
+          policy: {
+            effective: "manual",
+            project_override: null,
+            team_default: "manual",
+          },
+          eligibility: { promotable: true, reason: null },
+          previous_team_version: null,
+          pending_request: null,
+          remote: "ok",
+        };
+      }
+      if (index === 2 || index === 3)
+        return { remote: "ok", requests: [request], complete: true };
+      return { request };
+    };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        const index = calls.length;
+        calls.push({ url, init });
+        return json(responseFor(index));
+      },
+    });
+
+    await client.getPromotionPreview("entry/a");
+    await client.promoteKnowledge("knowledge-1", "version-1");
+    await client.listPromotions("team-1", "decided");
+    await client.listPromotions(null, "all");
+    await client.decidePromotion("request/id", "approved", "Looks good");
+    await client.withdrawPromotion("request-id");
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "/api/v1/knowledge/entry%2Fa/promotion",
+      "/api/v1/knowledge/knowledge-1/promote",
+      "/api/v1/promotions?team=team-1&status=decided",
+      "/api/v1/promotions?status=all",
+      "/api/v1/promotions/request%2Fid/approve",
+      "/api/v1/promotions/request-id/withdraw",
+    ]);
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+      version_id: "version-1",
+    });
+    expect(JSON.parse(calls[4]?.init?.body as string)).toEqual({
+      note: "Looks good",
+    });
+    expect(JSON.parse(calls[5]?.init?.body as string)).toEqual({});
+  });
+});
+
+describe("api client: error envelopes", () => {
+  it("preserves the gateway error type in ApiError.code", async () => {
+    const { client } = clientFor(() =>
+      json(
+        {
+          type: "error",
+          error: {
+            type: "stale_version",
+            message: "Knowledge entry changed",
+          },
+        },
+        409,
+      ),
+    );
+    const error = await failure(
+      client.promoteKnowledge("knowledge-1", "version-1"),
+    );
+    expect(error).toMatchObject({
+      kind: "http",
+      status: 409,
+      code: "stale_version",
+    });
+  });
+});
+
 describe("connection store", () => {
   it("starts as checking and follows read outcomes", () => {
     const store = createConnectionStore();

@@ -12,6 +12,8 @@ import {
   create,
   listPendingTeamPromotions,
   rejectForTeam,
+  remove,
+  teamPromotionCandidate,
   update,
 } from "../src/ltm";
 import { teamScopeForContent } from "../src/sync-data";
@@ -136,7 +138,65 @@ describe("E-5-F3 scope selection & promotion policy", () => {
 });
 
 describe("E-5-F3-2 team-promotion review gate", () => {
-  it("create() gates approval_status by the effective policy", () => {
+  it("returns the current candidate with its linked scope and previous approved version", () => {
+    const pid = ensureProject("/test/f3gate/candidate");
+    seedScope("sCandidate", "Candidate", "manual");
+    setProjectScope(pid, "sCandidate");
+    const id = create({
+      projectPath: "/test/f3gate/candidate",
+      category: "gotcha",
+      title: "Current",
+      content: "Current content",
+      scope: "project",
+    });
+
+    expect(teamPromotionCandidate("missing")).toBeNull();
+    expect(teamPromotionCandidate(id)).toMatchObject({
+      logicalId: id,
+      versionId: id,
+      version: 1,
+      title: "Current",
+      content: "Current content",
+      category: "gotcha",
+      projectId: pid,
+      scopeId: "sCandidate",
+      approvalStatus: "pending",
+      sensitivity: "normal",
+      previousTeamVersion: null,
+    });
+
+    expect(approveForTeam(id, "admin")).toBe(true);
+    update(id, {
+      title: "Current after edit",
+      content: "Current content after edit",
+    });
+    expect(rejectForTeam(id)).toBe(true);
+    expect(teamPromotionCandidate(id)).toMatchObject({
+      version: 2,
+      approvalStatus: "rejected",
+      previousTeamVersion: {
+        versionId: id,
+        version: 1,
+        title: "Current",
+        content: "Current content",
+      },
+    });
+  });
+
+  it("returns null for a deleted current version", () => {
+    const id = create({
+      projectPath: "/test/f3gate/deleted-candidate",
+      category: "pattern",
+      title: "Deleted",
+      content: "Deleted content",
+      scope: "project",
+    });
+    remove(id);
+
+    expect(teamPromotionCandidate(id)).toBeNull();
+  });
+
+  it("create() keeps team-bound entries pending regardless of policy", () => {
     // Unbound project → 'auto' (legacy/neutral; never team-synced).
     const id1 = create({
       projectPath: "/test/f3gate/personal",
@@ -160,7 +220,7 @@ describe("E-5-F3-2 team-promotion review gate", () => {
     });
     expect(approvalOf(id2)).toBe("pending");
 
-    // Flip the team to AUTO → new entries are 'approved' immediately.
+    // AUTO still requires a server promotion request before local approval.
     db().query("UPDATE scopes SET promotion_policy='auto' WHERE id='sT'").run();
     const id3 = create({
       projectPath: "/test/f3gate/team",
@@ -169,7 +229,7 @@ describe("E-5-F3-2 team-promotion review gate", () => {
       content: "c",
       scope: "project",
     });
-    expect(approvalOf(id3)).toBe("approved");
+    expect(approvalOf(id3)).toBe("pending");
   });
 
   it("approve/reject transitions + listPendingTeamPromotions", () => {
@@ -258,7 +318,7 @@ describe("E-5-F3-2 team-promotion review gate", () => {
     );
   });
 
-  it("effective policy 'auto' via a project override auto-approves even under a manual team", () => {
+  it("effective policy 'auto' via a project override still starts pending", () => {
     const pid = ensureProject("/test/f3gate/override");
     seedScope("sO", "Override", "manual"); // team default = manual
     setProjectScope(pid, "sO");
@@ -272,14 +332,14 @@ describe("E-5-F3-2 team-promotion review gate", () => {
       content: "c",
       scope: "project",
     });
-    expect(approvalOf(id)).toBe("approved");
+    expect(approvalOf(id)).toBe("pending");
   });
 });
 
 describe("E-5-F3-3 effective-scope resolution (teamScopeForContent)", () => {
   it("knowledge: team iff approved AND team-bound", () => {
     const pid = ensureProject("/test/f3res/team");
-    seedScope("T", "TeamT", "auto"); // auto → created 'approved'
+    seedScope("T", "TeamT", "auto");
     setProjectScope(pid, "T");
     const approvedId = create({
       projectPath: "/test/f3res/team",
@@ -288,6 +348,8 @@ describe("E-5-F3-3 effective-scope resolution (teamScopeForContent)", () => {
       content: "c",
       scope: "project",
     });
+    expect(approvalOf(approvedId)).toBe("pending");
+    approveForTeam(approvedId);
     expect(teamScopeForContent("knowledge", approvedId)).toBe("T");
 
     // manual policy → 'pending' → personal (not yet approved)
@@ -326,6 +388,7 @@ describe("E-5-F3-3 effective-scope resolution (teamScopeForContent)", () => {
       content: "c",
       scope: "project",
     });
+    approveForTeam(kId);
     seedEntity("e1", pid);
     link(kId, "e1");
     expect(teamScopeForContent("entities", "e1")).toBe("TE");
@@ -355,6 +418,7 @@ describe("E-5-F3-3 effective-scope resolution (teamScopeForContent)", () => {
       content: "c",
       scope: "project",
     });
+    approveForTeam(k);
     seedEntity("ra", pid);
     seedEntity("rb", pid);
     seedEntity("rc", pid);

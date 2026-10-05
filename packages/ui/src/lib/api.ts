@@ -51,6 +51,9 @@ import {
   projectList,
   projectRenameResult,
   projectsMergeResult,
+  promotionListResponse,
+  promotionPreview,
+  promotionReceipt,
   query,
   sessionsMoveResult,
   recallResponse,
@@ -87,6 +90,9 @@ import {
   type ProjectClearResult,
   type ProjectDeleteResult,
   type ProjectRenameResult,
+  type PromotionListResponse,
+  type PromotionPreview,
+  type PromotionReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -140,27 +146,30 @@ export interface ApiClientOptions {
   base?: string;
 }
 
-async function readErrorDetails(
-  res: Response,
-): Promise<{ message: string | null; isErrorEnvelope: boolean }> {
+async function readErrorDetails(res: Response): Promise<{
+  message: string | null;
+  isErrorEnvelope: boolean;
+  code: string | null;
+}> {
   const text = await res.text().catch(() => "");
-  if (!text) return { message: null, isErrorEnvelope: false };
+  if (!text) return { message: null, isErrorEnvelope: false, code: null };
   try {
     const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
     if (parsed.ok) {
       return {
         message: parsed.value.error.message,
         isErrorEnvelope: true,
+        code: parsed.value.error.type,
       };
     }
   } catch {
     // Fall through to the bounded text diagnostic for generic HTTP errors.
   }
-  return { message: text.slice(0, 200), isErrorEnvelope: false };
-}
-
-async function readErrorMessage(res: Response): Promise<string | null> {
-  return (await readErrorDetails(res)).message;
+  return {
+    message: text.slice(0, 200),
+    isErrorEnvelope: false,
+    code: null,
+  };
 }
 
 export function createApiClient(options: ApiClientOptions = {}) {
@@ -194,11 +203,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
     }
 
     if (res.status === 401) {
+      const details = await readErrorDetails(res);
       throw new ApiError(
         "unauthorized",
         path,
         "Gateway refused this browser",
         res.status,
+        details.code,
       );
     }
 
@@ -213,6 +224,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           path,
           details.message ?? "Gateway refused this operation",
           res.status,
+          details.code,
         );
       }
       if (details.message === null) {
@@ -221,41 +233,57 @@ export function createApiClient(options: ApiClientOptions = {}) {
           path,
           "Gateway refused this browser",
           res.status,
+          details.code,
         );
       }
-      throw new ApiError("http", path, details.message, res.status);
+      throw new ApiError(
+        "http",
+        path,
+        details.message,
+        res.status,
+        details.code,
+      );
     }
 
     if (res.status === 502 || res.status === 503 || res.status === 504) {
-      const message = await readErrorMessage(res);
+      const details = await readErrorDetails(res);
       throw new ApiError(
         "unreachable",
         path,
-        message ?? `Gateway responded ${res.status}`,
+        details.message ?? `Gateway responded ${res.status}`,
         res.status,
+        details.code,
       );
     }
 
     if (!res.ok) {
-      const message = await readErrorMessage(res);
+      const details = await readErrorDetails(res);
       if (res.status === 404) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
-        if (message === null) {
+        if (details.message === null) {
           throw new ApiError(
             "unauthorized",
             path,
             "Gateway hid this route from the current peer",
             404,
+            details.code,
           );
         }
-        throw new ApiError("not_found", path, message, 404);
+        throw new ApiError(
+          "not_found",
+          path,
+          details.message,
+          404,
+          details.code,
+        );
       }
       throw new ApiError(
         "http",
         path,
-        message ?? `Gateway responded ${res.status}`,
+        details.message ?? `Gateway responded ${res.status}`,
         res.status,
+        details.code,
       );
     }
 
@@ -597,6 +625,70 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
+        signal,
+      );
+    },
+    getPromotionPreview(
+      knowledgeId: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionPreview> {
+      return getJson(
+        apiPath(["knowledge", knowledgeId, "promotion"]),
+        promotionPreview,
+        signal,
+      );
+    },
+    promoteKnowledge(
+      knowledgeId: string,
+      versionId: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["knowledge", knowledgeId, "promote"]),
+        { version_id: versionId },
+        promotionReceipt,
+        signal,
+      );
+    },
+    listPromotions(
+      teamId: string | null,
+      status: "pending" | "decided" | "all" = "pending",
+      signal?: AbortSignal,
+    ): Promise<PromotionListResponse> {
+      return getJson(
+        `/promotions${query({ team: teamId, status })}`,
+        promotionListResponse,
+        signal,
+      );
+    },
+    decidePromotion(
+      id: string,
+      decision: "approved" | "rejected",
+      note?: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath([
+          "promotions",
+          id,
+          decision === "approved" ? "approve" : "reject",
+        ]),
+        note === undefined ? {} : { note },
+        promotionReceipt,
+        signal,
+      );
+    },
+    withdrawPromotion(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["promotions", id, "withdraw"]),
+        {},
+        promotionReceipt,
         signal,
       );
     },

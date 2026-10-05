@@ -101,6 +101,14 @@ export const routes: RouteDefinition[] = [
     ),
   },
   {
+    path: "/promotions",
+    component: lazy(() =>
+      import("./routes/Promotions").then((m) => ({
+        default: m.PromotionsRoute,
+      })),
+    ),
+  },
+  {
     path: "/entities/:entityId",
     component: lazy(() =>
       import("./routes/Entities").then((m) => ({

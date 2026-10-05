@@ -12,6 +12,37 @@ async function projectByName(page: import("@playwright/test").Page) {
   return project.id;
 }
 
+async function storedKeeper(
+  page: import("@playwright/test").Page,
+  key: string,
+) {
+  return page.evaluate(
+    (markKey) =>
+      new Promise<string | undefined>((resolve) => {
+        const open = indexedDB.open("lore-ui");
+        open.onerror = () => resolve(undefined);
+        open.onsuccess = () => {
+          const db = open.result;
+          const request = db
+            .transaction("reviewDecisions", "readonly")
+            .objectStore("reviewDecisions")
+            .get(markKey);
+          request.onsuccess = () => {
+            resolve(
+              (request.result as { keepId?: string } | undefined)?.keepId,
+            );
+            db.close();
+          };
+          request.onerror = () => {
+            db.close();
+            resolve(undefined);
+          };
+        };
+      }),
+    key,
+  );
+}
+
 test.describe("read-only duplicate review (MEM-01)", () => {
   test("previews groups, stores local decisions, and never mutates the server", async ({
     page,
@@ -146,8 +177,21 @@ test.describe("read-only duplicate review (MEM-01)", () => {
       "1 accepted",
     );
 
-    await page.getByLabel("Keep this one (2)").check();
-    await expect(page.getByLabel("Keep this one (2)")).toBeChecked();
+    const keeper = page.getByLabel("Keep this one (2)");
+    const keeperId = await keeper.getAttribute("value");
+    const keeperName = await keeper.getAttribute("name");
+    if (!keeperId || !keeperName)
+      throw new Error("keeper radio is missing data");
+    await keeper.check();
+    await expect(keeper).toBeChecked();
+    await expect
+      .poll(() =>
+        storedKeeper(
+          page,
+          `${projectId}/${keeperName.replace(/^keeper-/, "")}`,
+        ),
+      )
+      .toBe(keeperId);
     await page.reload();
     await expect(page.getByLabel("Keep this one (2)")).toBeChecked();
 

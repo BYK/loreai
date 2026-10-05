@@ -33,12 +33,14 @@ import {
   createTeam,
   createTeamInvite,
   distinctContributors,
+  identityLabel,
   listTeams,
   rejectDomainJoin,
   removeTeamMember,
   requestDomainJoin,
   setTeamRole,
   teamMembers,
+  teamMemberProfiles,
 } from "../src/team";
 
 interface ClientOpts {
@@ -323,6 +325,59 @@ describe("teamMembers", () => {
   it("throws on a query error", async () => {
     const c = makeClient({ membersErr: { message: "boom" } });
     await expect(teamMembers(c, "s")).rejects.toThrow(/team members: boom/);
+  });
+});
+
+describe("team member profiles", () => {
+  it("uses the scope-authorized profile RPC and label priority", async () => {
+    const profiles = [
+      {
+        user_id: SELF,
+        display_name: "Display Name",
+        github_login: "handle",
+        email: "user@example.test",
+      },
+    ];
+    const client = makeClient({
+      rpc: (name) =>
+        name === "team_member_profiles"
+          ? { data: profiles, error: null }
+          : null,
+    });
+
+    expect(await teamMemberProfiles(client, "scope-id")).toEqual(profiles);
+    expect(client.rpcCalls[0]).toEqual({
+      name: "team_member_profiles",
+      params: { p_scope: "scope-id" },
+    });
+    expect(
+      identityLabel({
+        display_name: "Display Name",
+        github_login: "handle",
+        email: "user@example.test",
+      }),
+    ).toBe("Display Name");
+    expect(
+      identityLabel({
+        display_name: null,
+        github_login: "handle",
+        email: "user@example.test",
+      }),
+    ).toBe("@handle");
+    expect(
+      identityLabel({
+        display_name: null,
+        github_login: null,
+        email: "user@example.test",
+      }),
+    ).toBe("user@example.test");
+    expect(
+      identityLabel({
+        display_name: null,
+        github_login: null,
+        email: null,
+      }),
+    ).toBeNull();
   });
 });
 

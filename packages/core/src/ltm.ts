@@ -2,7 +2,6 @@ import { uuidv7 } from "uuidv7";
 import {
   databaseInTransaction,
   db,
-  effectivePromotionPolicy,
   ensureProject,
   getKV,
   projectScope,
@@ -492,17 +491,11 @@ export function create(input: {
   const now = Date.now();
   const confidence =
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
-  // E-5-F3-2: team-promotion review gate. In a team-bound project, new knowledge is gated by the
-  // effective policy — 'auto' auto-approves it for the team, 'manual' holds it 'pending' for
-  // review. Outside a team-bound project the status stays 'auto' (legacy/neutral: it is never
-  // team-synced — F3-3 gates team scope on 'approved' only, so a pre-existing 'auto' entry never
-  // auto-promotes when its project is later linked). approved_at marks the auto-approval time.
+  // Team approval is server-authoritative. New knowledge in a team-bound project stays pending
+  // until its promotion request is reviewed; unbound knowledge keeps the neutral "auto" state.
   let approvalStatus: ApprovalStatus = "auto";
-  let approvedAt: number | null = null;
   if (pid && projectScope(pid)) {
-    approvalStatus =
-      effectivePromotionPolicy(pid) === "auto" ? "approved" : "pending";
-    if (approvalStatus === "approved") approvedAt = now;
+    approvalStatus = "pending";
   }
   db()
     .query(
@@ -527,7 +520,7 @@ export function create(input: {
       input.workerModelID ?? null,
       stringifyMetadata(input.metadata),
       approvalStatus,
-      approvedAt,
+      null,
     );
   // The mutable metrics live on the register, keyed by logical_id (A2 3b). A fresh
   // entry starts its decay clock now (last_reinforced_at = now).
@@ -720,10 +713,10 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
 // E-5-F3-2 (#827): team-promotion review gate
 // ---------------------------------------------------------------------------
 // A knowledge entry's `approval_status` governs whether it is shared to its project's team scope
-// (F3-3 gates team scope on 'approved' ONLY). Under 'manual' policy new entries land 'pending';
-// under 'auto' they land 'approved'. These functions drive the manual review workflow. The status
-// is a LOCAL, mutable metadata field (not synced; not content) — updated in place on the current
-// version, and copied forward by appendVersion so it survives content edits.
+// (F3-3 gates team scope on 'approved' ONLY). Team-bound entries stay 'pending' until the server
+// decides their promotion request; the project auto-share policy only controls proposal timing.
+// Unbound entries keep the neutral 'auto' state. The status is LOCAL metadata, updated in place
+// after server decisions and reset to 'pending' for new team-bound versions.
 
 export type TeamPromotionCandidate = {
   logicalId: string;
@@ -734,8 +727,8 @@ export type TeamPromotionCandidate = {
 
 /**
  * Knowledge entries in a TEAM-BOUND project awaiting a promotion decision, newest first —
- * everything not yet 'approved'/'rejected' (i.e. 'pending' from the manual-policy gate AND legacy
- * 'auto' entries that predate the binding), so pre-existing knowledge in a newly-linked project is
+ * everything not yet 'approved'/'rejected' (including legacy 'auto' entries that predate the
+ * binding), so pre-existing knowledge in a newly-linked project is
  * reviewable too. Scoped to team-bound projects (JOIN projects WHERE scope_id IS NOT NULL) so a
  * user's personal 'auto' knowledge never floods the queue. Optionally narrowed to one project.
  */
@@ -772,6 +765,94 @@ export function listPendingTeamPromotions(
     category: r.category,
     projectId: r.project_id,
   }));
+}
+
+export type TeamPromotionPreviousVersion = {
+  versionId: string;
+  version: number;
+  title: string;
+  content: string;
+};
+
+export type TeamPromotionEntryCandidate = TeamPromotionPreviousVersion & {
+  logicalId: string;
+  category: string;
+  projectId: string | null;
+  scopeId: string | null;
+  approvalStatus: ApprovalStatus;
+  sensitivity: Sensitivity;
+  previousTeamVersion: TeamPromotionPreviousVersion | null;
+};
+
+/** Current local content and its latest previously-approved team version, if any. */
+export function teamPromotionCandidate(
+  logicalId: string,
+): TeamPromotionEntryCandidate | null {
+  const tenantId = currentTenantId();
+  const current = db()
+    .query(
+      `SELECT k.logical_id, k.id AS version_id, k.version, k.title, k.content,
+              k.category, k.project_id, p.scope_id, k.approval_status, k.sensitivity
+         FROM knowledge k
+         LEFT JOIN projects p ON p.id = k.project_id AND p.tenant_id = k.tenant_id
+        WHERE k.tenant_id = ? AND k.logical_id = ?
+          AND k.is_current = 1 AND k.is_deleted = 0
+        LIMIT 1`,
+    )
+    .get(tenantId, logicalId) as
+    | {
+        logical_id: string;
+        version_id: string;
+        version: number;
+        title: string;
+        content: string;
+        category: string;
+        project_id: string | null;
+        scope_id: string | null;
+        approval_status: ApprovalStatus;
+        sensitivity: Sensitivity;
+      }
+    | undefined;
+  if (!current) return null;
+
+  const previous = db()
+    .query(
+      `SELECT id AS version_id, version, title, content
+         FROM knowledge
+        WHERE tenant_id = ? AND logical_id = ? AND is_current = 0
+          AND approval_status = 'approved'
+        ORDER BY version DESC
+        LIMIT 1`,
+    )
+    .get(tenantId, logicalId) as
+    | {
+        version_id: string;
+        version: number;
+        title: string;
+        content: string;
+      }
+    | undefined;
+
+  return {
+    logicalId: current.logical_id,
+    versionId: current.version_id,
+    version: current.version,
+    title: current.title,
+    content: current.content,
+    category: current.category,
+    projectId: current.project_id,
+    scopeId: current.scope_id,
+    approvalStatus: current.approval_status,
+    sensitivity: current.sensitivity,
+    previousTeamVersion: previous
+      ? {
+          versionId: previous.version_id,
+          version: previous.version,
+          title: previous.title,
+          content: previous.content,
+        }
+      : null,
+  };
 }
 
 // E-5-F3 (#1307): notified with a knowledge logical_id whenever its team-promotion status CHANGES

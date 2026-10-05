@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+const promotionCycle = vi.hoisted(() => ({ calls: [] as string[] }));
 import {
   db,
   close as closeDb,
@@ -434,6 +435,14 @@ vi.mock("../src/supabase", () => ({
   getAuthedClient: () => Promise.resolve(authed ? makeClient() : null),
   getCurrentUser: () =>
     Promise.resolve({ github_login: "octocat", user_id: mockUserId }),
+}));
+vi.mock("../src/promotions", () => ({
+  autoProposePending: async () => {
+    promotionCycle.calls.push("propose");
+  },
+  applyPromotionDecisions: async () => {
+    promotionCycle.calls.push("apply");
+  },
 }));
 
 import {
@@ -2535,6 +2544,15 @@ describe("pull parent-ownership registry", () => {
 });
 
 describe("syncOnce", () => {
+  test("auto-proposes pending entries before applying promotion decisions", async () => {
+    syncData.enableSync("basic");
+    promotionCycle.calls.length = 0;
+
+    await syncOnce();
+
+    expect(promotionCycle.calls).toEqual(["propose", "apply"]);
+  });
+
   test("the v81 marker re-seeds trustworthy live local rows after legacy quarantine", async () => {
     syncData.enableSync("basic");
     syncData.withApplying(() => insertKnowledge("v81-local", "live local"));
@@ -3257,6 +3275,8 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
       content: "c2",
       scope: "project",
     });
+    expect(ltm.approveForTeam(kid)).toBe(true);
+    expect(ltm.approveForTeam(kid2)).toBe(true);
     for (const e of ["e1", "e2"])
       db()
         .query(
@@ -3289,7 +3309,7 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     await pushOnce(makeClient() as never);
     const scopeOf = (t: string, pred: (r: RemoteRow) => boolean) =>
       tableRows(t).find(pred)?.scope_id;
-    // Auto policy → K and K2 approved on create → the whole linked graph is team-scoped.
+    // Server-approved K and K2 make the whole linked graph team-scoped.
     expect(scopeOf("knowledge", (r) => r.id === kid)).toBe("TD");
     expect(scopeOf("entities", (r) => r.id === "e1")).toBe("TD");
     expect(scopeOf("entities", (r) => r.id === "e2")).toBe("TD");
@@ -3318,7 +3338,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
   const TEAM = "team-f2";
   const FAST = { t: 1, m: 256, p: 1 };
 
-  // A team-bound, auto-approved project so the knowledge resolves to the TEAM scope on push (F3-3).
+  // A team-bound project whose server-approved knowledge resolves to the TEAM scope on push.
   function bindTeamProject(path: string): string {
     const pid = ensureProjectCore(path);
     db()
@@ -3355,6 +3375,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "team secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
 
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);
@@ -3383,6 +3404,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "team secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);
 
@@ -3413,6 +3435,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "rotated secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
 
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);

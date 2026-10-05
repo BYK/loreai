@@ -6,11 +6,12 @@
  *
  *   - positionals[0]: subcommand (list | members | discover | create | add
  *                     | remove | set-role | invite | accept | link | unlink
- *                     | review | approve | reject | policy | domain)
+ *                     | review | propose | approve | reject | withdraw
+ *                     | review-policy | policy | domain)
  *   - positionals[1+]: subcommand-specific args (e.g., `add <scope> <userId>`)
  *
  * Flags forwarded to the legacy values dict: --invite, --role, --email,
- * --offline, --project.
+ * --note, --team, --offline, --project.
  *
  * Output shape:
  *   - human: rendered legacy text
@@ -26,6 +27,8 @@ type TeamFlags = {
   invite?: string;
   role?: string;
   email?: string;
+  note?: string;
+  team?: string;
   offline: boolean;
   project?: string;
 };
@@ -40,9 +43,9 @@ export const teamCommand = buildOutputCommand<
     "Team configuration: list members, invite, assign roles, remove " +
     "members. Subcommands include list, members, discover, create, " +
     "add, remove, set-role, invite, accept, link, unlink, review, " +
-    "approve, reject, policy, domain. The first positional selects " +
+    "propose, approve, reject, withdraw, review-policy, policy, domain. The first positional selects " +
     "the subcommand; subsequent positionals are subcommand-specific " +
-    "args. Flags --invite, --role, --email, --offline, --project " +
+    "args. Flags --invite, --role, --email, --note, --team, --offline, --project " +
     "are forwarded as values. --json emits a structured envelope.",
   parameters: {
     flags: {
@@ -62,6 +65,18 @@ export const teamCommand = buildOutputCommand<
         kind: "parsed",
         parse: String,
         brief: "Email hint for the invitee",
+        optional: true,
+      },
+      note: {
+        kind: "parsed",
+        parse: String,
+        brief: "Optional promotion decision note",
+        optional: true,
+      },
+      team: {
+        kind: "parsed",
+        parse: String,
+        brief: "Team name or id for review",
         optional: true,
       },
       offline: {
@@ -93,6 +108,8 @@ export const teamCommand = buildOutputCommand<
     if (flags.invite) values.invite = flags.invite;
     if (flags.role) values.role = flags.role;
     if (flags.email) values.email = flags.email;
+    if (flags.note) values.note = flags.note;
+    if (flags.team) values.team = flags.team;
     if (flags.offline) values.offline = true;
     if (flags.project) values.project = flags.project;
     // Stricli spreads the variadic positional array into individual

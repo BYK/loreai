@@ -41,6 +41,13 @@ vi.mock("../src/team", () => ({
     );
   },
 }));
+vi.mock("../src/promotions", () => ({
+  listPromotionRequestsService: vi.fn(),
+  proposePromotionService: vi.fn(),
+  decidePromotionService: vi.fn(),
+  withdrawPromotionService: vi.fn(),
+  setTeamReviewPolicyService: vi.fn(),
+}));
 
 // `lore team discover` re-runs GitHub OAuth for a fresh provider_token; mock it so the CLI test can
 // exercise the discover/--invite flow without a real OAuth dance.
@@ -60,6 +67,7 @@ import { getAuthedClient, getCurrentUser } from "../src/supabase";
 import { commandTeam } from "../src/cli/team-cmd";
 import { acquireGitHubProviderToken } from "../src/cli/login";
 import * as team from "../src/team";
+import * as promotions from "../src/promotions";
 
 const FAKE_CLIENT = { id: "client" } as never;
 let logs: string[];
@@ -81,6 +89,32 @@ beforeEach(() => {
     errs.push(a.join(" "));
   });
   vi.mocked(getAuthedClient).mockResolvedValue(FAKE_CLIENT);
+  vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
+    ok: true,
+    value: { remote: "ok", requests: [], complete: true },
+  });
+  vi.mocked(promotions.proposePromotionService).mockResolvedValue({
+    ok: true,
+    value: {
+      request: {
+        id: "request-1",
+        logical_id: "entry-1",
+        entry_version: 1,
+      } as never,
+    },
+  });
+  vi.mocked(promotions.decidePromotionService).mockResolvedValue({
+    ok: true,
+    value: { request: { id: "request-1" } as never },
+  });
+  vi.mocked(promotions.withdrawPromotionService).mockResolvedValue({
+    ok: true,
+    value: { request: { id: "request-1" } as never },
+  });
+  vi.mocked(promotions.setTeamReviewPolicyService).mockResolvedValue({
+    ok: true,
+    value: { policy: "auto" },
+  });
   vi.spyOn(keystore, "encryptionState").mockReturnValue("on");
   vi.spyOn(syncData, "isSyncEnabled").mockReturnValue(true);
 });
@@ -718,7 +752,7 @@ describe("link / unlink (E-5-F3-1)", () => {
   });
 });
 
-describe("review / approve / reject / policy (E-5-F3-2)", () => {
+describe("server-backed promotion review and project sharing policy", () => {
   const PROJECT = "/test/f3cli2/proj";
   let pid: string;
   let id: string;
@@ -754,15 +788,90 @@ describe("review / approve / reject / policy (E-5-F3-2)", () => {
   });
 
   it("review lists the pending entry", async () => {
+    vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
+      ok: true,
+      value: {
+        remote: "ok",
+        requests: [
+          {
+            id: "request-1",
+            logical_id: id,
+            category: "pattern",
+            title: "Reviewable",
+            team: { id: "sc", name: "T" },
+            proposer: { id: "u1", label: "@reviewer" },
+          } as never,
+        ],
+        complete: true,
+      },
+    });
     await commandTeam(["review"], { project: PROJECT });
     expect(process.exitCode).toBe(0);
+    expect(promotions.listPromotionRequestsService).toHaveBeenCalledWith("sc");
+    expect(logs.join("\n")).toContain("request-1");
     expect(logs.join("\n")).toContain(id);
+    expect(logs.join("\n")).toContain("T  [pattern]  Reviewable  by @reviewer");
+  });
+
+  it("review --project includes server proposals without a local entry", async () => {
+    vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
+      ok: true,
+      value: {
+        remote: "ok",
+        requests: [
+          {
+            id: "other-member-request",
+            logical_id: "other-member-entry",
+            category: "pattern",
+            title: "Other member proposal",
+            team: { id: "sc", name: "T" },
+            proposer: { id: "u2", label: "@other" },
+          } as never,
+        ],
+        complete: true,
+      },
+    });
+
+    await commandTeam(["review"], { project: PROJECT });
+
+    expect(promotions.listPromotionRequestsService).toHaveBeenCalledWith("sc");
+    expect(logs.join("\n")).toContain("other-member-request");
+    expect(logs.join("\n")).toContain("other-member-entry");
   });
 
   it("review prints nothing-pending when clear", async () => {
-    ltm.approveForTeam(id, "u1");
     await commandTeam(["review"], { project: PROJECT });
     expect(logs.join("\n")).toMatch(/Nothing pending/);
+  });
+
+  it("review resolves a team filter and lists the server queue", async () => {
+    vi.mocked(team.listTeams).mockResolvedValue([
+      { scopeId: "sc", name: "T", role: "admin" },
+    ]);
+    vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
+      ok: true,
+      value: {
+        remote: "ok",
+        requests: [
+          {
+            id: "server-request",
+            logical_id: "server-entry",
+            category: "pattern",
+            title: "Server queue entry",
+            team: { id: "sc", name: "T" },
+            proposer: { id: "other", label: null },
+          } as never,
+        ],
+        complete: true,
+      },
+    });
+
+    await commandTeam(["review"], { team: "T" });
+
+    expect(promotions.listPromotionRequestsService).toHaveBeenCalledWith("sc");
+    expect(logs.join("\n")).toContain("server-request");
+    expect(logs.join("\n")).toContain("by Former member");
+    expect(logs.join("\n")).not.toContain(id);
   });
 
   it("review with an unknown --project errors (does not silently list all)", async () => {
@@ -771,28 +880,102 @@ describe("review / approve / reject / policy (E-5-F3-2)", () => {
     expect(errs.join("\n")).toMatch(/No lore project/);
   });
 
-  it("approve transitions to approved", async () => {
-    await commandTeam(["approve", id], {});
+  it("approve calls the server service without changing local approval", async () => {
+    await commandTeam(["approve", "request-1"], {});
     expect(process.exitCode).toBe(0);
-    expect(approvalOf(id)).toBe("approved");
+    expect(promotions.decidePromotionService).toHaveBeenCalledWith(
+      "request-1",
+      "approve",
+      undefined,
+    );
+    expect(approvalOf(id)).toBe("pending");
   });
 
-  it("reject transitions to rejected", async () => {
-    await commandTeam(["reject", id], {});
+  it("reject calls the server service without changing local approval", async () => {
+    await commandTeam(["reject", "request-1"], {});
     expect(process.exitCode).toBe(0);
-    expect(approvalOf(id)).toBe("rejected");
+    expect(promotions.decidePromotionService).toHaveBeenCalledWith(
+      "request-1",
+      "reject",
+      undefined,
+    );
+    expect(approvalOf(id)).toBe("pending");
   });
 
-  it("approve an unknown id → error + exit 1", async () => {
-    await commandTeam(["approve", "nope"], {});
+  it("forwards an optional decision note", async () => {
+    await commandTeam(["approve", "request-1"], {
+      note: "approved after review",
+    });
+    expect(promotions.decidePromotionService).toHaveBeenCalledWith(
+      "request-1",
+      "approve",
+      "approved after review",
+    );
+  });
+
+  it.each([
+    { status: 403, code: "forbidden", message: "reviewer role required" },
+    { status: 409, code: "already_decided", message: "already decided" },
+    { status: 404, code: "not_found", message: "promotion request not found" },
+  ])("prints $code service errors and exits 1", async (failure) => {
+    vi.mocked(promotions.decidePromotionService).mockResolvedValue({
+      ok: false,
+      ...failure,
+    });
+    await commandTeam(["approve", "missing-request"], {});
     expect(process.exitCode).toBe(1);
-    expect(errs.join("\n")).toMatch(/No current knowledge entry/);
+    expect(errs.join("\n")).toContain(`${failure.code}: ${failure.message}`);
+    expect(approvalOf(id)).toBe("pending");
+  });
+
+  it("proposes the current local version through the server service", async () => {
+    await commandTeam(["propose", id], {});
+    expect(process.exitCode).toBe(0);
+    expect(promotions.proposePromotionService).toHaveBeenCalledWith(id, id);
+  });
+
+  it("propose exits 1 for an unknown logical id", async () => {
+    await commandTeam(["propose", "unknown-logical-id"], {});
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("No current knowledge entry");
+  });
+
+  it("withdraws a server promotion request", async () => {
+    await commandTeam(["withdraw", "request-1"], {});
+    expect(process.exitCode).toBe(0);
+    expect(promotions.withdrawPromotionService).toHaveBeenCalledWith(
+      "request-1",
+    );
+  });
+
+  it("sets the server team review policy with an expected value", async () => {
+    vi.mocked(team.listTeams).mockResolvedValue([
+      { scopeId: "sc", name: "T", role: "admin" },
+    ]);
+    await commandTeam(["review-policy", "T", "optional"], {});
+    expect(process.exitCode).toBe(0);
+    expect(promotions.setTeamReviewPolicyService).toHaveBeenCalledWith(
+      "sc",
+      "auto",
+      "manual",
+    );
+  });
+
+  it("review-policy exits 1 for an unknown team", async () => {
+    vi.mocked(team.listTeams).mockResolvedValue([]);
+
+    await commandTeam(["review-policy", "Missing", "required"], {});
+
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain('No team "Missing" found');
+    expect(promotions.setTeamReviewPolicyService).not.toHaveBeenCalled();
   });
 
   it("policy sets the project override", async () => {
     await commandTeam(["policy", "auto"], { project: PROJECT });
     expect(process.exitCode).toBe(0);
     expect(effectivePromotionPolicy(pid)).toBe("auto");
+    expect(logs.join("\n")).toMatch(/auto-share override/);
   });
 
   it("policy with an invalid value → usage + exit 1", async () => {

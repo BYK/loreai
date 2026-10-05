@@ -4,6 +4,7 @@
  */
 import { resolve } from "node:path";
 import {
+  db,
   effectivePromotionPolicy,
   getGitRemote,
   keystore,
@@ -37,9 +38,25 @@ import {
   setTeamRole,
   teamMembers,
 } from "../team";
+import {
+  decidePromotionService,
+  listPromotionRequestsService,
+  proposePromotionService,
+  setTeamReviewPolicyService,
+  withdrawPromotionService,
+  type PromotionRequest,
+} from "../promotions";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] [--team <team>] | propose <knowledge-id> | approve <request-id> [--note <text>] | reject <request-id> [--note <text>] | withdraw <request-id> | review-policy <team> <required|optional> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+
+function reportPromotionFailure(result: {
+  code: string;
+  message: string;
+}): void {
+  console.error(`lore team: ${result.code}: ${result.message}`);
+  process.exitCode = 1;
+}
 
 export async function commandTeam(
   positionals: string[],
@@ -473,8 +490,8 @@ export async function commandTeam(
         );
         console.log(
           policy === "auto"
-            ? "Policy: AUTO — new knowledge here will be shared to the team."
-            : "Policy: MANUAL — knowledge here stays personal until you approve it for the team (`lore team review`).",
+            ? "Policy: AUTO SHARE — pending entries here are proposed automatically; the team's review policy controls approval."
+            : "Policy: MANUAL SHARE — pending team entries are not proposed automatically (`lore team propose <logical-id>`).",
         );
         break;
       }
@@ -493,8 +510,7 @@ export async function commandTeam(
         break;
       }
       case "review": {
-        // List knowledge awaiting team-promotion review. Scoped to --project if given, else all
-        // team-bound projects. An explicit but unknown --project errors (don't silently widen to all).
+        // List server-backed promotion requests for the linked team(s).
         let proj: string | undefined;
         if (values.project) {
           const rp = resolve(values.project as string);
@@ -505,39 +521,174 @@ export async function commandTeam(
             return;
           }
         }
-        const pending = ltm.listPendingTeamPromotions(proj);
-        if (pending.length === 0) {
+        const projectTeam = proj ? projectScope(proj) : null;
+        if (proj && !projectTeam) {
+          console.error("This project is not linked to a team.");
+          process.exitCode = 1;
+          return;
+        }
+        let team: Awaited<ReturnType<typeof listTeams>>[number] | null = null;
+        if (values.team) {
+          const ref = values.team as string;
+          team =
+            (await listTeams(client)).find(
+              (item) =>
+                item.scopeId === ref ||
+                item.name.toLocaleLowerCase() === ref.toLocaleLowerCase(),
+            ) ?? null;
+          if (!team) {
+            console.error(`No team "${ref}" found in the local registry.`);
+            process.exitCode = 1;
+            return;
+          }
+        }
+        if (team && projectTeam && team.scopeId !== projectTeam) {
+          console.error("--team does not match the project's linked team.");
+          process.exitCode = 1;
+          return;
+        }
+        const scopes = projectTeam
+          ? [projectTeam]
+          : team
+            ? [team.scopeId]
+            : (await listTeams(client)).map((item) => item.scopeId);
+        const requests: PromotionRequest[] = [];
+        for (const scope of scopes) {
+          const result = await listPromotionRequestsService(scope);
+          if (!result.ok) {
+            reportPromotionFailure(result);
+            return;
+          }
+          if (result.value.remote !== "ok") {
+            console.error(
+              `Promotion service is ${result.value.remote}; run \`lore sync now\` and try again.`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          requests.push(...result.value.requests);
+        }
+        if (requests.length === 0) {
           console.log("Nothing pending team review.");
           break;
         }
-        for (const p of pending)
-          console.log(`${p.logicalId}  [${p.category}]  ${p.title}`);
+        for (const request of requests) {
+          const teamName = request.team.name ?? request.team.id;
+          console.log(
+            `${request.id}  ${request.logical_id}  ${teamName}  [${request.category}]  ${request.title ?? "(sealed)"}  by ${request.proposer.label ?? "Former member"}`,
+          );
+        }
         console.log(
-          "\nApprove with `lore team approve <id>`, reject with `lore team reject <id>`.",
+          "\nApprove or reject with `lore team approve <request-id>` / `lore team reject <request-id>`.",
+        );
+        break;
+      }
+      case "propose": {
+        const logicalId = positionals[1];
+        if (!logicalId) return usage();
+        const candidate = ltm.teamPromotionCandidate(logicalId);
+        if (!candidate) {
+          console.error(`No current knowledge entry "${logicalId}".`);
+          process.exitCode = 1;
+          return;
+        }
+        const result = await proposePromotionService(
+          logicalId,
+          candidate.versionId,
+        );
+        if (!result.ok) {
+          reportPromotionFailure(result);
+          return;
+        }
+        console.log(
+          `Proposed ${result.value.request.logical_id} version ${result.value.request.entry_version} for team review (${result.value.request.id}).`,
         );
         break;
       }
       case "approve": {
         const id = positionals[1];
         if (!id) return usage();
-        const user = await getCurrentUser();
-        if (!ltm.approveForTeam(id, user?.user_id)) {
-          console.error(`No current knowledge entry "${id}".`);
-          process.exitCode = 1;
+        const result = await decidePromotionService(
+          id,
+          "approve",
+          values.note as string | undefined,
+        );
+        if (!result.ok) {
+          reportPromotionFailure(result);
           return;
         }
-        console.log(`Approved ${id} for team promotion.`);
+        console.log(`Approved promotion request ${id}.`);
         break;
       }
       case "reject": {
         const id = positionals[1];
         if (!id) return usage();
-        if (!ltm.rejectForTeam(id)) {
-          console.error(`No current knowledge entry "${id}".`);
+        const result = await decidePromotionService(
+          id,
+          "reject",
+          values.note as string | undefined,
+        );
+        if (!result.ok) {
+          reportPromotionFailure(result);
+          return;
+        }
+        console.log(`Rejected promotion request ${id}.`);
+        break;
+      }
+      case "withdraw": {
+        const id = positionals[1];
+        if (!id) return usage();
+        const result = await withdrawPromotionService(id);
+        if (!result.ok) {
+          reportPromotionFailure(result);
+          return;
+        }
+        console.log(`Withdrew promotion request ${id}.`);
+        break;
+      }
+      case "review-policy": {
+        const teamRef = positionals[1];
+        const required = positionals[2];
+        if (!teamRef || (required !== "required" && required !== "optional"))
+          return usage();
+        const team = (await listTeams(client)).find(
+          (item) =>
+            item.scopeId === teamRef ||
+            item.name.toLocaleLowerCase() === teamRef.toLocaleLowerCase(),
+        );
+        if (!team) {
+          console.error(`No team "${teamRef}" found in the local registry.`);
           process.exitCode = 1;
           return;
         }
-        console.log(`Rejected ${id} — it stays personal.`);
+        const mirrored = db()
+          .query("SELECT promotion_policy FROM scopes WHERE id = ?")
+          .get(team.scopeId) as
+          | { promotion_policy?: string | null }
+          | undefined;
+        if (
+          mirrored?.promotion_policy !== "manual" &&
+          mirrored?.promotion_policy !== "auto"
+        ) {
+          console.error(
+            "No mirrored team review policy; run `lore sync now` and try again.",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const policy = required === "required" ? "manual" : "auto";
+        const result = await setTeamReviewPolicyService(
+          team.scopeId,
+          policy,
+          mirrored.promotion_policy,
+        );
+        if (!result.ok) {
+          reportPromotionFailure(result);
+          return;
+        }
+        console.log(
+          `Set team review policy to ${result.value.policy === "manual" ? "required" : "optional"} for ${team.name}.`,
+        );
         break;
       }
       case "policy": {
@@ -553,7 +704,9 @@ export async function commandTeam(
           return;
         }
         setProjectPromotionPolicy(pid, policy);
-        console.log(`Set this project's team-promotion policy to ${policy}.`);
+        console.log(
+          `Set this project's auto-share override to ${policy}. ${policy === "auto" ? "Pending team entries will be proposed automatically; the team's review policy controls approval." : "Team entries will not be proposed automatically."}`,
+        );
         break;
       }
       case "domain": {
