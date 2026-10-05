@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { data, ensureProject, ltm } from "@loreai/core";
+import { data, ensureProject, knowledgeEdit, ltm } from "@loreai/core";
 import { connect } from "node:net";
 import { request } from "node:http";
 import { loadConfig, type GatewayConfig } from "../src/config";
@@ -380,6 +380,61 @@ describe("management route access control", () => {
         .map((e) => e.id)
         .sort(),
     ).toEqual([keep, merge].sort());
+  });
+
+  test("hides knowledge edit routes and checked delete from remote peers", async () => {
+    const projectPath = `/test/remote-knowledge-edit-${Date.now()}`;
+    ensureProject(projectPath, "remote-knowledge-edit-guard");
+    const id = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Remote knowledge edit guard",
+      content: "keep unchanged",
+      session: "s",
+      scope: "project",
+    });
+    const before = knowledgeEdit.knowledgeEffects(id);
+    expect(before).not.toBeNull();
+
+    const path = `/api/v1/knowledge/${id}`;
+    const requests: Array<{ path: string; init?: RequestInit }> = [
+      { path: `${path}/effects` },
+      {
+        path,
+        init: {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: before?.revision,
+            content: "remote write",
+          }),
+        },
+      },
+      {
+        path: `${path}/restore`,
+        init: {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expected_revision: before?.revision }),
+        },
+      },
+      {
+        path: `${path}?expected_revision=${before?.revision}`,
+        init: { method: "DELETE" },
+      },
+    ];
+
+    for (const item of requests) {
+      const response = await fetch(urlFor(remotePeer, item.path), item.init);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    }
+
+    expect(knowledgeEdit.knowledgeEffects(id)).toMatchObject({
+      revision: before?.revision,
+      is_deleted: false,
+    });
+    expect(ltm.getByLogical(id)?.content).toBe("keep unchanged");
   });
 
   test("denies before parsing a management request body", async () => {

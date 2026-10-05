@@ -2096,7 +2096,7 @@ async function cmdMove(
   const remote = getRemoteUrl();
   if (remote) return cmdMoveRemote(remote, args, flags);
 
-  const { data } = await import("@loreai/core");
+  const { data, ltm } = await import("@loreai/core");
   const type = args[0];
   const rawIds = args.slice(1);
   const skipConfirm = !!flags.yes;
@@ -2235,11 +2235,21 @@ async function cmdMove(
         return;
       }
 
-      if (data.reassignKnowledge(id, targetPath)) {
-        console.log(`Moved knowledge entry ${id} to ${targetPath}`);
-      } else {
-        console.error(`Knowledge entry not found: ${rawId}`);
-        process.exit(1);
+      try {
+        if (data.reassignKnowledge(id, targetPath)) {
+          console.log(`Moved knowledge entry ${id} to ${targetPath}`);
+        } else {
+          console.error(`Knowledge entry not found: ${rawId}`);
+          process.exit(1);
+        }
+      } catch (error) {
+        if (error instanceof ltm.TitleConflictError) {
+          console.error(
+            `Refusing to move: title "${error.title}" is already used by shared entry "${error.conflicting.title}" (${error.conflicting.logical_id}). Rename one entry or review duplicates in the Lore UI.`,
+          );
+          process.exit(1);
+        }
+        throw error;
       }
       break;
     }

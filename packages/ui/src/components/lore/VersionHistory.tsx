@@ -1,8 +1,8 @@
-import type { Component } from "solid-js";
+import type { Component, JSX } from "solid-js";
 import { For, Show, Switch, Match } from "solid-js";
 import { A } from "@solidjs/router";
 
-import type { KnowledgeVersionHistory } from "~/contracts";
+import type { KnowledgeVersion, KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import {
   formatConfidence,
@@ -18,6 +18,7 @@ import { StateCard } from "./StateCard";
 export const VersionHistory: Component<{
   loader: Loader<KnowledgeVersionHistory>;
   projectId?: string;
+  renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
   const versions = () =>
     [...(props.loader.data()?.versions ?? [])].sort(
@@ -100,6 +101,9 @@ export const VersionHistory: Component<{
                           </Show>
                         </div>
                       )}
+                    </Show>
+                    <Show when={!version.is_deleted && !version.is_current}>
+                      {props.renderRestore?.(version)}
                     </Show>
                   </div>
                 </details>

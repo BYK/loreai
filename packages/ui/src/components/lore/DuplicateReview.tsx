@@ -12,18 +12,22 @@ import {
 import { A } from "@solidjs/router";
 
 import type {
+  DedupApplyBody,
+  DedupApplyReceipt,
   DedupPreviewGroup,
   KnowledgeVersion,
   KnowledgeVersionHistory,
+  SyncStatus,
 } from "~/contracts";
-import type { DedupReviewMark } from "~/db";
+import type { DedupApplyRecord, DedupReviewMark } from "~/db";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { ScopeLabel } from "~/components/lore/Document";
 import { errorStateFor } from "~/components/lore/ErrorState";
 import { StateCard } from "~/components/lore/StateCard";
 import { formatConfidence, formatWhen } from "~/lib/format";
-import { markFrom, markStatus } from "~/lib/dedup-review";
+import { loreFileConsequence, markFrom, markStatus } from "~/lib/dedup-review";
 import { isApiError } from "~/lib/api";
 import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { createLoader } from "~/lib/loader";
@@ -46,6 +50,19 @@ const STATUS_LABELS = {
   skipped: "Skipped",
   stale: "Stale",
 } as const;
+
+const REFUSAL_LABELS = {
+  stale_revision: "Changed since you reviewed it — rescan and review again",
+  not_found: "An entry was removed since the scan",
+  scope_mismatch: "An entry is no longer in this scope",
+  conflicting_groups: "Shares an entry with another accepted group",
+} as const;
+
+type ApplyNotice = { kind: "error" | "locked" | "status"; text: string };
+type ApplyResult = {
+  record: DedupApplyRecord;
+  receipt: DedupApplyReceipt;
+};
 
 function currentVersion(
   load: VersionLoad | undefined,
@@ -85,14 +102,34 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       ws.tracked(() => ws.client.previewDedup(projectId, signal)),
   );
   const rescan = preview.reload;
+  const sharedTitleConflicts = () =>
+    preview.data()?.shared_title_conflicts ?? [];
 
   const [marks, setMarks] = createSignal<DedupReviewMark[]>([]);
+  const [pendingApplies, setPendingApplies] = createSignal<DedupApplyRecord[]>(
+    [],
+  );
+  const [applyResults, setApplyResults] = createSignal<ApplyResult[]>([]);
+  const [applyNotice, setApplyNotice] = createSignal<ApplyNotice | null>(null);
+  const [applyPending, setApplyPending] = createSignal(false);
+  const [activeApplyKey, setActiveApplyKey] = createSignal<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = createSignal(false);
+  const [syncStatus, setSyncStatus] = createSignal<SyncStatus | null>(null);
+  const [syncStatusLoading, setSyncStatusLoading] = createSignal(false);
+  const [syncStatusFailed, setSyncStatusFailed] = createSignal(false);
   const [persistenceError, setPersistenceError] = createSignal(false);
   const refreshMarks = async (projectId = props.projectId) => {
     setMarks(await ws.state.dedupReview.list(projectId));
   };
+  const refreshApplies = async (projectId = props.projectId) => {
+    setPendingApplies(await ws.state.dedupReview.listApplies(projectId));
+  };
   createEffect(() => {
-    void refreshMarks(props.projectId);
+    const projectId = props.projectId;
+    void refreshMarks(projectId);
+    void refreshApplies(projectId);
+    setApplyResults([]);
+    setApplyNotice(null);
   });
   const groups = () => preview.data()?.groups ?? [];
   const [focusedIndex, setFocusedIndex] = createSignal(0);
@@ -211,6 +248,327 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     setPersistenceError(!deleted);
     await refreshMarks();
   };
+  const acceptedGroups = () =>
+    groups().filter((group) => statusFor(group) === "accepted");
+  const applyPlans = () => {
+    const accepted = acceptedGroups();
+    return (["project", "global"] as const).flatMap((scope) => {
+      const scopedGroups = accepted.filter((group) =>
+        scope === "project"
+          ? group.scope === "project"
+          : group.scope === "global",
+      );
+      if (!scopedGroups.length) return [];
+      const groupMarks = scopedGroups.map((group) => {
+        const mark = markFor(group);
+        if (!mark || markStatus(group, mark) !== "accepted")
+          throw new Error("Accepted duplicate group has no current mark");
+        return mark;
+      });
+      const operationId = crypto.randomUUID();
+      const body: DedupApplyBody = {
+        operationId,
+        reviewedAt: Math.max(...groupMarks.map((mark) => mark.markedAt)),
+        actor: "lore-ui",
+        decisions: groupMarks.map((mark) => ({
+          keepId: mark.keepId,
+          mergeIds: [...mark.mergeIds],
+          expectedRevisions: { ...mark.expectedRevisions },
+        })),
+        ...(scope === "global" ? { projectId: null } : {}),
+      };
+      const record: DedupApplyRecord = {
+        key: `${props.projectId}/apply/${operationId}`,
+        kind: "dedup-apply",
+        projectId: props.projectId,
+        operationId,
+        body,
+        groupIds: scopedGroups.map((group) => group.group_id),
+        candidateTitles: Object.fromEntries(
+          scopedGroups.flatMap((group) =>
+            group.candidates.map((candidate) => [
+              candidate.logical_id,
+              candidate.title,
+            ]),
+          ),
+        ),
+        createdAt: Date.now(),
+      };
+      return [{ record }];
+    });
+  };
+  const titleFor = (record: DedupApplyRecord, id: string) =>
+    record.candidateTitles[id] ?? id;
+  const knowledgeLinkFor = (record: DedupApplyRecord, id: string) =>
+    record.body.projectId === null
+      ? globalKnowledgeHref(id)
+      : knowledgeHref(record.projectId, id);
+  const syncConsequence = () => {
+    if (syncStatus()?.enabled) {
+      const pending = syncStatus()?.pending_changes;
+      return pending === null
+        ? "Deletions are synced (pending count unavailable)"
+        : `Deletions are synced (${pending} changes already pending)`;
+    }
+    return syncStatus() ? "Sync is off — this device only" : "";
+  };
+  const openConfirmation = async () => {
+    if (!acceptedGroups().length || applyPending()) return;
+    setApplyNotice(null);
+    setSyncStatus(null);
+    setSyncStatusFailed(false);
+    setSyncStatusLoading(true);
+    setConfirmOpen(true);
+    try {
+      setSyncStatus(await ws.tracked(() => ws.client.getSyncStatus()));
+    } catch {
+      setSyncStatusFailed(true);
+    } finally {
+      setSyncStatusLoading(false);
+    }
+  };
+  const removeApplyRecord = async (
+    record: DedupApplyRecord,
+    receiptConfirmed = true,
+  ) => {
+    const removed = await ws.state.dedupReview.deleteApply(record);
+    if (!removed) {
+      setApplyNotice({
+        kind: "error",
+        text: receiptConfirmed
+          ? "The apply receipt is confirmed, but its local retry record could not be removed."
+          : "The apply was rejected, but its local retry record could not be removed.",
+      });
+    }
+    await refreshApplies(record.projectId);
+    return removed;
+  };
+  const applyReceipt = async (
+    record: DedupApplyRecord,
+    receipt: DedupApplyReceipt,
+  ) => {
+    setApplyResults((previous) => [
+      ...previous.filter(
+        (result) => result.receipt.operationId !== receipt.operationId,
+      ),
+      { record, receipt },
+    ]);
+    await removeApplyRecord(record);
+    const markDeletes = await Promise.all(
+      receipt.applied.map(async (applied) => {
+        const groupId = record.groupIds[applied.groupIndex];
+        if (!groupId) return false;
+        return ws.state.dedupReview.delete(record.projectId, groupId);
+      }),
+    );
+    setPersistenceError(markDeletes.some((deleted) => !deleted));
+    await refreshMarks(record.projectId);
+    try {
+      await Promise.all(
+        receipt.applied.flatMap((applied) =>
+          applied.merged.map((entry) => ws.state.knowledge.remove(entry.id)),
+        ),
+      );
+      await ws.state.knowledge.invalidateProject(record.projectId);
+      ws.projects.reload();
+      preview.reload();
+    } catch {
+      setApplyNotice({
+        kind: "error",
+        text: "Apply is confirmed, but local knowledge caches could not be refreshed.",
+      });
+    }
+    await refreshApplies(record.projectId);
+  };
+  const submitApply = async (
+    record: DedupApplyRecord,
+    persistBeforePost: boolean,
+  ): Promise<boolean> => {
+    if (persistBeforePost) {
+      if (!(await ws.state.dedupReview.persistent())) {
+        setApplyNotice({
+          kind: "error",
+          text: "Could not save the apply operation on this device — no changes were sent.",
+        });
+        return false;
+      }
+      const saved = await ws.state.dedupReview.putApply(record);
+      if (!saved) {
+        setApplyNotice({
+          kind: "error",
+          text: "Could not save the apply operation on this device — no changes were sent.",
+        });
+        return false;
+      }
+      await refreshApplies(record.projectId);
+    }
+
+    setApplyNotice(null);
+    let receipt: DedupApplyReceipt;
+    try {
+      receipt = await ws.tracked(() =>
+        ws.client.applyDedup(record.projectId, record.body),
+      );
+    } catch (error) {
+      setConfirmOpen(false);
+      if (isApiError(error) && error.status === 409) {
+        const removed = await removeApplyRecord(record, false);
+        setApplyNotice({
+          kind: "error",
+          text: `Operation ID conflict — ${error.message}${
+            removed ? "" : " The local retry record could not be removed."
+          }`,
+        });
+        return false;
+      }
+      if (
+        isApiError(error) &&
+        (error.kind === "forbidden" ||
+          error.kind === "unauthorized" ||
+          (error.status !== null && error.status >= 400 && error.status < 500))
+      ) {
+        const removed = await removeApplyRecord(record, false);
+        setApplyNotice(
+          error.kind === "forbidden"
+            ? {
+                kind: "locked",
+                text: `Not available in hosted mode — run a local gateway to use this action.${
+                  removed ? "" : " The local retry record could not be removed."
+                }`,
+              }
+            : {
+                kind: "error",
+                text: `${error.message}${
+                  removed ? "" : " The local retry record could not be removed."
+                }`,
+              },
+        );
+        return false;
+      }
+      setApplyNotice({
+        kind: "status",
+        text: "The last apply didn't confirm — Retry",
+      });
+      await refreshApplies(record.projectId);
+      return false;
+    }
+
+    await applyReceipt(record, receipt);
+    return true;
+  };
+  const applyAccepted = async () => {
+    const plans = applyPlans();
+    if (!plans.length || applyPending()) return;
+    setConfirmOpen(false);
+    setApplyPending(true);
+    try {
+      for (const { record } of plans) {
+        setActiveApplyKey(record.key);
+        if (!(await submitApply(record, true))) break;
+      }
+    } finally {
+      setActiveApplyKey(null);
+      setApplyPending(false);
+    }
+  };
+  const retryApply = async (record: DedupApplyRecord) => {
+    if (applyPending()) return;
+    if (!(await ws.state.dedupReview.persistent())) {
+      setApplyNotice({
+        kind: "error",
+        text: "IndexedDB is unavailable — the saved apply cannot be retried safely.",
+      });
+      return;
+    }
+    setApplyPending(true);
+    setActiveApplyKey(record.key);
+    try {
+      await submitApply(record, false);
+    } finally {
+      setActiveApplyKey(null);
+      setApplyPending(false);
+    }
+  };
+  const showReceipt = (
+    record: DedupApplyRecord,
+    receipt: DedupApplyReceipt,
+  ) => (
+    <div class="space-y-3 border-t border-line pt-3">
+      <div
+        class="flex flex-wrap items-center gap-2 text-xs text-muted"
+        data-testid="dedup-apply-operation-header"
+      >
+        <span>
+          Operation <code>{receipt.operationId}</code>
+        </span>
+        <Badge variant="outline">
+          {record.body.projectId !== null ? "Project" : "Shared (no project)"}
+        </Badge>
+      </div>
+      <For each={receipt.applied}>
+        {(applied) => (
+          <div
+            class="rounded-md border border-line bg-bg p-3"
+            data-testid="applied-group"
+          >
+            <p class="m-0 text-sm font-medium">
+              {titleFor(record, applied.keepId)} ←{" "}
+              <For each={applied.merged}>
+                {(entry, index) => (
+                  <>
+                    {index() > 0 ? ", " : ""}
+                    <A
+                      class="text-accent underline"
+                      href={knowledgeLinkFor(record, entry.id)}
+                    >
+                      {titleFor(record, entry.id)}
+                    </A>
+                  </>
+                )}
+              </For>
+            </p>
+            <p class="mt-2 text-xs text-muted">Applied</p>
+          </div>
+        )}
+      </For>
+      <For each={receipt.refused}>
+        {(refused) => (
+          <div
+            class="rounded-md border border-mark-edge/60 bg-mark/30 p-3"
+            data-testid="refused-group"
+          >
+            <p class="m-0 text-sm font-medium">
+              {titleFor(record, refused.keepId)} ←{" "}
+              <For each={refused.mergeIds}>
+                {(id, index) => (
+                  <>
+                    {index() > 0 ? ", " : ""}
+                    <A
+                      class="text-accent underline"
+                      href={knowledgeLinkFor(record, id)}
+                    >
+                      {titleFor(record, id)}
+                    </A>
+                  </>
+                )}
+              </For>
+            </p>
+            <p class="mt-2 text-xs text-gold">
+              {REFUSAL_LABELS[refused.error.code]}
+            </p>
+          </div>
+        )}
+      </For>
+      <details class="text-xs text-muted">
+        <summary class="cursor-pointer">Technical details</summary>
+        <p class="mt-2">
+          Operation ID: <code>{receipt.operationId}</code>
+          <br />
+          Replayed: {receipt.replayed ? "true" : "false"}
+        </p>
+      </details>
+    </div>
+  );
   const chooseKeeper = (group: DedupPreviewGroup, id: string) => {
     setKeepers((previous) => ({ ...previous, [group.group_id]: id }));
     const existing = markFor(group);
@@ -309,7 +667,10 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
         data-testid="review-summary"
       >
         <p class="font-medium">
-          Nothing is applied — marks are saved only in this browser.
+          Accepted decisions are applied only after confirmation.
+        </p>
+        <p class="mt-1 text-xs text-muted">
+          Marks are saved only in this browser.
         </p>
         <p class="mt-1 text-xs text-muted">
           {counts().accepted} accepted · {counts().skipped} skipped ·{" "}
@@ -332,6 +693,131 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
         </Show>
       </section>
 
+      <Show when={sharedTitleConflicts().length > 0}>
+        <section
+          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-4"
+          aria-label="Shared title conflicts"
+          data-testid="shared-title-conflicts"
+        >
+          <h2 class="m-0 text-base font-semibold">Shared title conflicts</h2>
+          <p class="mt-2 text-sm text-muted">
+            These shared entries use the same title. Lore does not merge,
+            rename, or delete them automatically. Rename, change scope, or
+            delete one to resolve the conflict.
+          </p>
+          <For each={sharedTitleConflicts()}>
+            {(group) => (
+              <div class="mt-3 border-t border-line pt-3">
+                <p class="mb-2 text-xs text-muted">
+                  Title key <code>{group.title_key}</code>
+                </p>
+                <ul class="m-0 list-disc space-y-1 pl-5 text-sm">
+                  <For each={group.entries}>
+                    {(entry) => (
+                      <li>
+                        <A
+                          class="text-accent underline"
+                          href={
+                            entry.project_id
+                              ? knowledgeHref(entry.project_id, entry.id)
+                              : globalKnowledgeHref(entry.id)
+                          }
+                        >
+                          {entry.title}
+                        </A>{" "}
+                        <span class="text-xs text-muted">({entry.scope})</span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            )}
+          </For>
+        </section>
+      </Show>
+
+      <Show when={applyNotice()}>
+        {(notice) => (
+          <p
+            class={`mb-4 rounded-md border px-3 py-2 text-sm ${
+              notice().kind === "locked"
+                ? "border-mark-edge/60 bg-mark/30 text-gold"
+                : notice().kind === "error"
+                  ? "border-danger/40 bg-danger/10 text-danger"
+                  : "border-line bg-soft text-muted"
+            }`}
+            role={notice().kind === "status" ? "status" : "alert"}
+            data-testid="apply-notice"
+          >
+            {notice().text}
+          </p>
+        )}
+      </Show>
+
+      <Show when={pendingApplies().length > 0}>
+        <section
+          class="mb-5 space-y-2 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-3"
+          aria-label="Pending apply operations"
+          data-testid="pending-dedup-applies"
+        >
+          <For
+            each={pendingApplies()
+              .slice()
+              .sort((a, b) => b.createdAt - a.createdAt)}
+          >
+            {(record) => {
+              const confirmed = () =>
+                applyResults().some(
+                  (result) => result.receipt.operationId === record.operationId,
+                );
+              return (
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div class="text-sm">
+                    <p class="m-0">
+                      {activeApplyKey() === record.key
+                        ? "Applying…"
+                        : confirmed()
+                          ? "Apply receipt confirmed — retry replays this operation"
+                          : "The last apply didn't confirm — Retry"}
+                    </p>
+                    <p class="mt-1 text-xs text-muted">
+                      Operation <code>{record.operationId}</code>
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="retry-dedup-apply"
+                    disabled={applyPending()}
+                    onClick={() => void retryApply(record)}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              );
+            }}
+          </For>
+        </section>
+      </Show>
+
+      <Show when={applyResults().length > 0}>
+        <section
+          class="mb-5 space-y-4 rounded-lg border border-thread bg-soft px-4 py-4"
+          aria-label="Dedup apply receipts"
+          role="status"
+          data-testid="dedup-apply-receipt"
+        >
+          <h2 class="m-0 text-base font-semibold">Apply receipts</h2>
+          <For each={applyResults()}>
+            {(result) => (
+              <article data-testid="dedup-apply-operation">
+                {showReceipt(result.record, result.receipt)}
+              </article>
+            )}
+          </For>
+        </section>
+      </Show>
+
       <Show when={preview.data()}>
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <p class="text-xs text-muted">
@@ -339,14 +825,29 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
             {groups().length === 1 ? "group" : "groups"}
             {preview.loading() ? " · scanning again" : ""}
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            data-testid="dedup-rescan"
-            onClick={rescan}
-          >
-            Rescan
-          </Button>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              data-testid="apply-accepted"
+              disabled={
+                acceptedGroups().length === 0 ||
+                applyPending() ||
+                pendingApplies().length > 0 ||
+                preview.loading()
+              }
+              onClick={() => void openConfirmation()}
+            >
+              Apply {acceptedGroups().length} accepted…
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="dedup-rescan"
+              onClick={rescan}
+            >
+              Rescan
+            </Button>
+          </div>
         </div>
       </Show>
 
@@ -696,6 +1197,67 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           </div>
         </Match>
       </Switch>
+
+      <ConfirmDialog
+        open={confirmOpen()}
+        title="Apply accepted duplicate decisions?"
+        description={
+          <div class="space-y-3">
+            <p>
+              The accepted groups below will be applied to the gateway. Review
+              the affected entries and consequences before continuing.
+            </p>
+            <ul class="space-y-3 pl-5">
+              <For each={acceptedGroups()}>
+                {(group) => {
+                  const mark = () => markFor(group);
+                  const keepTitle = () =>
+                    group.candidates.find(
+                      (candidate) => candidate.logical_id === mark()?.keepId,
+                    )?.title ?? mark()?.keepId;
+                  const mergeTitles = () =>
+                    group.candidates
+                      .filter(
+                        (candidate) => candidate.logical_id !== mark()?.keepId,
+                      )
+                      .map((candidate) => candidate.title)
+                      .join(", ");
+                  return (
+                    <li>
+                      <p class="m-0 font-medium">
+                        {keepTitle()} ← {mergeTitles()}
+                      </p>
+                      <p class="mt-1 text-xs text-muted">
+                        {loreFileConsequence(
+                          group,
+                          mark()?.keepId ?? suggestedKeeper(group),
+                          props.projectId,
+                          ws.projects.data() ?? [],
+                        )}
+                      </p>
+                    </li>
+                  );
+                }}
+              </For>
+            </ul>
+            <p class="text-xs text-muted">
+              {syncStatusLoading()
+                ? "Checking sync status…"
+                : syncStatusFailed()
+                  ? "Sync status could not be checked."
+                  : syncConsequence()}
+            </p>
+            <p class="text-xs text-muted">
+              Each scope is a separate operation. Receipts are recorded under an
+              operation ID so a retry replays the same result.
+            </p>
+          </div>
+        }
+        confirmLabel={`Apply ${acceptedGroups().length} accepted`}
+        pending={applyPending() || syncStatusLoading()}
+        onConfirm={() => void applyAccepted()}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </main>
   );
 };

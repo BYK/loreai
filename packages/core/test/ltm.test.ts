@@ -2819,6 +2819,126 @@ describe("ltm — cross-project promotion", () => {
     }
   });
 
+  test("skips shared-title collisions and reports them in dry and real runs", () => {
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Promotion collision candidate",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Promotion safe candidate B",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Promotion safe candidate C",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const existing = ltm.create({
+      category: "preference",
+      title: "Promotion collision candidate",
+      content: "Existing shared content",
+      scope: "global",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run("Promotion collision candidate", a);
+    const before = [a, b, c].map((id) => ltm.getByLogical(id)?.content);
+
+    const dryRun = ltm.promoteCrossProject({ dryRun: true });
+    expect(dryRun.promoted).toBe(2);
+    expect(dryRun.conflicts).toEqual([
+      {
+        logicalId: a,
+        title: "Promotion collision candidate",
+        conflictingLogicalId: existing,
+      },
+    ]);
+    expect([a, b, c].map((id) => ltm.getByLogical(id)?.cross_project)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const applied = ltm.promoteCrossProject({ dryRun: false });
+    expect(applied.promoted).toBe(2);
+    expect(applied.conflicts).toEqual(dryRun.conflicts);
+    expect(ltm.getByLogical(a)).toMatchObject({
+      cross_project: 0,
+      content: before[0],
+    });
+    expect(ltm.getByLogical(b)?.cross_project).toBe(1);
+    expect(ltm.getByLogical(c)?.cross_project).toBe(1);
+    expect(ltm.getByLogical(existing)?.content).toBe("Existing shared content");
+  });
+
+  test("dry runs track normalized title collisions between cluster members", () => {
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Promotion batch first",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Promotion batch second",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Promotion batch third",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run("Batch duplicate", a);
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(" batch duplicate ", b);
+
+    const dryRun = ltm.promoteCrossProject({ dryRun: true });
+    expect(dryRun.promoted).toBe(2);
+    expect(dryRun.conflicts).toHaveLength(1);
+    const collision = dryRun.conflicts[0];
+    if (!collision) throw new Error("expected an in-batch title conflict");
+    const titleById = new Map([
+      [a, "Batch duplicate"],
+      [b, " batch duplicate "],
+    ]);
+    expect(titleById.get(collision.logicalId)).toBe(collision.title);
+    expect([a, b]).toContain(collision.logicalId);
+    expect([a, b]).toContain(collision.conflictingLogicalId);
+    expect(collision.conflictingLogicalId).not.toBe(collision.logicalId);
+    expect([a, b, c].map((id) => ltm.getByLogical(id)?.cross_project)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const applied = ltm.promoteCrossProject({ dryRun: false });
+    expect(applied.promoted).toBe(2);
+    expect(applied.conflicts).toEqual(dryRun.conflicts);
+    expect(
+      [a, b, c].filter((id) => ltm.getByLogical(id)?.cross_project === 1),
+    ).toHaveLength(2);
+    const sharedCopies = db()
+      .query(
+        `SELECT COUNT(*) AS count FROM knowledge_current
+          WHERE (project_id IS NULL OR cross_project = 1)
+            AND LOWER(TRIM(title, ' ' || char(9) || char(10) || char(13))) = 'batch duplicate'`,
+      )
+      .get() as { count: number };
+    expect(sharedCopies.count).toBe(1);
+  });
+
   test("no-op when embeddings are unavailable", () => {
     seedEntry({
       projectPath: PA,

@@ -63,3 +63,30 @@ export function markFrom(
     markedAt: Date.now(),
   };
 }
+
+export function loreFileConsequence(
+  group: DedupPreviewGroup,
+  keepId: string,
+  routeProjectId: string,
+  projects: readonly { id: string; name: string | null }[],
+): string {
+  const affectedProjects = [
+    ...new Set(
+      group.candidates
+        .filter(
+          (candidate) =>
+            candidate.logical_id !== keepId && candidate.project_id !== null,
+        )
+        .map((candidate) => candidate.project_id as string),
+    ),
+  ];
+  if (affectedProjects.length === 0)
+    return ".lore.md files are not affected (the removed entries belong to no project)";
+
+  const labels = affectedProjects.map((id) =>
+    id === routeProjectId
+      ? "this project"
+      : (projects.find((project) => project.id === id)?.name ?? id),
+  );
+  return `Regenerates .lore.md for ${labels.join(", ")} (when .lore.md export is enabled)`;
+}

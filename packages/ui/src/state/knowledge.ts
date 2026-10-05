@@ -244,6 +244,15 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       store.remove(id);
       await repo.delete(id);
     },
+    async reconcile(entry: KnowledgeEntry): Promise<void> {
+      store.reconcileOne(entry);
+      await repo.put(entry, entry.project_id ?? "global", {
+        keepScope: true,
+      });
+    },
+    async invalidateProject(projectId: string): Promise<void> {
+      await repo.deleteCollection(projectId);
+    },
     select: (id: string) => store.select(id),
     selectList: (projectId: string) => store.selectList(projectId),
     store,

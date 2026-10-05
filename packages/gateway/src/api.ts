@@ -47,6 +47,7 @@ import {
 } from "./api-lists";
 import { parseBooleanParam } from "./query-bool";
 import { handleSessionContext } from "./session-context-api";
+import { handleCheckedDeleteKnowledge } from "./knowledge-edit-api";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -450,15 +451,42 @@ async function handleMoveKnowledge(
   }
 
   const resolvedId = data.resolveId("knowledge", knowledgeId) ?? knowledgeId;
-  const success = data.reassignKnowledge(resolvedId, targetPath);
-  if (!success) {
-    return errorResponse(
-      404,
-      "not_found",
-      `Knowledge entry not found: ${knowledgeId}`,
-    );
+  try {
+    const success = data.reassignKnowledge(resolvedId, targetPath);
+    if (!success) {
+      return errorResponse(
+        404,
+        "not_found",
+        `Knowledge entry not found: ${knowledgeId}`,
+      );
+    }
+    return jsonResponse({ moved: true, id: resolvedId });
+  } catch (error) {
+    if (error instanceof ltm.TitleConflictError) {
+      const conflict = error.conflicting;
+      const scope =
+        conflict.project_id === null || conflict.cross_project === 1
+          ? "shared"
+          : "project";
+      return jsonResponse(
+        {
+          type: "error",
+          error: {
+            type: "title_conflict",
+            message: error.message,
+            conflicting_entry: {
+              id: conflict.logical_id,
+              title: conflict.title,
+              project_id: conflict.project_id,
+              scope,
+            },
+          },
+        },
+        409,
+      );
+    }
+    throw error;
   }
-  return jsonResponse({ moved: true, id: resolvedId });
 }
 
 function handleMergeProjects(): Response {
@@ -1036,7 +1064,11 @@ export async function handleAPIRequest(
   if (method === "DELETE") {
     // DELETE /api/v1/knowledge/:id
     params = matchRoute(pathname, "/api/v1/knowledge/:id");
-    if (params) return handleDeleteKnowledge(params.id);
+    if (params) {
+      if (url.searchParams.has("expected_revision"))
+        return handleCheckedDeleteKnowledge(url, params.id, config.hostedMode);
+      return handleDeleteKnowledge(params.id);
+    }
 
     // DELETE /api/v1/sessions/:id
     params = matchRoute(pathname, "/api/v1/sessions/:id");

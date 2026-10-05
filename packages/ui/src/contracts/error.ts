@@ -5,6 +5,7 @@
  */
 import "./config";
 import { type } from "arktype";
+import { nonEmptyString } from "./primitives";
 
 /** The gateway's JSON error envelope: `{ type: "error", error: {...} }`. */
 export const apiErrorBody = type({
@@ -14,6 +15,15 @@ export const apiErrorBody = type({
     message: "string",
   },
 });
+
+export const conflictingEntry = type({
+  id: nonEmptyString,
+  title: "string",
+  project_id: "string | null",
+  scope: "'project' | 'shared'",
+});
+
+export type ConflictingEntry = typeof conflictingEntry.infer;
 
 export type ApiErrorBody = typeof apiErrorBody.infer;
 
@@ -29,18 +39,24 @@ export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | null;
   readonly path: string;
+  readonly errorType?: string;
+  readonly conflictingEntry?: ConflictingEntry;
 
   constructor(
     kind: ApiErrorKind,
     path: string,
     message: string,
     status: number | null = null,
+    errorType?: string,
+    conflictingEntry?: ConflictingEntry,
   ) {
     super(message);
     this.name = "ApiError";
     this.kind = kind;
     this.status = status;
     this.path = path;
+    this.errorType = errorType;
+    this.conflictingEntry = conflictingEntry;
   }
 }
 
