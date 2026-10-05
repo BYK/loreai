@@ -304,7 +304,9 @@ export function createSessionsState({
         async onServer(key, value) {
           const projectId = new URLSearchParams(key).get("projectId");
           if (!projectId) throw new Error("Invalid session page loader key");
-          for (const session of value.items) {
+          for (const item of value.items) {
+            // `match` is a per-query flag (#1948) — never cache it.
+            const { match: _match, ...session } = item;
             store.reconcileOne(session);
             await repos.sessions.put(session, projectId, {
               keepScope: true,

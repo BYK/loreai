@@ -38,6 +38,7 @@ import {
   sessionContext,
   sessionDetail,
   sessionList,
+  sessionSummary,
   sessionPage,
   sessionSearchPage,
   sharingStatus,
@@ -394,6 +395,29 @@ describe("contract violations", () => {
     });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.value.items[0]?.match).toBe("fuzzy");
+  });
+
+  it("sessionSummary accepts the optional match flag and rejects bad values", () => {
+    const input = {
+      session_id: "s-1",
+      message_count: 1,
+      first_message_at: 1,
+      last_message_at: 2,
+      distilled_count: 1,
+      undistilled_count: 0,
+      distillation_count: 0,
+      title: "Session title search",
+      title_source: "first_message" as const,
+    };
+    expect(safeParseContract("/x", sessionSummary, input).ok).toBe(true);
+    for (const match of ["exact", "fuzzy"] as const) {
+      expect(
+        safeParseContract("/x", sessionSummary, { ...input, match }).ok,
+      ).toBe(true);
+    }
+    expect(
+      safeParseContract("/x", sessionSummary, { ...input, match: "bogus" }).ok,
+    ).toBe(false);
   });
 
   it("apiErrorBody accepts the gateway error envelope", () => {

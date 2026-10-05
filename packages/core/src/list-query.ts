@@ -583,8 +583,10 @@ export function searchKnowledgeRanked(options: {
 /** Sessions are ordered `last_message_at DESC, session_id DESC`. */
 export type SessionKeyset = { last_message_at: number; session_id: string };
 
+export type SessionMatch = "exact" | "fuzzy";
+
 export type SessionPage = {
-  items: SessionSummary[];
+  items: Array<SessionSummary & { match: SessionMatch }>;
   next: SessionKeyset | null;
 };
 
@@ -661,18 +663,90 @@ export function listSessionsPage(
          LIMIT ${limit + 1}`,
     );
     const hasMore = rows.length > limit;
-    const items = hasMore ? rows.slice(0, limit) : rows;
+    const items: Array<SessionSummary & { match: SessionMatch }> = (
+      hasMore ? rows.slice(0, limit) : rows
+    ).map((row) => ({ ...row, match: "exact" as const }));
     const last = items[items.length - 1];
-    return {
-      items,
-      next:
-        hasMore && last
-          ? {
-              last_message_at: last.last_message_at,
-              session_id: last.session_id,
-            }
-          : null,
-    };
+    const next =
+      hasMore && last
+        ? {
+            last_message_at: last.last_message_at,
+            session_id: last.session_id,
+          }
+        : null;
+
+    // Fuzzy tail (#1948): only on the final page, when the exact leg
+    // underfills it. Every session_id the exact predicate matched — on any
+    // page, not just this one — is excluded so a fuzzy row can never shadow
+    // or duplicate an exact hit.
+    if (
+      next === null &&
+      items.length < limit &&
+      normalizeFuzzy(q).length >= FUZZY_MIN_QUERY
+    ) {
+      const excludeIds = new Set(
+        sql
+          .all<{ session_id: string }>(
+            db(),
+            sql`SELECT t.session_id
+             FROM temporal_messages t
+             JOIN session_meta m
+               ON m.project_id = ${pid} AND m.session_id = t.session_id
+             WHERE t.project_id = ${pid}
+             GROUP BY t.session_id
+             HAVING ${match}`,
+          )
+          .map((row) => row.session_id),
+      );
+      const candidates = sql
+        .all<{ session_id: string; title: string }>(
+          db(),
+          sql`SELECT session_id, title FROM session_meta
+             WHERE project_id = ${pid}
+             ORDER BY computed_at DESC
+             LIMIT ${FUZZY_CANDIDATE_CAP}`,
+        )
+        .filter((row) => !excludeIds.has(row.session_id));
+      const hits = fuzzyRank(
+        q,
+        candidates,
+        (row) => [row.title, row.session_id],
+        { limit: limit - items.length },
+      );
+      if (hits.length > 0) {
+        const fuzzyRows = sql.all<SessionSummary>(
+          db(),
+          sql`SELECT
+              t.session_id,
+              COUNT(*) as message_count,
+              MIN(t.created_at) as first_message_at,
+              MAX(t.created_at) as last_message_at,
+              SUM(CASE WHEN t.distilled = 1 THEN 1 ELSE 0 END) as distilled_count,
+              SUM(CASE WHEN t.distilled = 0 THEN 1 ELSE 0 END) as undistilled_count,
+              COALESCE(d.cnt, 0) as distillation_count,
+              m.title,
+              m.title_source
+             FROM temporal_messages t
+             JOIN session_meta m
+               ON m.project_id = ${pid} AND m.session_id = t.session_id
+             LEFT JOIN (
+               SELECT session_id, COUNT(*) AS cnt
+               FROM distillations
+               WHERE project_id = ${pid}
+               GROUP BY session_id
+             ) d ON d.session_id = t.session_id
+             WHERE t.project_id = ${pid}
+               AND t.session_id ${sql.inList(hits.map((hit) => hit.item.session_id))}
+             GROUP BY t.session_id`,
+        );
+        const byId = new Map(fuzzyRows.map((row) => [row.session_id, row]));
+        for (const hit of hits) {
+          const row = byId.get(hit.item.session_id);
+          if (row) items.push({ ...row, match: "fuzzy" });
+        }
+      }
+    }
+    return { items, next };
   }
 
   const rows = sql.all<SessionSummary>(
@@ -709,7 +783,10 @@ export function listSessionsPage(
   }
 
   const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
+  const items = (hasMore ? rows.slice(0, limit) : rows).map((row) => ({
+    ...row,
+    match: "exact" as const,
+  }));
   const last = items[items.length - 1];
   return {
     items,
