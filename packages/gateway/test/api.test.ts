@@ -730,7 +730,16 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
   };
   type Receipt = {
     operationId: string;
-    applied: Array<{ keepId: string; merged: Array<{ id: string }> }>;
+    applied: Array<{
+      keepId: string;
+      merged: Array<{ id: string }>;
+      contentFrom?: {
+        id: string;
+        revision: number;
+        replacedKeepRevision: number;
+        keepVersionId: string;
+      };
+    }>;
     refused: Array<{
       groupIndex: number;
       keepId: string;
@@ -957,6 +966,96 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
       project_id: otherId,
       cross_project: 1,
     });
+  });
+
+  it("applies a project_shared group with contentFromId, replacing the shared survivor's content", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-cf-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-cf-project");
+    const otherPath = `/test/api/dedup-cf-q-${Date.now()}-${seq++}`;
+    const otherId = ensureProject(otherPath, "dedup-cf-other");
+    const title = "Rate limit retry budget for chatty downstream services";
+    const priv = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Retry at most twice with jitter.",
+      session: "test-session",
+      scope: "project",
+    });
+    const promoted = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: otherPath,
+      category: "gotcha",
+      title: `${title} shared`,
+      content: "Shared wording of the retry rule.",
+      session: "test-session",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const group = preview.groups.find(
+      (g) =>
+        g.pool === "project_shared" &&
+        g.candidates.some((c) => c.logical_id === priv) &&
+        g.candidates.some((c) => c.logical_id === promoted),
+    );
+    if (!group) throw new Error("expected a project_shared group");
+    const privCandidate = group.candidates.find((c) => c.logical_id === priv)!;
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [{ ...decisionFrom(group), contentFromId: privCandidate.id }],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(receipt.applied[0].contentFrom).toMatchObject({
+      id: privCandidate.id,
+      revision: privCandidate.revision,
+    });
+
+    // The shared keeper took the private entry's content, kept its scope.
+    const keeper = ltm.getByLogical(promoted);
+    expect(keeper).toMatchObject({
+      title,
+      content: "Retry at most twice with jitter.",
+      project_id: otherId,
+      cross_project: 1,
+    });
+    expect(ltm.get(priv)).toBeNull();
+    const doc = await api(`/api/v1/knowledge/${ltm.logicalIdOf(promoted)}`);
+    expect(doc.status).toBe(200);
+    expect(await doc.json()).toMatchObject({
+      project_id: otherId,
+      cross_project: 1,
+    });
+  });
+
+  it("returns 400 when contentFromId is not one of mergeIds", async () => {
+    const { projectId } = await seedDuplicates();
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [
+        {
+          keepId: "k",
+          mergeIds: ["m"],
+          expectedRevisions: { k: 1, m: 1 },
+          contentFromId: "not-a-merge",
+        },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as ApiError;
+    expect(err.error.type).toBe("invalid_request");
   });
 
   it("offers promoted↔promoted duplicates only in the shared pool, applied with projectId null", async () => {

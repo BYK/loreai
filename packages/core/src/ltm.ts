@@ -849,7 +849,7 @@ export function rejectForTeam(logicalId: string): boolean {
  * (a dead/zeroed entry never blocks a re-title). Used ONLY by the re-title path
  * — create() has its own inline guard.
  */
-function titleCollides(
+export function titleCollides(
   logicalId: string,
   entry: KnowledgeEntry,
   newTitle: string,

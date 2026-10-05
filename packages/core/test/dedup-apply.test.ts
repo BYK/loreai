@@ -1080,3 +1080,282 @@ describe("shared-pool merge exports", () => {
     expect(exportLoreFile).not.toHaveBeenCalled();
   });
 });
+
+describe("keep content from a merged entry", () => {
+  const PROJECT_CF_Q = join(ROOT, "project-cf-q");
+  mkdirSync(PROJECT_CF_Q, { recursive: true });
+  let qProjectId = "";
+
+  function createPromoted(title: string): string {
+    return ltm.create({
+      id: uuidv7(),
+      projectPath: PROJECT_CF_Q,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+  }
+
+  function rowOf(id: string) {
+    return db()
+      .query(
+        "SELECT id, version, project_id, cross_project, is_deleted, title, content FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(ltm.logicalIdOf(id)) as {
+      id: string;
+      version: number;
+      project_id: string | null;
+      cross_project: number;
+      is_deleted: number;
+      title: string;
+      content: string;
+    };
+  }
+
+  const survivorCases: Array<{
+    label: string;
+    make: (title: string) => string;
+    /** Extra .lore.md export expected besides the request project's. */
+    extraExportPath: string | null;
+  }> = [
+    {
+      label: "NULL-project global survivor",
+      make: (title) => createGlobalEntry(title),
+      extraExportPath: null,
+    },
+    {
+      label: "promoted survivor from another project",
+      make: (title) => createPromoted(title),
+      extraExportPath: PROJECT_CF_Q,
+    },
+  ];
+
+  test.each(survivorCases)(
+    "$label: replaces the survivor's content and tombstones the source",
+    ({ make, extraExportPath }) => {
+      qProjectId = ensureProject(PROJECT_CF_Q, "dedup-apply-cf-q");
+      const s = make("CF Shared Survivor Title");
+      const sBefore = rowOf(s);
+      const p = createEntry("CF Private Source Title");
+      const pRevision = revisionOf(p);
+      const d = decision(s, p);
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+
+      expect(receipt.refused).toEqual([]);
+      expect(receipt.applied).toHaveLength(1);
+      const sAfter = rowOf(s);
+      // The survivor took p's title/content as a new version — scope untouched.
+      expect(sAfter.title).toBe("CF Private Source Title");
+      expect(sAfter.content).toBe(`Content for CF Private Source Title`);
+      expect(sAfter.project_id).toBe(sBefore.project_id);
+      expect(sAfter.cross_project).toBe(sBefore.cross_project);
+      expect(sAfter.version).toBe(sBefore.version + 1);
+      // The old version is still in history for recovery.
+      const history = ltm.versionHistory(ltm.logicalIdOf(s));
+      expect(
+        history.some(
+          (v) => v.version === sBefore.version && v.content === sBefore.content,
+        ),
+      ).toBe(true);
+      expect(isLive(p)).toBe(false);
+      const provenance = dedupProvenanceFor(receipt.operationId);
+      expect(provenance).toHaveLength(1);
+      expect(provenance[0]).toMatchObject({
+        keep_logical_id: ltm.logicalIdOf(s),
+        merged_logical_id: ltm.logicalIdOf(p),
+      });
+      const appliedGroup = receipt.applied[0];
+      expect(appliedGroup.keepRevision).toBe(sAfter.version);
+      expect(appliedGroup.contentFrom).toEqual({
+        id: p,
+        revision: pRevision,
+        replacedKeepRevision: sBefore.version,
+        keepVersionId: sAfter.id,
+      });
+      expect(exportLoreFile).toHaveBeenCalledWith(PROJECT);
+      expect(exportLoreFile).toHaveBeenCalledTimes(extraExportPath ? 2 : 1);
+      if (extraExportPath)
+        expect(exportLoreFile).toHaveBeenCalledWith(extraExportPath);
+      void qProjectId;
+    },
+  );
+
+  test.each(survivorCases)(
+    "$label: a stale survivor revision refuses and changes nothing",
+    ({ make }) => {
+      const s = make("CF Stale Survivor Title");
+      const p = createEntry("CF Stale Source Title");
+      const d = decision(s, p);
+      ltm.update(ltm.logicalIdOf(s), { content: "edited after preview" });
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+      expect(receipt.applied).toEqual([]);
+      expect(receipt.refused[0].error.code).toBe("stale_revision");
+      expect(rowOf(s).content).toBe("edited after preview");
+      expect(isLive(p)).toBe(true);
+      expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+      expect(exportLoreFile).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a stale source revision refuses and changes nothing", () => {
+    const s = createGlobalEntry("CF Stale Source Survivor");
+    const p = createEntry("CF Stale Source Entry");
+    const d = decision(s, p);
+    ltm.update(ltm.logicalIdOf(p), { content: "source edited after preview" });
+    const receipt = apply(request([{ ...d, contentFromId: p }], { projectId }));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("stale_revision");
+    expect(rowOf(s).title).toBe("CF Stale Source Survivor");
+    expect(isLive(p)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("the same request replays the receipt without re-applying", () => {
+    const s = createGlobalEntry("CF Replay Survivor Title");
+    const p = createEntry("CF Replay Source Title");
+    const req = request([{ ...decision(s, p), contentFromId: p }], {
+      projectId,
+    });
+    const first = apply(req);
+    expect(first.applied).toHaveLength(1);
+    const versionAfterFirst = rowOf(s).version;
+    exportLoreFile.mockClear();
+
+    const second = apply(req);
+    expect(second.replayed).toBe(true);
+    expect(second.applied).toEqual(first.applied);
+    expect(second.refused).toEqual(first.refused);
+    expect(rowOf(s).version).toBe(versionAfterFirst);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+
+  test.each(survivorCases)(
+    "$label: a same-scope title collision refuses the whole group",
+    ({ make }) => {
+      const s = make("CF Conflict Survivor Title");
+      const p = createEntry("CF Conflict Source Title");
+      // A third shared entry whose title equals the source's, case-insensitively.
+      const blocker = createGlobalEntry("cf conflict source title");
+      expect(ltm.getByLogical(ltm.logicalIdOf(blocker))).not.toBeNull();
+      expect(blocker).not.toBe(p);
+      const d = decision(s, p);
+      const receipt = apply(
+        request([{ ...d, contentFromId: p }], { projectId }),
+      );
+
+      expect(receipt.applied).toEqual([]);
+      const refused = receipt.refused[0];
+      expect(refused.error.code).toBe("title_conflict");
+      expect(refused.error.details).toEqual([
+        {
+          id: p,
+          reason: "title_conflict",
+          expectedRevision: d.expectedRevisions[p],
+        },
+      ]);
+      // Rolled back: the merges never committed, no provenance, no export.
+      const sAfter = rowOf(s);
+      expect(sAfter.version).toBe(1);
+      expect(sAfter.title).toBe("CF Conflict Survivor Title");
+      expect(isLive(p)).toBe(true);
+      expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+      expect(exportLoreFile).not.toHaveBeenCalled();
+    },
+  );
+
+  test("a source title equal to the survivor's title applies cleanly", () => {
+    const s = createGlobalEntry("CF Same Title For Both");
+    const p = createEntry("CF Same Title For Both");
+    const receipt = apply(
+      request([{ ...decision(s, p), contentFromId: p }], { projectId }),
+    );
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(rowOf(s).content).toBe("Content for CF Same Title For Both");
+    expect(rowOf(s).title).toBe("CF Same Title For Both");
+  });
+
+  test("contentFromId outside mergeIds (and equal to keepId) is invalid", () => {
+    const base = {
+      projectId: "p",
+      operationId: "op-x",
+      reviewedAt: 1,
+      actor: "a",
+    };
+    const decisionBase = {
+      keepId: "k",
+      mergeIds: ["m"],
+      expectedRevisions: { k: 1, m: 1 },
+    };
+    expect(() =>
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "other" }],
+      }),
+    ).toThrowError(DedupApplyError);
+    expect(() =>
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "k" }],
+      }),
+    ).toThrowError(DedupApplyError);
+    try {
+      parseDedupApplyRequest({
+        ...base,
+        decisions: [{ ...decisionBase, contentFromId: "other" }],
+      });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect((e as DedupApplyError).code).toBe("invalid_request");
+    }
+  });
+
+  test("the payload hash is unchanged without contentFromId and differs with it", () => {
+    const fixed = {
+      projectId: "p1",
+      operationId: "op-hash-stability",
+      reviewedAt: 1700000000000,
+      actor: "tester",
+      decisions: [
+        {
+          keepId: "keep-1",
+          mergeIds: ["m1", "m2"],
+          expectedRevisions: { "keep-1": 2, m1: 1, m2: 3 },
+        },
+      ],
+    };
+    expect(dedupApplyPayloadHash(fixed)).toBe(
+      "5b9e4e6d4bc7abe7fc970750d6ec58aeef6f61fddaf9394ecfbc5276ce0170f0",
+    );
+    expect(
+      dedupApplyPayloadHash({
+        ...fixed,
+        decisions: [{ ...fixed.decisions[0], contentFromId: "m1" }],
+      }),
+    ).not.toBe(
+      "5b9e4e6d4bc7abe7fc970750d6ec58aeef6f61fddaf9394ecfbc5276ce0170f0",
+    );
+  });
+
+  test("private survivor takes a private source's content in the project pool", () => {
+    const p1 = createEntry("CF Private Keep Title");
+    const p2 = createEntry("CF Private Drop Title");
+    const receipt = apply(
+      request([{ ...decision(p1, p2), contentFromId: p2 }], { projectId }),
+    );
+    expect(receipt.refused).toEqual([]);
+    const after = rowOf(p1);
+    expect(after.title).toBe("CF Private Drop Title");
+    expect(after.content).toBe("Content for CF Private Drop Title");
+    expect(after.project_id).toBe(projectId);
+    expect(after.cross_project).toBe(0);
+    expect(isLive(p2)).toBe(false);
+  });
+});

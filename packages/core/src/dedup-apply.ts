@@ -21,6 +21,11 @@
  * same-project) survivor, so a shared entry can never be removed in favour of
  * a private one and private content never becomes shared — the survivor row
  * itself is never modified by a merge.
+ *
+ * A decision may instead KEEP the dropped entry's content (`contentFromId`):
+ * the named merge entry's title/content become a new version of the survivor
+ * — same logical id, scope and visibility — before the merges tombstone. The
+ * prior survivor version stays in history for recovery.
  */
 
 import { createHash } from "node:crypto";
@@ -52,6 +57,12 @@ export type DedupDecision = {
    * saw it, keyed by the exact id used in `keepId` / `mergeIds`.
    */
   expectedRevisions: Record<string, number>;
+  /**
+   * When set, the survivor (`keepId`) takes this merged entry's title and
+   * content as a new version before the merge entries are tombstoned. Must be
+   * one of `mergeIds`. The survivor keeps its logical id, scope and visibility.
+   */
+  contentFromId?: string;
 };
 
 export type DedupApplyRequest = {
@@ -72,7 +83,8 @@ export type DedupApplyRequest = {
 export type DedupRefusalReason =
   | "not_found"
   | "scope_mismatch"
-  | "stale_revision";
+  | "stale_revision"
+  | "title_conflict";
 
 export type DedupRefusalDetail = {
   id: string;
@@ -104,9 +116,23 @@ export type DedupMergedEntry = {
 export type DedupGroupApplied = {
   groupIndex: number;
   keepId: string;
+  /** The survivor's current revision after apply — a replace (`contentFromId`)
+   * appends a version, so it can differ from the reviewed one. Usable as the
+   * next expected revision either way. */
   keepRevision: number;
   merged: DedupMergedEntry[];
   appliedAt: number;
+  /** Set only when `contentFromId` replaced the survivor's content. */
+  contentFrom?: {
+    /** The `contentFromId` as given in the decision. */
+    id: string;
+    /** Its revision when applied (before tombstoning). */
+    revision: number;
+    /** Survivor revision before the replacement version was appended. */
+    replacedKeepRevision: number;
+    /** Survivor's current version id after apply. */
+    keepVersionId: string;
+  };
 };
 
 export type DedupApplyReceipt = {
@@ -202,7 +228,17 @@ function parseDecision(raw: unknown, index: number): DedupDecision {
       `${label}.expectedRevisions[${id}]`,
     );
   }
-  return { keepId, mergeIds, expectedRevisions };
+  const out: DedupDecision = { keepId, mergeIds, expectedRevisions };
+  if (raw.contentFromId !== undefined) {
+    const contentFromId = requireId(
+      raw.contentFromId,
+      `${label}.contentFromId`,
+    );
+    if (!mergeIds.includes(contentFromId))
+      invalid(`${label}.contentFromId must be one of mergeIds`);
+    out.contentFromId = contentFromId;
+  }
+  return out;
 }
 
 /**
@@ -258,6 +294,7 @@ export function dedupApplyPayloadHash(request: DedupApplyRequest): string {
       expectedRevisions: Object.keys(d.expectedRevisions)
         .sort()
         .map((id) => [id, d.expectedRevisions[id]] as const),
+      ...(d.contentFromId ? { contentFromId: d.contentFromId } : {}),
     }))
     .sort((a, b) => a.keepId.localeCompare(b.keepId));
   const canonical = JSON.stringify({
@@ -418,76 +455,157 @@ function checkedRow(rows: Map<string, CurrentRow>, id: string): CurrentRow {
   return row;
 }
 
+/**
+ * Thrown inside a group's transaction to roll the whole group back when a
+ * `contentFromId` replacement title collides with a third live entry. Caught
+ * right outside `withTransaction` and converted into a `title_conflict`
+ * refusal — the merges and provenance writes never commit.
+ */
+class TitleConflictError extends Error {
+  constructor(readonly sourceId: string) {
+    super(`dedup apply: replacement title from ${sourceId} collides`);
+    this.name = "TitleConflictError";
+  }
+}
+
 function applyGroup(
   group: ResolvedGroup,
   request: DedupApplyRequest,
 ):
-  | { outcome: DedupGroupApplied; mergedProjectIds: string[] }
+  | { outcome: DedupGroupApplied; exportProjectIds: string[] }
   | { outcome: DedupGroupRefused } {
-  return withTransaction(() => {
-    const checked = checkGroup(group, request.projectId);
-    if (!("rows" in checked)) return { outcome: refusal(group, checked) };
-    const { decision } = group;
-    const keepRow = checkedRow(checked.rows, decision.keepId);
-    const appliedAt = Date.now();
-    const merged: DedupMergedEntry[] = [];
-    const tenantId = currentTenantId();
-    for (const id of decision.mergeIds) {
-      const before = checkedRow(checked.rows, id);
-      if (before.logical_id === keepRow.logical_id)
-        throw new Error(
-          `dedup apply: ${id} aliases the survivor ${decision.keepId}`,
-        );
-      ltm.remove(before.logical_id);
-      const after = currentRow(before.logical_id);
-      if (!after || !after.is_deleted)
-        throw new Error(
-          `dedup apply: ${before.logical_id} has no death-certificate version after remove()`,
-        );
-      db()
-        .query(
-          `INSERT INTO dedup_provenance (
-             tenant_id, operation_id, group_index, keep_logical_id, merged_logical_id,
-             merged_version_id, expected_revision, actual_revision,
-             keep_expected_revision, keep_actual_revision, actor, reviewed_at, applied_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  try {
+    return withTransaction(() => {
+      const checked = checkGroup(group, request.projectId);
+      if (!("rows" in checked)) return { outcome: refusal(group, checked) };
+      const { decision } = group;
+      const keepRow = checkedRow(checked.rows, decision.keepId);
+      const appliedAt = Date.now();
+      const merged: DedupMergedEntry[] = [];
+      const tenantId = currentTenantId();
+      for (const id of decision.mergeIds) {
+        const before = checkedRow(checked.rows, id);
+        if (before.logical_id === keepRow.logical_id)
+          throw new Error(
+            `dedup apply: ${id} aliases the survivor ${decision.keepId}`,
+          );
+        ltm.remove(before.logical_id);
+        const after = currentRow(before.logical_id);
+        if (!after || !after.is_deleted)
+          throw new Error(
+            `dedup apply: ${before.logical_id} has no death-certificate version after remove()`,
+          );
+        db()
+          .query(
+            `INSERT INTO dedup_provenance (
+               tenant_id, operation_id, group_index, keep_logical_id, merged_logical_id,
+               merged_version_id, expected_revision, actual_revision,
+               keep_expected_revision, keep_actual_revision, actor, reviewed_at, applied_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            tenantId,
+            request.operationId,
+            group.index,
+            keepRow.logical_id,
+            before.logical_id,
+            after.id,
+            decision.expectedRevisions[id],
+            before.version,
+            decision.expectedRevisions[decision.keepId],
+            keepRow.version,
+            request.actor,
+            request.reviewedAt,
+            appliedAt,
+          );
+        merged.push({
+          id,
+          revision: before.version,
+          tombstoneVersionId: after.id,
+        });
+      }
+      let contentFrom: DedupGroupApplied["contentFrom"];
+      let keepRevision = keepRow.version;
+      if (decision.contentFromId) {
+        // The source keeps its checked version's title/content even though it
+        // was just tombstoned — tombstones are new rows, old versions keep
+        // their content. The collision probe runs AFTER the removes, so the
+        // group's own merges (the source included) never count as collisions.
+        const sourceRow = checkedRow(checked.rows, decision.contentFromId);
+        const source = db()
+          .query(
+            "SELECT title, content FROM knowledge WHERE tenant_id = ? AND id = ?",
+          )
+          .get(tenantId, sourceRow.id) as {
+          title: string;
+          content: string;
+        } | null;
+        const survivor = ltm.getByLogical(keepRow.logical_id);
+        if (!source || !survivor)
+          throw new Error(
+            `dedup apply: ${decision.contentFromId} passed checks but its version row is gone`,
+          );
+        if (
+          source.title !== survivor.title &&
+          ltm.titleCollides(keepRow.logical_id, survivor, source.title)
         )
-        .run(
-          tenantId,
-          request.operationId,
-          group.index,
-          keepRow.logical_id,
-          before.logical_id,
-          after.id,
-          decision.expectedRevisions[id],
-          before.version,
-          decision.expectedRevisions[decision.keepId],
-          keepRow.version,
-          request.actor,
-          request.reviewedAt,
-          appliedAt,
-        );
-      merged.push({
-        id,
-        revision: before.version,
-        tombstoneVersionId: after.id,
-      });
-    }
-    return {
-      outcome: {
-        groupIndex: group.index,
-        keepId: decision.keepId,
-        keepRevision: keepRow.version,
-        merged,
-        appliedAt,
-      },
-      // Origin projects of the merged rows (a shared-pool merge can tombstone
-      // another project's promoted entry) — their .lore.md files export too.
-      mergedProjectIds: decision.mergeIds.map(
+          throw new TitleConflictError(decision.contentFromId);
+        ltm.update(keepRow.logical_id, {
+          title: source.title,
+          content: source.content,
+        });
+        const after = currentRow(keepRow.logical_id);
+        if (!after)
+          throw new Error(
+            `dedup apply: survivor ${keepRow.logical_id} has no current row after replace`,
+          );
+        keepRevision = after.version;
+        contentFrom = {
+          id: decision.contentFromId,
+          revision: sourceRow.version,
+          replacedKeepRevision: keepRow.version,
+          keepVersionId: after.id,
+        };
+      }
+      const exportProjectIds = decision.mergeIds.map(
         (id) => checkedRow(checked.rows, id).project_id ?? "",
-      ),
-    };
-  });
+      );
+      // A replaced promoted survivor's origin project lists it in .lore.md.
+      if (contentFrom && keepRow.project_id !== null)
+        exportProjectIds.push(keepRow.project_id);
+      return {
+        outcome: {
+          groupIndex: group.index,
+          keepId: decision.keepId,
+          keepRevision,
+          merged,
+          appliedAt,
+          ...(contentFrom ? { contentFrom } : {}),
+        },
+        // Origin projects of the merged rows (a shared-pool merge can tombstone
+        // another project's promoted entry) — their .lore.md files export too.
+        exportProjectIds,
+      };
+    });
+  } catch (e) {
+    if (e instanceof TitleConflictError) {
+      const id = e.sourceId;
+      return {
+        outcome: refusal(group, {
+          code: "title_conflict",
+          message: `group ${group.index} refused: ${id} title_conflict`,
+          details: [
+            {
+              id,
+              reason: "title_conflict",
+              expectedRevision: group.decision.expectedRevisions[id],
+            },
+          ],
+        }),
+      };
+    }
+    throw e;
+  }
 }
 
 /**
@@ -580,8 +698,8 @@ function exportAfterCommit(projectId: string): void {
  *
  * Throws `DedupApplyError` for request-level problems (`invalid_request`,
  * `not_found` for the project, `operation_conflict`); per-group problems
- * (`stale_revision`, `not_found`, `scope_mismatch`, `conflicting_groups`) are
- * returned in `receipt.refused`.
+ * (`stale_revision`, `not_found`, `scope_mismatch`, `title_conflict`,
+ * `conflicting_groups`) are returned in `receipt.refused`.
  *
  * Must be called outside any transaction: inside one, the per-group
  * transactions would collapse into savepoints of the caller's and a refused
@@ -632,9 +750,9 @@ export function applyDedupDecisions(
     const result = applyGroup(group, request);
     if ("error" in result.outcome) {
       refused.push(result.outcome);
-    } else if ("mergedProjectIds" in result) {
+    } else if ("exportProjectIds" in result) {
       applied.push(result.outcome);
-      for (const pid of result.mergedProjectIds)
+      for (const pid of result.exportProjectIds)
         if (pid) mergedProjectIds.add(pid);
     }
   }
