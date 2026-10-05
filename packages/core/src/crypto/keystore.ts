@@ -350,10 +350,10 @@ export function persistScopeKeyRotation(
  * Rotate the scope's DEK (E-4c-3): mint a FRESH DEK and wrap it to EACH remaining member at
  * `newEpoch`, INSERTing new rows while OLD-epoch rows are retained (so past blobs stay
  * decryptable). New content seals at `newEpoch` once it is the highest local epoch. `newEpoch`
- * MUST be allocated server-atomically via the `rotate_scope_key(scope)` RPC so concurrent admins
- * never mint the same epoch with divergent DEKs. `members` MUST include the caller (self) with
- * their own public key, or the rotator locks itself out of the new epoch. Members + their
- * identity public keys are supplied by the caller (CLI/registry).
+ * MUST be allocated server-atomically by the `remove_scope_member_rotating` RPC so concurrent
+ * member removals never mint the same epoch with divergent DEKs. `members` MUST include the caller
+ * (self) with their own public key, or the rotator locks itself out of the new epoch. Members +
+ * their identity public keys are supplied by the caller (CLI/registry).
  */
 export async function rotateScopeKey(
   scopeId: string,
