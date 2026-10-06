@@ -25,6 +25,11 @@ import {
   type StreamedItemsBuilder,
 } from "./streaming-request";
 import { parseContextBoundary } from "../context-boundary";
+import { isImageBlock, toAnthropicImage } from "./images";
+import {
+  InvalidCrossProviderRequestError,
+  requireTextOnlyToolResult,
+} from "./errors";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -146,7 +151,29 @@ function normalizeMessageContent(content: unknown): {
     const block = toGatewayBlock(rawBlock);
     provenancePositions.push(provenance.length);
     visible.push(block);
-    provenance.push(block);
+    if (
+      (rawBlock.type === "text" &&
+        Object.keys(rawBlock).some(
+          (key) => key !== "type" && key !== "text",
+        )) ||
+      (rawBlock.type === "tool_result" &&
+        Array.isArray(rawBlock.content) &&
+        rawBlock.content.some(
+          (part: unknown) =>
+            part !== null &&
+            typeof part === "object" &&
+            !Array.isArray(part) &&
+            (part as Record<string, unknown>).type === "text" &&
+            Object.keys(part).some((key) => key !== "type" && key !== "text"),
+        ))
+    ) {
+      // Keep native citation and cache fields on the request-only side. A
+      // foreign route cannot safely project them to plain visible text.
+      hasRequestOnlyProvenance = true;
+      provenance.push({ type: "opaque", raw: rawBlock, requestOnly: true });
+    } else {
+      provenance.push(block);
+    }
   }
 
   return {
@@ -201,10 +228,211 @@ function normalizeSystem(system: unknown): string {
 // Reverse helpers — gateway blocks → Anthropic format
 // ---------------------------------------------------------------------------
 
-/**
- * Convert a `GatewayContentBlock` back to Anthropic's wire format.
- */
-function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
+/** Native and foreign replay share the same Responses output-envelope checks. */
+export function assertResponsesToolOutputEnvelope(
+  raw: Record<string, unknown>,
+): void {
+  if (
+    raw.type !== "function_call_output" ||
+    typeof raw.call_id !== "string" ||
+    !raw.call_id ||
+    (raw.id !== undefined &&
+      (typeof raw.id !== "string" || raw.id.length === 0)) ||
+    (raw.status !== undefined && raw.status !== "completed") ||
+    (typeof raw.output !== "string" && !Array.isArray(raw.output)) ||
+    Object.keys(raw).some(
+      (key) =>
+        key !== "type" &&
+        key !== "call_id" &&
+        key !== "output" &&
+        key !== "id" &&
+        key !== "status",
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+}
+
+/** A foreign wire can carry only the visible text of a Responses tool output. */
+export function portableResponsesToolOutput(
+  raw: Record<string, unknown>,
+): Array<{ type: "text"; text: string }> {
+  assertResponsesToolOutputEnvelope(raw);
+  if (typeof raw.output === "string") {
+    return [{ type: "text", text: raw.output }];
+  }
+  if (!Array.isArray(raw.output)) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  return raw.output.map((part: unknown) => {
+    if (
+      !part ||
+      typeof part !== "object" ||
+      Array.isArray(part) ||
+      ((part as Record<string, unknown>).type !== "output_text" &&
+        (part as Record<string, unknown>).type !== "input_text") ||
+      typeof (part as Record<string, unknown>).text !== "string" ||
+      Object.keys(part).some(
+        (key) =>
+          key !== "type" &&
+          key !== "text" &&
+          !(
+            key === "annotations" &&
+            (part as Record<string, unknown>).type === "output_text" &&
+            Array.isArray((part as Record<string, unknown>).annotations) &&
+            ((part as Record<string, unknown>).annotations as unknown[])
+              .length === 0
+          ),
+      )
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    return { type: "text", text: (part as { text: string }).text };
+  });
+}
+
+/** Only a completed Responses function call can become an Anthropic tool use. */
+export function portableResponsesFunctionCall(raw: Record<string, unknown>): {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+} {
+  if (
+    raw.type !== "function_call" ||
+    typeof raw.call_id !== "string" ||
+    !raw.call_id ||
+    typeof raw.name !== "string" ||
+    !raw.name ||
+    typeof raw.arguments !== "string" ||
+    (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id)) ||
+    (raw.status !== undefined && raw.status !== "completed") ||
+    Object.keys(raw).some(
+      (key) =>
+        key !== "type" &&
+        key !== "call_id" &&
+        key !== "name" &&
+        key !== "arguments" &&
+        key !== "id" &&
+        key !== "status",
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  try {
+    const input: unknown = JSON.parse(raw.arguments);
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    return {
+      type: "tool_use",
+      id: raw.call_id,
+      name: raw.name,
+      input: input as Record<string, unknown>,
+    };
+  } catch {
+    throw new InvalidCrossProviderRequestError();
+  }
+}
+
+/** Check every assistant item field before projecting its visible text. */
+export function portableResponsesAssistantText(
+  raw: Record<string, unknown>,
+): string {
+  if (
+    (raw.type !== undefined && raw.type !== "message") ||
+    raw.role !== "assistant" ||
+    (raw.status !== undefined && raw.status !== "completed") ||
+    (raw.id !== undefined &&
+      (typeof raw.id !== "string" || raw.id.length === 0)) ||
+    Object.keys(raw).some(
+      (key) =>
+        key !== "type" &&
+        key !== "role" &&
+        key !== "status" &&
+        key !== "id" &&
+        key !== "content",
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (typeof raw.content === "string") return raw.content;
+  if (!Array.isArray(raw.content) || raw.content.length !== 1) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  const part = raw.content[0];
+  if (
+    !part ||
+    typeof part !== "object" ||
+    Array.isArray(part) ||
+    (part as Record<string, unknown>).type !== "output_text" ||
+    typeof (part as Record<string, unknown>).text !== "string" ||
+    Object.keys(part).some(
+      (key) =>
+        key !== "type" &&
+        key !== "text" &&
+        !(
+          key === "annotations" &&
+          Array.isArray((part as Record<string, unknown>).annotations) &&
+          ((part as Record<string, unknown>).annotations as unknown[])
+            .length === 0
+        ),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  return (part as { text: string }).text;
+}
+
+/** A completed Responses user item may shed its source ID only if its parts remain portable. */
+export function portableResponsesUserMessage(
+  raw: Record<string, unknown>,
+): void {
+  if (
+    (raw.type !== undefined && raw.type !== "message") ||
+    raw.role !== "user" ||
+    (raw.status !== undefined && raw.status !== "completed") ||
+    (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id)) ||
+    Object.keys(raw).some(
+      (key) => !["type", "role", "content", "id", "status"].includes(key),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (Array.isArray(raw.content)) {
+    for (const part of raw.content) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      const value = part as Record<string, unknown>;
+      if (["input_text", "output_text", "text"].includes(String(value.type))) {
+        if (
+          typeof value.text !== "string" ||
+          Object.keys(value).some(
+            (key) =>
+              key !== "type" &&
+              key !== "text" &&
+              !(
+                key === "annotations" &&
+                value.type === "output_text" &&
+                Array.isArray(value.annotations) &&
+                value.annotations.length === 0
+              ),
+          )
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
+      }
+    }
+  }
+}
+
+/** Convert a `GatewayContentBlock` back to Anthropic's wire format. */
+function toAnthropicBlock(
+  block: GatewayContentBlock,
+  source: GatewayRequest["protocol"],
+  role?: GatewayMessage["role"],
+): Record<string, unknown> {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -227,16 +455,51 @@ function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
       };
 
     case "tool_result": {
+      if (source === "openai") requireTextOnlyToolResult(block);
       const result: Record<string, unknown> = {
         type: "tool_result",
         tool_use_id: block.toolUseId,
-        content: block.content.map(toAnthropicBlock),
+        content: block.content.map((part) =>
+          toAnthropicBlock(part, source, role),
+        ),
       };
       if (block.isError) result.is_error = true;
       return result;
     }
 
     case "opaque":
+      if (source === "openai-responses") {
+        if (block.responsesItem && block.raw.type === "function_call") {
+          return portableResponsesFunctionCall(block.raw);
+        }
+        if (block.responsesItem && block.raw.type === "function_call_output") {
+          return {
+            type: "tool_result",
+            tool_use_id: block.raw.call_id,
+            content: portableResponsesToolOutput(block.raw),
+          };
+        }
+        if (
+          block.responsesItem &&
+          (block.raw.type === "message" ||
+            (block.raw.type === undefined && block.raw.role === "assistant"))
+        ) {
+          return {
+            type: "text",
+            text: portableResponsesAssistantText(block.raw),
+          };
+        }
+        if (!isImageBlock(block.raw) || block.responsesItem) {
+          throw new InvalidCrossProviderRequestError();
+        }
+      }
+      if (isImageBlock(block.raw)) {
+        if (source !== "anthropic" && role !== "user") {
+          throw new InvalidCrossProviderRequestError();
+        }
+        return toAnthropicImage(block.raw, source);
+      }
+      if (source !== "anthropic") throw new InvalidCrossProviderRequestError();
       // Re-emit the original block verbatim.
       // Return a fresh envelope because conversation caching annotates the
       // serialized block with `cache_control`; mutating `raw` would mutate
@@ -505,6 +768,37 @@ export function buildAnthropicRequest(
   headers: Record<string, string>;
   body: unknown;
 } {
+  if (req.extras?.response_format !== undefined) {
+    const format = req.extras.response_format;
+    if (
+      !format ||
+      typeof format !== "object" ||
+      Array.isArray(format) ||
+      format.type !== "text" ||
+      Object.keys(format).some((key) => key !== "type")
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  }
+  if (req.extras?.text !== undefined) {
+    const text = req.extras.text;
+    if (!text || typeof text !== "object" || Array.isArray(text)) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    const controls = text as Record<string, unknown>;
+    const format = controls.format;
+    if (
+      Object.keys(controls).some((key) => key !== "format") ||
+      (format !== undefined &&
+        (!format ||
+          typeof format !== "object" ||
+          Array.isArray(format) ||
+          (format as Record<string, unknown>).type !== "text" ||
+          Object.keys(format).some((key) => key !== "type")))
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  }
   // --- Headers ---
   // Forward non-managed client headers first (provider-specific headers like
   // anthropic-beta, user-agent, etc.), then overlay gateway-managed headers
@@ -581,12 +875,29 @@ export function buildAnthropicRequest(
   }
 
   // Messages
-  const messages = req.messages.map((msg) => ({
-    role: msg.role,
-    // Thinking/signature blocks live in request-only provenance. Re-emit the
-    // complete native sequence only while the pipeline permits provenance.
-    content: (msg.provenanceContent ?? msg.content).map(toAnthropicBlock),
-  }));
+  const messages = req.messages.map((msg) => {
+    // A completed Responses user envelope keeps its ID/status for native
+    // replay. On a foreign wire, project the validated visible parts instead.
+    const provenance = msg.provenanceContent;
+    const userItem = provenance?.length === 1 ? provenance[0] : undefined;
+    const portableUserItem =
+      req.protocol === "openai-responses" &&
+      msg.role === "user" &&
+      userItem?.type === "opaque" &&
+      userItem.responsesItem &&
+      (userItem.raw.type === "message" || userItem.raw.type === undefined) &&
+      userItem.raw.role === "user";
+    if (portableUserItem) portableResponsesUserMessage(userItem.raw);
+    return {
+      role: msg.role,
+      // Thinking/signature blocks live in request-only provenance. Re-emit
+      // the complete native sequence only while the pipeline permits it.
+      content: (portableUserItem
+        ? msg.content
+        : (provenance ?? msg.content)
+      ).map((block) => toAnthropicBlock(block, req.protocol, msg.role)),
+    };
+  });
 
   // Conversation caching: place a breakpoint on the final content block of
   // the last message. Anthropic's 20-block lookback finds the prior turn's
@@ -803,7 +1114,7 @@ export function buildAnthropicNonStreamResponse(
     type: "message",
     role: "assistant",
     model: resp.model,
-    content: resp.content.map(toAnthropicBlock),
+    content: resp.content.map((block) => toAnthropicBlock(block, "anthropic")),
     stop_reason: toAnthropicStopReason(resp.stopReason),
     stop_sequence: null,
     usage,

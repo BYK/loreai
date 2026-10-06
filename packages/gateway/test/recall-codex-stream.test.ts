@@ -264,7 +264,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       body: JSON.stringify({
         model: "gpt-5.5",
         stream: true,
-        parallel_tool_calls: true,
+        parallel_tool_calls: false,
         input: "what did we decide?",
         // Non-empty tools so the gateway injects the recall tool.
         tools: [
@@ -487,7 +487,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       body: JSON.stringify({
         model: "gpt-5.5",
         stream: true,
-        parallel_tool_calls: true,
+        parallel_tool_calls: false,
         input: "what did we decide?",
         tools: [
           {

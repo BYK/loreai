@@ -131,10 +131,13 @@ export type LoreToolStateCompleted = {
   output: string;
   /**
    * Structured content blocks from the tool result (when richer than text).
-   * Preserved for lossless upstream forwarding; dropped by gradient
-   * compression (Layer 2+) when `output` is replaced with an annotation.
+   * Preserved for lossless upstream forwarding. Gradient compression replaces
+   * native Responses array parts with one annotation block when it rewrites
+   * `output`; other source blocks are dropped.
    */
   blocks?: LoreContentBlock[];
+  /** Preserve the Responses array-vs-string output shape across compaction. */
+  nativeResponsesOutputArray?: true;
   metadata?: unknown;
   time: { start: number; end: number };
 };
@@ -146,6 +149,7 @@ export type LoreToolStateError = {
   error: string;
   /** Structured content blocks — same semantics as on completed state. */
   blocks?: LoreContentBlock[];
+  nativeResponsesOutputArray?: true;
   metadata?: unknown;
   time: { start: number; end: number };
 };

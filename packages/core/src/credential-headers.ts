@@ -46,10 +46,13 @@ const KNOWN_CREDENTIAL_HEADER_NAMES = new Set([
   GATEWAY_AUTH_HEADER,
   "x-api-key",
   "x-goog-api-key",
+  "dpop",
+  "x-forwarded-client-cert",
+  "x-ssl-client-cert",
 ]);
 
 const CREDENTIAL_HEADER_PATTERN =
-  /(?:^|-)(?:(?:api|access|auth|bearer|client|consumer|identity|private|refresh|security|subscription)-?(?:id|key|secret|token)|auth|authenticate|authentication|authorisation|authorization|bearer|cookies?|credentials?|jwt|key|oauth|passphrase|passwd|password|secret|signature|token)(?:-|$)/;
+  /(?:^|-)(?:(?:api|access|auth|bearer|client|consumer|identity|private|refresh|security|subscription)-?(?:id|key|secret|token)|(?:client|ssl-client)-cert(?:ificate)?|auth|authenticate|authentication|authorisation|authorization|bearer|cookies?|credentials?|jwt|key|oauth|passphrase|passwd|password|secret|signature|token)(?:-|$)/;
 
 const COLLAPSED_CREDENTIAL_HEADER_PATTERN =
   /^x(?:apikey|(?:auth|oauth|bearer|secret|token|key)sessionid)$/;

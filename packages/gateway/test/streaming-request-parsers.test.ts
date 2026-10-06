@@ -33,6 +33,27 @@ function encoded(body: unknown): Uint8Array {
 }
 
 describe("streaming request parsers", () => {
+  test("Chat developer instructions cannot be elided across a context boundary", async () => {
+    const body = {
+      model: "gpt-test",
+      messages: [
+        { role: "developer", content: "developer-only instruction" },
+        { role: "user", content: "question" },
+      ],
+    };
+    expect(parseOpenAIRequest(body, headers).sourceInput?.boundarySafe).toBe(
+      false,
+    );
+    const streamed = await parseOpenAIRequestChunks(
+      chunks(encoded(body)),
+      headers,
+    );
+    expect(streamed.sourceInput?.boundarySafe).toBe(false);
+    expect(streamed.extras?.nativeChatInstructionPrefix?.items).toEqual([
+      { role: "developer", content: "developer-only instruction" },
+    ]);
+  });
+
   test("Anthropic matches sync parsing for large and small bodies", async () => {
     const body = {
       model: "claude",

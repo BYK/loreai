@@ -28,13 +28,33 @@ import {
   type StreamedItemsBuilder,
 } from "./streaming-request";
 import { parseContextBoundary } from "../context-boundary";
+import {
+  InvalidCrossProviderRequestError,
+  requireTextOnlyToolResult,
+} from "./errors";
 
 type OpenAIMessages = {
   system: string;
   messages: GatewayMessage[];
+  hasDeveloperInstruction: boolean;
+  nativeChatInstructionPrefix: NonNullable<
+    GatewayRequest["extras"]
+  >["nativeChatInstructionPrefix"];
   boundarySafe: boolean;
   retainedItems: number;
 };
+
+function supportedInstructionCacheControl(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const control = value as Record<string, unknown>;
+  return (
+    control.type === "ephemeral" &&
+    (control.ttl === undefined || control.ttl === "1h") &&
+    Object.keys(control).every((key) => key === "type" || key === "ttl")
+  );
+}
 
 export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessages> {
   let system = "";
@@ -42,6 +62,11 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessag
   let leadingSystemItems = 0;
   let sawConversationItem = false;
   let systemAfterConversation = false;
+  let hasDeveloperInstruction = false;
+  let hasInstructionCacheControl = false;
+  const instructionItems: NonNullable<
+    OpenAIMessages["nativeChatInstructionPrefix"]
+  >["items"] = [];
   let seamKind: "none" | "other" | "tool-result" = "none";
   return {
     add(item) {
@@ -50,17 +75,48 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessag
       const content = msg.content;
 
       if (role === "system" || role === "developer") {
+        if (role === "developer") hasDeveloperInstruction = true;
         if (sawConversationItem) systemAfterConversation = true;
         else leadingSystemItems++;
         let text = "";
         if (typeof content === "string") {
           text = content;
         } else if (Array.isArray(content)) {
+          if (
+            content.some(
+              (part) =>
+                !part ||
+                part.type !== "text" ||
+                typeof part.text !== "string" ||
+                Object.keys(part).some(
+                  (key) =>
+                    key !== "type" && key !== "text" && key !== "cache_control",
+                ) ||
+                (part.cache_control !== undefined &&
+                  !supportedInstructionCacheControl(part.cache_control)),
+            )
+          ) {
+            throw new InvalidCrossProviderRequestError();
+          }
           text = (content as Array<Record<string, unknown>>)
             .filter((b) => b.type === "text")
             .map((b) => asString(b.text))
             .join("\n");
+          if (content.some((part) => part.cache_control !== undefined)) {
+            hasInstructionCacheControl = true;
+          }
+        } else {
+          throw new InvalidCrossProviderRequestError();
         }
+        instructionItems.push({
+          role,
+          content:
+            typeof content === "string"
+              ? content
+              : (content as Array<{ type: "text"; text: string }>).map(
+                  (part) => ({ ...part }),
+                ),
+        });
         if (system) {
           system += `\n\n${text}`;
         } else {
@@ -76,7 +132,7 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessag
           content,
           msg.tool_calls as Array<Record<string, unknown>> | undefined,
         );
-        messages.push({ role: "user", content: blocks });
+        messages.push(chatMessageWithTextProvenance("user", blocks));
         seamKind = "other";
         return;
       }
@@ -86,7 +142,7 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessag
           content,
           msg.tool_calls as Array<Record<string, unknown>> | undefined,
         );
-        messages.push({ role: "assistant", content: blocks });
+        messages.push(chatMessageWithTextProvenance("assistant", blocks));
         seamKind = "other";
         return;
       }
@@ -113,11 +169,51 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessag
       return {
         system,
         messages,
-        boundarySafe: !systemAfterConversation && seamKind === "other",
+        hasDeveloperInstruction,
+        nativeChatInstructionPrefix:
+          hasDeveloperInstruction ||
+          systemAfterConversation ||
+          hasInstructionCacheControl
+            ? {
+                normalizedSystem: system,
+                hasLateItems: systemAfterConversation,
+                items: instructionItems,
+              }
+            : undefined,
+        // A suffix cannot recover the developer tier from normalized system
+        // text, so it must never inherit a checkpoint without this marker.
+        boundarySafe:
+          !hasDeveloperInstruction &&
+          !systemAfterConversation &&
+          !hasInstructionCacheControl &&
+          seamKind === "other",
         retainedItems: leadingSystemItems,
       };
     },
   };
+}
+
+function chatMessageWithTextProvenance(
+  role: GatewayMessage["role"],
+  content: GatewayContentBlock[],
+): GatewayMessage {
+  return content.some((block) => block.type === "text" && block.raw)
+    ? {
+        role,
+        content,
+        provenanceContent: content,
+        provenancePositions: content.map((_block, index) => index),
+      }
+    : { role, content };
+}
+
+function chatTextPart(item: Record<string, unknown>): GatewayContentBlock {
+  if (typeof item.text !== "string") {
+    throw new InvalidCrossProviderRequestError();
+  }
+  return Object.keys(item).some((key) => key !== "type" && key !== "text")
+    ? { type: "text", text: item.text, raw: item }
+    : { type: "text", text: item.text };
 }
 
 function openAIUsage(usage: GatewayUsage): Record<string, unknown> {
@@ -192,6 +288,25 @@ export function parseOpenAIRequest(
   if (Object.hasOwn(raw, "provider")) {
     extras.provider = raw.provider;
   }
+  if (Object.hasOwn(raw, "tool_choice")) {
+    extras.tool_choice = raw.tool_choice;
+  }
+  if (Object.hasOwn(raw, "parallel_tool_calls")) {
+    if (typeof raw.parallel_tool_calls !== "boolean") {
+      throw new InvalidCrossProviderRequestError();
+    }
+    extras.parallel_tool_calls = raw.parallel_tool_calls;
+  }
+  if (Object.hasOwn(raw, "response_format")) {
+    if (
+      !raw.response_format ||
+      typeof raw.response_format !== "object" ||
+      Array.isArray(raw.response_format)
+    ) {
+      throw new Error("invalid Chat response format");
+    }
+    extras.response_format = raw.response_format as Record<string, unknown>;
+  }
   if (raw.stream_options && typeof raw.stream_options === "object") {
     const so = raw.stream_options as Record<string, unknown>;
     if (typeof so.include_usage === "boolean") {
@@ -205,17 +320,31 @@ export function parseOpenAIRequest(
   for (const msg of rawMessages as Array<Record<string, unknown>>) {
     messageBuilder.add(msg);
   }
-  const { system, messages, boundarySafe, retainedItems } =
-    messageBuilder.finish();
+  const {
+    system,
+    messages,
+    hasDeveloperInstruction,
+    nativeChatInstructionPrefix,
+    boundarySafe,
+    retainedItems,
+  } = messageBuilder.finish();
+  if (hasDeveloperInstruction) extras.chatDeveloperInstruction = true;
+  if (nativeChatInstructionPrefix) {
+    extras.nativeChatInstructionPrefix = nativeChatInstructionPrefix;
+  }
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
   const tools: GatewayTool[] = rawTools.map((t: Record<string, unknown>) => {
     const func = t.function as Record<string, unknown> | undefined;
+    if (func?.strict !== undefined && typeof func.strict !== "boolean") {
+      throw new InvalidCrossProviderRequestError();
+    }
     return {
       name: asString(func?.name ?? t.name),
       description: asString(func?.description),
       inputSchema: (func?.parameters as Record<string, unknown>) ?? {},
+      ...(func?.strict !== undefined ? { strict: func.strict } : {}),
     };
   });
 
@@ -251,6 +380,9 @@ const OPENAI_STREAM_CAPTURE_KEYS = new Set([
   "logprobs",
   "top_logprobs",
   "provider",
+  "tool_choice",
+  "parallel_tool_calls",
+  "response_format",
   "stream_options",
   "tools",
 ]);
@@ -282,6 +414,15 @@ export function parseOpenAIRequestChunks(
       if (streamed !== undefined) {
         req.system = streamed.system;
         req.messages = streamed.messages;
+        if (streamed.hasDeveloperInstruction) {
+          req.extras ??= {};
+          req.extras.chatDeveloperInstruction = true;
+        }
+        if (streamed.nativeChatInstructionPrefix) {
+          req.extras ??= {};
+          req.extras.nativeChatInstructionPrefix =
+            streamed.nativeChatInstructionPrefix;
+        }
       }
       return req;
     },
@@ -299,7 +440,7 @@ function parseUserContent(
   } else if (Array.isArray(content)) {
     for (const item of content as Array<Record<string, unknown>>) {
       if (item.type === "text") {
-        blocks.push({ type: "text", text: asString(item.text) });
+        blocks.push(chatTextPart(item));
       } else if (item.type === "tool_use") {
         blocks.push({
           type: "tool_use",
@@ -350,7 +491,7 @@ function parseAssistantContent(
   } else if (Array.isArray(content)) {
     for (const item of content as Array<Record<string, unknown>>) {
       if (item.type === "text") {
-        blocks.push({ type: "text", text: asString(item.text) });
+        blocks.push(chatTextPart(item));
       } else if (item.type === "tool_use") {
         blocks.push({
           type: "tool_use",
@@ -401,7 +542,13 @@ function parseToolResult(msg: Record<string, unknown>): GatewayContentBlock[] {
   } else if (Array.isArray(content)) {
     innerBlocks = (content as Array<Record<string, unknown>>).map((item) => {
       if (item.type === "text") {
-        return { type: "text" as const, text: asString(item.text) };
+        if (
+          typeof item.text !== "string" ||
+          Object.keys(item).some((key) => key !== "type" && key !== "text")
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
+        return { type: "text" as const, text: item.text };
       }
       // Unknown sub-block (image_url, …) — preserve as opaque.
       return { type: "opaque" as const, raw: item };
@@ -832,7 +979,15 @@ export function buildOpenAIUpstreamRequest(
 
   const body: Record<string, unknown> = {
     model: req.model,
-    messages: buildOpenAIMessages(req.messages, req.system, cache),
+    messages: buildOpenAIMessages(
+      req.messages,
+      req.system,
+      req.protocol,
+      cache,
+      req.protocol === "openai"
+        ? req.extras?.nativeChatInstructionPrefix
+        : undefined,
+    ),
     stream: req.stream,
   };
 
@@ -851,6 +1006,7 @@ export function buildOpenAIUpstreamRequest(
         name: t.name,
         description: t.description,
         parameters: t.inputSchema,
+        ...(t.strict !== undefined ? { strict: t.strict } : {}),
       },
     }));
     if (cache?.cacheTools && tools.length > 0) {
@@ -885,6 +1041,15 @@ export function buildOpenAIUpstreamRequest(
     }
     if (req.extras.stream_options !== undefined) {
       body.stream_options = req.extras.stream_options;
+    }
+    if (req.extras.response_format !== undefined) {
+      body.response_format = req.extras.response_format;
+    }
+    if (req.protocol === "openai" && req.extras.tool_choice !== undefined) {
+      body.tool_choice = req.extras.tool_choice;
+    }
+    if (req.extras.parallel_tool_calls !== undefined) {
+      body.parallel_tool_calls = req.extras.parallel_tool_calls;
     }
   }
 
@@ -939,15 +1104,68 @@ const CACHE_ANCHOR_MIN_MESSAGES = 2 * CACHE_ANCHOR_STEP;
 function buildOpenAIMessages(
   messages: GatewayMessage[],
   system: string,
+  source: GatewayRequest["protocol"],
   cache?: AnthropicCacheOptions,
+  nativeInstructions?: NonNullable<
+    GatewayRequest["extras"]
+  >["nativeChatInstructionPrefix"],
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
+
+  if (nativeInstructions) {
+    const prefix = nativeInstructions.normalizedSystem;
+    if (prefix && system !== prefix && !system.startsWith(`${prefix}\n\n`)) {
+      throw new Error("Chat instruction provenance changed");
+    }
+    const suffix =
+      prefix && system !== prefix
+        ? system.slice(prefix.length + 2)
+        : prefix
+          ? ""
+          : system;
+    const firstDeveloper = nativeInstructions.items.findIndex(
+      (item) => item.role === "developer",
+    );
+    const suffixAt =
+      firstDeveloper < 0 ? nativeInstructions.items.length : firstDeveloper;
+    for (const [index, item] of nativeInstructions.items.entries()) {
+      if (index === suffixAt && suffix)
+        result.push({ role: "system", content: suffix });
+      result.push({
+        role: item.role,
+        content: Array.isArray(item.content)
+          ? item.content.map((part) => ({ ...part }))
+          : item.content,
+      });
+    }
+    if (suffixAt === nativeInstructions.items.length && suffix) {
+      result.push({ role: "system", content: suffix });
+    }
+    if (cache?.systemTTL) {
+      const lastSystem = result.findLastIndex((item) => item.role === "system");
+      if (lastSystem >= 0) {
+        const item = result[lastSystem];
+        const parts =
+          typeof item.content === "string"
+            ? [{ type: "text", text: item.content }]
+            : (item.content as Array<Record<string, unknown>>);
+        if (parts.length > 0) {
+          if (parts[parts.length - 1].cache_control === undefined) {
+            parts[parts.length - 1].cache_control = ephemeralCacheControl(
+              cache.systemTTL,
+            );
+          }
+          item.content = parts;
+        }
+      }
+    }
+  }
 
   // Add system prompt if present. When system caching is requested, emit the
   // block-array form with a `cache_control` breakpoint so OpenRouter caches the
   // (large, stable) system prefix. Otherwise keep the plain-string form for
   // maximum compatibility and cache stability (byte-identical across turns).
-  if (system) {
+  if (system && !nativeInstructions) {
     if (cache?.systemTTL) {
       result.push({
         role: "system",
@@ -965,7 +1183,31 @@ function buildOpenAIMessages(
   }
 
   for (const msg of messages) {
-    const blocks = msg.content;
+    if (
+      source === "openai-responses" &&
+      msg.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem &&
+          block.raw.type === "message" &&
+          Array.isArray(block.raw.content) &&
+          block.raw.content.some(
+            (part: unknown) =>
+              part !== null &&
+              typeof part === "object" &&
+              !Array.isArray(part) &&
+              "annotations" in part &&
+              (!Array.isArray(part.annotations) || part.annotations.length > 0),
+          ),
+      )
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    const blocks =
+      source === "openai" &&
+      msg.provenanceContent?.some((block) => block.type === "text" && block.raw)
+        ? msg.provenanceContent
+        : msg.content;
     const role = msg.role;
 
     // Collect text, opaque (image/audio/…), and tool_use blocks.
@@ -975,7 +1217,11 @@ function buildOpenAIMessages(
 
     for (const block of blocks) {
       if (block.type === "text") {
-        contentParts.push({ type: "text", text: block.text });
+        contentParts.push(
+          source === "openai" && block.raw
+            ? { ...block.raw }
+            : { type: "text", text: block.text },
+        );
       } else if (block.type === "tool_use") {
         toolUses.push({
           id: block.id,
@@ -986,16 +1232,18 @@ function buildOpenAIMessages(
           },
         });
       } else if (block.type === "tool_result") {
-        // OpenAI tool messages take a string content field. Use the text
-        // projection — non-text sub-blocks (images) are represented as
-        // placeholders. (OpenAI's wire format can't carry structured
-        // tool-result content; Anthropic-native clients are unaffected.)
+        requireTextOnlyToolResult(block);
+        // OpenAI tool messages take a string content field. Reject non-text
+        // sub-blocks before taking the text projection.
         result.push({
           role: "tool",
           tool_call_id: block.toolUseId,
           content: blocksToText(block.content),
         });
       } else if (block.type === "opaque") {
+        if (source !== "openai") {
+          throw new InvalidCrossProviderRequestError();
+        }
         // Re-emit the original block verbatim (e.g. image_url, input_audio).
         contentParts.push(block.raw);
         hasOpaque = true;
@@ -1022,7 +1270,12 @@ function buildOpenAIMessages(
         // the single `cache_control` marker moves between turns (matching the
         // always-array native Anthropic path); keep the plain-string form when
         // caching is off, where it's simpler and there's no breakpoint to move.
-        if (hasOpaque || cache?.cacheConversation) {
+        if (
+          hasOpaque ||
+          cache?.cacheConversation ||
+          (source === "openai" &&
+            blocks.some((block) => block.type === "text" && block.raw))
+        ) {
           msgRecord.content = contentParts;
         } else {
           msgRecord.content = contentParts
@@ -1073,7 +1326,9 @@ function buildOpenAIMessages(
       ttl?: "5m" | "1h" | false,
     ) => {
       const parts = m.content as Array<Record<string, unknown>>;
-      parts[parts.length - 1].cache_control = ephemeralCacheControl(ttl);
+      if (parts[parts.length - 1].cache_control === undefined) {
+        parts[parts.length - 1].cache_control = ephemeralCacheControl(ttl);
+      }
     };
 
     // (1) Moving tail breakpoint — on the last annotatable message. Advances

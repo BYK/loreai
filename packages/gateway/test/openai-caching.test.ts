@@ -51,6 +51,28 @@ function messagesOf(body: Record<string, unknown>): Msg[] {
 // ---------------------------------------------------------------------------
 
 describe("buildOpenAIUpstreamRequest — no caching", () => {
+  test("attaching a breakpoint never mutates a native text part", () => {
+    const raw = { type: "text", text: "Hello", native_tag: "keep" };
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Hello", raw }] },
+      ],
+    });
+
+    const cached = messagesOf(getBody(req, { cacheConversation: true })).find(
+      (message) => message.role === "user",
+    );
+    expect(cached?.content).toEqual([
+      { ...raw, cache_control: { type: "ephemeral" } },
+    ]);
+    expect(raw).toEqual({ type: "text", text: "Hello", native_tag: "keep" });
+
+    const uncached = messagesOf(getBody(req)).find(
+      (message) => message.role === "user",
+    );
+    expect(uncached?.content).toEqual([raw]);
+  });
+
   test("system is a plain string when no cache options", () => {
     const msgs = messagesOf(getBody(makeRequest()));
     const sys = msgs.find((m) => m.role === "system");

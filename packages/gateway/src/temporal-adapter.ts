@@ -228,10 +228,13 @@ function contentBlockToPart(
     case "tool_result": {
       // Text projection for memory/FTS/gradient consumers.
       const textProjection = blocksToText(block.content);
-      // Carry structured blocks only when the content has non-text blocks
-      // (images, opaque, …) so lossless round-trip is possible.
-      const hasNonText = block.content.some((b) => b.type !== "text");
-      const blocks: LoreContentBlock[] | undefined = hasNonText
+      // Empty and multipart text have boundaries that the joined text
+      // projection cannot reconstruct for native tool-result replay.
+      const needsBlocks =
+        block.nativeResponsesOutputArray === true ||
+        block.content.length > 1 ||
+        block.content.some((b) => b.type !== "text" || b.text === "");
+      const blocks: LoreContentBlock[] | undefined = needsBlocks
         ? block.content.map((b): LoreContentBlock => ({ ...b }))
         : undefined;
 
@@ -251,6 +254,9 @@ function contentBlockToPart(
               input: null,
               error: textProjection,
               ...(blocks ? { blocks } : undefined),
+              ...(block.nativeResponsesOutputArray
+                ? { nativeResponsesOutputArray: true as const }
+                : {}),
               time: { start: now, end: now },
             }
           : {
@@ -258,6 +264,9 @@ function contentBlockToPart(
               input: null,
               output: textProjection,
               ...(blocks ? { blocks } : undefined),
+              ...(block.nativeResponsesOutputArray
+                ? { nativeResponsesOutputArray: true as const }
+                : {}),
               time: { start: now, end: now },
             },
       } satisfies LoreToolPart;
@@ -450,6 +459,7 @@ export function resolveToolResults(
     {
       output: string;
       blocks?: LoreContentBlock[];
+      nativeResponsesOutputArray?: true;
       toolName?: string;
       isError: boolean;
     }
@@ -462,6 +472,7 @@ export function resolveToolResults(
           resultsByCallID.set(part.callID, {
             output: part.state.output,
             blocks: part.state.blocks,
+            nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
             toolName: part.toolName,
             isError: false,
           });
@@ -469,6 +480,7 @@ export function resolveToolResults(
           resultsByCallID.set(part.callID, {
             output: part.state.error,
             blocks: part.state.blocks,
+            nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
             toolName: part.toolName,
             isError: true,
           });
@@ -495,6 +507,9 @@ export function resolveToolResults(
                 input: part.state.input,
                 error: result.output,
                 ...(result.blocks ? { blocks: result.blocks } : undefined),
+                ...(result.nativeResponsesOutputArray
+                  ? { nativeResponsesOutputArray: true as const }
+                  : {}),
                 time: { start: now, end: now },
               }
             : {
@@ -502,6 +517,9 @@ export function resolveToolResults(
                 input: part.state.input,
                 output: result.output,
                 ...(result.blocks ? { blocks: result.blocks } : undefined),
+                ...(result.nativeResponsesOutputArray
+                  ? { nativeResponsesOutputArray: true as const }
+                  : {}),
                 time: { start: now, end: now },
               };
         }

@@ -34,6 +34,16 @@ import {
   ZERO_USAGE,
 } from "./types";
 import { extractAuth } from "../auth";
+import { isImageBlock, toResponsesImage } from "./images";
+import {
+  assertResponsesToolOutputEnvelope,
+  portableResponsesFunctionCall,
+  portableResponsesToolOutput,
+} from "./anthropic";
+import {
+  InvalidCrossProviderRequestError,
+  requireTextOnlyToolResult,
+} from "./errors";
 import { safeTokenSum } from "../usage-validation";
 import {
   buildOpenAICodexResponsesUrl,
@@ -53,6 +63,13 @@ export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 
 type ParsedInputItems = {
   messages: GatewayMessage[];
+  instructions: string[];
+  elevatedItems: Array<{
+    type?: "message";
+    role: "system" | "developer";
+    content: string | Array<{ type: "input_text"; text: string }>;
+  }>;
+  hasLateItems: boolean;
   boundarySafe: boolean;
 };
 
@@ -116,20 +133,63 @@ function parseOpenAIResponsesRequestInternal(
     typeof raw.max_output_tokens === "number" ? raw.max_output_tokens : 4096;
 
   // System prompt comes from `instructions`
-  const system = typeof raw.instructions === "string" ? raw.instructions : "";
+  const instructions =
+    typeof raw.instructions === "string" ? raw.instructions : "";
 
   // Parse input items into normalized messages
-  const messages = (parsedInput ?? parseInputItems(raw.input)).messages;
+  const parsed = parsedInput ?? parseInputItems(raw.input);
+  const messages = parsed.messages;
+  const system = [instructions, ...parsed.instructions]
+    .filter(Boolean)
+    .join("\n\n");
 
   // Parse tools
+  if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
+    throw new InvalidCrossProviderRequestError();
+  }
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
-  const tools: GatewayTool[] = rawTools
-    .filter((t: Record<string, unknown>) => t.type === "function")
-    .map((t: Record<string, unknown>) => ({
-      name: asString(t.name),
-      description: asString(t.description),
-      inputSchema: (t.parameters as Record<string, unknown>) ?? {},
-    }));
+  const tools: GatewayTool[] = rawTools.map((t: unknown) => {
+    if (
+      !t ||
+      typeof t !== "object" ||
+      Array.isArray(t) ||
+      typeof (t as Record<string, unknown>).type !== "string"
+    ) {
+      // GatewayTool represents only functions. Dropping another tool would
+      // change the request without the client's consent.
+      throw new InvalidCrossProviderRequestError();
+    }
+    const tool = t as Record<string, unknown>;
+    if (tool.type === "web_search_preview") {
+      if (Object.keys(tool).some((key) => key !== "type")) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      return {
+        name: "web_search_preview",
+        description: "",
+        inputSchema: {},
+        responsesBuiltin: "web_search_preview",
+      };
+    }
+    if (
+      tool.type !== "function" ||
+      Object.keys(tool).some(
+        (key) =>
+          !["type", "name", "description", "parameters", "strict"].includes(
+            key,
+          ),
+      ) ||
+      (tool.strict !== undefined && typeof tool.strict !== "boolean")
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    return {
+      name: asString(tool.name),
+      description: asString(tool.description),
+      inputSchema: (tool.parameters as Record<string, unknown>) ?? {},
+      ...(tool.strict !== undefined ? { strict: tool.strict } : {}),
+    };
+  });
 
   // Extract extras for passthrough
   const extras: GatewayRequest["extras"] = {};
@@ -151,6 +211,15 @@ function parseOpenAIResponsesRequestInternal(
   if (Object.hasOwn(raw, "provider")) {
     extras.provider = raw.provider;
   }
+  if (Object.hasOwn(raw, "tool_choice")) {
+    extras.tool_choice = raw.tool_choice;
+  }
+  if (Object.hasOwn(raw, "parallel_tool_calls")) {
+    if (typeof raw.parallel_tool_calls !== "boolean") {
+      throw new InvalidCrossProviderRequestError();
+    }
+    extras.parallel_tool_calls = raw.parallel_tool_calls;
+  }
   // Responses API-specific extras
   if (raw.previous_response_id !== undefined) {
     extras.previous_response_id = raw.previous_response_id as string;
@@ -158,7 +227,21 @@ function parseOpenAIResponsesRequestInternal(
   if (raw.reasoning !== undefined) {
     extras.reasoning = raw.reasoning;
   }
+  if (parsed.elevatedItems.length > 0) {
+    extras.nativeInstructionPrefix = {
+      originalInstructions: instructions,
+      normalizedSystem: system,
+      items: parsed.elevatedItems,
+      hasLateItems: parsed.hasLateItems,
+    };
+  }
+  if (raw.text !== undefined) {
+    extras.text = raw.text;
+  }
   if (raw.truncation !== undefined) {
+    if (raw.truncation !== "auto" && raw.truncation !== "disabled") {
+      throw new InvalidCrossProviderRequestError();
+    }
     extras.truncation = raw.truncation;
   }
 
@@ -188,17 +271,17 @@ const RESPONSES_TOP_LEVEL_KEYS = new Set([
   "presence_penalty",
   "user",
   "provider",
+  "tool_choice",
+  "parallel_tool_calls",
   "previous_response_id",
   "reasoning",
+  "text",
   "truncation",
 ]);
 
 const CODEX_TOP_LEVEL_KEYS = new Set([
   "include",
   "prompt_cache_key",
-  "text",
-  "tool_choice",
-  "parallel_tool_calls",
   "service_tier",
 ]);
 
@@ -214,11 +297,6 @@ function addCodexControls(
   if (raw.include !== undefined) extras.include = raw.include;
   if (typeof raw.prompt_cache_key === "string") {
     extras.prompt_cache_key = raw.prompt_cache_key;
-  }
-  if (raw.text !== undefined) extras.text = raw.text;
-  if (raw.tool_choice !== undefined) extras.tool_choice = raw.tool_choice;
-  if (typeof raw.parallel_tool_calls === "boolean") {
-    extras.parallel_tool_calls = raw.parallel_tool_calls;
   }
   if (typeof raw.service_tier === "string") {
     extras.service_tier = raw.service_tier;
@@ -271,11 +349,12 @@ export function parseOpenAIResponsesRequestChunks(
  * API, so we reuse `parseOpenAIResponsesRequest` for the shared parsing and add
  * the Codex-specific delta on top:
  *   - flag the request as Codex (steers the upstream URL + `store:false`)
- *   - capture Codex control fields (`store`, `include`, `prompt_cache_key`,
- *     `text`, `tool_choice`, `parallel_tool_calls`, `service_tier`).
+ *   - capture Codex-only controls (`include`, `prompt_cache_key`,
+ *     `service_tier`). Shared Responses `text`, `tool_choice`, and
+ *     `parallel_tool_calls` controls are captured by the base parser.
  *
- * These fields are captured ONLY here (not in the shared base parser) so normal
- * `openai-responses` callers keep their existing upstream body untouched.
+ * Codex-only controls are captured here; both routes force `store: false`
+ * because the gateway sends complete history on every turn.
  */
 export function parseOpenAICodexRequest(
   body: unknown,
@@ -311,13 +390,25 @@ function parseInputItems(input: unknown): ParsedInputItems {
   if (typeof input === "string") {
     return {
       messages: [{ role: "user", content: [{ type: "text", text: input }] }],
+      instructions: [],
+      elevatedItems: [],
+      hasLateItems: false,
       // String shorthand cannot be suffix-elided as an item array.
       boundarySafe: false,
     };
   }
 
+  if (input !== undefined && input !== null && !Array.isArray(input)) {
+    throw new InvalidCrossProviderRequestError();
+  }
   if (!Array.isArray(input)) {
-    return { messages: [], boundarySafe: false };
+    return {
+      messages: [],
+      instructions: [],
+      elevatedItems: [],
+      hasLateItems: false,
+      boundarySafe: false,
+    };
   }
 
   const builder = createInputItemsBuilder();
@@ -360,8 +451,12 @@ function createInputItemsBuilder(): {
   finish(): ParsedInputItems;
 } {
   const messages: GatewayMessage[] = [];
+  const instructions: string[] = [];
+  const elevatedItems: ParsedInputItems["elevatedItems"] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
   let sawItem = false;
+  let sawConversationItem = false;
+  let elevatedAfterConversation = false;
   let seamKind: "none" | "other" | "tool-call" | "tool-result" = "none";
   let seamHasPendingReasoning = false;
 
@@ -396,7 +491,30 @@ function createInputItemsBuilder(): {
 
     // Track only the state that can affect normalization across an item seam.
     if (itemType === "message" || (!itemType && role)) {
+      if (role === "user" && pendingReasoning.length > 0) {
+        // The pending assistant items would otherwise be appended after this
+        // user turn, changing the source item's order.
+        throw new InvalidCrossProviderRequestError();
+      }
+      if (
+        role === "user" &&
+        typeof raw.content !== "string" &&
+        (!Array.isArray(raw.content) ||
+          raw.content.some(
+            (part: unknown) =>
+              !part || typeof part !== "object" || Array.isArray(part),
+          ))
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
       const content = parseMessageContent(raw.content);
+      if (
+        role === "user" &&
+        content.length === 0 &&
+        (raw.id !== undefined || raw.status !== undefined)
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
       if (role === "assistant") {
         seamHasPendingReasoning = false;
         seamKind = "other";
@@ -421,12 +539,58 @@ function createInputItemsBuilder(): {
       const content = parseMessageContent(raw.content);
 
       if (msgRole === "developer" || msgRole === "system") {
-        // developer/system messages in input array are treated as user messages
-        // with the system content (the real system prompt is in `instructions`)
-        if (content.length > 0) {
-          messages.push({ role: "user", content });
+        // These items carry instructions, never user text. Other providers
+        // have one system field, so preserve their priority there.
+        if (
+          Object.keys(raw).some(
+            (key) => key !== "type" && key !== "role" && key !== "content",
+          )
+        ) {
+          throw new InvalidCrossProviderRequestError();
         }
+        if (
+          typeof raw.content !== "string" &&
+          (!Array.isArray(raw.content) ||
+            raw.content.some(
+              (part: unknown) =>
+                !part ||
+                typeof part !== "object" ||
+                Array.isArray(part) ||
+                (part as Record<string, unknown>).type !== "input_text" ||
+                typeof (part as Record<string, unknown>).text !== "string" ||
+                Object.keys(part).some(
+                  (key) => key !== "type" && key !== "text",
+                ),
+            ))
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
+        if (content.some((block) => block.type !== "text")) {
+          throw new InvalidCrossProviderRequestError();
+        }
+        if (sawConversationItem) elevatedAfterConversation = true;
+        const text = content
+          .map((block) => (block.type === "text" ? block.text : ""))
+          .join("\n");
+        if (text) {
+          instructions.push(text);
+        }
+        // Keep the original wire shape, including string content and an
+        // omitted `type`. The joined text above is only for translation.
+        elevatedItems.push({
+          ...(raw.type === undefined ? {} : { type: "message" }),
+          role: msgRole,
+          content: Array.isArray(raw.content)
+            ? (raw.content as Array<{ type: "input_text"; text: string }>).map(
+                (part) => ({ ...part }),
+              )
+            : raw.content,
+        });
       } else if (msgRole === "assistant") {
+        sawConversationItem = true;
+        if (typeof raw.content !== "string" && !Array.isArray(raw.content)) {
+          throw new InvalidCrossProviderRequestError();
+        }
         const parsed = parseAssistantMessageContent(raw);
         appendAssistant(
           parsed.content,
@@ -434,14 +598,64 @@ function createInputItemsBuilder(): {
           parsed.provenancePositions,
         );
       } else {
-        if (content.length > 0) {
-          messages.push({ role: "user", content });
+        sawConversationItem = true;
+        if (
+          content.some((block) => block.type === "opaque" && block.requestOnly)
+        ) {
+          // Request-only text with unknown metadata must not enter Lore's
+          // visible user content, even when the source route is native.
+          throw new InvalidCrossProviderRequestError();
         }
+        if (
+          role !== "user" ||
+          (raw.status !== undefined && raw.status !== "completed") ||
+          (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id)) ||
+          Object.keys(raw).some(
+            (key) =>
+              key !== "type" &&
+              key !== "role" &&
+              key !== "content" &&
+              key !== "id" &&
+              key !== "status",
+          )
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
+        if (Array.isArray(raw.content)) {
+          for (const part of raw.content) {
+            if (
+              part &&
+              typeof part === "object" &&
+              !Array.isArray(part) &&
+              ((part as Record<string, unknown>).type === "input_text" ||
+                (part as Record<string, unknown>).type === "output_text")
+            ) {
+              assertToolOutputPart(part);
+            }
+          }
+        }
+        if (content.length === 0) {
+          // An empty source item would otherwise vanish from the full-history
+          // request. Reject it rather than silently changing the transcript.
+          throw new InvalidCrossProviderRequestError();
+        }
+        // Every input item is a separate item on the Responses wire, even
+        // without an ID or status. Keep its complete envelope for replay.
+        messages.push({
+          role: "user",
+          content,
+          provenanceContent: [
+            { type: "opaque", raw, responsesItem: true, requestOnly: true },
+          ],
+          provenancePositions: content.map(() => 0),
+        });
       }
       return;
     }
 
     if (itemType === "function_call") {
+      sawConversationItem = true;
+      portableResponsesFunctionCall(raw);
       // Function call from assistant — maps to tool_use.
       //
       // The Responses API emits each parallel tool call as its OWN
@@ -459,6 +673,11 @@ function createInputItemsBuilder(): {
         name: asString(raw.name),
         input: parseArguments(raw.arguments),
       };
+      const provenanceBlock: GatewayContentBlock = {
+        type: "opaque",
+        raw,
+        responsesItem: true,
+      };
       const last = messages[messages.length - 1];
       const lastIsToolUseMessage =
         last !== undefined &&
@@ -471,21 +690,29 @@ function createInputItemsBuilder(): {
           last.provenancePositions ??
           last.content.map((_block, index) => index);
         const position = provenance.length + pendingReasoning.length;
-        provenance.push(...pendingReasoning, toolUseBlock);
+        provenance.push(...pendingReasoning, provenanceBlock);
         positions.push(position);
         last.content.push(toolUseBlock);
-        if (last.provenanceContent || pendingReasoning.length > 0) {
-          last.provenanceContent = provenance;
-          last.provenancePositions = positions;
-        }
+        last.provenanceContent = provenance;
+        last.provenancePositions = positions;
         pendingReasoning = [];
       } else {
-        appendAssistant([toolUseBlock]);
+        appendAssistant([toolUseBlock], [provenanceBlock], [0]);
       }
       return;
     }
 
     if (itemType === "function_call_output") {
+      if (pendingReasoning.length > 0) {
+        // A result cannot cross a pending assistant reasoning item: the
+        // normalized tool pair cannot represent that native item order.
+        throw new InvalidCrossProviderRequestError();
+      }
+      sawConversationItem = true;
+      assertResponsesToolOutputEnvelope(raw);
+      if (Array.isArray(raw.output)) {
+        raw.output.forEach(assertToolOutputPart);
+      }
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
       //
@@ -498,7 +725,27 @@ function createInputItemsBuilder(): {
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
         toolUseId: asString(raw.call_id),
-        content: parseMessageContent(raw.output),
+        ...(Array.isArray(raw.output)
+          ? { nativeResponsesOutputArray: true as const }
+          : {}),
+        // Cited text remains visible to memory and search; the complete
+        // annotated output is retained only in request-only item provenance.
+        content: Array.isArray(raw.output)
+          ? raw.output.flatMap((part: Record<string, unknown>) =>
+              part.type === "output_text" &&
+              typeof part.text === "string" &&
+              (part.text === "" ||
+                (Array.isArray(part.annotations) &&
+                  part.annotations.length > 0))
+                ? [{ type: "text" as const, text: part.text }]
+                : parseMessageContent([part]),
+            )
+          : parseMessageContent(raw.output),
+      };
+      const provenanceBlock: GatewayContentBlock = {
+        type: "opaque",
+        raw,
+        responsesItem: true,
       };
       const last = messages[messages.length - 1];
       const lastIsToolResultMessage =
@@ -507,45 +754,54 @@ function createInputItemsBuilder(): {
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_result");
       if (lastIsToolResultMessage) {
+        if (last.provenanceContent || raw.output !== undefined) {
+          last.provenanceContent = [
+            ...(last.provenanceContent ?? last.content),
+            provenanceBlock,
+          ];
+          last.provenancePositions = last.content.map((_block, index) => index);
+          last.provenancePositions.push(last.content.length);
+        }
         last.content.push(toolResultBlock);
       } else {
-        messages.push({ role: "user", content: [toolResultBlock] });
+        messages.push({
+          role: "user",
+          content: [toolResultBlock],
+          provenanceContent: [provenanceBlock],
+          provenancePositions: [0],
+        });
       }
       return;
     }
 
     if (itemType === "reasoning") {
+      sawConversationItem = true;
       pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
 
-    // Other item types — skip, but warn about ones that can carry conversation
-    // content the gateway cannot reconstruct.
-    //
     // `item_reference` points to an item OpenAI stored server-side (under an
     // opaque upstream id). The gateway is a stateless full-history proxy: it
     // rewrites the conversation every turn and never persists upstream item
-    // ids, so it has no way to resolve a reference. Codex itself never emits
-    // these (it always sends full input items), but other Responses-API
-    // clients might. Surface it so we have observability if it ever happens
-    // rather than silently dropping context. (`reasoning` items are expected
-    // and intentionally dropped — don't warn on those.)
+    // ids. Reject it rather than forwarding a conversation missing that item.
     if (itemType === "item_reference") {
-      log.warn(
-        "dropping unresolvable Responses API item_reference; gateway is stateless full-history and cannot resolve server-side item references",
-      );
-      return;
+      throw new InvalidCrossProviderRequestError();
     }
 
     // Preserve every self-contained item in request-only provenance. The
     // gateway may not render an unknown item, but canonical replay must hash
     // the same full transcript on both the producing and consuming turns.
+    sawConversationItem = true;
     pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
   };
 
   const finish = (): ParsedInputItems => {
     const boundarySafe =
       sawItem &&
+      // Elevated items live in req.system rather than the normalized message
+      // prefix. A suffix request cannot reconstruct them from a checkpoint.
+      elevatedItems.length === 0 &&
+      !elevatedAfterConversation &&
       !seamHasPendingReasoning &&
       seamKind !== "tool-call" &&
       seamKind !== "tool-result";
@@ -559,7 +815,13 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     }
 
-    return { messages, boundarySafe };
+    return {
+      messages,
+      instructions,
+      elevatedItems,
+      hasLateItems: elevatedAfterConversation,
+      boundarySafe,
+    };
   };
 
   return { add, finish };
@@ -579,7 +841,39 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
       part.type === "output_text" ||
       part.type === "text"
     ) {
+      // Annotations on output_text are known native metadata. The source
+      // envelope retains them for replay; only its visible words enter Lore.
+      // Any other text metadata remains request-only and is rejected for users.
+      if (
+        typeof part.text !== "string" ||
+        Object.keys(part).some(
+          (key) =>
+            key !== "type" &&
+            key !== "text" &&
+            !(
+              key === "annotations" &&
+              part.type === "output_text" &&
+              Array.isArray(part.annotations)
+            ),
+        )
+      ) {
+        // Retain native wire fields, but never project unknown text metadata
+        // into visible conversation text for a different provider.
+        blocks.push({ type: "opaque", raw: part, requestOnly: true });
+        continue;
+      }
       const text = asString(part.text);
+      if (
+        !text &&
+        part.type === "output_text" &&
+        Array.isArray(part.annotations) &&
+        part.annotations.length > 0
+      ) {
+        // Keep this visible empty part so native provenance retains its
+        // position. Its citation remains in the source envelope, never text.
+        blocks.push({ type: "text", text: "" });
+        continue;
+      }
       if (text) blocks.push({ type: "text", text });
     } else {
       // Unknown content part (input_image, input_audio, input_file, …) —
@@ -601,33 +895,45 @@ function parseAssistantMessageContent(item: Record<string, unknown>): {
       : [];
     return {
       content,
-      provenanceContent: [...content],
-      provenancePositions: content.map((_block, index) => index),
+      provenanceContent: [{ type: "opaque", raw: item, responsesItem: true }],
+      provenancePositions: content.map(() => 0),
     };
   }
 
   const content: GatewayContentBlock[] = [];
-  const provenanceContent: GatewayContentBlock[] = [];
+  // Keep the source item whole: adjacent source messages may have identical
+  // envelopes, while parts of a single message must replay as one item.
+  const provenanceContent: GatewayContentBlock[] = [
+    { type: "opaque", raw: item, responsesItem: true },
+  ];
   const provenancePositions: number[] = [];
   if (!Array.isArray(item.content)) {
     return { content, provenanceContent, provenancePositions };
   }
   for (const part of item.content as Array<Record<string, unknown>>) {
+    if (!part || typeof part !== "object" || Array.isArray(part)) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    if (isImageBlock(part)) {
+      throw new InvalidCrossProviderRequestError();
+    }
     const isText = part.type === "output_text" || part.type === "text";
+    if (isText && typeof part.text !== "string") {
+      throw new InvalidCrossProviderRequestError();
+    }
     const text = isText ? asString(part.text) : "";
     const visible: GatewayContentBlock | undefined = text
       ? { type: "text", text }
       : !isText
         ? { type: "opaque", raw: part }
         : undefined;
-    if (!visible) continue;
-    provenancePositions.push(provenanceContent.length);
+    if (!visible) {
+      // The full item retains empty text, annotations, and the enclosing
+      // status for replay and foreign-route checks.
+      continue;
+    }
+    provenancePositions.push(0);
     content.push(visible);
-    provenanceContent.push({
-      type: "opaque",
-      raw: { ...item, content: [part] },
-      responsesItem: true,
-    });
   }
   return { content, provenanceContent, provenancePositions };
 }
@@ -703,6 +1009,63 @@ function buildStrictRecallParameters(
   };
 }
 
+function chatTextFormatForResponses(
+  format: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    !format ||
+    typeof format !== "object" ||
+    Array.isArray(format) ||
+    Object.keys(format).some((key) => key !== "type" && key !== "json_schema")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (format.type === "json_object" || format.type === "text") {
+    if (format.json_schema !== undefined) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    return { format: { type: format.type } };
+  }
+  if (format.type !== "json_schema") {
+    throw new InvalidCrossProviderRequestError();
+  }
+  const schema = format.json_schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  const value = schema as Record<string, unknown>;
+  if (
+    Object.keys(value).some(
+      (key) =>
+        key !== "name" &&
+        key !== "description" &&
+        key !== "schema" &&
+        key !== "strict",
+    ) ||
+    typeof value.name !== "string" ||
+    !value.name.trim() ||
+    (value.description !== undefined &&
+      typeof value.description !== "string") ||
+    !value.schema ||
+    typeof value.schema !== "object" ||
+    Array.isArray(value.schema) ||
+    (value.strict !== undefined && typeof value.strict !== "boolean")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  return {
+    format: {
+      type: "json_schema",
+      name: value.name,
+      ...(value.description !== undefined
+        ? { description: value.description }
+        : {}),
+      ...(value.strict !== undefined ? { strict: value.strict } : {}),
+      schema: value.schema,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // GatewayRequest → OpenAI Responses API upstream request
 // ---------------------------------------------------------------------------
@@ -726,23 +1089,52 @@ export function buildOpenAIResponsesUpstreamRequest(
   const body: Record<string, unknown> = {
     model: req.model,
     stream: req.stream,
+    // The gateway sends full history, so upstream response storage is unused.
+    store: false,
   };
 
   if (req.maxTokens) {
     body.max_output_tokens = req.maxTokens;
   }
 
-  // System prompt → instructions
-  if (req.system) {
-    body.instructions = req.system;
+  const nativeInstructions =
+    req.protocol === "openai-responses"
+      ? req.extras?.nativeInstructionPrefix
+      : undefined;
+  if (nativeInstructions) {
+    const prefix = nativeInstructions.normalizedSystem;
+    if (
+      prefix &&
+      req.system !== prefix &&
+      !req.system.startsWith(`${prefix}\n\n`)
+    ) {
+      throw new Error("Responses instruction provenance changed");
+    }
+    const suffix =
+      req.system === prefix
+        ? ""
+        : prefix
+          ? req.system.slice(prefix.length + 2)
+          : req.system;
+    const instructions = [nativeInstructions.originalInstructions, suffix]
+      .filter(Boolean)
+      .join("\n\n");
+    if (instructions) body.instructions = instructions;
+    body.input = [
+      ...nativeInstructions.items,
+      ...buildResponsesInput(req.messages, req.protocol),
+    ];
+  } else {
+    if (req.system) body.instructions = req.system;
+    body.input = buildResponsesInput(req.messages, req.protocol);
   }
-
-  // Build input items from normalized messages
-  body.input = buildResponsesInput(req.messages);
 
   // Add tools in Responses API format
   if (req.tools.length > 0) {
     body.tools = req.tools.map((t) => {
+      if (t.responsesBuiltin === "web_search_preview") {
+        return { type: "web_search_preview" };
+      }
       if (
         t.name !== "recall" ||
         t.gatewayOwned !== true ||
@@ -753,6 +1145,7 @@ export function buildOpenAIResponsesUpstreamRequest(
           name: t.name,
           description: t.description,
           parameters: t.inputSchema,
+          ...(t.strict !== undefined ? { strict: t.strict } : {}),
         };
       }
       return {
@@ -808,8 +1201,20 @@ export function buildOpenAIResponsesUpstreamRequest(
     if (req.extras.truncation !== undefined) {
       body.truncation = req.extras.truncation;
     }
+    if (req.extras.text !== undefined) {
+      body.text = req.extras.text;
+    }
+    if (req.extras.response_format !== undefined) {
+      body.text = chatTextFormatForResponses(req.extras.response_format);
+    }
     if (req.extras.parallel_tool_calls !== undefined) {
       body.parallel_tool_calls = req.extras.parallel_tool_calls;
+    }
+    if (
+      req.protocol === "openai-responses" &&
+      req.extras.tool_choice !== undefined
+    ) {
+      body.tool_choice = req.extras.tool_choice;
     }
   }
 
@@ -849,7 +1254,7 @@ export function buildOpenAIResponsesUpstreamRequest(
  *    this is also semantically correct. Enforced gateway-side, not trusted from
  *    the client.
  *  - RE-EMIT the Codex control fields captured by `parseOpenAICodexRequest`
- *    (`include`, `prompt_cache_key`, `text`, `tool_choice`,
+ *    (`include`, `prompt_cache_key`, `tool_choice`,
  *    `parallel_tool_calls`, `service_tier`).
  */
 function applyCodexResponsesDelta(
@@ -870,7 +1275,6 @@ function applyCodexResponsesDelta(
   if (extras.prompt_cache_key !== undefined) {
     body.prompt_cache_key = extras.prompt_cache_key;
   }
-  if (extras.text !== undefined) body.text = extras.text;
   if (extras.tool_choice !== undefined) body.tool_choice = extras.tool_choice;
   if (extras.parallel_tool_calls !== undefined) {
     body.parallel_tool_calls = extras.parallel_tool_calls;
@@ -880,13 +1284,123 @@ function applyCodexResponsesDelta(
   }
 }
 
+function assertToolOutputPart(part: unknown): void {
+  if (!part || typeof part !== "object" || Array.isArray(part)) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  const value = part as Record<string, unknown>;
+  if (value.type === "input_image") {
+    // Even native output must not replay malformed or foreign image shapes.
+    if (value.image_url === undefined) {
+      if (
+        Object.keys(value).some(
+          (key) => key !== "type" && key !== "file_id" && key !== "detail",
+        ) ||
+        typeof value.file_id !== "string" ||
+        !value.file_id ||
+        (value.detail !== undefined &&
+          value.detail !== "auto" &&
+          value.detail !== "low" &&
+          value.detail !== "high" &&
+          value.detail !== "original")
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+    } else if (typeof value.image_url !== "string") {
+      throw new InvalidCrossProviderRequestError();
+    } else {
+      toResponsesImage(value, "openai-responses");
+    }
+  } else if (value.type === "output_text" || value.type === "input_text") {
+    if (
+      typeof value.text !== "string" ||
+      Object.keys(value).some(
+        (key) =>
+          key !== "type" &&
+          key !== "text" &&
+          !(
+            value.type === "output_text" &&
+            key === "annotations" &&
+            Array.isArray(value.annotations)
+          ),
+      )
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  } else if (value.type === "input_file") {
+    const references = [value.file_id, value.file_data, value.file_url].filter(
+      (reference) => reference !== undefined,
+    );
+    const encoded =
+      typeof value.file_data === "string"
+        ? /^data:[a-z][a-z0-9.+-]*\/[a-z][a-z0-9.+-]*;base64,([A-Za-z0-9+/]+={0,2})$/i.exec(
+            value.file_data,
+          )
+        : null;
+    const validURL = (() => {
+      if (value.file_url === undefined) return true;
+      if (typeof value.file_url !== "string") return false;
+      try {
+        const url = new URL(value.file_url);
+        return (
+          url.protocol === "https:" &&
+          !url.username &&
+          !url.password &&
+          !url.hash
+        );
+      } catch {
+        return false;
+      }
+    })();
+    if (
+      Object.keys(value).some(
+        (key) =>
+          ![
+            "type",
+            "file_id",
+            "file_data",
+            "file_url",
+            "filename",
+            "detail",
+          ].includes(key),
+      ) ||
+      references.length !== 1 ||
+      (value.file_id !== undefined &&
+        (typeof value.file_id !== "string" || !value.file_id.trim())) ||
+      (value.file_data !== undefined &&
+        (!encoded ||
+          Buffer.from(encoded[1], "base64").toString("base64") !== encoded[1] ||
+          typeof value.filename !== "string" ||
+          !value.filename.trim())) ||
+      !validURL ||
+      (value.filename !== undefined &&
+        (typeof value.filename !== "string" || !value.filename.trim())) ||
+      (value.detail !== undefined &&
+        value.detail !== "auto" &&
+        value.detail !== "low" &&
+        value.detail !== "high")
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  } else {
+    throw new InvalidCrossProviderRequestError();
+  }
+}
+
 function buildResponsesInput(
   messages: GatewayMessage[],
+  source: GatewayRequest["protocol"],
 ): Array<Record<string, unknown>> {
   const items: Array<Record<string, unknown>> = [];
-  const appendItem = (item: Record<string, unknown>): void => {
+  const synthesizedItemIndices = new Set<number>();
+  const appendItem = (item: Record<string, unknown>, native = false): void => {
     const previous = items[items.length - 1];
-    if (item.type === "message" && previous?.type === "message") {
+    if (
+      !native &&
+      synthesizedItemIndices.has(items.length - 1) &&
+      item.type === "message" &&
+      previous?.type === "message"
+    ) {
       const { content: itemContent, ...itemEnvelope } = item;
       const { content: previousContent, ...previousEnvelope } = previous;
       if (
@@ -898,6 +1412,7 @@ function buildResponsesInput(
         return;
       }
     }
+    if (!native) synthesizedItemIndices.add(items.length);
     items.push(item);
   };
 
@@ -922,27 +1437,111 @@ function buildResponsesInput(
           arguments: JSON.stringify(block.input),
         });
       } else if (block.type === "tool_result") {
-        // Responses API function_call_output.output is a string — use the
-        // text projection. (Non-text tool-result sub-blocks can't be
-        // represented on this wire format; Anthropic-native clients are
-        // unaffected.)
+        if (block.isError) throw new InvalidCrossProviderRequestError();
+        if (
+          source === "openai-responses" &&
+          block.nativeResponsesOutputArray === true
+        ) {
+          const output = block.content.map((part) => {
+            if (part.type === "text") {
+              return { type: "output_text", text: part.text };
+            }
+            if (part.type === "opaque") return part.raw;
+            throw new InvalidCrossProviderRequestError();
+          });
+          output.forEach(assertToolOutputPart);
+          appendItem({
+            type: "function_call_output",
+            call_id: block.toolUseId,
+            output,
+          });
+          continue;
+        }
+        requireTextOnlyToolResult(block);
+        // Text-only results from other protocols use a string projection.
+        // Native multi-part results take the array path above, even when a
+        // compaction boundary deliberately drops their source provenance.
         appendItem({
           type: "function_call_output",
           call_id: block.toolUseId,
           output: blocksToText(block.content),
         });
       } else if (block.type === "opaque") {
+        if (
+          (block.requestOnly && source !== "openai-responses") ||
+          block.raw.type === "thinking" ||
+          block.raw.type === "redacted_thinking"
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
         if (block.responsesItem) {
           if (block.raw.type === "item_reference") continue;
+          if (block.raw.type === "function_call_output") {
+            assertResponsesToolOutputEnvelope(block.raw);
+            if (
+              typeof block.raw.call_id !== "string" ||
+              (typeof block.raw.output !== "string" &&
+                !Array.isArray(block.raw.output))
+            ) {
+              throw new InvalidCrossProviderRequestError();
+            }
+            if (Array.isArray(block.raw.output)) {
+              block.raw.output.forEach(assertToolOutputPart);
+            } else {
+              portableResponsesToolOutput(block.raw);
+            }
+          }
+          let nativeItem = block.raw;
+          if (
+            (block.raw.type === "message" ||
+              (block.raw.type === undefined &&
+                (block.raw.role === "user" ||
+                  block.raw.role === "assistant"))) &&
+            Array.isArray(block.raw.content)
+          ) {
+            const content = block.raw.content.map((part: unknown) => {
+              if (!part || typeof part !== "object" || Array.isArray(part)) {
+                return part;
+              }
+              const rawPart = part as Record<string, unknown>;
+              if (isImageBlock(rawPart)) {
+                if (block.raw.role !== "user") {
+                  throw new InvalidCrossProviderRequestError();
+                }
+                return toResponsesImage(rawPart, source);
+              }
+              if (rawPart.type === "input_file") {
+                assertToolOutputPart(rawPart);
+              }
+              return part;
+            });
+            nativeItem = { ...block.raw, content };
+          }
           // Stateless follow-ups must replay complete top-level output items
           // verbatim, including encrypted reasoning, refusals, and future types.
-          appendItem(block.raw);
+          appendItem(nativeItem, true);
         } else {
           // Re-emit opaque blocks as message content parts (e.g. input_image).
+          if (
+            source !== "openai-responses" &&
+            (!isImageBlock(block.raw) || msg.role !== "user")
+          ) {
+            throw new InvalidCrossProviderRequestError();
+          }
+          if (isImageBlock(block.raw) && msg.role !== "user") {
+            throw new InvalidCrossProviderRequestError();
+          }
+          if (block.raw.type === "input_file") {
+            assertToolOutputPart(block.raw);
+          }
           appendItem({
             type: "message",
             role: msg.role === "assistant" ? "assistant" : "user",
-            content: [block.raw],
+            content: [
+              isImageBlock(block.raw)
+                ? toResponsesImage(block.raw, source)
+                : block.raw,
+            ],
           });
         }
       }
