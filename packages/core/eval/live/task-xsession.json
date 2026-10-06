@@ -1,0 +1,22 @@
+{
+  "id": "xsession-memory",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "prompt": "We're kicking off the 'orderkit' Python project (pure stdlib, code under src/). Let me establish the project conventions and decisions up front — please internalize these, we'll rely on them throughout: (1) every new Python file must begin with the exact header line `# WH-CONVENTION v3`; (2) money is ALWAYS integer cents — we hit nasty float rounding bugs in prod, so never use float for money anywhere; (3) the maximum line items per order is 100 — note we deliberately raised this from an earlier 50; use a constant MAX_LINE_ITEMS = 100; (4) order status strings are UPPERCASE like 'SUBMITTED' — this supersedes an older lowercase-status convention we used to have. To get us started, create src/inventory.py with a pure function stock_level(records, sku) that sums quantities for a SKU across a list of record dicts. Keep it simple."
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "turns": [
+        {
+          "prompt": "Create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must: enforce the maximum line-items cap; compute the order total in integer cents; and return a dict {\"customer\": customer, \"status\": <submitted-state>, \"total_cents\": <int>, \"line_count\": <int>}. No database — just return the dict. Follow every project convention and decision we established for orderkit."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "id": "wh-compaction-hard",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Kicking off the 'orderkit' Python library (pure stdlib, code under src/). A bit of quick background on how this project works, for when we get to the order stuff later on: order status strings are UPPERCASE like 'SUBMITTED', the maximum line items per order is 100, and every order dict we build carries a channel field set to 'WHOLESALE'. Also house style — files begin with `# WH-CONVENTION v3` and money is always integer cents. Anyway, that's for later. For now, using the large reference spec piped below for context, create src/inventory.py with a pure function stock_level(records, sku) that sums the quantities for a SKU across a list of record dicts."
+        },
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Continuing the same session. Using the reference spec piped below for context, create src/text_utils.py with a pure function slugify(s) that lowercases a string and replaces any run of non-alphanumeric characters with a single hyphen, trimming leading/trailing hyphens."
+        },
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Still the same session. Using the reference spec piped below, create src/dates.py with a pure function days_between(a, b) that returns the integer number of days between two 'YYYY-MM-DD' date strings (b minus a)."
+        },
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Same session. Using the reference spec piped below, create src/stats.py with a pure function mean(values) that returns the arithmetic mean of a list of numbers as a float, or 0.0 for an empty list."
+        },
+        {
+          "prompt": "Now create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must: enforce the maximum line-items cap; compute the order total in integer cents; and return a dict {\"customer\": customer, \"status\": <the order status value>, \"total_cents\": <int>, \"line_count\": <int>, \"channel\": <the channel value>}. No database — just return the dict. Follow the orderkit conventions and details we went over at the start of this session."
+        }
+      ]
+    }
+  ]
+}

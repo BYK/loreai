@@ -904,6 +904,7 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-agent",
   "x-lore-session-title",
   "x-lore-no-store",
+  "x-lore-no-memory",
   GATEWAY_AUTH_HEADER,
   "x-lore-recall-invoked",
   // Protocol version — set explicitly by each builder

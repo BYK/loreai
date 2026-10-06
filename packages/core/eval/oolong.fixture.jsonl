@@ -1,0 +1,1 @@
+{"id":"synth-fixture","context_window_id":"fixture-window","dataset":"synth","context_window_text":"The marker named cedar is blue.\nThe marker named pine is red.","question":"What color is cedar?","answer":"['blue']"}
