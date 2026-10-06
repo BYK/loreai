@@ -226,9 +226,11 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
     }
   }
 
+  // Directory containing driver.mjs for local evaluation runs.
+  const configuredHarnessDir = process.env.LORE_EVAL_HARNESS;
   const harnessDir =
     (values.harness ? resolve(values.harness as string) : null) ||
-    process.env.LORE_EVAL_HARNESS ||
+    configuredHarnessDir ||
     (() => {
       const d = findUp("packages/core/eval/live/driver.mjs");
       return d ? resolve(d, "..") : null;
