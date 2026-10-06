@@ -1,12 +1,17 @@
 # Live counterfactual benchmark — Lore vs no-Lore (#961)
 
+**Historical results from earlier retention fixtures.** The eight-checkpoint
+iterative workflow now has a separate two-compaction/million-provider-token gate;
+none of the figures below establishes that it has passed. Report new workflow
+trials separately, with qualification counts and per-checkpoint strict verdicts.
+
 Real OpenCode agent, real Lore gateway, MiniMax-M3, per-arm isolated (own config
 home, data home, project dir, Lore DB, gateway port). Fresh trunk build of the
 plugin+gateway. Deterministic scorer (no LLM judge, per #961). Each arm drives
 headless `opencode run` in build mode; metrics parsed from the event stream +
 opencode.db.
 
-Harness (reproducible) lives in the eval-signals-scorer worktree at
+Harness (reproducible) lives at
 `packages/core/eval/live/`: `driver.mjs`, `gen-seed.mjs`, `gen-blob.mjs`,
 `score.mjs`, `task-compaction.json`, `task-xsession.json`, `seed-min/`.
 

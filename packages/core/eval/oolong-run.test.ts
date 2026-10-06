@@ -16,6 +16,8 @@ test("replays growing fixed-history prefixes and scores the final answer", async
     messages: Array<{ role: string; content: string }>;
     headers: { sessionID?: string; project?: string };
   }> = [];
+  const firstHeader = (value: string | string[] | undefined) =>
+    Array.isArray(value) ? value[0] : value;
   const server = createServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => (body += chunk));
@@ -27,8 +29,8 @@ test("replays growing fixed-history prefixes and scores the final answer", async
       requests.push({
         ...payload,
         headers: {
-          sessionID: request.headers["x-lore-session-id"],
-          project: request.headers["x-lore-project"],
+          sessionID: firstHeader(request.headers["x-lore-session-id"]),
+          project: firstHeader(request.headers["x-lore-project"]),
         },
       });
       response.setHeader("content-type", "application/json");

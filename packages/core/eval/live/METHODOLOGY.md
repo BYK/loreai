@@ -1,9 +1,10 @@
-# Coding-agent memory benchmark methodology
+# Sustained coding-session evaluation methodology
 
-This is the auditable protocol behind Lore's memory benchmark (issue #961) and the
-"The compaction tax" blog post. Everything here is reproducible from this directory;
-the scripts, task fixtures, and scorer are all versioned alongside it. Raw per-run
-results and the aggregated scorecards live in `RESULTS.md`.
+This is the auditable protocol behind Lore's evaluation (issue #961). The primary
+question is whether an agent maintains a coherent, correct software project while
+the session accumulates millions of provider tokens, not merely whether it recalls
+four facts. Scripts, fixtures, and scorers are versioned here. `RESULTS.md` contains
+historical retention runs; it does not establish a result for the extended workflow.
 
 The benchmark has two deliberately separate tracks. They answer different questions
 and their results are never pooled:
@@ -67,7 +68,8 @@ tool-readable project artifacts instead.
 
 ## Iterative workflow scenario
 
-`task-iterative-orders.json` is a five-checkpoint API-evolution task. The agent owns
+`task-iterative-orders.json` is an eight-checkpoint API-evolution task in one
+continuous agent session. The agent owns
 one workspace throughout: no reference implementation replaces its code between
 checkpoints and no previous defect is erased. Each checkpoint adds a new externally
 visible requirement that pressures the earlier design:
@@ -77,6 +79,9 @@ visible requirement that pressures the earlier design:
 3. Add shipping-zone behavior while retaining existing callers.
 4. Extract a reusable quoting API without breaking the original one.
 5. Add fulfillment fields using values stated only at checkpoint 1.
+6. Combine discounts and shipping without mutating the original order.
+7. Quote discounted shipped orders without diverging from the original APIs.
+8. Fulfill an order without losing its earlier totals or project-specific fields.
 
 After every checkpoint, the driver invokes `verify-iterative-orders.py` outside the
 workspace. The agent never sees its command, source, test names, expected values, or
@@ -87,9 +92,26 @@ failure output. We report three deterministic outcomes:
 - **strict:** every contract from checkpoint 1 through the current checkpoint.
 
 Thus a regression opened at checkpoint 2 remains a strict failure at later checkpoints
-until the agent independently repairs it. Required reference artifacts are written into
-the project and must be inspected by the agent, creating realistic tool-readable
-context without revealing the hidden verifier.
+until the agent independently repairs it. The current change contract is placed in a
+tool-readable reference artifact rather than repeated in the prompt; the rest is
+deterministic **synthetic** vendor data. These files provide source-finding pressure,
+not a claim that the agent read all their bytes. The hidden verifier remains outside
+the project.
+
+**Sustained-workflow gate:** before checkpoint 7 is scored, the no-Lore arm must
+have at least **two observed native compactions in this same session**. By the
+final checkpoint it must have accumulated at least **1,000,000 provider tokens**
+(input, output, cache read, and cache write, counted once each from usage).
+The identical task and context cap apply to Lore, but Lore is not required to
+perform native compaction or spend a million tokens: avoiding both is a possible
+advantage. Per-checkpoint observations are recorded in `result.json`. If the
+no-Lore arm does not meet the gate, both paired runs remain visible with their
+actual verdicts and a **not qualified** label; they do not enter the sustained
+workflow aggregate. A terminal agent timeout is reported separately from a
+short but otherwise completed workload. The no-Lore control must reach the
+final checkpoint for the pair to qualify; missing Lore checkpoints count as
+failures in a qualified pair's aggregate denominator. Calibrate the fixed task length in
+unscored runs, then freeze its version and budget before repeated scored trials.
 
 ## Arms
 
@@ -135,10 +157,15 @@ Each arm is one value of `--arm`:
 - **Retention stress:** generated-fact executable behavior score and contamination
   status. Source scans are provenance diagnostics only and never award a point.
 - **Workflow correctness:** `checkpoint-score.mjs` reports core, isolated, and strict
-  checkpoint outcomes from the held-out executable oracle.
+  checkpoint outcomes from the held-out executable oracle. A later strict pass
+  requires all earlier contracts; record each regression and recovery, not only
+  the final number. Pairing checks the frozen task hash and generated fact map.
 - **Efficiency**, parsed from OpenCode's `--format json` stream and its session DB:
   steps, `tokensIn/Out`, `cacheRead`, `cacheWrite`, total tokens, tool calls, peak
-  context, wall time, and native `compactions`.
+  context, wall time, and native `compactions` observed by checkpoint. Provider
+  usage is **not** the volume of unique new source material: repeated and cached
+  prefixes can contribute to cumulative tokens. Report the fixture's introduced
+  source bytes separately rather than labeling provider usage as novel context.
 - **Cost**: the answering-model cost OpenCode reports, plus, for Lore, the gateway's
   own `daily_costs` buckets (`conversation` and `worker`) so the background
   distillation spend is counted, not hidden.

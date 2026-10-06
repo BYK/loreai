@@ -28,6 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { runVerifierProcess } from "./verifier.mjs";
+import { renderReferenceContext } from "./reference-context.mjs";
 
 // ---- args ----------------------------------------------------------------
 const args = Object.fromEntries(
@@ -52,7 +53,7 @@ const AUTH_SRC =
   );
 // Fresh trunk build (NOT the user's active installed plugin) — see #1211.
 const LORE_BUILD =
-  args["lore-build"] || "/home/byk/.local/share/lore-worktrees/eval-live";
+  args["lore-build"] || path.resolve(import.meta.dirname, "../../../..");
 const REAL_LORE_PLUGIN = args["lore-plugin"] || `${LORE_BUILD}/eval-plugin.ts`;
 const GW_DIST =
   args["gw-dist"] || `${LORE_BUILD}/packages/gateway/dist/index.bun.js`;
@@ -126,6 +127,20 @@ function validateTask(task) {
     throw new Error(
       "iterative tasks require an id and at least one checkpoint",
     );
+  }
+  if (task.workflowGate) {
+    const gate = task.workflowGate;
+    if (
+      task.sessions.length !== 1 ||
+      !task.verifier ||
+      !seen.has(gate.checkpoint) ||
+      !Number.isSafeInteger(gate.minBaselineCompactions) ||
+      gate.minBaselineCompactions < 2 ||
+      !Number.isSafeInteger(gate.minBaselineProviderTokens) ||
+      gate.minBaselineProviderTokens < 1
+    ) {
+      throw new Error("invalid single-session workflow qualification gate");
+    }
   }
 }
 
@@ -293,6 +308,7 @@ function parseSession(jsonlPath) {
 // Count native compactions OpenCode performed, from its session DB. Compaction
 // parts aren't emitted to the --format json stream, but a row is persisted.
 function countCompactions(dbPath) {
+  if (!fs.existsSync(dbPath)) return 0;
   try {
     const out = execFileSync(
       "python3",
@@ -307,9 +323,10 @@ print(n)`,
       ],
       { encoding: "utf8" },
     );
-    return Number(out.trim()) || 0;
+    const n = Number(out.trim());
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -535,17 +552,12 @@ function interpolateFacts(prompt) {
 function writeToolContext(turn) {
   if (!turn.toolContext) return;
   const rel = String(turn.toolContext.path || "reference/context.txt");
-  const sizeKb = Number(turn.toolContext.sizeKb || 1);
   if (rel.includes("..") || path.isAbsolute(rel)) {
     throw new Error(`toolContext path must stay in project: ${rel}`);
   }
   const full = path.join(project, rel);
   fs.mkdirSync(path.dirname(full), { recursive: true });
-  const line = `reference context for ${turn.checkpoint || "turn"}: inspect this file before coding\n`;
-  fs.writeFileSync(
-    full,
-    line.repeat(Math.max(1, Math.ceil((sizeKb * 1024) / line.length))),
-  );
+  fs.writeFileSync(full, renderReferenceContext(turn));
 }
 // Optional per-arm Lore config override so a single build can A/B one knob.
 // `--context-sources off` -> contextSources:[]; `--context-sources distillation`
@@ -1291,6 +1303,10 @@ async function waitForMemoryReady(
 
 const sessionMetrics = [];
 const checkpoints = [];
+const nativeCompactions = () =>
+  AGENT === "pi"
+    ? countPiCompactions(PI_SESSION_DIR)
+    : countCompactions(path.join(OUT, "data/opencode/opencode.db"));
 const expectedCheckpoints = TASK.sessions.reduce(
   (count, session) =>
     count +
@@ -1305,6 +1321,7 @@ let aborted = false;
 for (let i = 0; i < TASK.sessions.length; i++) {
   const s = TASK.sessions[i];
   const turns = s.turns || [{ prompt: s.prompt }];
+  const compactionsAtSessionStart = nativeCompactions();
   console.log(
     `[${ARM}] session ${i + 1}/${TASK.sessions.length}: ${s.id} (${turns.length} turn(s))`,
   );
@@ -1377,6 +1394,15 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     merged.reBilledTokens += tm.reBilledTokens || 0;
     merged.reBilledCost += tm.reBilledCost || 0;
     merged.misses += tm.misses || 0;
+    const currentCompactions = nativeCompactions();
+    const sessionCompactions =
+      currentCompactions !== null &&
+      compactionsAtSessionStart !== null &&
+      currentCompactions >= compactionsAtSessionStart
+        ? currentCompactions - compactionsAtSessionStart
+        : null;
+    const providerTokens =
+      merged.tokensIn + merged.tokensOut + merged.cacheRead + merged.cacheWrite;
     // A watchdog timeout after the agent made progress is an observed terminal
     // capability outcome (for example, a native-compaction runaway), not an
     // infrastructure failure. Preserve completed checkpoints and score them.
@@ -1398,6 +1424,8 @@ for (let i = 0; i < TASK.sessions.length; i++) {
       exit: code,
       wallSec: wall,
       timedOut,
+      nativeCompactions: sessionCompactions,
+      providerTokens,
     });
     console.log(
       `    turn ${j + 1}/${turns.length}: exit=${code} steps=${tm.steps} peakCtx=${tm.peakContext} tools=${tm.toolCalls} wall=${wall.toFixed(0)}s`,
@@ -1411,7 +1439,13 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     }
     if (turns[j].checkpoint) {
       const verdict = await scoreCheckpoint(turns[j].checkpoint);
-      checkpoints.push({ session: s.id, turn: j + 1, ...verdict });
+      checkpoints.push({
+        session: s.id,
+        turn: j + 1,
+        ...verdict,
+        nativeCompactions: sessionCompactions,
+        providerTokens,
+      });
       // Deliberately do not expose any verifier output to the agent. The next
       // checkpoint arrives as a new requirement, so defects carry forward.
       console.log(
@@ -1536,10 +1570,7 @@ const totals = sessionMetrics.reduce(
     misses: 0,
   },
 );
-const compactions =
-  AGENT === "pi"
-    ? countPiCompactions(PI_SESSION_DIR)
-    : countCompactions(path.join(OUT, "data/opencode/opencode.db"));
+const compactions = nativeCompactions();
 
 // Validity gate (fairness audit P0 #3): a competitor MCP arm that made ZERO
 // memory_* tool calls never stored/retrieved anything — its 0/N is a dead-
@@ -1616,6 +1647,7 @@ fs.writeFileSync(
       sessions: sessionMetrics,
       checkpoints,
       expectedCheckpoints,
+      workflowGate: TASK.workflowGate || null,
       totals,
     },
     null,

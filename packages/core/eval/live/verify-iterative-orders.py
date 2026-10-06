@@ -44,6 +44,8 @@ for line in sys.stdin:
             out = mapping(value)
         elif op == "discount": out = mapping(module.apply_discount(**req["args"]))
         elif op == "quote": out = mapping(module.quote_order(**req["args"]))
+        elif op == "discounted_quote": out = mapping(module.quote_discounted_order(**req["args"]))
+        elif op == "fulfill": out = mapping(module.fulfill_order(**req["args"]))
         else: raise ValueError("unknown operation")
         print(json.dumps({"ok": True, "value": out}), flush=True)
     except Exception as error:
@@ -84,10 +86,13 @@ class AgentApi:
             self.child.wait()
 
 
-def create(api, customer="acme", items=None, shipping_zone="LOCAL"):
+def create(api, customer="acme", items=None, shipping_zone=None):
     if items is None:
         items = [("sku-1", 199, 2), ("sku-2", 50, 1)]
-    return api.call("create", customer=customer, items=items, shipping_zone=shipping_zone)
+    args = {"customer": customer, "items": items}
+    if shipping_zone is not None:
+        args["shipping_zone"] = shipping_zone
+    return api.call("create", **args)
 
 
 def c1(api, facts):
@@ -141,8 +146,51 @@ def c5_core(api, facts):
         assert key in order, f"{key} must be part of the public result"
 
 
-CHECKPOINTS = [c1, c2, c3, c4, c5]
-CORE_CHECKPOINTS = [c1, c2, c3, c4, c5_core]
+def c6(api, facts):
+    order = create(api, shipping_zone="REMOTE")
+    discounted = api.call("discount", order=order, code="WELCOME10")
+    assert discounted["total_cents"] == 403
+    assert discounted["shipping_cents"] == 799
+    assert discounted["grand_total_cents"] == 1202
+    assert order["total_cents"] == 448
+    assert order["grand_total_cents"] == 1247
+    for key in ("status", "channel", "region", "warehouse"):
+        assert discounted[key] == order[key]
+
+
+def c7(api, facts):
+    quote = api.call("discounted_quote", customer="acme",
+                     items=[("sku-1", 200, 1)], shipping_zone="REMOTE", code="WELCOME10")
+    assert quote == {"subtotal_cents": 180, "shipping_cents": 799,
+                     "grand_total_cents": 979}
+    order = create(api, items=[("sku-1", 200, 1)], shipping_zone="REMOTE")
+    discounted = api.call("discount", order=order, code="WELCOME10")
+    assert discounted["grand_total_cents"] == quote["grand_total_cents"]
+
+
+def check_c8(api, facts, require_initial_status):
+    order = create(api, shipping_zone="REMOTE")
+    fulfilled = api.call("fulfill", order=order, tracking_code="TRACK-987")
+    assert fulfilled["status"] == "FULFILLED"
+    assert fulfilled["tracking_code"] == "TRACK-987"
+    if require_initial_status:
+        assert order["status"] == facts["status"]
+    assert "tracking_code" not in order
+    for key in ("customer", "total_cents", "shipping_cents", "grand_total_cents",
+                "channel", "region", "warehouse"):
+        assert fulfilled[key] == order[key]
+
+
+def c8(api, facts):
+    check_c8(api, facts, True)
+
+
+def c8_core(api, facts):
+    check_c8(api, facts, False)
+
+
+CHECKPOINTS = [c1, c2, c3, c4, c5, c6, c7, c8]
+CORE_CHECKPOINTS = [c1, c2, c3, c4, c5_core, c6, c7, c8_core]
 
 
 def main():

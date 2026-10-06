@@ -13,6 +13,7 @@ import {
   hasMatchingTerminalResult,
   readMatrixState,
   returnCellToPending,
+  scoreTrack,
   startCell,
   writeMatrixState,
 } from "./matrix-state.mjs";
@@ -341,6 +342,11 @@ if (!DRY_RUN && !RESUME) {
         })),
         harnessInputs: [
           "driver.mjs",
+          "agent-process.mjs",
+          "reference-context.mjs",
+          "verifier.mjs",
+          "matrix-state.mjs",
+          "run-matrix.mjs",
           "score.mjs",
           "checkpoint-score.mjs",
           "verify-iterative-orders.py",
@@ -569,7 +575,9 @@ for (const dir of dirs) {
   const result = JSON.parse(
     fs.readFileSync(path.join(dir, "result.json"), "utf8"),
   );
-  (result.checkpoints?.length ? checkpointDirs : retentionDirs).push(dir);
+  (scoreTrack(result) === "workflow" ? checkpointDirs : retentionDirs).push(
+    dir,
+  );
 }
 if (checkpointDirs.length) {
   const scoreCode = await run(

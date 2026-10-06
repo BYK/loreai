@@ -3,6 +3,16 @@ import path from "node:path";
 
 export const MATRIX_STATE_FILE = "matrix-state.json";
 
+export function scoreTrack(result) {
+  if (
+    !Number.isSafeInteger(result.expectedCheckpoints) ||
+    result.expectedCheckpoints < 0
+  ) {
+    throw new Error("result must declare its expected checkpoint count");
+  }
+  return result.expectedCheckpoints > 0 ? "workflow" : "retention";
+}
+
 export function cellKey(cell) {
   return [
     cell.task,

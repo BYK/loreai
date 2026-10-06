@@ -10,6 +10,7 @@ import {
   hasMatchingTerminalResult,
   readMatrixState,
   returnCellToPending,
+  scoreTrack,
   startCell,
   writeMatrixState,
 } from "./matrix-state.mjs";
@@ -101,4 +102,20 @@ test("retries an interrupted cell without preserving its terminal claim", () => 
     attempts: 2,
     resultSha256: null,
   });
+});
+
+test("a workflow that times out before its first checkpoint remains a workflow", () => {
+  expect(
+    scoreTrack({
+      terminalOutcome: "agent-timeout",
+      expectedCheckpoints: 8,
+      checkpoints: [],
+    }),
+  ).toBe("workflow");
+  expect(scoreTrack({ expectedCheckpoints: 0, checkpoints: [] })).toBe(
+    "retention",
+  );
+  expect(() => scoreTrack({ checkpoints: [] })).toThrow(
+    "expected checkpoint count",
+  );
 });
