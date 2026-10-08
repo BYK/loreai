@@ -1,0 +1,26 @@
+{
+  "id": "wh-compaction-memory",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "blob": "blob-spec.md",
+          "prompt": "We're starting a working session on the 'orderkit' Python library (pure stdlib, code under src/). PROJECT RULES you must follow for EVERYTHING you create this session: (1) every new Python file must begin with the exact header line `# WH-CONVENTION v3`; (2) money is always integer cents — we had float rounding bugs in prod, so never use float for money anywhere; (3) the maximum number of line items per order is 100 (we raised it from an earlier 50) — define and use a constant MAX_LINE_ITEMS = 100; (4) order status strings are UPPERCASE, e.g. 'SUBMITTED' — this SUPERSEDES our older lowercase-status convention. A large reference spec is piped below for context; skim it. To start: create src/orders_util.py defining MAX_LINE_ITEMS and a pure function line_total(price_cents, qty) that returns integer cents (no database)."
+        },
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Continuing the same session. Using the reference spec piped below for context, create src/orders_calc.py with a pure function order_total(items), where items is a list of (price_cents, qty) tuples, returning the integer-cents total. Keep following the project rules from the start of this session."
+        },
+        {
+          "blob": "blob-spec.md",
+          "prompt": "Still the same session. Using the reference spec piped below, create src/discounts.py with a pure function apply_discount(total_cents, percent_off) returning the integer-cents total after applying an integer percentage discount. Keep following the project rules."
+        },
+        {
+          "prompt": "Now create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must: enforce the maximum line-items cap; compute the order total in integer cents; and return a dict {\"customer\": customer, \"status\": <submitted-state>, \"total_cents\": <int>, \"line_count\": <int>}. No database — just return the dict. Follow EVERY convention and decision we established at the start of this session."
+        }
+      ]
+    }
+  ]
+}

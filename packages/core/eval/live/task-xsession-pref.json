@@ -1,0 +1,22 @@
+{
+  "id": "xsession-pref",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "prompt": "Kicking off the 'orderkit' project (pure Python stdlib, code under src/). Create src/inventory.py with a pure function stock_level(records, sku) that sums the quantities for a SKU across a list of record dicts (each like {\"sku\": str, \"qty\": int}). A few personal working-style things while we're here, nothing formal: I really prefer @dataclass over bare dicts for anything with named fields (bare dicts are a refactoring nightmare); when validation fails I like raising a custom exception class rather than a bare ValueError (makes failures greppable); money is always integer cents (floats burned us in prod); order status values are UPPERCASE like 'SUBMITTED'; and every order we build carries a channel field set to 'WHOLESALE'. Anyway — just the inventory function for now."
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "turns": [
+        {
+          "prompt": "Create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must enforce a maximum of 100 line items, compute the order total in integer cents, and return the order with these fields: customer, status, total_cents, line_count, and channel. No database — just return the order object. Build it the way I like things done on this project."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "id": "xsession-hard",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "prompt": "Kicking off the 'orderkit' project (pure Python stdlib, code under src/). Create src/inventory.py with a pure function stock_level(records, sku) that sums the quantities for a SKU across a list of record dicts (each like {\"sku\": str, \"qty\": int}). Just quick house-style notes as you build it: we start every Python file with the line `# WH-CONVENTION v3`, and we always keep money as integer cents — floats burned us with rounding bugs in prod."
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "turns": [
+        {
+          "prompt": "Add src/pricing.py with a pure function apply_discount(total_cents, pct) that returns the discounted total as an integer number of cents (round half-up, stay in integer cents). By the way, order status values are lowercase strings for now, like 'submitted'."
+        }
+      ]
+    },
+    {
+      "id": "s3",
+      "turns": [
+        {
+          "prompt": "A couple of convention changes to lock in going forward. First, we've raised the maximum line items per order from 50 up to 100 — use a constant MAX_LINE_ITEMS = 100 when you need it. Second, we're switching order status to UPPERCASE from now on — use 'SUBMITTED', not the old lowercase 'submitted'. For now just add src/validate.py with a pure function is_valid_sku(sku) that returns True for a non-empty alphanumeric string and False otherwise."
+        }
+      ]
+    },
+    {
+      "id": "s4",
+      "turns": [
+        {
+          "prompt": "Create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must: enforce the maximum line-items cap; compute the order total in integer cents; and return a dict {\"customer\": customer, \"status\": <the current order-status value>, \"total_cents\": <int>, \"line_count\": <int>}. No database — just return the dict. Follow every orderkit convention and decision we've established across the project so far."
+        }
+      ]
+    }
+  ]
+}

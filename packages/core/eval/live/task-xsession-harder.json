@@ -1,0 +1,46 @@
+{
+  "id": "xsession-harder",
+  "seed": "./seed-min",
+  "sessions": [
+    {
+      "id": "s1",
+      "turns": [
+        {
+          "prompt": "Kicking off the 'orderkit' project (pure Python stdlib, code under src/). Create src/inventory.py with a pure function stock_level(records, sku) that sums the quantities for a SKU across a list of record dicts (each like {\"sku\": str, \"qty\": int}). House-style notes as you build: every Python file starts with the line `# WH-CONVENTION v3`, and money is always integer cents — floats gave us rounding bugs in prod."
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "turns": [
+        {
+          "prompt": "Add src/pricing.py with a pure function apply_discount(total_cents, pct) that returns the discounted total as an integer number of cents (round half-up). Also let's set the order line-item cap: MAX_LINE_ITEMS = 50."
+        }
+      ]
+    },
+    {
+      "id": "s3",
+      "turns": [
+        {
+          "prompt": "Add src/validate.py with a pure function is_valid_sku(sku) that returns True for a non-empty alphanumeric string, else False. Two notes for the project: the order line-item cap is now 100, and order status values are lowercase strings like 'submitted'."
+        }
+      ]
+    },
+    {
+      "id": "s4",
+      "turns": [
+        {
+          "prompt": "Add src/reporting.py with a pure function order_summary(orders) that returns a dict with keys total_orders (int) and total_cents (int) summing over a list of order dicts. Two project updates: the order line-item cap is 250, and order status values are UPPERCASE strings like 'SUBMITTED'."
+        }
+      ]
+    },
+    {
+      "id": "s5",
+      "turns": [
+        {
+          "prompt": "Create src/orders_v2.py with a PURE function create_order(customer, items), where items is a list of (product_id, price_cents, qty) tuples. It must: enforce the current maximum line-items cap; compute the order total in integer cents; and return a dict {\"customer\": customer, \"status\": <the current order-status value>, \"total_cents\": <int>, \"line_count\": <int>}. No database — just return the dict. Follow every orderkit convention and decision as they currently stand across the project."
+        }
+      ]
+    }
+  ]
+}

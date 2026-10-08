@@ -1,0 +1,95 @@
+{
+  "id": "iterative-orders-v1",
+  "seed": "./seed-min",
+  "verifier": "verify-iterative-orders.py",
+  "workflowGate": {
+    "checkpoint": "c7",
+    "minBaselineCompactions": 2,
+    "minBaselineProviderTokens": 1000000
+  },
+  "facts": {
+    "channel": { "prefix": "CHANNEL-" },
+    "region": { "prefix": "REGION-" },
+    "warehouse": { "prefix": "WH-" },
+    "status": { "prefix": "STATUS-" }
+  },
+  "sessions": [
+    {
+      "id": "iterative-orders",
+      "turns": [
+        {
+          "checkpoint": "c1",
+          "toolContext": {
+            "path": "reference/catalog-v1.txt",
+            "sizeKb": 90,
+            "spec": "Implement src/orders.py with create_order(customer, items), where items are (product_id, price_cents, qty). Return customer, total_cents (integer cents), and line_count. Reject more than 100 items. The catalog records above are vendor reference data, not a source of project-specific fulfillment values."
+          },
+          "prompt": "Start the orderkit library. Inspect reference/catalog-v1.txt and implement its current change contract. Aside for a later order workflow, not something to write into code now: our orders use {{fact.channel}} for channel, {{fact.region}} for region, {{fact.warehouse}} for warehouse, and {{fact.status}} as the status."
+        },
+        {
+          "checkpoint": "c2",
+          "toolContext": {
+            "path": "reference/discount-rules.txt",
+            "sizeKb": 90,
+            "spec": "Add apply_discount(order, code). WELCOME10 reduces the order total by 10 percent using integer cents; unknown codes must fail. Do not mutate the input order. Preserve create_order's public behavior."
+          },
+          "prompt": "Checkpoint 2. Inspect reference/discount-rules.txt and implement its current change contract without breaking the prior public behavior."
+        },
+        {
+          "checkpoint": "c3",
+          "toolContext": {
+            "path": "reference/shipping-zones.txt",
+            "sizeKb": 90,
+            "spec": "create_order must accept shipping_zone. LOCAL ships free and REMOTE costs 799 cents. Preserve prior fields and add shipping_cents and grand_total_cents. Existing callers without shipping_zone must keep working."
+          },
+          "prompt": "Checkpoint 3. Inspect reference/shipping-zones.txt and extend the existing API according to its change contract. Keep earlier callers working."
+        },
+        {
+          "checkpoint": "c4",
+          "toolContext": {
+            "path": "reference/quote-contract.txt",
+            "sizeKb": 90,
+            "spec": "Add quote_order(customer, items, shipping_zone) returning subtotal_cents, shipping_cents, and grand_total_cents. Make create_order use the same calculation while preserving every prior behavior."
+          },
+          "prompt": "Checkpoint 4. The product now needs a reusable quote endpoint. Inspect reference/quote-contract.txt and implement its change contract without breaking the original API."
+        },
+        {
+          "checkpoint": "c5",
+          "toolContext": {
+            "path": "reference/fulfillment-contract.txt",
+            "sizeKb": 90,
+            "spec": "Extend create_order for fulfillment. Its returned order must now include status, channel, region, and warehouse as well as all prior fields. Use the project-specific values from the start of this session; they are not in this vendor export. Preserve every earlier API behavior and calculation."
+          },
+          "prompt": "Checkpoint 5. Inspect reference/fulfillment-contract.txt and implement the fulfillment contract. Build it the way this orderkit project is run. Preserve every earlier API behavior and calculation."
+        },
+        {
+          "checkpoint": "c6",
+          "toolContext": {
+            "path": "reference/discounted-shipping.txt",
+            "sizeKb": 90,
+            "spec": "Discounts now apply to shipped orders too: apply_discount(order, 'WELCOME10') must update the grand total using the discounted subtotal plus unchanged shipping, without mutating the original order or losing its fulfillment fields. Preserve all earlier behavior."
+          },
+          "prompt": "Checkpoint 6. Inspect reference/discounted-shipping.txt and implement its change contract. Preserve all earlier behavior."
+        },
+        {
+          "checkpoint": "c7",
+          "toolContext": {
+            "path": "reference/discounted-quote.txt",
+            "sizeKb": 90,
+            "spec": "Add quote_discounted_order(customer, items, shipping_zone, code), using the same integer-cents discount and shipping calculations as the order API. Return subtotal_cents (after discount), shipping_cents, and grand_total_cents without creating or mutating an order. Keep the earlier quote and order APIs working."
+          },
+          "prompt": "Checkpoint 7. Inspect reference/discounted-quote.txt and implement its change contract without diverging from the existing order calculations."
+        },
+        {
+          "checkpoint": "c8",
+          "toolContext": {
+            "path": "reference/fulfillment-transition.txt",
+            "sizeKb": 90,
+            "spec": "Add fulfill_order(order, tracking_code), returning a new order marked FULFILLED with the tracking code. Do not mutate the input; retain its totals, channel, region, and warehouse. The initial status returned by create_order must still use the project-specific convention from the beginning of the session. Preserve all previous APIs."
+          },
+          "prompt": "Checkpoint 8. Inspect reference/fulfillment-transition.txt and implement its change contract while preserving the earlier initial-status convention and all previous APIs."
+        }
+      ]
+    }
+  ]
+}

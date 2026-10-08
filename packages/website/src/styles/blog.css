@@ -234,7 +234,14 @@
 }
 
 .blog-prose table {
+  /* Render as a block so a wide table scrolls within itself on narrow
+     viewports instead of overflowing the page (the table is its own scroll
+     container; the page never scrolls sideways). */
+  display: block;
   width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   border-collapse: collapse;
   font-size: 1rem;
 }
@@ -246,6 +253,8 @@
   text-align: left;
   vertical-align: top;
   line-height: 1.55;
+  /* Keep cells on one line so the table scrolls rather than crushing columns. */
+  white-space: nowrap;
 }
 
 .blog-prose thead th {

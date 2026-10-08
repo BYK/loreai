@@ -2354,6 +2354,20 @@ export function ltmEntryKeys(
     .sort();
 }
 
+/** Explicit no-memory control for gateway-based evaluation requests. */
+export function suppressesMemoryInjection(
+  rawHeaders: Record<string, string | undefined>,
+): boolean {
+  return rawHeaders["x-lore-no-memory"] === "true";
+}
+
+export function canInjectMemory(
+  knowledgeEnabled: boolean,
+  rawHeaders: Record<string, string | undefined>,
+): boolean {
+  return knowledgeEnabled && !suppressesMemoryInjection(rawHeaders);
+}
+
 /**
  * A delta baseline that surfaces the FULL current set as "changed".
  *
@@ -21020,7 +21034,7 @@ async function handleConversationTurnPrepared(
   };
   let usedAcceptedWindowFallback = false;
   let stable: { formatted: string; tokenCount: number } | undefined;
-  if (cfg.knowledge.enabled) {
+  if (canInjectMemory(cfg.knowledge.enabled, req.rawHeaders)) {
     const acceptedWindowFallback = Symbol("accepted source and knowledge pin");
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
@@ -21728,7 +21742,7 @@ async function handleConversationTurnPrepared(
   // NEXT turn's prefix matches and gets a cache read.
   if (
     result.refreshLtm &&
-    cfg.knowledge.enabled &&
+    canInjectMemory(cfg.knowledge.enabled, req.rawHeaders) &&
     !usedAcceptedWindowFallback
   ) {
     try {
@@ -22079,6 +22093,7 @@ async function handleConversationTurnPrepared(
   // A provider-owned built-in cannot execute recall, and a client's explicit
   // parallel-tool setting must not be replaced by our serial recall policy.
   if (
+    !suppressesMemoryInjection(req.rawHeaders) &&
     modifiedReq.tools.some((tool) => tool.responsesBuiltin === undefined) &&
     // Native Gemini built-ins are replayed as an exact tool set. Adding recall
     // here would change the set and invalidate that replay.
