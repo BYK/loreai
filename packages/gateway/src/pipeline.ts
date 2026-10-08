@@ -250,6 +250,7 @@ import {
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
 import { InvalidCrossProviderRequestError } from "./translate/errors";
+import { projectNativeUserProvenance } from "./native-user-provenance";
 import {
   accumulateResponsesSSEStream,
   streamResponsesPassthrough,
@@ -325,6 +326,7 @@ import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
+  deterministicPartID,
   legacyContentForMessage,
   visibleContentForMessage,
 } from "./temporal-adapter";
@@ -24084,7 +24086,7 @@ export function loreMessagesToGateway(
     }
 
     const message: GatewayMessage = { role: msg.info.role, content };
-    const candidate = provenanceByMessageId.get(msg.info.id);
+    let candidate = provenanceByMessageId.get(msg.info.id);
     const userNativeProvenance =
       allowNativeUserProvenance &&
       msg.info.role === "user" &&
@@ -24107,9 +24109,8 @@ export function loreMessagesToGateway(
       candidate.provenanceContent?.some(
         (block) => block.type === "text" && block.raw?.type === "text",
       );
-    if (userNativeProvenance) {
+    if (userNativeProvenance && candidate) {
       if (
-        JSON.stringify(content) !== JSON.stringify(candidate.content) ||
         !candidate.provenanceContent?.every(
           (block) =>
             block.type !== "opaque" ||
@@ -24127,8 +24128,28 @@ export function loreMessagesToGateway(
       ) {
         throw new InvalidCrossProviderRequestError();
       }
+      // Gradient cleanup can edit plain user text even on the same route.
+      // Replaying the stale envelope would undo those edits; dropping it
+      // would lose IDs, status, part types, or native metadata.
+      if (JSON.stringify(content) !== JSON.stringify(candidate.content)) {
+        const sourceIndexes = new Map(
+          candidate.content.map((_block, index) => [
+            deterministicPartID(msg.info.id, index),
+            index,
+          ]),
+        );
+        candidate = projectNativeUserProvenance(
+          candidate,
+          content,
+          msg.parts.map((part) =>
+            typeof part.id === "string"
+              ? (sourceIndexes.get(part.id) ?? -1)
+              : -1,
+          ),
+        );
+      }
     }
-    if (chatNativeTextProvenance) {
+    if (chatNativeTextProvenance && candidate) {
       if (
         !candidate.provenanceContent?.every(
           (block) =>
