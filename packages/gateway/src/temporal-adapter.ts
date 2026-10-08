@@ -173,7 +173,10 @@ export function legacyContentForMessage(
  * Generate a deterministic ID for a part within a message.
  * Uses the message ID + part index for stability.
  */
-function deterministicPartID(messageID: string, partIndex: number): string {
+export function deterministicPartID(
+  messageID: string,
+  partIndex: number,
+): string {
   const h = createHash("sha256");
   h.update(`${messageID}:part:${partIndex}`);
   return h.digest("hex").slice(0, 32);

@@ -1539,6 +1539,100 @@ describe("cross-provider request conformance through real forwarding", () => {
     },
   );
 
+  it.each(
+    ([1, 4] as const).flatMap((layer) =>
+      [false, true].flatMap((streamed) =>
+        [false, true].flatMap((envelope) =>
+          [false, true, "whitespace", "reminder"].map((array) => ({
+            layer,
+            streamed,
+            envelope,
+            array,
+          })),
+        ),
+      ),
+    ),
+  )(
+    "projects normalized native Responses user text after Layer $layer (streamed=$streamed, envelope=$envelope, array=$array)",
+    async ({ layer, streamed, envelope, array }) => {
+      const sessionID = `native-user-normalized-${layer}-${streamed}-${envelope}-${array}`;
+      const nativeUser = {
+        ...(envelope
+          ? { type: "message", id: "msg_user_normalized", status: "completed" }
+          : {}),
+        role: "user",
+        content: array
+          ? [
+              ...(typeof array === "string"
+                ? [
+                    {
+                      type: "input_text",
+                      text:
+                        array === "whitespace"
+                          ? "   "
+                          : "<system-reminder>Plan mode is active</system-reminder>",
+                    },
+                  ]
+                : []),
+              { type: "input_text", text: "continue\n\n\n" },
+              { type: "output_text", text: "  next step  ", annotations: [] },
+            ]
+          : "continue\n\n\n",
+      };
+      const { upstream } = await forward(
+        "/v1/responses",
+        "openai",
+        {
+          model: "gpt-test",
+          input: [nativeUser],
+          ...(streamed
+            ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+            : {}),
+        },
+        true,
+        async () => {
+          const accepted = await harness!.request("/v1/responses", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: "Bearer test-key",
+              "x-lore-provider": "openai",
+              "x-lore-project": projectPath!,
+              "x-lore-agent": "coder",
+              "x-lore-session-id": sessionID,
+            },
+            body: JSON.stringify({
+              model: "gpt-test",
+              input: [{ role: "user", content: "start" }],
+            }),
+          });
+          expect(accepted.status, await accepted.text()).toBe(200);
+          const session = [...getActiveSessions().values()].find(
+            (candidate) => candidate.headerSessionId === sessionID,
+          );
+          if (!session || session.storageTenantId === undefined)
+            throw new Error("missing accepted session owner");
+          core.withTenant(session.storageTenantId, () =>
+            core.setForceMinLayer(layer, session.sessionID),
+          );
+        },
+        { upstreamCalls: 2, headers: { "x-lore-session-id": sessionID } },
+      );
+      expect(upstream.input).toContainEqual({
+        ...nativeUser,
+        content: array
+          ? [
+              ...(typeof array === "string"
+                ? [{ type: "input_text", text: "" }]
+                : []),
+              { type: "input_text", text: "continue" },
+              { type: "output_text", text: "next step", annotations: [] },
+            ]
+          : "continue",
+      });
+    },
+  );
+
   it("does not replay stripped session markers in native Chat text parts", async () => {
     const { upstream } = await forward("/v1/chat/completions", "openrouter", {
       model: "gpt-test",
