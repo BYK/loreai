@@ -1217,9 +1217,9 @@ export type InferredProjectPath = { path: string; authoritative: boolean };
 /**
  * Try to extract a project path from the system prompt content.
  *
- * Claude Code includes absolute paths in its system prompt (CLAUDE.md
- * content, tool definitions, working directory references). Returns the
- * extracted path or `null` if nothing looks like a project directory.
+ * Older Claude Code prompts include absolute paths (CLAUDE.md content, tool
+ * definitions, working directory references). Returns the extracted path or
+ * `null` if nothing looks like a project directory.
  */
 export function inferProjectPathDetailed(
   systemPrompt: string,
@@ -1238,6 +1238,54 @@ export function inferProjectPathDetailed(
 
 export function inferProjectPath(systemPrompt: string): string | null {
   return inferProjectPathDetailed(systemPrompt)?.path ?? null;
+}
+
+/** A client reminder does not establish which of several projects is active. */
+export class ProjectPathConflictError extends Error {
+  constructor() {
+    super("Conflicting project paths");
+    this.name = "ProjectPathConflictError";
+  }
+}
+
+/**
+ * Claude Code's opening reminder lists instruction files, including global
+ * files under ~/.claude. Unlike the system prompt, it can also quote arbitrary
+ * cwd fields and paths; only one unambiguous project instruction directory may
+ * bind a session. Never select the first match from the general-purpose
+ * system-prompt heuristic here.
+ */
+export function inferClaudeCodeReminderProjectPath(
+  reminder: string,
+): InferredProjectPath | null {
+  const instructionFile =
+    /(\/[\w.@+/-]+)\/(?:CLAUDE|AGENTS|\.lore)\.md(?=$|[\s"'<>):,;])/g;
+  const paths = new Set<string>();
+  for (const match of reminder.matchAll(instructionFile)) {
+    const path = match[1].replace(/\/+$/, "");
+    if (
+      !path ||
+      path.length > MAX_PROJECT_PATH_LENGTH ||
+      path.includes("//") ||
+      path.split("/").some((part) => part === "." || part === "..") ||
+      isUnattributedPath(path)
+    ) {
+      throw new ProjectPathConflictError();
+    }
+    // User-level Claude Code instructions are shared across projects. They
+    // cannot be used to identify the active workspace.
+    if (
+      path.split("/").includes(".claude") ||
+      path.includes("/.config/claude/") ||
+      path.endsWith("/.config/claude")
+    ) {
+      continue;
+    }
+    paths.add(path);
+    if (paths.size > 1) throw new ProjectPathConflictError();
+  }
+  const path = paths.values().next().value;
+  return path ? { path, authoritative: true } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,9 +1334,10 @@ export const isUnattributedPath = isUnattributedProjectPath;
 
 /**
  * Resolve the project path for a request. Checks in order:
- *  1. `X-Lore-Project` header (explicit override)
- *  2. `inferProjectPath(systemPrompt)` (zero-config extraction)
- *  3. `process.cwd()` (last resort fallback)
+ *  1. Authoritative system-prompt inference (overrides a stale header)
+ *  2. An explicit header, if absent or consistent with the opening reminder
+ *  3. Unambiguous Claude Code opening-reminder inference, when provided
+ *  4. `process.cwd()` (last resort fallback)
  *
  * Returns a `{ path, source }` tuple so callers can distinguish a
  * successful resolution from a cwd fallback and take corrective action
@@ -1301,6 +1350,7 @@ export const isUnattributedPath = isUnattributedProjectPath;
 export function getProjectPath(
   systemPrompt: string,
   headers: Record<string, string>,
+  openingReminder?: string | null,
 ): ProjectPathResult {
   // Extract git remote from header (independent of path resolution).
   const gitRemote = extractGitRemoteHeader(headers);
@@ -1336,12 +1386,28 @@ export function getProjectPath(
     return { path: inferred.path, source: "inferred", gitRemote };
   }
 
-  // 2. No authoritative inference — an explicit header wins if present. This
-  //    protects legitimate clients (OpenCode/Pi plugins) that send a correct
-  //    header alongside a system prompt with no inferable working directory.
+  // Claude Code 2.1.289 moved the workspace marker from `system` into the
+  // opening user reminder. The reminder cannot override an explicit header,
+  // but a disagreement is unsafe: a static header could join distinct
+  // projects. Reject the request instead of trusting either lower-priority
+  // signal or rebinding the session.
+  const reminderPath = openingReminder
+    ? inferClaudeCodeReminderProjectPath(openingReminder)
+    : null;
+  if (headerPath && reminderPath && headerPath !== reminderPath.path) {
+    throw new ProjectPathConflictError();
+  }
+
+  // 2. Explicit project headers remain the preferred source for clients
+  // without a conflicting reminder (including OpenCode and Pi).
   if (headerPath) return { path: headerPath, source: "header", gitRemote };
 
-  // 3. Fall back to gateway's own cwd (with workspace root discovery)
+  // 3. The reminder can identify a project only when no other signal exists.
+  if (reminderPath) {
+    return { path: reminderPath.path, source: "inferred", gitRemote };
+  }
+
+  // 4. Fall back to gateway's own cwd (with workspace root discovery)
   return {
     path: discoverWorkspaceRoot(process.cwd()),
     source: "cwd",

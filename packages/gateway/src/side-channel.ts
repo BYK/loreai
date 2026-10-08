@@ -4,11 +4,10 @@
  * Claude Code issues several auxiliary API calls that are NOT conversation
  * turns: the auto-mode permission classifier (one call per tool action),
  * conversation title/topic generation, and subagent naming/summary. These are
- * built with `skipSystemPromptPrefix: true`, so they carry NEITHER the coding
- * system prompt (no "Working directory:" line, no CLAUDE.md content) NOR —
- * since Claude Code 2.1.258, where the classifier request is built with
- * `forceAttributionHeader: true` — is the anchored OAuth billing header a
- * reliable discriminator: the classifier now DOES carry it at `system[0]`.
+ * built with `skipSystemPromptPrefix: true`, so they lack workspace markers
+ * in the system prompt. Since Claude Code 2.1.258, the classifier can carry
+ * an OAuth billing header at `system[0]` via `forceAttributionHeader: true`;
+ * that header is not a reliable discriminator.
  * All of these calls still carry the SAME `x-claude-code-session-id` header as
  * the live coding conversation (Claude Code attaches it to every request).
  *
@@ -27,45 +26,41 @@
  * any Lore processing (`handlePassthrough`), never touching session state or
  * memory.
  */
-import { inferProjectPathDetailed } from "./config";
+import {
+  getProjectPath,
+  inferClaudeCodeReminderProjectPath,
+  inferProjectPathDetailed,
+  type ProjectPathResult,
+} from "./config";
 import { isClaudeCodeClient } from "./session";
 import type { GatewayRequest } from "./translate/types";
 
 /**
- * Claude Code's coding system prompt always contains a `Working directory:`
- * line (verified in the 2.1.x binary). We match the LABEL only — not the path —
- * so it recognizes a coding turn regardless of the path format, including a
- * Windows `Working directory: C:\Users\…` that the POSIX-oriented
+ * Older Claude Code coding system prompts contain a `Working directory:` line.
+ * Match the LABEL only — not the path — to recognize a turn regardless of
+ * path format, including a Windows `Working directory: C:\Users\…` that the POSIX-oriented
  * `inferProjectPathDetailed` heuristic does not treat as authoritative. It is
  * absent from every `skipSystemPromptPrefix` side-channel call.
  */
 const CLAUDE_CODE_CWD_MARKER_RE = /(?:^|\n)[ \t]*Working directory:[ \t]*\S/i;
 
 /**
- * True when a system prompt carries the Claude Code CODING prompt — i.e. it
- * belongs to a real conversation turn (the main session OR a subagent), not a
- * side-channel call.
+ * True when the system prompt carries a coding-turn workspace marker.
  *
  * Detected by any signal:
- *   1. a `Working directory:` marker line — Claude Code always embeds it in its
- *      coding system prompt (including for subagent turns), for any OS; or
+ *   1. a `Working directory:` marker line on older Claude Code versions; or
  *   2. an AUTHORITATIVE workspace inference (a `cwd` field or a
  *      CLAUDE/AGENTS/.lore.md path), a broader heuristic than signal 1.
  *
  * The signals are OR-combined so a real turn is recognized on any platform
- * (signal 1 does not require a POSIX-style path). A side-channel call carries
- * none of these.
+ * (signal 1 does not require a POSIX-style path). Claude Code 2.1.289 instead
+ * places its workspace marker in the first user's opening system reminder.
  *
  * NOTE: the anchored OAuth billing header is deliberately NOT a signal here.
  * Since Claude Code 2.1.258 the auto-mode permission classifier is built with
  * `forceAttributionHeader: true`, so it carries the billing header at
- * `system[0]` even though it is a `skipSystemPromptPrefix` side-channel call
- * (it never embeds the coding prompt, so signals 1 and 2 are still absent).
- * Treating the header as sufficient would demote the classifier out of the
- * bypass and corrupt its verdict. A real coding turn always carries the
- * `Working directory:` marker regardless, so dropping the header signal never
- * mis-classifies a real turn — it only ever widens the bypass to
- * side-channels that now carry `forceAttributionHeader`, which is correct.
+ * `system[0]` even though it is a `skipSystemPromptPrefix` side-channel call.
+ * Treating the header as sufficient would corrupt the classifier verdict.
  */
 export function hasClaudeCodeCodingPrompt(system: string): boolean {
   if (CLAUDE_CODE_CWD_MARKER_RE.test(system)) return true;
@@ -73,18 +68,47 @@ export function hasClaudeCodeCodingPrompt(system: string): boolean {
 }
 
 /**
+ * Only the opening reminder in the first user text block is eligible for
+ * workspace inference. Later user text and tool results can quote arbitrary
+ * paths and must never bind a session to a different project.
+ */
+function claudeCodeOpeningReminder(req: GatewayRequest): string | null {
+  if (req.protocol !== "anthropic" || !isClaudeCodeClient(req.rawHeaders)) {
+    return null;
+  }
+  const first = req.messages[0];
+  const block = first?.role === "user" ? first.content[0] : undefined;
+  if (block?.type !== "text") return null;
+  const opening = /^\s*<system-reminder>/.exec(block.text);
+  if (!opening) return null;
+  const end = block.text.indexOf("</system-reminder>", opening[0].length);
+  return end === -1 ? null : block.text.slice(opening[0].length, end);
+}
+
+/** Resolve the same coding-turn marker for routing and project attribution. */
+export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
+  return getProjectPath(
+    req.system,
+    req.rawHeaders,
+    claudeCodeOpeningReminder(req),
+  );
+}
+
+/**
  * True when a request is a Claude Code side-channel / auxiliary call that must
  * be forwarded upstream untouched.
  *
- * Conservative by construction: it bypasses ONLY requests that (a) originate
- * from Claude Code (carry `x-claude-code-session-id`) AND (b) lack the coding
- * system prompt (no `Working directory:` marker, no authoritative workspace
- * inference). A real coding turn carries the marker on every platform, so it is
- * never mis-classified as a side-channel. Conversely, a side-channel that
- * somehow embedded a coding-prompt signal would merely fall through to the
- * normal pipeline — a safe (memory-only) miss, never a broken conversation.
+ * Bypass requests with neither a system workspace marker nor an authoritative
+ * marker in the opening user reminder. Do not use the billing header or an
+ * arbitrary quoted path in user text as a coding-turn signal.
  */
 export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
   if (!isClaudeCodeClient(req.rawHeaders)) return false;
-  return !hasClaudeCodeCodingPrompt(req.system);
+  if (hasClaudeCodeCodingPrompt(req.system)) return false;
+  // Claude Code's classifier and naming calls do not offer tools. Their first
+  // user message can quote an earlier coding reminder, so reminder text alone
+  // must never turn a tool-less auxiliary call into a conversation turn.
+  if (req.protocol !== "anthropic" || req.tools.length === 0) return true;
+  const reminder = claudeCodeOpeningReminder(req);
+  return !reminder || !inferClaudeCodeReminderProjectPath(reminder);
 }

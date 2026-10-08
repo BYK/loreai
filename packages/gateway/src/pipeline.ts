@@ -187,6 +187,7 @@ import {
   isCallerUpstreamAllowed,
   normalizeUpstreamBase,
   unattributedBucketPath,
+  ProjectPathConflictError,
   type ProjectPathResult,
 } from "./config";
 import {
@@ -393,7 +394,7 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
-import { isClaudeCodeSideChannel } from "./side-channel";
+import { getRequestProjectPath, isClaudeCodeSideChannel } from "./side-channel";
 import {
   analyzeCacheTurn,
   categorizeBust,
@@ -17320,7 +17321,7 @@ async function handleCompactionInner(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   const credential = extractAuth(req.rawHeaders);
   if (!credential) {
     return errorResponse(401, "A provider credential is required");
@@ -20212,7 +20213,7 @@ async function handleConversationTurnPrepared(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -24414,7 +24415,7 @@ async function handleLoreSlashCommand(
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
   if (!state && indexedSessionID) {
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
+    const pathResult = getRequestProjectPath(req);
     state = getOrCreateSession(
       indexedSessionID,
       pathResult.path,
@@ -24651,7 +24652,7 @@ async function handleCurateSlashCommand(
   if (text.toLowerCase() !== "/lore:curate") return null;
 
   const indexedSessionID = findIndexedSessionID(req, config);
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   let state = findLiveSessionState(req, config, allSessions);
   let sessionID = state?.sessionID;
 
@@ -25061,6 +25062,13 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof ProjectPathConflictError) {
+      return errorResponse(
+        400,
+        "Conflicting project paths",
+        "invalid_request_error",
+      );
+    }
     if (err instanceof InvalidCrossProviderRequestError) {
       return errorResponse(
         400,
