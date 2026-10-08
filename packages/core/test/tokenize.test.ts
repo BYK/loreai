@@ -7,7 +7,11 @@
  *  - lazy construction: cl100k_base eager, others lazy
  *  - basic accuracy spot-checks against known BPE counts
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { Tokenizer } from "ai-tokenizer";
+import * as cl100k from "ai-tokenizer/encoding/cl100k_base";
+import * as o200k from "ai-tokenizer/encoding/o200k_base";
+import * as claude from "ai-tokenizer/encoding/claude";
 import {
   estimateTokens,
   encodingForModel,
@@ -76,9 +80,57 @@ describe("tokenize / encodingForModel", () => {
 });
 
 describe("tokenize / estimateTokens", () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(() => {
     _resetTokenizeCacheForTest();
   });
+
+  it.each([{}, { modelID: "gpt-4o" }, { providerID: "anthropic" }])(
+    "recovers from any tokenizer exception using the legacy chars/3 heuristic (%j)",
+    (opts) => {
+      const text = "private input Merhaba 🇹🇷 漢字 \ud800";
+      vi.spyOn(Tokenizer.prototype, "count").mockImplementation(() => {
+        throw new Error(`private failure ${text}`);
+      });
+      expect(estimateTokens(text, opts)).toBe(Math.ceil(text.length / 3));
+      expect(estimateTokens("", opts)).toBe(0);
+      vi.restoreAllMocks();
+      const encoding =
+        opts.providerID === "anthropic"
+          ? claude
+          : opts.modelID === "gpt-4o"
+            ? o200k
+            : cl100k;
+      expect(estimateTokens(text, opts)).toBe(
+        new Tokenizer(encoding).encode(text, [], []).length,
+      );
+    },
+  );
+
+  it.each([
+    { encoding: cl100k, opts: {} },
+    { encoding: o200k, opts: { modelID: "gpt-4o" } },
+    { encoding: claude, opts: { providerID: "anthropic" } },
+  ])(
+    "counts literal special-token strings as ordinary text in $encoding.name",
+    ({ encoding, opts }) => {
+      const tokenizer = new Tokenizer(encoding);
+      expect(Object.keys(encoding.special_tokens).length).toBeGreaterThan(0);
+      for (const marker of Object.keys(encoding.special_tokens)) {
+        for (const text of [
+          marker,
+          `A tool printed ${marker} in its output.`,
+          `${marker}${marker}`,
+          JSON.stringify({ text: `Merhaba 🇹🇷 ${marker} 漢字` }),
+        ]) {
+          const expected = tokenizer.encode(text, [], []);
+          expect(tokenizer.decode(expected)).toBe(text);
+          expect(estimateTokens(text, opts)).toBe(expected.length);
+          expect(expected.length).toBeGreaterThan(1);
+        }
+      }
+    },
+  );
 
   it("returns 0 for empty input without touching the tokenizer", () => {
     expect(estimateTokens("", { providerID: "anthropic" })).toBe(0);

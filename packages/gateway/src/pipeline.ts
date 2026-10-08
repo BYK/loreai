@@ -20976,6 +20976,9 @@ async function handleConversationTurnPrepared(
     sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
     harness: detectHarness(req.rawHeaders),
+  }).catch((error: unknown) => {
+    preparationTiming.failure(error);
+    throw error;
   });
   preparation.assertActive();
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
