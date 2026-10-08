@@ -210,12 +210,14 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.290": SEED_2_1_138,
   "2.1.292": SEED_2_1_138,
   "2.1.293": SEED_2_1_138,
+  "2.1.295": SEED_2_1_138,
+  "2.1.294": SEED_2_1_138,
   // Future versions: extract and add entries here.
   // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.293";
+const WORKER_VERSION = "2.1.295";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
