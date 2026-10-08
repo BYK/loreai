@@ -1250,16 +1250,16 @@ export class ProjectPathConflictError extends Error {
 
 /**
  * Claude Code's opening reminder lists instruction files, including global
- * files under ~/.claude. Unlike the system prompt, it can also quote arbitrary
- * cwd fields and paths; only one unambiguous project instruction directory may
- * bind a session. Never select the first match from the general-purpose
- * system-prompt heuristic here.
+ * files under ~/.claude. Other text can quote arbitrary paths, so only actual
+ * instruction-file records can bind a session. Nested instruction directories
+ * need an independent project header to distinguish a root from a subproject.
  */
 export function inferClaudeCodeReminderProjectPath(
   reminder: string,
+  headerPath?: string,
 ): InferredProjectPath | null {
   const instructionFile =
-    /(\/[\w.@+/-]+)\/(?:CLAUDE|AGENTS|\.lore)\.md(?=$|[\s"'<>):,;])/g;
+    /(?:^|\n)[ \t]*(?:Instructions from:|Contents of)[ \t]*(\/[\w.@+/-]+)\/(?:CLAUDE|AGENTS|\.lore)\.md(?=$|[\s"'<>):,;])/g;
   const paths = new Set<string>();
   for (const match of reminder.matchAll(instructionFile)) {
     const path = match[1].replace(/\/+$/, "");
@@ -1282,7 +1282,21 @@ export function inferClaudeCodeReminderProjectPath(
       continue;
     }
     paths.add(path);
-    if (paths.size > 1) throw new ProjectPathConflictError();
+  }
+  if (paths.size > 1) {
+    if (
+      !headerPath ||
+      !paths.has(headerPath) ||
+      [...paths].some(
+        (candidate) =>
+          candidate !== headerPath &&
+          !candidate.startsWith(`${headerPath}/`) &&
+          !headerPath.startsWith(`${candidate}/`),
+      )
+    ) {
+      throw new ProjectPathConflictError();
+    }
+    return { path: headerPath, authoritative: true };
   }
   const path = paths.values().next().value;
   return path ? { path, authoritative: true } : null;
@@ -1392,7 +1406,7 @@ export function getProjectPath(
   // projects. Reject the request instead of trusting either lower-priority
   // signal or rebinding the session.
   const reminderPath = openingReminder
-    ? inferClaudeCodeReminderProjectPath(openingReminder)
+    ? inferClaudeCodeReminderProjectPath(openingReminder, headerPath)
     : null;
   if (headerPath && reminderPath && headerPath !== reminderPath.path) {
     throw new ProjectPathConflictError();

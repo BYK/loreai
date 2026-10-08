@@ -259,6 +259,49 @@ describe("isClaudeCodeSideChannel", () => {
     ).toBe(true);
   });
 
+  test("true: a tool-bearing classifier quoting the opening reminder stays a side-channel", () => {
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS },
+          system: CLASSIFIER_SYSTEM,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: NEW_CLAUDE_REMINDER }],
+            },
+          ],
+          tools: Array.from({ length: 127 }, (_, i) => ({
+            name: `tool_${i}`,
+            description: "Test tool",
+            inputSchema: { type: "object" },
+          })),
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test("true: a quoted instruction path is not an opening workspace record", () => {
+    const request = makeRequest({
+      rawHeaders: { ...CC_SESSION_HEADERS },
+      system: NEW_CLAUDE_SYSTEM.join("\n"),
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "<system-reminder>Example: /client/projects/other/CLAUDE.md is in another project</system-reminder>",
+            },
+          ],
+        },
+      ],
+      tools: [{ name: "tool", description: "Test tool", inputSchema: {} }],
+    });
+    expect(isClaudeCodeSideChannel(request)).toBe(true);
+    expect(getRequestProjectPath(request).source).toBe("cwd");
+  });
+
   test("true: a reminder quoted in a later message cannot identify a coding turn", () => {
     expect(
       isClaudeCodeSideChannel(
@@ -368,6 +411,43 @@ cwd: /client/projects/wrong
     const reminder = `<system-reminder>
 Instructions from: /client/projects/one/CLAUDE.md
 Instructions from: /client/projects/two/CLAUDE.md
+</system-reminder>`;
+    expect(() =>
+      getRequestProjectPath(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS },
+          messages: [
+            { role: "user", content: [{ type: "text", text: reminder }] },
+          ],
+        }),
+      ),
+    ).toThrow("Conflicting project paths");
+  });
+
+  test("nested project instructions agree with the project header", () => {
+    const reminder = `<system-reminder>
+Instructions from: /client/projects/app/CLAUDE.md
+Instructions from: /client/projects/app/src/CLAUDE.md
+</system-reminder>`;
+    expect(
+      getRequestProjectPath(
+        makeRequest({
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-lore-project": "/client/projects/app",
+          },
+          messages: [
+            { role: "user", content: [{ type: "text", text: reminder }] },
+          ],
+        }),
+      ),
+    ).toMatchObject({ path: "/client/projects/app", source: "header" });
+  });
+
+  test("nested instruction files without an independent project path remain ambiguous", () => {
+    const reminder = `<system-reminder>
+Instructions from: /client/projects/app/CLAUDE.md
+Instructions from: /client/projects/app/src/CLAUDE.md
 </system-reminder>`;
     expect(() =>
       getRequestProjectPath(
@@ -691,6 +771,83 @@ Instructions from: /client/projects/${project}/CLAUDE.md
     expect(harness.upstreamBodies()).toEqual([]);
   });
 
+  it("does not inject another project's memory for an example path in an opening reminder", async () => {
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "Upstream reply",
+        }),
+      ],
+    });
+    withTenant(
+      credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+      () => {
+        ltm.create({
+          projectPath: "/client/projects/other",
+          scope: "project",
+          category: "preference",
+          title: "Private other project knowledge",
+          content: "private-other-project-knowledge",
+        });
+      },
+    );
+    const response = await harness.chat(
+      newClaudeCodeBody(
+        "<system-reminder>Example: /client/projects/other/CLAUDE.md is in another project</system-reminder>",
+      ),
+      "test-key",
+      {
+        ...CC_SESSION_HEADERS,
+        "x-lore-project": "",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await assistantText(response)).toBe("Upstream reply");
+    expect(harness.upstreamBodies()).toHaveLength(1);
+    expect(
+      harness.upstreamBodies()[0].includes("private-other-project-knowledge"),
+    ).toBe(false);
+    expect(harness.queryDB("SELECT project_path FROM session_state")).toEqual(
+      [],
+    );
+    expect(harness.queryDB("SELECT * FROM temporal_messages")).toEqual([]);
+  });
+
+  it("accepts nested instruction files under a matching project header", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "Coding reply",
+        }),
+      ],
+    });
+    const response = await harness.chat(
+      newClaudeCodeBody(`<system-reminder>
+Instructions from: /client/projects/app/CLAUDE.md
+Instructions from: /client/projects/app/src/CLAUDE.md
+</system-reminder>`),
+      "test-key",
+      { ...CC_SESSION_HEADERS, "x-lore-project": "/client/projects/app" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(
+      harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state WHERE header_session_id = ?",
+        [CC_SESSION_HEADERS["x-claude-code-session-id"]],
+      ),
+    ).toEqual([{ project_path: "/client/projects/app" }]);
+  });
+
   it("forwards a side-channel request upstream verbatim and stores nothing", async () => {
     harness = await createHarness({
       fixtures: [
@@ -828,7 +985,7 @@ Instructions from: /client/projects/${project}/CLAUDE.md
     expect(await assistantText(classifier)).toBe("SIDECHANNEL-FIXTURE");
   });
 
-  it("forwards a classifier quoting an opening reminder after a coding session exists", async () => {
+  it("forwards a tool-bearing classifier quoting an opening reminder after a coding session exists", async () => {
     harness = await createHarness({
       fixtures: [
         makeFixtureEntry({
@@ -856,6 +1013,7 @@ Instructions from: /client/projects/${project}/CLAUDE.md
     const classifier = await harness.chat(
       {
         ...sideChannelBody(),
+        tools: newClaudeCodeBody().tools,
         messages: [
           {
             role: "user",
@@ -875,5 +1033,71 @@ Instructions from: /client/projects/${project}/CLAUDE.md
     const bodies = harness.upstreamBodies();
     const sent = JSON.parse(bodies.at(-1) ?? "{}") as { system?: unknown };
     expect(sent.system).toBe(CLASSIFIER_SYSTEM);
+  });
+
+  it("rejects a later project's reminder under an already-bound session before injecting memory", async () => {
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "First reply",
+        }),
+        makeFixtureEntry({
+          seq: 1,
+          requestMessages: [],
+          responseText: "Second reply",
+        }),
+      ],
+    });
+    const headers = {
+      ...CC_SESSION_HEADERS,
+      "x-lore-project": "",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+    };
+    const first = await harness.chat(
+      newClaudeCodeBody(
+        "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
+      ),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.text();
+    const [{ n: before }] = harness.queryDB<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM temporal_messages",
+    );
+    const secondBody = newClaudeCodeBody(
+      "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
+    );
+    secondBody.messages = [
+      ...(secondBody.messages as Array<Record<string, unknown>>),
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
+          },
+        ],
+      },
+    ];
+    const second = await harness.chat(secondBody, "test-key", headers);
+    expect(second.status).toBe(400);
+    expect(harness.upstreamBodies()).toHaveLength(1);
+    const [{ n: after }] = harness.queryDB<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM temporal_messages",
+    );
+    expect(after).toBe(before);
+    expect(
+      harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state WHERE header_session_id = ?",
+        [CC_SESSION_HEADERS["x-claude-code-session-id"]],
+      ),
+    ).toEqual([{ project_path: "/client/projects/one" }]);
   });
 });

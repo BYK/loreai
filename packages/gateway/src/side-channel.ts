@@ -27,6 +27,8 @@
  * memory.
  */
 import {
+  ProjectPathConflictError,
+  extractProjectHeader,
   getProjectPath,
   inferClaudeCodeReminderProjectPath,
   inferProjectPathDetailed,
@@ -43,6 +45,11 @@ import type { GatewayRequest } from "./translate/types";
  * absent from every `skipSystemPromptPrefix` side-channel call.
  */
 const CLAUDE_CODE_CWD_MARKER_RE = /(?:^|\n)[ \t]*Working directory:[ \t]*\S/i;
+
+// skipSystemPromptPrefix removes Claude Code's coding preamble from auxiliary
+// requests. A quoted reminder and a tools array alone cannot identify a turn.
+const CLAUDE_CODE_CODING_PREAMBLE_RE =
+  /(?:^|\n)[ \t]*You are Claude Code(?:[.,\s]|$)/i;
 
 /**
  * True when the system prompt carries a coding-turn workspace marker.
@@ -72,12 +79,10 @@ export function hasClaudeCodeCodingPrompt(system: string): boolean {
  * workspace inference. Later user text and tool results can quote arbitrary
  * paths and must never bind a session to a different project.
  */
-function claudeCodeOpeningReminder(req: GatewayRequest): string | null {
-  if (req.protocol !== "anthropic" || !isClaudeCodeClient(req.rawHeaders)) {
-    return null;
-  }
-  const first = req.messages[0];
-  const block = first?.role === "user" ? first.content[0] : undefined;
+function openingReminder(
+  message: GatewayRequest["messages"][number] | undefined,
+): string | null {
+  const block = message?.role === "user" ? message.content[0] : undefined;
   if (block?.type !== "text") return null;
   const opening = /^\s*<system-reminder>/.exec(block.text);
   if (!opening) return null;
@@ -85,13 +90,35 @@ function claudeCodeOpeningReminder(req: GatewayRequest): string | null {
   return end === -1 ? null : block.text.slice(opening[0].length, end);
 }
 
+function claudeCodeOpeningReminder(req: GatewayRequest): string | null {
+  if (req.protocol !== "anthropic" || !isClaudeCodeClient(req.rawHeaders)) {
+    return null;
+  }
+  return openingReminder(req.messages[0]);
+}
+
 /** Resolve the same coding-turn marker for routing and project attribution. */
 export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
-  return getProjectPath(
+  const result = getProjectPath(
     req.system,
     req.rawHeaders,
     claudeCodeOpeningReminder(req),
   );
+  if (req.protocol === "anthropic" && isClaudeCodeClient(req.rawHeaders)) {
+    // The first reminder can be retained across turns. A later instruction
+    // record naming a different project means it no longer identifies the
+    // current workspace; reject before reading or storing either project's data.
+    for (const message of req.messages.slice(1)) {
+      const reminder = openingReminder(message);
+      const later = reminder
+        ? inferClaudeCodeReminderProjectPath(reminder)
+        : null;
+      if (later && later.path !== result.path) {
+        throw new ProjectPathConflictError();
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -108,7 +135,19 @@ export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
   // Claude Code's classifier and naming calls do not offer tools. Their first
   // user message can quote an earlier coding reminder, so reminder text alone
   // must never turn a tool-less auxiliary call into a conversation turn.
-  if (req.protocol !== "anthropic" || req.tools.length === 0) return true;
+  if (
+    req.protocol !== "anthropic" ||
+    req.tools.length === 0 ||
+    !CLAUDE_CODE_CODING_PREAMBLE_RE.test(req.system)
+  ) {
+    return true;
+  }
   const reminder = claudeCodeOpeningReminder(req);
-  return !reminder || !inferClaudeCodeReminderProjectPath(reminder);
+  return (
+    !reminder ||
+    !inferClaudeCodeReminderProjectPath(
+      reminder,
+      extractProjectHeader(req.rawHeaders),
+    )
+  );
 }
