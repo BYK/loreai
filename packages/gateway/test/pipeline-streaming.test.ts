@@ -3098,6 +3098,7 @@ describe("Pipeline — streaming responses", () => {
   it("preserves a pinned knowledge delta when the next selection worker fails", async () => {
     const sessionHeaders = { "x-lore-session-id": "pinned-read-failure" };
     const projectPath = "/tmp/lore-1736-pinned-read-failure";
+    const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
     const entryId = ltm.create({
       projectPath,
       category: "gotcha",
@@ -3159,6 +3160,7 @@ describe("Pipeline — streaming responses", () => {
         }
         return original(...args);
       });
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
       const response = await handleRequest(
         request("continue after the failed worker"),
         loadLocalConfig(),
@@ -3171,6 +3173,9 @@ describe("Pipeline — streaming responses", () => {
       selection?.mockRestore();
       setUpstreamInterceptor(undefined);
       ltm.remove(entryId);
+      if (priorTimeout === undefined)
+        delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
       await resetPipelineState();
     }
   });

@@ -336,7 +336,10 @@ describe("cache stability (e2e)", () => {
   });
   it("retries a Layer 4 turn when the emergency knowledge refresh loses its read worker", async () => {
     const turns = Array.from({ length: 3 }, (_, i) => ({
-      userMessage: `Emergency refresh turn ${i}: continue.`,
+      // Keep the task query fixed so this test reaches the emergency read,
+      // rather than testing a separate task-switch selection failure.
+      userMessage:
+        "Keep the current gateway request open until the memory refresh finishes.",
       assistantText: `Emergency refresh answer ${i}.`,
     }));
     harness = await createHarness({
@@ -1268,11 +1271,7 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, selector, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(
-      rows.length,
-      `expected coalesced first-injection + material change (1 block), got ` +
-        `seqs=${rows.map((r) => r.seq).join(",")}`,
-    ).toBe(1);
+    expect(rows).toHaveLength(1);
     const selector0 = JSON.parse(rows[0].selector) as {
       target: string;
       insertAt: number;
@@ -1283,12 +1282,97 @@ describe("cache stability (e2e)", () => {
     expect(rows[0].content).toContain("Initial context-bound knowledge");
     expect(rows[0].content).toContain("Updated context-bound knowledge");
     expect(rows[0].content).toContain(`[k:${largeContextID}]`);
-    // The mut signature has both changes recorded.
     const mergedMut = JSON.parse(rows[0].selector).mut as {
       changed: Array<{ id: string; h: string }>;
       removed: string[];
     };
     expect(mergedMut.changed.length).toBeGreaterThan(0);
+  });
+
+  it("reselects on a new user task without rewriting the stable prefix", async () => {
+    const turns = [
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Starting.",
+      },
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Chart done.",
+      },
+      {
+        userMessage: "Fix tenant-scoped gateway credential routing.",
+        assistantText: "Credentials done.",
+      },
+      {
+        userMessage: "Continue fixing tenant-scoped gateway credentials.",
+        assistantText: "Continuing.",
+      },
+    ];
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-task-shift-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `task-shift-${Date.now()}`,
+    };
+    const { ltm } = await import("@loreai/core");
+    const history: unknown[] = [];
+    const revisions: string[] = [];
+    const deltasByTurn: Array<Array<{ seq: number; content: string }>> = [];
+    for (const [index, turn] of turns.entries()) {
+      if (index === 1) {
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Chart palette colors",
+          content: "Use blue for chart labels and yellow for palette badges.",
+        });
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Tenant credential routing",
+          content:
+            "Scope gateway credentials to the tenant before forwarding requests.",
+        });
+      }
+      const response = await harness.chat(
+        makeBody(turn.userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(response.status).toBe(200);
+      await response.json();
+      const state = harness.queryDB<{ ltm_cache_revision: string | null }>(
+        "SELECT ltm_cache_revision FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      );
+      revisions.push(state[0]?.ltm_cache_revision ?? "");
+      deltasByTurn.push(
+        harness.queryDB<{ seq: number; content: string }>(
+          "SELECT seq, content FROM session_prompt_deltas ORDER BY seq",
+        ),
+      );
+      history.push({ role: "user", content: turn.userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turn.assistantText }],
+      });
+    }
+    const bodies = harness.upstreamBodies();
+    expect(revisions[2]).not.toBe(revisions[1]);
+    expect(serializedMessages(bodies[1])).toContain("Chart palette colors");
+    expect(deltasByTurn[1]).toHaveLength(1);
+    expect(deltasByTurn[2]).toHaveLength(2);
+    expect(deltasByTurn[2][0]).toEqual(deltasByTurn[1][0]);
+    expect(deltasByTurn[2][1].content).toContain("Tenant credential routing");
+    expect(serializedMessages(bodies[2])).toContain(
+      "Tenant credential routing",
+    );
+    expect(systemBlocks(bodies[2])).toEqual(systemBlocks(bodies[1]));
+    expect(deltasByTurn[3]).toEqual(deltasByTurn[2]);
+    expect(systemBlocks(bodies[3])).toEqual(systemBlocks(bodies[1]));
   });
 
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
@@ -1434,23 +1518,9 @@ describe("cache stability (e2e)", () => {
     );
   });
 
-  it("ranking churn with NO DB change appends NO extra delta beyond the first injection and keeps the prefix byte-stable (the cause=incremental bust)", async () => {
-    // T1 regression for the production bust (session 1LYkXZ7jkiHHnqPl): the delta
-    // fired on per-turn relevance-ranking churn (the forSession selection picks a
-    // different subset each turn) even though NO knowledge changed in the DB,
-    // rewriting a deep-prefix message every turn → ~250k tokens rewritten per
-    // turn. The cached selection should remain stable across near-zero idle
-    // resumes even when the query topic changes and the DB has no mutations.
-    //
-    // New contract (delta-primary): the FIRST injection of context-bound LTM
-    // appends exactly ONE durable block (seq 0). After that, pure ranking churn
-    // (a different top-K subset each turn, but NO DB mutation) must append NO
-    // further blocks — the DB-sourced trigger (detectSurfacedMutations compares
-    // the advancing surfaced set against the live DB, not the per-turn
-    // selection) surfaces nothing to change. And the cached system prefix must
-    // stay byte-identical. Under the old selection-based trigger, the churn
-    // wrote (and rewrote) a "Superseded" delta EVERY turn → many rows → this
-    // test fails (mutation-verified).
+  it("new tasks do not repeat entries already delivered by the large initial budget", async () => {
+    // A changed task query causes re-selection. When the initial budget already
+    // delivered every candidate, no new delta is needed and the prefix stays fixed.
     const topics = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
     const turns = Array.from({ length: 6 }, (_, i) => ({
       // Each turn foregrounds a DIFFERENT topic so forSession re-ranks which
@@ -1502,6 +1572,7 @@ describe("cache stability (e2e)", () => {
     const history: unknown[] = [];
     let sessionID = "";
     let callsAfterInitialSelection = 0;
+    let firstDelta: { seq: number; content: string } | undefined;
     for (let i = 0; i < turns.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 80));
       const resp = await harness.chat(
@@ -1524,31 +1595,32 @@ describe("cache stability (e2e)", () => {
         expect(sessionID).not.toBe("");
       }
       if (i === 1) callsAfterInitialSelection = forSessionSpy.mock.calls.length;
+      if (i === 1) {
+        firstDelta = harness.queryDB<{ seq: number; content: string }>(
+          "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+          [sessionID],
+        )[0];
+      }
       // NB: intentionally NO ltm.update / ltm.remove anywhere — the DB is frozen.
     }
 
-    // Once the first context selection is saved, idle resumes reuse it instead
-    // of embedding and re-ranking the entire session on every later turn.
     expect(callsAfterInitialSelection).toBeGreaterThan(0);
-    expect(forSessionSpy.mock.calls.length).toBe(callsAfterInitialSelection);
+    expect(forSessionSpy.mock.calls.length).toBeGreaterThan(
+      callsAfterInitialSelection,
+    );
 
-    // The core guarantee: the FIRST injection appends exactly ONE block (seq 0);
-    // pure ranking churn (no genuine knowledge mutation) appends NOTHING further,
-    // regardless of how the relevance selection churned across the later turns.
     const deltaRows = harness.queryDB<{ seq: number; content: string }>(
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(
-      deltaRows.map((r) => r.seq),
-      `expected exactly the first-injection block (seq 0) and NO churn-driven ` +
-        `rows, got seqs=${deltaRows.map((r) => r.seq).join(",")} — a >1 count ` +
-        `means the selection-based trigger rewrote a delta on mere re-ranking, ` +
-        `which is the cause=incremental bust`,
-    ).toEqual([0]);
-    // The single first-injection block carries genuine new knowledge, never a
-    // "Superseded — ignore these ids" churn list.
-    expect(deltaRows[0].content).not.toContain("Superseded");
+    expect(deltaRows).toHaveLength(1);
+    expect(deltaRows[0]).toEqual(firstDelta);
+    for (const topic of topics) {
+      expect(deltaRows[0].content).toContain(`${topic} subsystem note`);
+    }
+    expect(deltaRows.every((row) => !row.content.includes("Superseded"))).toBe(
+      true,
+    );
 
     // And the cached system prefix must be byte-identical once established
     // (turn 2+), proving the churn never emitted a context-bound system[2] block

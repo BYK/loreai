@@ -2679,7 +2679,9 @@ async function scoreEntriesFTS(
     for (const r of results) {
       const norm =
         minRank === maxRank ? 1 : (maxRank - r.rank) / (maxRank - minRank);
-      scoreMap.set(r.id, norm);
+      // Zero means "no FTS match" downstream. Keep the weakest real match
+      // eligible, including for the overflow recall pool.
+      scoreMap.set(r.id, Math.max(Number.EPSILON, norm));
     }
     return scoreMap;
   } catch (error) {
@@ -2966,34 +2968,37 @@ export async function forSession(
     return result;
   }
 
-  // --- 3. Build session context for relevance scoring ---
-  let sessionContext = "";
-  if (sessionID) {
-    const distRow = db()
-      .query(
-        `SELECT observations FROM distillations
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(pid, sessionID) as { observations: string } | null;
-    if (distRow?.observations) {
-      sessionContext += `${distRow.observations}\n`;
-    }
+  // --- 3. Build a bounded query from the current task, not recent tool output ---
+  // A gateway request already contains the latest real user turns. Prefer that
+  // hint even when a distillation or tool result was stored for this session:
+  // the old order ignored the hint and let unrelated tool output dominate FTS.
+  // Direct callers without a hint use the latest plain user messages. Only
+  // fall back to the last distillation if neither source has a task to score.
+  const contextHint = options?.contextHint?.trim();
+  let sessionContext = contextHint?.slice(0, 4_096) ?? "";
+  if (!sessionContext && sessionID) {
     const recentMsgs = db()
       .query(
         `SELECT content FROM temporal_messages
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 10`,
+         WHERE project_id = ? AND session_id = ? AND role = 'user'
+           AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
+         ORDER BY created_at DESC LIMIT 2`,
       )
       .all(pid, sessionID) as Array<{ content: string }>;
-    if (recentMsgs.length) {
-      sessionContext += recentMsgs.map((m) => m.content).join("\n");
+    sessionContext = recentMsgs
+      .map((m) => m.content.slice(0, 2_048))
+      .join("\n")
+      .trim();
+    if (!sessionContext) {
+      const distRow = db()
+        .query(
+          `SELECT observations FROM distillations
+           WHERE project_id = ? AND session_id = ?
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(pid, sessionID) as { observations: string } | null;
+      sessionContext = distRow?.observations.slice(0, 4_096) ?? "";
     }
-  }
-
-  // Fall back to caller-provided context hint (e.g., user's first message)
-  if (!sessionContext.trim() && options?.contextHint) {
-    sessionContext = options.contextHint;
   }
 
   // --- 4. Score both pools by relevance ---

@@ -59,6 +59,161 @@ function deltaContents(sessionID: string): string[] {
 }
 
 describe("append-only durable knowledge deltas", () => {
+  it("surfaces a newly selected entry on a task switch without rewriting the old block", () => {
+    const a = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Chart colors",
+      content: "Keep chart labels legible.",
+    });
+    const b = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Tenant credentials",
+      content: "Scope credentials to the tenant.",
+    });
+    const sessionID = `append-task-switch-${Date.now()}`;
+    const aKey = keyOf(a, "Chart colors", "Keep chart labels legible.");
+    const bKey = keyOf(
+      b,
+      "Tenant credentials",
+      "Scope credentials to the tenant.",
+    );
+    const aEntry = {
+      id: a,
+      category: "gotcha",
+      title: "Chart colors",
+      content: "Keep chart labels legible.",
+    };
+    const bEntry = {
+      id: b,
+      category: "gotcha",
+      title: "Tenant credentials",
+      content: "Scope credentials to the tenant.",
+    };
+
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [`${a}:`],
+        nextKeys: [aKey],
+        entries: [aEntry],
+        now: 1_000,
+      }),
+    ).toBe(true);
+    const original = listSessionPromptDeltas(sessionID)[0];
+
+    // A source revision or incidental score change alone must not surface B.
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        now: 1_001,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual([original]);
+
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        taskShift: true,
+        now: 1_002, // still in the mutation debounce window
+      }),
+    ).toBe(true);
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(original);
+    expect(deltaText(rows[1].content)).toContain("Tenant credentials");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 6,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        taskShift: true,
+        now: 1_003,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual(rows);
+  });
+
+  it("does not surface an edited entry twice when its new version is selected on a task switch", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Versioned task guidance",
+      content: "Initial guidance.",
+    });
+    const sessionID = `task-version-${Date.now()}`;
+    const oldKey = keyOf(id, "Versioned task guidance", "Initial guidance.");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [`${id}:`],
+        nextKeys: [oldKey],
+        entries: [
+          {
+            id,
+            category: "gotcha",
+            title: "Versioned task guidance",
+            content: "Initial guidance.",
+          },
+        ],
+        now: 1_000,
+      }),
+    ).toBe(true);
+    ltm.update(id, { content: "Revised guidance." });
+    const current = ltm.getByLogical(id);
+    if (!current) throw new Error("Missing updated knowledge version");
+    const newKey = keyOf(
+      current.id,
+      "Versioned task guidance",
+      "Revised guidance.",
+    );
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [`${id}:`],
+        nextKeys: [newKey],
+        entries: [
+          {
+            id: current.id,
+            category: "gotcha",
+            title: "Versioned task guidance",
+            content: "Revised guidance.",
+          },
+        ],
+        taskShift: true,
+        now: 1_002,
+      }),
+    ).toBe(true);
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+    const delta = deltaText(rows[0].content);
+    expect(delta.match(/Revised guidance\./g)).toHaveLength(1);
+    expect(delta).not.toContain(`[k:${current.id}]`);
+  });
+
   it("two DISTINCT genuine mutations across turns → TWO appended blocks, not one upserted row", () => {
     const a = ltm.create({
       projectPath: PROJECT,
@@ -344,6 +499,76 @@ describe("append-only durable knowledge deltas", () => {
     // That one block describes the full pin→DB delta (all 9 entries changed).
     const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
     expect(body).toContain("cap v2 0.");
+  });
+
+  it("keeps task-switch additions when compacting the eighth block and ignores a no-op at the cap", () => {
+    const sessionID = `task-cap-${Date.now()}`;
+    const ids = Array.from({ length: 9 }, (_, index) =>
+      ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: `Task switch ${index}`,
+        content: `Task-specific guidance ${index}.`,
+      }),
+    );
+    const entries = ids.map((id, index) => ({
+      id,
+      category: "gotcha",
+      title: `Task switch ${index}`,
+      content: `Task-specific guidance ${index}.`,
+    }));
+    const keys = entries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
+    for (const [index, entry] of entries.entries()) {
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keys[index]],
+          entries: [entry],
+          taskShift: true,
+          now: 1_000 + index,
+        }),
+      ).toBe(true);
+      if (index === 7) {
+        const atCap = listSessionPromptDeltas(sessionID);
+        expect(atCap).toHaveLength(8);
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath: PROJECT,
+            insertAt: 19,
+            previousKeys: [],
+            nextKeys: [keys[index]],
+            entries: [entry],
+            taskShift: true,
+            now: 1_009,
+          }),
+        ).toBe(false);
+        expect(listSessionPromptDeltas(sessionID)).toEqual(atCap);
+      }
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    for (const entry of entries) {
+      expect(deltaText(compacted[0].content)).toContain(entry.content);
+    }
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: [],
+        nextKeys: [keys[8]],
+        entries: [entries[8]],
+        taskShift: true,
+        now: 1_010,
+      }),
+    ).toBe(false);
   });
 
   it("re-editing the SAME entry to a new value DOES append a second block", () => {
