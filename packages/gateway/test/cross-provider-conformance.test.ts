@@ -1510,6 +1510,35 @@ describe("cross-provider request conformance through real forwarding", () => {
     expect(JSON.stringify(upstream.input)).not.toContain("lore:session-id");
   });
 
+  it.each([false, true])(
+    "forwards literal tokenizer markers in native Responses history (streamed=%s)",
+    async (streamed) => {
+      const text = "Tool printed <|endoftext|><|fim_prefix|><|endofprompt|>";
+      const call = {
+        type: "function_call",
+        call_id: "literal-call",
+        name: "shell",
+        arguments: JSON.stringify({ command: text }),
+      };
+      const result = {
+        type: "function_call_output",
+        call_id: "literal-call",
+        output: text,
+      };
+      const user = { role: "user", content: text };
+      const { upstream } = await forward("/v1/responses", "openai", {
+        model: "gpt-test",
+        input: [user, call, result, { role: "user", content: "continue" }],
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+      });
+      expect(upstream.input).toContainEqual(user);
+      expect(upstream.input).toContainEqual(call);
+      expect(upstream.input).toContainEqual(result);
+    },
+  );
+
   it("does not replay stripped session markers in native Chat text parts", async () => {
     const { upstream } = await forward("/v1/chat/completions", "openrouter", {
       model: "gpt-test",

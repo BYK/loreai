@@ -31,3 +31,4 @@ overrides:
 patchedDependencies:
   "@sentry/node@11.0.0": "patches/@sentry__node@11.0.0.patch"
   "@sentry/server-utils@11.0.0": "patches/@sentry__server-utils@11.0.0.patch"
+  ai-tokenizer@1.0.6: patches/ai-tokenizer@1.0.6.patch

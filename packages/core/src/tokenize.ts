@@ -29,7 +29,8 @@ export type EncodingName = "cl100k_base" | "o200k_base" | "claude";
 
 // Durable derived counts must miss after an encoding/tokenizer-policy change.
 // The contract test checks this against the installed tokenizer version.
-export const TOKEN_ESTIMATE_CACHE_VERSION = "ai-tokenizer@1.0.6:cl100k_base:v1";
+export const TOKEN_ESTIMATE_CACHE_VERSION =
+  "ai-tokenizer@1.0.6:cl100k_base:ordinary-v2";
 
 const cache = new Map<EncodingName, Tokenizer>();
 cache.set("cl100k_base", new Tokenizer(cl100k_base_encoding));
@@ -65,15 +66,20 @@ export function encodingForModel(opts: {
 /**
  * Estimate token count for a text string using a real BPE encoding.
  *
- * Sync. Empty input returns 0 (Tokenizer.count throws on empty in some
- * encodings — guard at the boundary to keep call sites simple).
+ * Input is ordinary content, even when it quotes a tokenizer control marker.
+ * Tokenizer failures fall back to Lore's legacy characters/3 heuristic.
+ * Never expose an exception that may contain the input text.
  */
 export function estimateTokens(
   text: string,
   opts: { providerID?: string; modelID?: string } = {},
 ): number {
   if (!text) return 0;
-  return getTokenizer(encodingForModel(opts)).count(text);
+  try {
+    return getTokenizer(encodingForModel(opts)).count(text);
+  } catch {
+    return Math.ceil(text.length / 3);
+  }
 }
 
 /**

@@ -90,6 +90,10 @@ export class PreparationTiming {
     }
     try {
       return fn();
+    } catch (error) {
+      if (!this.lastFailure || this.lastFailure.error !== error)
+        this.lastFailure = { stage, error };
+      throw error;
     } finally {
       this.activeStage = previous;
       this.lastStage = stage;
@@ -113,7 +117,8 @@ export class PreparationTiming {
     try {
       return await fn();
     } catch (error) {
-      this.lastFailure = { stage, error };
+      if (!this.lastFailure || this.lastFailure.error !== error)
+        this.lastFailure = { stage, error };
       throw error;
     } finally {
       this.activeStage = previous;
@@ -123,6 +128,31 @@ export class PreparationTiming {
         wallMs: performance.now() - started,
         cpuMs: (delta.user + delta.system) / 1000,
       });
+    }
+  }
+  /** Fixed labels only; diagnostics must never replace the original failure. */
+  failure(error: unknown): void {
+    try {
+      if (
+        error instanceof SourceDeltaUnavailableError ||
+        (error instanceof DOMException && error.name === "AbortError")
+      )
+        return;
+      const failure = this.lastFailure;
+      const stage =
+        failure && failure.error === error ? failure.stage : "awaiting";
+      const kind =
+        error instanceof TypeError
+          ? "type"
+          : error instanceof RangeError
+            ? "range"
+            : error instanceof SyntaxError
+              ? "syntax"
+              : "other";
+      this.metric("failure_count", 1, stage);
+      log.warn(`semantic-preparation failure stage=${stage} kind=${kind}`);
+    } catch {
+      /* diagnostics are best effort, including inspection of hostile errors */
     }
   }
   /** Report numeric, fixed-label diagnostics even when no upstream call began. */

@@ -21,6 +21,7 @@ import {
 } from "../src/turn-temporal";
 import { loreMessagesToGateway } from "../src/pipeline";
 import { semanticHistory } from "./fixtures/semantic-history";
+import { parseOpenAICodexRequest } from "../src/translate/openai-responses";
 
 vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
@@ -81,6 +82,89 @@ function seed(request: ReturnType<typeof semanticHistory>, restored = false) {
 }
 
 describe("semantic preparation", () => {
+  it.each([false, true])(
+    "reports the failing preparation stage without exception content (async=%s)",
+    async (asynchronous) => {
+      const timing = new PreparationTiming(semanticHistory(2));
+      const error = new TypeError(
+        "private prompt, credential and provider content",
+      );
+      error.name = "private-error-name";
+      const warn = vi.fn();
+      log.registerSink({ ...sink, warn });
+      if (asynchronous) {
+        await expect(
+          timing.measureAsync("conversion", async () => {
+            throw error;
+          }),
+        ).rejects.toBe(error);
+      } else {
+        expect(() =>
+          timing.measure("conversion", () => {
+            throw error;
+          }),
+        ).toThrow(error);
+      }
+      timing.failure(error);
+      expect(warn).toHaveBeenCalledWith(
+        "semantic-preparation failure stage=conversion kind=type",
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("private");
+      warn.mockImplementation(() => {
+        throw new Error("sink unavailable");
+      });
+      expect(() => timing.failure(error)).not.toThrow();
+    },
+  );
+
+  it("prepares literal tokenizer markers in Responses history without changing source or provenance", async () => {
+    const marker = "<|endoftext|><|fim_prefix|><|endofprompt|>";
+    const request = parseOpenAICodexRequest(
+      {
+        model: "gpt-6-sol",
+        stream: true,
+        input: [
+          { role: "user", content: `Inspect ${marker}` },
+          {
+            type: "function_call",
+            call_id: "literal-call",
+            name: "shell",
+            arguments: JSON.stringify({ command: marker }),
+          },
+          {
+            type: "function_call_output",
+            call_id: "literal-call",
+            output: `Tool output ${marker}`,
+          },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {},
+    );
+    const original = structuredClone(request.messages);
+    for (const noStore of [true, false, false]) {
+      const prepared = await prepareSemanticMessages({
+        messages: request.messages,
+        projectPath,
+        sessionID,
+        noStore,
+        timing: new PreparationTiming(request),
+      });
+      expect(request.messages).toEqual(original);
+      const expected = adapter.gatewayMessagesToLore(original, sessionID);
+      expect(prepared.loreMessages.map((m) => m.info.id)).toEqual(
+        expected.map((m) => m.info.id),
+      );
+      expect(prepared.loreMessages.map((m) => m.hiddenInputTokens)).toEqual(
+        expected.map((m) => m.hiddenInputTokens),
+      );
+      expect(prepared.provenanceByMessageId).toEqual(
+        responsesProvenanceByMessageId(original, expected),
+      );
+      expect(JSON.stringify(prepared.loreMessages)).toContain(marker);
+    }
+  });
+
   it("does not retokenize unchanged provenance on a subsequent request", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-07T18:14:04Z"));
