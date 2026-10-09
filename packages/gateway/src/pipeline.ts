@@ -188,6 +188,7 @@ import {
   isCallerUpstreamAllowed,
   normalizeUpstreamBase,
   unattributedBucketPath,
+  ProjectPathConflictError,
   type ProjectPathResult,
 } from "./config";
 import {
@@ -394,7 +395,7 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
-import { isClaudeCodeSideChannel } from "./side-channel";
+import { getRequestProjectPath, isClaudeCodeSideChannel } from "./side-channel";
 import {
   analyzeCacheTurn,
   categorizeBust,
@@ -1822,6 +1823,19 @@ function conflictsWithConfidentSessionProject(
     persisted.projectPathProvisional === false &&
     persisted.projectPath !== pathResult.path
   );
+}
+
+/** Reject a project switch before any session-scoped prompt data or controls run. */
+function assertBoundSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): void {
+  // Only a reminder-derived claim needs this early guard. Explicit project
+  // headers and system workspace markers retain their existing, separately
+  // checked session-adoption and clone-migration paths.
+  if (!pathResult.openingReminderProjectPath) return;
+  if (!conflictsWithConfidentSessionProject(sessionID, pathResult)) return;
+  throw new ProjectPathConflictError();
 }
 
 function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
@@ -17565,7 +17579,7 @@ async function handleCompactionInner(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   const credential = extractAuth(req.rawHeaders);
   if (!credential) {
     return errorResponse(401, "A provider credential is required");
@@ -20457,7 +20471,7 @@ async function handleConversationTurnPrepared(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -20480,6 +20494,7 @@ async function handleConversationTurnPrepared(
   const { identified } = admitted;
   preparation.assertActive();
   const { sessionID, isNew, tier } = identified;
+  if (!isNew) assertBoundSessionProject(sessionID, pathResult);
   try {
     onSessionIdentified?.(sessionID);
   } catch (error) {
@@ -24741,10 +24756,11 @@ async function handleLoreSlashCommand(
     );
   }
 
+  const pathResult = getRequestProjectPath(req);
+
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
   if (!state && indexedSessionID) {
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
     state = getOrCreateSession(
       indexedSessionID,
       pathResult.path,
@@ -24755,6 +24771,7 @@ async function handleLoreSlashCommand(
   }
   const sessionID = indexedSessionID ?? state?.sessionID;
   if (sessionID) {
+    assertBoundSessionProject(sessionID, pathResult);
     await claimSession(sessionID);
     if (
       indexedSessionID &&
@@ -24981,7 +24998,7 @@ async function handleCurateSlashCommand(
   if (text.toLowerCase() !== "/lore:curate") return null;
 
   const indexedSessionID = findIndexedSessionID(req, config);
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   let state = findLiveSessionState(req, config, allSessions);
   let sessionID = state?.sessionID;
 
@@ -25391,6 +25408,13 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof ProjectPathConflictError) {
+      return errorResponse(
+        400,
+        "Conflicting project paths",
+        "invalid_request_error",
+      );
+    }
     if (err instanceof InvalidCrossProviderRequestError) {
       return errorResponse(
         400,
