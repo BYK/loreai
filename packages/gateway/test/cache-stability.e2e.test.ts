@@ -1375,6 +1375,108 @@ describe("cache stability (e2e)", () => {
     expect(systemBlocks(bodies[3])).toEqual(systemBlocks(bodies[1]));
   });
 
+  it.each([
+    {
+      name: "on an emergency Layer 4 turn",
+      request: "Fix tenant-scoped gateway credential routing.",
+      emergency: true,
+    },
+    {
+      name: "when the new request is short",
+      request: "fix auth",
+      emergency: false,
+    },
+  ])("delivers a newly relevant task $name", async ({ request, emergency }) => {
+    const turns = [
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Starting.",
+      },
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Chart done.",
+      },
+      { userMessage: request, assistantText: "Credentials done." },
+      { userMessage: request, assistantText: "Continuing." },
+    ];
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-task-switch-edge-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `task-switch-edge-${Date.now()}`,
+    };
+    const { ltm, getLastLayer, setForceMinLayer } =
+      await import("@loreai/core");
+    const original = ltm.forSession;
+    const hints: string[] = [];
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          hints.push(args[3]?.contextHint ?? "");
+        }
+        return original(...args);
+      });
+    const history: unknown[] = [];
+    let sessionID = "";
+    const deltasByTurn: Array<Array<{ seq: number; content: string }>> = [];
+    for (const [index, turn] of turns.entries()) {
+      if (index === 1) {
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Chart palette colors",
+          content: "Use blue for chart labels and yellow for palette badges.",
+        });
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Auth credential routing",
+          content: "Scope auth credentials to the tenant before forwarding.",
+        });
+      }
+      if (index === 2 && emergency) setForceMinLayer(4, sessionID);
+      const response = await harness.chat(
+        makeBody(turn.userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(response.status).toBe(200);
+      await response.json();
+      if (index === 2 && emergency) expect(getLastLayer(sessionID)).toBe(4);
+      if (index === 0) {
+        sessionID =
+          harness.queryDB<{ session_id: string }>(
+            "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+          )[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+      }
+      deltasByTurn.push(
+        harness.queryDB<{ seq: number; content: string }>(
+          "SELECT seq, content FROM session_prompt_deltas ORDER BY seq",
+        ),
+      );
+      history.push({ role: "user", content: turn.userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turn.assistantText }],
+      });
+    }
+    selection.mockRestore();
+    if (!emergency) expect(hints).toContain(request);
+    const bodies = harness.upstreamBodies();
+    expect(deltasByTurn[1]).toHaveLength(1);
+    expect(deltasByTurn[2]).toHaveLength(2);
+    expect(deltasByTurn[2][1].content).toContain("Auth credential routing");
+    expect(serializedMessages(bodies[2])).toContain("Auth credential routing");
+    expect(serializedMessages(bodies[3])).toContain("Auth credential routing");
+    expect(systemBlocks(bodies[2])).toEqual(systemBlocks(bodies[1]));
+  });
+
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
     // End-to-end proof of the #917 wiring: knowledge that is relevance-scored
     // but doesn't fit the system[2] injection budget must reach the wire as a

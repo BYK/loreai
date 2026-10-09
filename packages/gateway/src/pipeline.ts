@@ -67,6 +67,7 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  db,
   recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
@@ -3345,6 +3346,7 @@ export function detectSurfacedMutations(
     string,
     { category: string; title: string; content: string }
   >,
+  projectID?: string,
 ): {
   changed: Array<{
     id: string;
@@ -3381,7 +3383,10 @@ export function detectSurfacedMutations(
     // alongside any version-row compaction.
     const logicalId = ltm.logicalIdOf(id);
     const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
-    if (!current) {
+    if (
+      !current ||
+      (projectID && !eligibleForDeltaProject(current, projectID))
+    ) {
       // Not a resolvable `knowledge` row. Before treating it as a non-knowledge
       // synthetic, check the current selection snapshot: distillation/temporal
       // facts (`d:`/`t:`) and lat.md sections live outside the knowledge
@@ -3414,7 +3419,7 @@ export function detectSurfacedMutations(
       // model would be told to ignore still-valid pinned knowledge, and
       // (append-only) that false removal would be frozen into an immutable block
       // + advance the surfaced set past a non-knowledge id.
-      if (ltm.isTombstoned(logicalId)) removedIds.push(id);
+      if (current || ltm.isTombstoned(logicalId)) removedIds.push(id);
       continue;
     }
     const currentHash = surfaceSignature(current.title, current.content);
@@ -3722,6 +3727,7 @@ export function appendKnowledgePromptDelta(input: {
   // `nextKeys` is retained on the input for the gate sites (hasMaterialLtmDelta).
   // `entries` supplies content for SYNTHETIC context-source ids (see
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
+  const projectID = ensureProject(input.projectPath);
   const blocks = listSessionPromptDeltas(input.sessionID);
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
   // Synthetic selections (recalled context and lat.md) don't live in knowledge.
@@ -3745,6 +3751,7 @@ export function appendKnowledgePromptDelta(input: {
   const databaseMutations = detectSurfacedMutations(
     surfacedKeys,
     syntheticEntries,
+    projectID,
   );
   // Synthetic context may be new at any time. Ordinary knowledge only joins
   // when a real user task changes: routine re-ranking must not rewrite the
@@ -3770,6 +3777,7 @@ export function appendKnowledgePromptDelta(input: {
   const { changed, removedIds } = detectSurfacedMutations(
     surfacedKeys,
     syntheticEntries,
+    projectID,
   );
   const messages = buildKnowledgeDeltaMessage(
     changed,
@@ -3830,10 +3838,10 @@ export function appendKnowledgePromptDelta(input: {
         ),
       null,
     );
-    const projectID = ensureProject(input.projectPath);
     const rendered = renderCurrentDelta(
       mergeMutations(compactedMutations, mut),
       input.sessionID,
+      projectID,
       input.overflow,
     );
     if (!rendered.messages.length) return false;
@@ -3878,6 +3886,7 @@ export function appendKnowledgePromptDelta(input: {
     const rendered = renderCurrentDelta(
       mergedMut,
       input.sessionID,
+      projectID,
       input.overflow,
     );
     if (!rendered.messages.length) return false;
@@ -3904,7 +3913,7 @@ export function appendKnowledgePromptDelta(input: {
 
   appendSessionPromptDelta({
     sessionID: input.sessionID,
-    projectID: ensureProject(input.projectPath),
+    projectID,
     selector: JSON.stringify({
       target: "messages",
       insertAt: input.insertAt,
@@ -3949,10 +3958,74 @@ function mergeMutations(
   };
 }
 
-/** Rebuild a coalesced block from the latest live version of every surfaced id. */
+function eligibleForDeltaProject(
+  entry: ltm.KnowledgeEntry,
+  projectID: string,
+): boolean {
+  return (
+    entry.confidence > 0.2 &&
+    (entry.project_id === projectID ||
+      entry.project_id === null ||
+      entry.cross_project === 1)
+  );
+}
+
+/** Snapshots may be reused only while their source remains live in this project. */
+function liveSyntheticSnapshot(
+  id: string,
+  snapshot: NonNullable<DeltaMutation["changed"][number]["snapshot"]>,
+  projectID: string,
+): boolean {
+  if (id.startsWith("d:")) {
+    const row = db()
+      .query(
+        "SELECT observations FROM distillations WHERE id = ? AND project_id = ? AND archived = 0",
+      )
+      .get(id.slice(2), projectID) as { observations: string } | null;
+    return (
+      row?.observations === snapshot.content &&
+      snapshot.title === "Relevant earlier context"
+    );
+  }
+  if (id.startsWith("t:")) {
+    const row = db()
+      .query(
+        "SELECT role, content FROM temporal_messages WHERE id = ? AND project_id = ?",
+      )
+      .get(id.slice(2), projectID) as {
+      role: string;
+      content: string;
+    } | null;
+    return (
+      row?.content === snapshot.content &&
+      snapshot.title === `Relevant earlier message (${row?.role})`
+    );
+  }
+  if (snapshot.category === "lat.md") {
+    const row = db()
+      .query(
+        "SELECT file, heading, content, first_paragraph FROM lat_sections WHERE id = ? AND project_id = ?",
+      )
+      .get(id, projectID) as {
+      file: string;
+      heading: string;
+      content: string;
+      first_paragraph: string | null;
+    } | null;
+    return (
+      row != null &&
+      snapshot.title === `[${row.file}] ${row.heading}` &&
+      snapshot.content === (row.first_paragraph ?? row.content)
+    );
+  }
+  return false;
+}
+
+/** Rebuild a coalesced block from the latest eligible version of every surfaced id. */
 function renderCurrentDelta(
   merged: DeltaMutation,
   sessionID: string,
+  projectID: string,
   overflow?: Array<{ id: string; category: string; title: string }>,
 ): { messages: GatewayMessage[]; mut: DeltaMutation } {
   const removed = new Set(merged.removed);
@@ -3965,11 +4038,25 @@ function renderCurrentDelta(
   }> = [];
   for (const mutation of merged.changed) {
     if (removed.has(mutation.id)) continue;
-    const current = mutation.snapshot
-      ? { id: mutation.id, ...mutation.snapshot }
+    if (
+      mutation.snapshot &&
+      !liveSyntheticSnapshot(mutation.id, mutation.snapshot, projectID)
+    ) {
+      removed.add(mutation.id);
+      continue;
+    }
+    const currentKnowledge = mutation.snapshot
+      ? null
       : (ltm.get(mutation.id) ??
         ltm.getByLogical(ltm.logicalIdOf(mutation.id)));
-    if (!current) {
+    const current = mutation.snapshot
+      ? { id: mutation.id, ...mutation.snapshot }
+      : currentKnowledge;
+    if (
+      !current ||
+      (currentKnowledge &&
+        !eligibleForDeltaProject(currentKnowledge, projectID))
+    ) {
       removed.add(mutation.id);
       continue;
     }
@@ -21903,11 +21990,15 @@ async function handleConversationTurnPrepared(
         cfg.knowledge.contextSources,
         contextHint,
       );
+      // Step 6 may already have saved refreshRevision to the session cache.
+      // Preserve its task-switch decision when Layer 4 replaces that turn's
+      // pending delta; recomputing from the updated cache loses new entries.
       const taskShift =
-        !!contextHint &&
-        !!ltmPinnedText.get(sessionID) &&
-        taskDigest(ltmSessionCache.get(sessionID)?.revision) !==
-          taskDigest(refreshRevision);
+        pendingKnowledgeDelta?.taskShift === true ||
+        (!!contextHint &&
+          !!ltmPinnedText.get(sessionID) &&
+          taskDigest(ltmSessionCache.get(sessionID)?.revision) !==
+            taskDigest(refreshRevision));
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -24563,14 +24654,13 @@ function selectionTaskHint(req: GatewayRequest): string {
   }
   const latest = userTurns[0] ?? "";
   const previous = userTurns[1];
-  // Short acknowledgements and explicit continuations refer to the preceding
-  // task. A substantive new request must not drag the old task into ranking.
+  // Only an acknowledgement or an explicit continuation needs the preceding
+  // task. Length alone is not evidence: "fix auth" can be a distinct new task.
   if (
     !previous ||
-    (latest.length >= 28 &&
-      !/\b(?:go ahead|continue|initial plan|same task|same thing)\b/i.test(
-        latest,
-      ))
+    !/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)(?:\b|[.!?]|$)/i.test(
+      latest,
+    )
   ) {
     return latest.slice(0, 4_096);
   }

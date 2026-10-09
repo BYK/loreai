@@ -22,7 +22,13 @@
  * plus block immutability.
  */
 import { describe, it, expect } from "vitest";
-import { ltm, listSessionPromptDeltas } from "@loreai/core";
+import {
+  data,
+  db,
+  ensureProject,
+  ltm,
+  listSessionPromptDeltas,
+} from "@loreai/core";
 import {
   appendKnowledgePromptDelta,
   applySessionPromptDeltas,
@@ -56,6 +62,17 @@ function deltaContents(sessionID: string): string[] {
       return "";
     }
   });
+}
+
+function seedDistillation(id: string, observations: string): void {
+  db()
+    .query(
+      `INSERT INTO distillations
+       (id, project_id, session_id, narrative, facts, observations,
+        source_ids, generation, token_count, archived, created_at)
+       VALUES (?, ?, 'synthetic-source', '', '', ?, '[]', 0, 0, 0, ?)`,
+    )
+    .run(id, ensureProject(PROJECT), observations, Date.now());
 }
 
 describe("append-only durable knowledge deltas", () => {
@@ -586,15 +603,74 @@ describe("append-only durable knowledge deltas", () => {
     }
   });
 
+  it("does not rehydrate a foreign entry after sharing is revoked", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-foreign-project",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Shared foreign guidance",
+      content: "Foreign private guidance must not reappear.",
+    });
+    const sessionID = `revoked-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      if (index === 0) {
+        return {
+          id: foreign,
+          category: "gotcha",
+          title: "Shared foreign guidance",
+          content: "Foreign private guidance must not reappear.",
+        };
+      }
+      const title = `Local revocation guidance ${index}`;
+      const content = `Local guidance after revocation ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8) {
+        db()
+          .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+          .run(foreign);
+        expect(ltm.get(foreign)?.cross_project).toBe(0);
+      }
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(foreign);
+    expect(body).toContain(entries[8].content);
+  });
+
   it("keeps earlier distillation snapshots when a later block triggers compaction", () => {
     const sessionID = `synthetic-cap-${Date.now()}`;
     const entries = Array.from({ length: 9 }, (_, index) => ({
       id: `d:synthetic-${index}`,
       category: ltm.RECALLED_CONTEXT_CATEGORY,
-      title: `Distilled task ${index}`,
+      title: "Relevant earlier context",
       content: `Distinct guidance from task ${index}.`,
     }));
     for (const [index, entry] of entries.entries()) {
+      seedDistillation(entry.id.slice(2), entry.content);
       expect(
         appendKnowledgePromptDelta({
           sessionID,
@@ -613,6 +689,38 @@ describe("append-only durable knowledge deltas", () => {
     for (const entry of entries) {
       expect(body).toContain(entry.content);
     }
+  });
+
+  it("does not restore a deleted distillation snapshot during compaction", () => {
+    const sessionID = `deleted-synthetic-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      id: `d:deleted-synthetic-${index}`,
+      category: ltm.RECALLED_CONTEXT_CATEGORY,
+      title: "Relevant earlier context",
+      content: `Distillation guidance ${index}.`,
+    }));
+    for (const [index, entry] of entries.entries()) {
+      seedDistillation(entry.id.slice(2), entry.content);
+      if (index === 8)
+        expect(data.deleteDistillation(entries[0].id.slice(2))).toBe(true);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(entries[0].id);
+    expect(body).toContain(entries[8].content);
   });
 
   it("keeps task-switch additions when compacting the eighth block and ignores a no-op at the cap", () => {
