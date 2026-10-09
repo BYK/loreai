@@ -3055,6 +3055,12 @@ export async function forSession(
   // embedded context vector — keeping distillation/temporal on the identical
   // cosine scale as knowledge (no separate embed, no scale mismatch).
   let contextVec: Float32Array | undefined;
+  // A bare acknowledgment has no new task terms. Preserve the no-context
+  // blanket-eligible fallback; distinct short requests still use FTS below.
+  const bareAcknowledgment =
+    /^(?:ok(?:ay)?|yes|sure|thanks|thank you|go ahead|continue|same task)[.!?]*$/i.test(
+      sessionContext.trim(),
+    );
 
   if (
     !projectEntries.length &&
@@ -3189,7 +3195,7 @@ export async function forSession(
         ftsScores,
       ));
     }
-  } else if (sessionContext.trim().length > 0) {
+  } else if (sessionContext.trim().length > 0 && !bareAcknowledgment) {
     // Short tasks and unavailable embeddings still use FTS5 BM25. A short
     // request must not fall through to unrelated confidence-ranked entries.
     const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);

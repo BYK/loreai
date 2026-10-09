@@ -3523,7 +3523,7 @@ export function buildKnowledgeDeltaMessage(
               : e.id.startsWith("d:") || e.id.startsWith("t:")
                 ? e.id
                 : `k:${e.id}`;
-          return `* [${recallId}] ${Array.from(e.title.slice(0, 122)).slice(0, 120).join("")} (${e.category})`;
+          return `* [${recallId}] ${Array.from(e.title).slice(0, 120).join("")} (${e.category})`;
         })
         .join("\n")}${
         overflowToc.length > shownOverflow.length

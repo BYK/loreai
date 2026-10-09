@@ -4,6 +4,31 @@ import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
 import * as temporal from "../src/temporal";
 
+test("a bare acknowledgment retains blanket-eligible knowledge", async () => {
+  const projectPath = "/test/ltm/acknowledgment";
+  const standing = ltm.create({
+    projectPath,
+    scope: "global",
+    category: "gotcha",
+    title: "Standing API rule",
+    content: "Validate the project scope of each lookup.",
+  });
+  const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
+  try {
+    const blank = await ltm.forSession(projectPath, "ack-session", 200, {
+      deferEffects: true,
+    });
+    const acknowledged = await ltm.forSession(projectPath, "ack-session", 200, {
+      contextHint: "ok",
+      deferEffects: true,
+    });
+    expect(blank.map((entry) => entry.id)).toContain(standing);
+    expect(acknowledged.map((entry) => entry.id)).toContain(standing);
+  } finally {
+    available.mockRestore();
+  }
+});
+
 test("current task outranks stale observations and recent tool output", async () => {
   const projectPath = "/test/ltm/current-task";
   const projectID = ensureProject(projectPath);

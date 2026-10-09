@@ -925,6 +925,55 @@ describe("append-only durable knowledge deltas", () => {
     }
   });
 
+  it("truncates overflow titles without persisting half of a surrogate pair", () => {
+    const title = `😀😀${"x".repeat(117)}😀`;
+    const overflowID = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "Available through recall.",
+    });
+    const anchor = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Unicode overflow anchor",
+      content: "Selected content.",
+    });
+    const sessionID = `overflow-unicode-${crypto.randomUUID()}`;
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: [
+          keyOf(anchor, "Unicode overflow anchor", "Selected content."),
+        ],
+        entries: [
+          {
+            id: anchor,
+            category: "gotcha",
+            title: "Unicode overflow anchor",
+            content: "Selected content.",
+          },
+        ],
+        overflow: [{ id: overflowID, category: "gotcha", title }],
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(true);
+    const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(body).toContain(title);
+    expect(
+      Array.from(body).some((char) => {
+        const code = char.charCodeAt(0);
+        return char.length === 1 && code >= 0xd800 && code <= 0xdfff;
+      }),
+    ).toBe(false);
+  });
+
   it("restores re-shared guidance during a debounced edit after revocation", () => {
     const foreign = ltm.create({
       projectPath: "/tmp/lore-delta-reshare-source",
