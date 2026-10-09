@@ -15,6 +15,7 @@ test("current task outranks stale observations and recent tool output", async ()
     title: "Tenant credential routing",
     content:
       "Scope gateway credentials to the tenant before forwarding requests.",
+    confidence: 0.5,
   });
   const distractor = ltm.create({
     projectPath,
@@ -22,6 +23,7 @@ test("current task outranks stale observations and recent tool output", async ()
     category: "gotcha",
     title: "Chart palette colors",
     content: "Use blue for chart labels and yellow for palette badges.",
+    confidence: 0.95,
   });
   db()
     .query(
@@ -160,7 +162,7 @@ test("a mixed user message keeps its task text while excluding its tool output",
         sessionID,
         messageID: "mixed-user-old",
         type: "text",
-        text: "Change chart palette colors and chart labels.",
+        text: "Change table spacing and row margins.",
       },
     ],
   });
@@ -189,12 +191,21 @@ test("a mixed user message keeps its task text while excluding its tool output",
         callID: "mixed-user-call",
         state: {
           status: "completed",
-          output: "Chart palette colors and chart labels were changed earlier.",
+          output: `${"x".repeat(8_192)}\n\x1f${"Fix chart palette colors and chart labels. ".repeat(20)}`,
         },
       },
     ],
   });
 
+  const stored = db()
+    .query(
+      "SELECT metadata FROM temporal_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(sessionID) as { metadata: string };
+  expect(JSON.parse(stored.metadata)).toMatchObject({
+    taskText: "Fix tenant-scoped gateway credential routing on requests.",
+  });
+  expect(stored.metadata.length).toBeLessThan(1_024);
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
   try {
     const selected = await ltm.forSession(projectPath, sessionID, 40, {

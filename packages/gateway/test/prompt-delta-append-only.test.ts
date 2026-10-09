@@ -77,6 +77,81 @@ function seedDistillation(id: string, observations: string): void {
 }
 
 describe("append-only durable knowledge deltas", () => {
+  it("retires older task additions across repeated compactions", () => {
+    const sessionID = `bounded-task-switch-${Date.now()}`;
+    const entries = Array.from({ length: 40 }, (_, index) => {
+      const title = `Distinct task ${index} knowledge`;
+      const content = `Guidance for task ${index} with a separate current action.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    for (const [index, entry] of entries.entries()) {
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const blocks = listSessionPromptDeltas(sessionID);
+    expect(blocks.length).toBeLessThanOrEqual(8);
+    expect(
+      Math.max(...blocks.map((block) => block.content.length)),
+    ).toBeLessThan(8_000);
+    const replay = blocks.map((block) => deltaText(block.content)).join("\n");
+    expect(replay).not.toContain(entries[0].content);
+    expect(replay).toContain(entries[39].content);
+
+    const batchSessionID = `${sessionID}-batch`;
+    const batchEntries = [
+      ...entries,
+      ...Array.from({ length: 20 }, (_, offset) => {
+        const index = offset + entries.length;
+        const title = `Distinct task ${index} knowledge`;
+        const content = `Guidance for task ${index} with a separate current action.`;
+        const id = ltm.create({
+          projectPath: PROJECT,
+          scope: "project",
+          category: "gotcha",
+          title,
+          content,
+        });
+        return { id, category: "gotcha", title, content };
+      }),
+    ];
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID: batchSessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: batchEntries.map((entry) =>
+          keyOf(entry.id, entry.title, entry.content),
+        ),
+        entries: batchEntries,
+        taskShift: true,
+        now: 0,
+      }),
+    ).toBe(true);
+    const batch = listSessionPromptDeltas(batchSessionID);
+    expect(batch).toHaveLength(1);
+    expect(batch[0].content.length).toBeLessThan(8_000);
+    expect(deltaText(batch[0].content)).not.toContain(entries[0].content);
+    expect(deltaText(batch[0].content)).toContain(batchEntries[59].title);
+  });
+
   it("surfaces a newly selected entry on a task switch without rewriting the old block", () => {
     const a = ltm.create({
       projectPath: PROJECT,

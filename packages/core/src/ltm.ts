@@ -58,7 +58,7 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
-import { buildEmbeddingUnits } from "./embedding-units";
+import { taskHintExcerpt } from "./task-text";
 import { currentTenantId } from "./tenant";
 
 /**
@@ -2976,17 +2976,21 @@ export async function forSession(
   // Direct callers without a hint use the latest user prose. Only
   // fall back to the last distillation if neither source has a task to score.
   const contextHint = options?.contextHint?.trim();
-  let sessionContext = contextHint?.slice(0, 4_096) ?? "";
+  let sessionContext = taskHintExcerpt(contextHint ?? "", 4_096);
   if (!sessionContext && sessionID) {
     type TaskRow = {
       id: string;
-      content: string;
+      content: string | null;
       metadata: string | null;
       created_at: number;
     };
     const recentMsgs = db()
       .query(
-        `SELECT id, content, metadata, created_at FROM temporal_messages
+        `SELECT id,
+                CASE WHEN metadata IS NULL OR metadata NOT LIKE '%"tools":%'
+                  THEN substr(content, 1, 4096) ELSE NULL END AS content,
+                substr(metadata, 1, 32768) AS metadata, created_at
+         FROM temporal_messages
          WHERE project_id = ? AND session_id = ? AND role = 'user'
           ORDER BY created_at DESC, id DESC LIMIT 10`,
       )
@@ -2996,15 +3000,13 @@ export async function forSession(
         const metadata = m.metadata
           ? (JSON.parse(m.metadata) as Record<string, unknown>)
           : {};
-        if (!Array.isArray(metadata.tools) || metadata.tools.length === 0)
-          return m.content.trim();
-        // A mixed user row contains both task text and a tool result.
-        // Keep only structural text chunks; tool bodies are never task hints.
-        return buildEmbeddingUnits(m.content)
-          .filter((unit) => unit.kind === "text")
-          .map((unit) => unit.text)
-          .join("\n")
-          .trim();
+        if (typeof metadata.taskText === "string")
+          return taskHintExcerpt(metadata.taskText, 2_048);
+        // Legacy mixed rows cannot prove which text came from a tool body:
+        // tool output can forge the structural separator. Skip them.
+        if (Array.isArray(metadata.tools) && metadata.tools.length > 0)
+          return "";
+        return m.content?.trim() ?? "";
       } catch {
         return "";
       }
@@ -3015,7 +3017,9 @@ export async function forSession(
       recentMsgs.filter((m) => userProse(m)).length < 2
         ? (db()
             .query(
-              `SELECT id, content, metadata, created_at FROM temporal_messages
+              `SELECT id, substr(content, 1, 4096) AS content,
+                      substr(metadata, 1, 32768) AS metadata, created_at
+               FROM temporal_messages
                WHERE project_id = ? AND session_id = ? AND role = 'user'
                  AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
                ORDER BY created_at DESC, id DESC LIMIT 2`,
@@ -3029,7 +3033,7 @@ export async function forSession(
       .map(userProse)
       .filter(Boolean)
       .slice(0, 2)
-      .map((text) => text.slice(0, 2_048))
+      .map((text) => taskHintExcerpt(text, 2_048))
       .join("\n")
       .trim();
     if (!sessionContext) {

@@ -3519,7 +3519,7 @@ export function buildKnowledgeDeltaMessage(
               : e.id.startsWith("d:") || e.id.startsWith("t:")
                 ? e.id
                 : `k:${e.id}`;
-          return `* [${recallId}] ${e.title} (${e.category})`;
+          return `* [${recallId}] ${Array.from(e.title.slice(0, 122)).slice(0, 120).join("")} (${e.category})`;
         })
         .join("\n")}${
         overflowToc.length > shownOverflow.length
@@ -3602,6 +3602,11 @@ type DeltaMutation = {
   /** ids surfaced as removed/superseded. */
   removed: string[];
 };
+
+// A compaction keeps the latest tasks actionable without turning the single
+// replacement block into an ever-growing catalog of every past task.
+const MAX_CUMULATIVE_DELTA_ENTRIES = 24;
+const MAX_INITIAL_DELTA_ENTRIES = 48;
 
 /** Read a block's stashed {@link DeltaMutation} from its selector JSON. */
 function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
@@ -3779,14 +3784,6 @@ export function appendKnowledgePromptDelta(input: {
     syntheticEntries,
     projectID,
   );
-  const messages = buildKnowledgeDeltaMessage(
-    changed,
-    removedIds,
-    loreSessionToken(input.sessionID),
-    input.overflow,
-  );
-  if (!messages.length) return false;
-
   // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
   // rewriting one coalesced row in place. The insertAt is computed tool-pair-
   // safe at the call site against the CURRENT array tail, so the new message
@@ -3823,6 +3820,15 @@ export function appendKnowledgePromptDelta(input: {
     })),
     removed: removedIds,
   };
+  const current = renderCurrentDelta(
+    mut,
+    input.sessionID,
+    projectID,
+    input.overflow,
+    entryKeyIds(input.previousKeys),
+    MAX_INITIAL_DELTA_ENTRIES,
+  );
+  if (!current.messages.length) return false;
 
   const latest = blocks[blocks.length - 1];
   const now = input.now ?? Date.now();
@@ -3843,6 +3849,7 @@ export function appendKnowledgePromptDelta(input: {
       input.sessionID,
       projectID,
       input.overflow,
+      entryKeyIds(input.previousKeys),
     );
     if (!rendered.messages.length) return false;
     // Legacy blocks lack source IDs and signatures. Their text cannot be
@@ -3879,6 +3886,7 @@ export function appendKnowledgePromptDelta(input: {
       input.sessionID,
       projectID,
       input.overflow,
+      entryKeyIds(advanceSurfacedKeys(input.previousKeys, blocks.slice(0, -1))),
     );
     if (!rendered.messages.length) return false;
     updateSessionPromptDeltaSelector(
@@ -3908,10 +3916,10 @@ export function appendKnowledgePromptDelta(input: {
     selector: JSON.stringify({
       target: "messages",
       insertAt: input.insertAt,
-      mut,
+      mut: current.mut,
       debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
     }),
-    content: JSON.stringify(messages),
+    content: JSON.stringify(current.messages),
   });
   log.info(
     `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
@@ -3944,6 +3952,7 @@ function mergeMutations(
   for (const c of prev.changed) changedMap.set(c.id, c);
   const removed = new Set(prev.removed);
   for (const c of next.changed) {
+    changedMap.delete(c.id);
     changedMap.set(c.id, c);
     removed.delete(c.id);
   }
@@ -4023,6 +4032,8 @@ function renderCurrentDelta(
   sessionID: string,
   projectID: string,
   overflow?: Array<{ id: string; category: string; title: string }>,
+  retainedRemovedIds?: Set<string>,
+  maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
 ): { messages: GatewayMessage[]; mut: DeltaMutation } {
   const removed = new Set(merged.removed);
   const changed: DeltaMutation["changed"] = [];
@@ -4032,7 +4043,10 @@ function renderCurrentDelta(
     title: string;
     content: string;
   }> = [];
-  for (const mutation of merged.changed) {
+  for (const retired of merged.changed.slice(0, -maxEntries)) {
+    if (retainedRemovedIds?.has(retired.id)) removed.add(retired.id);
+  }
+  for (const mutation of merged.changed.slice(-maxEntries)) {
     if (removed.has(mutation.id)) continue;
     if (
       mutation.snapshot &&
@@ -4069,14 +4083,17 @@ function renderCurrentDelta(
       h: surfaceSignature(current.title, current.content),
     });
   }
+  const persistedRemoved = [...removed].filter(
+    (id) => !retainedRemovedIds || retainedRemovedIds.has(id),
+  );
   return {
     messages: buildKnowledgeDeltaMessage(
       entries,
-      [...removed],
+      persistedRemoved,
       loreSessionToken(sessionID),
       overflow,
     ),
-    mut: { changed, removed: [...removed] },
+    mut: { changed, removed: persistedRemoved },
   };
 }
 
@@ -21259,7 +21276,8 @@ async function handleConversationTurnPrepared(
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
-      const selectionHint = selectionTaskHint(req);
+      const taskSelection = selectionTaskHint(req);
+      const selectionHint = taskSelection.hint;
 
       // --- system[1]: Stable LTM (preferences) + known entities ---
       // Computed once per session and pinned for ≥1h. NOT invalidated by
@@ -21331,7 +21349,7 @@ async function handleConversationTurnPrepared(
         const selectionRevision = taskSelectionRevision(
           projectPath,
           cfg.knowledge.contextSources,
-          selectionHint,
+          taskSelection.identity,
         );
         let cached = ltmSessionCache.get(sessionID);
         const taskShift =
@@ -21951,7 +21969,8 @@ async function handleConversationTurnPrepared(
       // Preferences have their own dedicated budget and remain pinned.
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const contextHint = selectionTaskHint(req);
+      const taskSelection = selectionTaskHint(req);
+      const contextHint = taskSelection.hint;
       // Stability hint: keep the previously-pinned set sticky so consecutive
       // Layer-4 turns don't churn the selection (see step-6).
       const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
@@ -21959,7 +21978,7 @@ async function handleConversationTurnPrepared(
       const refreshRevision = taskSelectionRevision(
         projectPath,
         cfg.knowledge.contextSources,
-        contextHint,
+        taskSelection.identity,
       );
       // Step 6 may already have saved refreshRevision to the session cache.
       // Preserve its task-switch decision when Layer 4 replaces that turn's
@@ -24610,7 +24629,16 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
 }
 
 /** Keep tool-result turns and Lore's own deltas out of the task query. */
-function selectionTaskHint(req: GatewayRequest): string {
+function boundedTaskHint(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars / 4);
+  return `${text.slice(0, headChars)}\n${text.slice(-(maxChars - headChars - 1))}`;
+}
+
+function selectionTaskHint(req: GatewayRequest): {
+  hint: string;
+  identity: string;
+} {
   const userTurns: string[] = [];
   for (const message of req.messages.toReversed()) {
     if (message.role !== "user") continue;
@@ -24633,9 +24661,12 @@ function selectionTaskHint(req: GatewayRequest): string {
       latest,
     )
   ) {
-    return latest.slice(0, 4_096);
+    return { hint: boundedTaskHint(latest, 4_096), identity: latest };
   }
-  return `${latest.slice(0, 1_024)}\n${previous.slice(0, 3_072)}`;
+  return {
+    hint: `${boundedTaskHint(latest, 1_024)}\n${boundedTaskHint(previous, 3_071)}`,
+    identity: `${latest}\n${previous}`,
+  };
 }
 
 function taskSelectionRevision(
