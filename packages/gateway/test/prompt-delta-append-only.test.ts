@@ -572,6 +572,69 @@ describe("append-only durable knowledge deltas", () => {
     },
   );
 
+  it("retains a pinned removal through successive debounce rewrites", () => {
+    const removed = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned obsolete note",
+      content: "Old pinned guidance.",
+    });
+    const edited = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned edited note",
+      content: "Original pinned guidance.",
+    });
+    const added = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "New task addition",
+      content: "New task guidance.",
+    });
+    const sessionID = `pinned-rewrite-removal-${Date.now()}`;
+    const previousKeys = [
+      keyOf(removed, "Pinned obsolete note", "Old pinned guidance."),
+      keyOf(edited, "Pinned edited note", "Original pinned guidance."),
+    ];
+    const addedEntry = {
+      id: added,
+      category: "gotcha",
+      title: "New task addition",
+      content: "New task guidance.",
+    };
+    const input = {
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 10,
+      previousKeys,
+      nextKeys: [keyOf(added, addedEntry.title, addedEntry.content)],
+      entries: [addedEntry],
+      taskShift: true,
+    };
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_000 })).toBe(true);
+    ltm.remove(removed);
+    ltm.update(edited, { content: "First edited guidance." });
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_001 })).toBe(true);
+    const removalIds = () => {
+      const blocks = listSessionPromptDeltas(sessionID);
+      expect(blocks).toHaveLength(1);
+      const selector = JSON.parse(blocks[0].selector) as {
+        mut: { removed: string[] };
+      };
+      return selector.mut.removed;
+    };
+    expect(removalIds()).toContain(removed);
+    ltm.update(edited, { content: "Second edited guidance." });
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_002 })).toBe(true);
+    expect(removalIds()).toContain(removed);
+    const blocks = listSessionPromptDeltas(sessionID);
+    expect(appendKnowledgePromptDelta({ ...input, now: 100_000 })).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual(blocks);
+  });
+
   it("an appended block is immutable — a later append never rewrites earlier blocks", () => {
     const a = ltm.create({
       projectPath: PROJECT,

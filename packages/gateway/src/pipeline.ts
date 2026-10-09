@@ -3896,7 +3896,12 @@ export function appendKnowledgePromptDelta(input: {
       input.sessionID,
       projectID,
       input.overflow,
-      entryKeyIds(surfacedKeys),
+      new Set([
+        ...entryKeyIds(
+          advanceSurfacedKeys(input.previousKeys, blocks.slice(0, -1)),
+        ),
+        ...entryKeyIds(surfacedKeys),
+      ]),
     );
     if (!rendered.messages.length) return false;
     updateSessionPromptDeltaSelector(
