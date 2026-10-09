@@ -22,7 +22,15 @@
  * plus block immutability.
  */
 import { describe, it, expect } from "vitest";
-import { ltm, listSessionPromptDeltas } from "@loreai/core";
+import {
+  data,
+  db,
+  ensureProject,
+  log,
+  ltm,
+  listSessionPromptDeltas,
+  updateSessionPromptDeltaSelector,
+} from "@loreai/core";
 import {
   appendKnowledgePromptDelta,
   applySessionPromptDeltas,
@@ -58,7 +66,319 @@ function deltaContents(sessionID: string): string[] {
   });
 }
 
+function seedDistillation(id: string, observations: string): void {
+  db()
+    .query(
+      `INSERT INTO distillations
+       (id, project_id, session_id, narrative, facts, observations,
+        source_ids, generation, token_count, archived, created_at)
+       VALUES (?, ?, 'synthetic-source', '', '', ?, '[]', 0, 0, 0, ?)`,
+    )
+    .run(id, ensureProject(PROJECT), observations, Date.now());
+}
+
 describe("append-only durable knowledge deltas", () => {
+  it("retires older task additions across repeated compactions", () => {
+    const sessionID = `bounded-task-switch-${Date.now()}`;
+    const entries = Array.from({ length: 40 }, (_, index) => {
+      const title = `Distinct task ${index} knowledge`;
+      const content = `Guidance for task ${index} with a separate current action.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    for (const [index, entry] of entries.entries()) {
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const blocks = listSessionPromptDeltas(sessionID);
+    expect(blocks.length).toBeLessThanOrEqual(8);
+    expect(
+      Math.max(...blocks.map((block) => block.content.length)),
+    ).toBeLessThan(8_000);
+    const replay = blocks.map((block) => deltaText(block.content)).join("\n");
+    expect(replay).not.toContain(entries[0].content);
+    expect(replay).toContain(entries[39].content);
+
+    const batchSessionID = `${sessionID}-batch`;
+    const batchEntries = [
+      ...entries,
+      ...Array.from({ length: 20 }, (_, offset) => {
+        const index = offset + entries.length;
+        const title = `Distinct task ${index} knowledge`;
+        const content = `Guidance for task ${index} with a separate current action.`;
+        const id = ltm.create({
+          projectPath: PROJECT,
+          scope: "project",
+          category: "gotcha",
+          title,
+          content,
+        });
+        return { id, category: "gotcha", title, content };
+      }),
+    ];
+    const batchKeys = batchEntries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID: batchSessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: batchKeys,
+        entries: batchEntries,
+        taskShift: true,
+        now: 0,
+      }),
+    ).toBe(true);
+    const batch = listSessionPromptDeltas(batchSessionID);
+    expect(batch).toHaveLength(1);
+    expect(batch[0].content.length).toBeLessThan(8_000);
+    const batchText = deltaText(batch[0].content);
+    for (const entry of batchEntries) {
+      // Every selected entry is either rendered or has a complete recall ID.
+      expect(
+        batchText.includes(entry.content) ||
+          batchText.includes(`k:${entry.id}`),
+      ).toBe(true);
+    }
+    expect(ltm.get(batchEntries[0].id)?.content).toBe(batchEntries[0].content);
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID: batchSessionID,
+        projectPath: PROJECT,
+        insertAt: 11,
+        previousKeys: [],
+        nextKeys: batchKeys,
+        entries: batchEntries,
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(batchSessionID)).toHaveLength(1);
+  });
+
+  it("keeps every first-delivery recall reference when an edit arrives during debounce", () => {
+    const sessionID = `debounce-coverage-${Date.now()}`;
+    const entries = Array.from({ length: 30 }, (_, index) => {
+      const title = `Debounced note ${index}`;
+      const content = `Advice for debounced note ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const keys = entries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: keys,
+        entries,
+        taskShift: true,
+        now: 1_000,
+      }),
+    ).toBe(true);
+    ltm.update(entries[29].id, { content: "Updated advice for note 29." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 12,
+        previousKeys: [],
+        nextKeys: keys,
+        entries,
+        now: 1_001,
+      }),
+    ).toBe(true);
+    const text = deltaContents(sessionID).join("\n");
+    for (const entry of entries) {
+      expect(
+        text.includes(entry.content) || text.includes(`k:${entry.id}`),
+      ).toBe(true);
+    }
+    expect(text).toContain("Updated advice for note 29.");
+  });
+
+  it("surfaces a newly selected entry on a task switch without rewriting the old block", () => {
+    const a = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Chart colors",
+      content: "Keep chart labels legible.",
+    });
+    const b = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Tenant credentials",
+      content: "Scope credentials to the tenant.",
+    });
+    const sessionID = `append-task-switch-${Date.now()}`;
+    const aKey = keyOf(a, "Chart colors", "Keep chart labels legible.");
+    const bKey = keyOf(
+      b,
+      "Tenant credentials",
+      "Scope credentials to the tenant.",
+    );
+    const aEntry = {
+      id: a,
+      category: "gotcha",
+      title: "Chart colors",
+      content: "Keep chart labels legible.",
+    };
+    const bEntry = {
+      id: b,
+      category: "gotcha",
+      title: "Tenant credentials",
+      content: "Scope credentials to the tenant.",
+    };
+
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [`${a}:`],
+        nextKeys: [aKey],
+        entries: [aEntry],
+        now: 1_000,
+      }),
+    ).toBe(true);
+    const original = listSessionPromptDeltas(sessionID)[0];
+
+    // A source revision or incidental score change alone must not surface B.
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        now: 1_001,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual([original]);
+
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        taskShift: true,
+        now: 1_002, // still in the mutation debounce window
+      }),
+    ).toBe(true);
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(original);
+    expect(deltaText(rows[1].content)).toContain("Tenant credentials");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 6,
+        previousKeys: [aKey],
+        nextKeys: [bKey],
+        entries: [bEntry],
+        taskShift: true,
+        now: 1_003,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual(rows);
+  });
+
+  it("does not surface an edited entry twice when its new version is selected on a task switch", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Versioned task guidance",
+      content: "Initial guidance.",
+    });
+    const sessionID = `task-version-${Date.now()}`;
+    const oldKey = keyOf(id, "Versioned task guidance", "Initial guidance.");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [`${id}:`],
+        nextKeys: [oldKey],
+        entries: [
+          {
+            id,
+            category: "gotcha",
+            title: "Versioned task guidance",
+            content: "Initial guidance.",
+          },
+        ],
+        now: 1_000,
+      }),
+    ).toBe(true);
+    ltm.update(id, { content: "Revised guidance." });
+    const current = ltm.getByLogical(id);
+    if (!current) throw new Error("Missing updated knowledge version");
+    const newKey = keyOf(
+      current.id,
+      "Versioned task guidance",
+      "Revised guidance.",
+    );
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 4,
+        previousKeys: [`${id}:`],
+        nextKeys: [newKey],
+        entries: [
+          {
+            id: current.id,
+            category: "gotcha",
+            title: "Versioned task guidance",
+            content: "Revised guidance.",
+          },
+        ],
+        taskShift: true,
+        now: 1_002,
+      }),
+    ).toBe(true);
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+    const delta = deltaText(rows[0].content);
+    expect(delta.match(/Revised guidance\./g)).toHaveLength(1);
+    expect(delta).not.toContain(`[k:${current.id}]`);
+  });
+
   it("two DISTINCT genuine mutations across turns → TWO appended blocks, not one upserted row", () => {
     const a = ltm.create({
       projectPath: PROJECT,
@@ -173,6 +493,146 @@ describe("append-only durable knowledge deltas", () => {
     expect(laterWrites).toEqual([false, false, false, false, false]);
     // Zero blocks, ever — a removal-only never busts the cache.
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
+  });
+
+  it.each([
+    { mode: "appended", now: 100_000 },
+    { mode: "coalesced", now: 1_001 },
+  ])(
+    "records removal of a previous task addition in a $mode block",
+    ({ now }) => {
+      const obsolete = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: "Earlier task note",
+        content: "Use the earlier task guidance.",
+      });
+      const fresh = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: "New task note",
+        content: "Use the new task guidance.",
+      });
+      const sessionID = `dynamic-removal-${Date.now()}`;
+      const previousKeys: string[] = [];
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10,
+          previousKeys,
+          nextKeys: [
+            keyOf(
+              obsolete,
+              "Earlier task note",
+              "Use the earlier task guidance.",
+            ),
+          ],
+          entries: [
+            {
+              id: obsolete,
+              category: "gotcha",
+              title: "Earlier task note",
+              content: "Use the earlier task guidance.",
+            },
+          ],
+          taskShift: true,
+          now: 1_000,
+        }),
+      ).toBe(true);
+      ltm.remove(obsolete);
+      const freshEntry = {
+        id: fresh,
+        category: "gotcha",
+        title: "New task note",
+        content: "Use the new task guidance.",
+      };
+      const next = {
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 12,
+        previousKeys,
+        nextKeys: [keyOf(fresh, freshEntry.title, freshEntry.content)],
+        entries: [freshEntry],
+        taskShift: true,
+        now,
+      };
+      expect(appendKnowledgePromptDelta(next)).toBe(true);
+      const blocks = listSessionPromptDeltas(sessionID);
+      const latest = blocks[blocks.length - 1];
+      const selector = JSON.parse(latest.selector) as {
+        mut: { removed: string[] };
+      };
+      expect(selector.mut.removed).toContain(obsolete);
+      expect(deltaText(latest.content)).not.toContain("Earlier task note");
+      expect(appendKnowledgePromptDelta({ ...next, now: 200_000 })).toBe(false);
+      expect(listSessionPromptDeltas(sessionID)).toEqual(blocks);
+    },
+  );
+
+  it("retains a pinned removal through successive debounce rewrites", () => {
+    const removed = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned obsolete note",
+      content: "Old pinned guidance.",
+    });
+    const edited = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Pinned edited note",
+      content: "Original pinned guidance.",
+    });
+    const added = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "New task addition",
+      content: "New task guidance.",
+    });
+    const sessionID = `pinned-rewrite-removal-${Date.now()}`;
+    const previousKeys = [
+      keyOf(removed, "Pinned obsolete note", "Old pinned guidance."),
+      keyOf(edited, "Pinned edited note", "Original pinned guidance."),
+    ];
+    const addedEntry = {
+      id: added,
+      category: "gotcha",
+      title: "New task addition",
+      content: "New task guidance.",
+    };
+    const input = {
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 10,
+      previousKeys,
+      nextKeys: [keyOf(added, addedEntry.title, addedEntry.content)],
+      entries: [addedEntry],
+      taskShift: true,
+    };
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_000 })).toBe(true);
+    ltm.remove(removed);
+    ltm.update(edited, { content: "First edited guidance." });
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_001 })).toBe(true);
+    const removalIds = () => {
+      const blocks = listSessionPromptDeltas(sessionID);
+      expect(blocks).toHaveLength(1);
+      const selector = JSON.parse(blocks[0].selector) as {
+        mut: { removed: string[] };
+      };
+      return selector.mut.removed;
+    };
+    expect(removalIds()).toContain(removed);
+    ltm.update(edited, { content: "Second edited guidance." });
+    expect(appendKnowledgePromptDelta({ ...input, now: 1_002 })).toBe(true);
+    expect(removalIds()).toContain(removed);
+    const blocks = listSessionPromptDeltas(sessionID);
+    expect(appendKnowledgePromptDelta({ ...input, now: 100_000 })).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)).toEqual(blocks);
   });
 
   it("an appended block is immutable — a later append never rewrites earlier blocks", () => {
@@ -344,6 +804,667 @@ describe("append-only durable knowledge deltas", () => {
     // That one block describes the full pin→DB delta (all 9 entries changed).
     const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
     expect(body).toContain("cap v2 0.");
+  });
+
+  it("compacts repeated edits to the latest revision rather than replaying every stale revision", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Revision history",
+      content: "original guidance.",
+    });
+    const sessionID = `revision-cap-${Date.now()}`;
+    const pin = [keyOf(id, "Revision history", "original guidance.")];
+
+    for (const revision of Array.from({ length: 9 }, (_, index) => index + 1)) {
+      ltm.update(id, { content: `guidance revision ${revision}.` });
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + revision,
+          previousKeys: pin,
+          nextKeys: pin,
+          entries: [],
+          now: revision * 100_000,
+        }),
+      ).toBe(true);
+    }
+
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).toContain("guidance revision 9.");
+    for (const revision of Array.from({ length: 8 }, (_, index) => index + 1)) {
+      expect(body).not.toContain(`guidance revision ${revision}.`);
+    }
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+        now: 1_000_000,
+      }),
+    ).toBe(false);
+  });
+
+  it("drops deleted guidance when compacting earlier task-switch additions", () => {
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      const title = `Switch ${index}`;
+      const content = `Guidance for switch ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const sessionID = `deleted-cap-${Date.now()}`;
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8) ltm.remove(entries[0].id);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(entries[0].id);
+    for (const entry of entries.slice(1)) {
+      expect(body).toContain(entry.content);
+    }
+  });
+
+  it("does not rehydrate a foreign entry after sharing is revoked", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-foreign-project",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Shared foreign guidance",
+      content: "Foreign private guidance must not reappear.",
+    });
+    const sessionID = `revoked-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      if (index === 0) {
+        return {
+          id: foreign,
+          category: "gotcha",
+          title: "Shared foreign guidance",
+          content: "Foreign private guidance must not reappear.",
+        };
+      }
+      const title = `Local revocation guidance ${index}`;
+      const content = `Local guidance after revocation ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8) {
+        db()
+          .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+          .run(foreign);
+        expect(ltm.get(foreign)?.cross_project).toBe(0);
+      }
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(foreign);
+    expect(body).toContain(entries[8].content);
+  });
+
+  it("does not render revoked overflow titles in a new or coalesced block", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-revoked-overflow",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Private overflow title",
+      content: "Private overflow content.",
+    });
+    const local = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Local overflow anchor",
+      content: "Visible local guidance.",
+    });
+    const entry = {
+      id: local,
+      category: "gotcha",
+      title: "Local overflow anchor",
+      content: "Visible local guidance.",
+    };
+    const staleOverflow = [
+      { id: foreign, category: "gotcha", title: "Private overflow title" },
+    ];
+    db()
+      .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+      .run(foreign);
+    expect(ltm.get(foreign)?.cross_project).toBe(0);
+
+    const sessionID = `revoked-overflow-${crypto.randomUUID()}`;
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [`${local}:`],
+        nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+        entries: [entry],
+        overflow: staleOverflow,
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(true);
+    const initial = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(initial).toContain(entry.content);
+    expect(initial).not.toContain("Private overflow title");
+    expect(initial).not.toContain(foreign);
+
+    ltm.update(local, { content: "Updated visible local rule." });
+    const second = ltm.getByLogical(local);
+    if (!second) throw new Error("Missing updated local anchor");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 11,
+        previousKeys: [`${local}:`],
+        nextKeys: [keyOf(second.id, second.title, second.content)],
+        entries: [
+          {
+            id: second.id,
+            category: "gotcha",
+            title: second.title,
+            content: second.content,
+          },
+        ],
+        overflow: staleOverflow,
+        now: 100_001,
+      }),
+    ).toBe(true);
+    const coalesced = listSessionPromptDeltas(sessionID);
+    expect(coalesced).toHaveLength(1);
+    const body = deltaText(coalesced[0].content);
+    expect(body).toContain("Updated visible local rule.");
+    expect(body).not.toContain("Private overflow title");
+    expect(body).not.toContain(foreign);
+  });
+
+  it("bounds overflow reads while finding a valid suggestion after revoked ones", () => {
+    const revoked = ltm.create({
+      projectPath: "/tmp/lore-delta-overflow-load-foreign",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Revoked overflow candidate",
+      content: "Not visible here.",
+    });
+    const visible = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Eligible later candidate",
+      content: "Recallable guidance.",
+    });
+    const anchor = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Overflow load anchor",
+      content: "Visible selected guidance.",
+    });
+    db()
+      .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+      .run(revoked);
+    const missing = Array.from({ length: 500 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      category: "gotcha",
+      title: "Unavailable candidate",
+    }));
+    const overflow = [
+      { id: revoked, category: "gotcha", title: "Revoked overflow candidate" },
+      ...missing.slice(0, 14),
+      { id: visible, category: "gotcha", title: "Stale eligible title" },
+      ...missing.slice(14),
+    ];
+    const sink = { info() {}, warn() {}, error() {}, captureException() {} };
+    const reads = { count: 0 };
+    log.registerSink({
+      ...sink,
+      withDbSpan(sql, fn) {
+        if (
+          sql.includes("knowledge_current") ||
+          sql.includes("FROM knowledge")
+        ) {
+          reads.count++;
+        }
+        return fn();
+      },
+    });
+    try {
+      const sessionID = `overflow-load-${crypto.randomUUID()}`;
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10,
+          previousKeys: [],
+          nextKeys: [
+            keyOf(anchor, "Overflow load anchor", "Visible selected guidance."),
+          ],
+          entries: [
+            {
+              id: anchor,
+              category: "gotcha",
+              title: "Overflow load anchor",
+              content: "Visible selected guidance.",
+            },
+          ],
+          overflow,
+          taskShift: true,
+          now: 100_000,
+        }),
+      ).toBe(true);
+      const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+      expect(body).toContain("Eligible later candidate");
+      expect(body).toContain(`k:${visible}`);
+      expect(body).not.toContain("Stale eligible title");
+      expect(body).not.toContain("Revoked overflow candidate");
+      expect(body).not.toContain(revoked);
+      expect(reads.count).toBeLessThanOrEqual(120);
+    } finally {
+      log.registerSink(sink);
+    }
+  });
+
+  it("truncates overflow titles without persisting half of a surrogate pair", () => {
+    const title = `😀😀${"x".repeat(117)}😀`;
+    const overflowID = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "Available through recall.",
+    });
+    const anchor = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Unicode overflow anchor",
+      content: "Selected content.",
+    });
+    const sessionID = `overflow-unicode-${crypto.randomUUID()}`;
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: [
+          keyOf(anchor, "Unicode overflow anchor", "Selected content."),
+        ],
+        entries: [
+          {
+            id: anchor,
+            category: "gotcha",
+            title: "Unicode overflow anchor",
+            content: "Selected content.",
+          },
+        ],
+        overflow: [{ id: overflowID, category: "gotcha", title }],
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(true);
+    const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(body).toContain(title);
+    expect(
+      Array.from(body).some((char) => {
+        const code = char.charCodeAt(0);
+        return char.length === 1 && code >= 0xd800 && code <= 0xdfff;
+      }),
+    ).toBe(false);
+  });
+
+  it("restores re-shared guidance during a debounced edit after revocation", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-reshare-source",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Re-shared guidance",
+      content: "Visible again after sharing resumes.",
+    });
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      if (index === 0)
+        return {
+          id: foreign,
+          category: "gotcha",
+          title: "Re-shared guidance",
+          content: "Visible again after sharing resumes.",
+        };
+      const topic = [
+        "parser checksum",
+        "gateway routing",
+        "index recovery",
+        "cache expiration",
+        "session ownership",
+        "artifact upload",
+        "schema upgrade",
+        "worker timeout",
+      ][index - 1];
+      const title = `Local ${topic}`;
+      const content = `Apply the ${topic} rule to this task.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const sessionID = `reshared-cap-${Date.now()}`;
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8)
+        db()
+          .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+          .run(foreign);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+        `re-share setup index ${index}`,
+      ).toBe(true);
+    }
+    expect(
+      deltaText(listSessionPromptDeltas(sessionID)[0].content),
+    ).not.toContain(entries[0].content);
+    db()
+      .query("UPDATE knowledge SET cross_project = 1 WHERE logical_id = ?")
+      .run(foreign);
+    const editedContent = "Updated local guidance after sharing resumes.";
+    ltm.update(entries[8].id, { content: editedContent });
+    const edited = { ...entries[8], content: editedContent };
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: [],
+        nextKeys: [
+          keyOf(foreign, entries[0].title, entries[0].content),
+          keyOf(edited.id, edited.title, edited.content),
+        ],
+        entries: [entries[0], edited],
+        taskShift: true,
+        now: 800_001,
+      }),
+    ).toBe(true);
+    const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(body).toContain(entries[0].content);
+    expect(body).toContain(editedContent);
+  });
+
+  it.each(["revoked sharing", "deleted distillation"] as const)(
+    "drops unverified legacy content after %s when later changes compact the block",
+    (source) => {
+      const legacyContent = "Legacy guidance lost before compaction.";
+      const legacyID =
+        source === "revoked sharing"
+          ? ltm.create({
+              projectPath: "/tmp/lore-delta-legacy-source",
+              scope: "project",
+              crossProject: true,
+              category: "gotcha",
+              title: "Legacy shared guidance",
+              content: legacyContent,
+            })
+          : `d:legacy-source-${Date.now()}`;
+      if (source === "deleted distillation")
+        seedDistillation(legacyID.slice(2), legacyContent);
+      const sessionID = `legacy-cap-${source}-${Date.now()}`;
+      const entries = Array.from({ length: 9 }, (_, index) => {
+        if (index === 0)
+          return {
+            id: legacyID,
+            category:
+              source === "revoked sharing"
+                ? "gotcha"
+                : ltm.RECALLED_CONTEXT_CATEGORY,
+            title:
+              source === "revoked sharing"
+                ? "Legacy shared guidance"
+                : "Relevant earlier context",
+            content: legacyContent,
+          };
+        const title = `Legacy follow-up ${index}`;
+        const content = `Follow-up content ${index}.`;
+        const id = ltm.create({
+          projectPath: PROJECT,
+          scope: "project",
+          category: "gotcha",
+          title,
+          content,
+        });
+        return { id, category: "gotcha", title, content };
+      });
+      for (const [index, entry] of entries.entries()) {
+        if (index === 1) {
+          updateSessionPromptDeltaSelector(
+            sessionID,
+            0,
+            JSON.stringify({ target: "messages", insertAt: 10 }),
+          );
+          if (source === "revoked sharing")
+            db()
+              .query(
+                "UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?",
+              )
+              .run(legacyID);
+          else expect(data.deleteDistillation(legacyID.slice(2))).toBe(true);
+        }
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath: PROJECT,
+            insertAt: 10 + index,
+            previousKeys: [],
+            nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+            entries: [entry],
+            taskShift: true,
+            now: index * 100_000,
+          }),
+        ).toBe(true);
+      }
+      const compacted = listSessionPromptDeltas(sessionID);
+      expect(compacted).toHaveLength(1);
+      expect(deltaText(compacted[0].content)).not.toContain(entries[0].content);
+      expect(deltaText(compacted[0].content)).toContain(entries[8].content);
+      const replayed = applySessionPromptDeltas(
+        [{ role: "user", content: [{ type: "text", text: "New request" }] }],
+        sessionID,
+      );
+      expect(JSON.stringify(replayed)).not.toContain(entries[0].content);
+    },
+  );
+
+  it("keeps earlier distillation snapshots when a later block triggers compaction", () => {
+    const sessionID = `synthetic-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      id: `d:synthetic-${index}`,
+      category: ltm.RECALLED_CONTEXT_CATEGORY,
+      title: "Relevant earlier context",
+      content: `Distinct guidance from task ${index}.`,
+    }));
+    for (const [index, entry] of entries.entries()) {
+      seedDistillation(entry.id.slice(2), entry.content);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    for (const entry of entries) {
+      expect(body).toContain(entry.content);
+    }
+  });
+
+  it("does not restore a deleted distillation snapshot during compaction", () => {
+    const sessionID = `deleted-synthetic-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      id: `d:deleted-synthetic-${index}`,
+      category: ltm.RECALLED_CONTEXT_CATEGORY,
+      title: "Relevant earlier context",
+      content: `Distillation guidance ${index}.`,
+    }));
+    for (const [index, entry] of entries.entries()) {
+      seedDistillation(entry.id.slice(2), entry.content);
+      if (index === 8)
+        expect(data.deleteDistillation(entries[0].id.slice(2))).toBe(true);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(entries[0].id);
+    expect(body).toContain(entries[8].content);
+  });
+
+  it("keeps task-switch additions when compacting the eighth block and ignores a no-op at the cap", () => {
+    const sessionID = `task-cap-${Date.now()}`;
+    const ids = Array.from({ length: 9 }, (_, index) =>
+      ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: `Task switch ${index}`,
+        content: `Task-specific guidance ${index}.`,
+      }),
+    );
+    const entries = ids.map((id, index) => ({
+      id,
+      category: "gotcha",
+      title: `Task switch ${index}`,
+      content: `Task-specific guidance ${index}.`,
+    }));
+    const keys = entries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
+    for (const [index, entry] of entries.entries()) {
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keys[index]],
+          entries: [entry],
+          taskShift: true,
+          now: 1_000 + index,
+        }),
+      ).toBe(true);
+      if (index === 7) {
+        const atCap = listSessionPromptDeltas(sessionID);
+        expect(atCap).toHaveLength(8);
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath: PROJECT,
+            insertAt: 19,
+            previousKeys: [],
+            nextKeys: [keys[index]],
+            entries: [entry],
+            taskShift: true,
+            now: 1_009,
+          }),
+        ).toBe(false);
+        expect(listSessionPromptDeltas(sessionID)).toEqual(atCap);
+      }
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    for (const entry of entries) {
+      expect(deltaText(compacted[0].content)).toContain(entry.content);
+    }
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: [],
+        nextKeys: [keys[8]],
+        entries: [entries[8]],
+        taskShift: true,
+        now: 1_010,
+      }),
+    ).toBe(false);
   });
 
   it("re-editing the SAME entry to a new value DOES append a second block", () => {

@@ -58,6 +58,7 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import { taskHintExcerpt } from "./task-text";
 import { currentTenantId } from "./tenant";
 
 /**
@@ -2679,7 +2680,9 @@ async function scoreEntriesFTS(
     for (const r of results) {
       const norm =
         minRank === maxRank ? 1 : (maxRank - r.rank) / (maxRank - minRank);
-      scoreMap.set(r.id, norm);
+      // Zero means "no FTS match" downstream. Keep the weakest real match
+      // eligible, including for the overflow recall pool.
+      scoreMap.set(r.id, Math.max(Number.EPSILON, norm));
     }
     return scoreMap;
   } catch (error) {
@@ -2966,34 +2969,83 @@ export async function forSession(
     return result;
   }
 
-  // --- 3. Build session context for relevance scoring ---
-  let sessionContext = "";
-  if (sessionID) {
-    const distRow = db()
-      .query(
-        `SELECT observations FROM distillations
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(pid, sessionID) as { observations: string } | null;
-    if (distRow?.observations) {
-      sessionContext += `${distRow.observations}\n`;
-    }
+  // --- 3. Build a bounded query from the current task, not recent tool output ---
+  // A gateway request already contains the latest real user turns. Prefer that
+  // hint even when a distillation or tool result was stored for this session:
+  // the old order ignored the hint and let unrelated tool output dominate FTS.
+  // Direct callers without a hint use the latest user prose. Only
+  // fall back to the last distillation if neither source has a task to score.
+  const contextHint = options?.contextHint?.trim();
+  let sessionContext = taskHintExcerpt(contextHint ?? "", 4_096);
+  if (!sessionContext && sessionID) {
+    type TaskRow = {
+      id: string;
+      content: string | null;
+      metadata: string | null;
+      created_at: number;
+    };
     const recentMsgs = db()
       .query(
-        `SELECT content FROM temporal_messages
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 10`,
+        `SELECT id,
+                CASE WHEN metadata IS NULL OR metadata NOT LIKE '%"tools":%'
+                  THEN substr(content, 1, 4096) ELSE NULL END AS content,
+                substr(metadata, 1, 32768) AS metadata, created_at
+         FROM temporal_messages
+         WHERE project_id = ? AND session_id = ? AND role = 'user'
+          ORDER BY created_at DESC, id DESC LIMIT 10`,
       )
-      .all(pid, sessionID) as Array<{ content: string }>;
-    if (recentMsgs.length) {
-      sessionContext += recentMsgs.map((m) => m.content).join("\n");
+      .all(pid, sessionID) as TaskRow[];
+    const userProse = (m: TaskRow): string => {
+      try {
+        const metadata = m.metadata
+          ? (JSON.parse(m.metadata) as Record<string, unknown>)
+          : {};
+        if (typeof metadata.taskText === "string")
+          return taskHintExcerpt(metadata.taskText, 2_048);
+        // Legacy mixed rows cannot prove which text came from a tool body:
+        // tool output can forge the structural separator. Skip them.
+        if (Array.isArray(metadata.tools) && metadata.tools.length > 0)
+          return "";
+        return m.content?.trim() ?? "";
+      } catch {
+        return "";
+      }
+    };
+    // Keep the two latest plain rows reachable even after many tool-only
+    // messages. The bounded recent scan also admits mixed user/tool rows.
+    const plainMsgs =
+      recentMsgs.filter((m) => userProse(m)).length < 2
+        ? (db()
+            .query(
+              `SELECT id, substr(content, 1, 4096) AS content,
+                      substr(metadata, 1, 32768) AS metadata, created_at
+               FROM temporal_messages
+               WHERE project_id = ? AND session_id = ? AND role = 'user'
+                 AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
+               ORDER BY created_at DESC, id DESC LIMIT 2`,
+            )
+            .all(pid, sessionID) as TaskRow[])
+        : [];
+    sessionContext = [
+      ...new Map([...recentMsgs, ...plainMsgs].map((m) => [m.id, m])).values(),
+    ]
+      .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id))
+      .map(userProse)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((text) => taskHintExcerpt(text, 2_048))
+      .join("\n")
+      .trim();
+    if (!sessionContext) {
+      const distRow = db()
+        .query(
+          `SELECT observations FROM distillations
+           WHERE project_id = ? AND session_id = ?
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(pid, sessionID) as { observations: string } | null;
+      sessionContext = distRow?.observations.slice(0, 4_096) ?? "";
     }
-  }
-
-  // Fall back to caller-provided context hint (e.g., user's first message)
-  if (!sessionContext.trim() && options?.contextHint) {
-    sessionContext = options.contextHint;
   }
 
   // --- 4. Score both pools by relevance ---
@@ -3003,6 +3055,12 @@ export async function forSession(
   // embedded context vector — keeping distillation/temporal on the identical
   // cosine scale as knowledge (no separate embed, no scale mismatch).
   let contextVec: Float32Array | undefined;
+  // A bare acknowledgment has no new task terms. Preserve the no-context
+  // blanket-eligible fallback; distinct short requests still use FTS below.
+  const bareAcknowledgment =
+    /^(?:ok(?:ay)?|yes|sure|thanks|thank you|go ahead|continue|same task)[.!?]*$/i.test(
+      sessionContext.trim(),
+    );
 
   if (
     !projectEntries.length &&
@@ -3137,8 +3195,9 @@ export async function forSession(
         ftsScores,
       ));
     }
-  } else if (sessionContext.trim().length > 20) {
-    // Embeddings unavailable — use FTS5 BM25 as fallback
+  } else if (sessionContext.trim().length > 0 && !bareAcknowledgment) {
+    // Short tasks and unavailable embeddings still use FTS5 BM25. A short
+    // request must not fall through to unrelated confidence-ranked entries.
     const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
     ({ scoredProject, scoredCross } = scoreFTS(
       projectEntries,

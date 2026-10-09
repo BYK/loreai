@@ -13,7 +13,7 @@
  * top-K this turn) is invisible to it — that is the churn-immunity property.
  */
 import { describe, it, expect } from "vitest";
-import { ltm, listSessionPromptDeltas } from "@loreai/core";
+import { db, ensureProject, ltm, listSessionPromptDeltas } from "@loreai/core";
 import {
   appendKnowledgePromptDelta,
   detectSurfacedMutations,
@@ -25,6 +25,16 @@ const PROJECT = "/tmp/lore-delta-mutation-trigger";
 
 function keyOf(id: string, title: string, content: string): string {
   return `${id}:${surfaceSignature(title, content)}`;
+}
+
+function seedLatSection(id: string, heading: string, content: string): void {
+  db()
+    .query(
+      `INSERT INTO lat_sections
+       (id, project_id, file, heading, depth, content, content_hash, first_paragraph, updated_at)
+       VALUES (?, ?, 'lat.md/rules', ?, 1, ?, 'test-hash', ?, ?)`,
+    )
+    .run(id, ensureProject(PROJECT), heading, content, content, Date.now());
 }
 
 /** Parse the persisted delta row's rendered text (the GatewayMessage content). */
@@ -417,10 +427,24 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     // DB) and rendered into the persisted delta. Pre-fix, appendKnowledgePromptDelta
     // dropped it and returned false (no row) — this test guards that regression.
     const synthId = "d:22222222-2222-2222-2222-2222222222cc";
-    const title = "Order defaults";
+    const title = "Relevant earlier context";
     const content =
       "channel=WHOLESALE, region=EMEA, warehouse=WH-07, status=SUBMITTED";
     const sessionID = `wiring-synthetic-${Date.now()}`;
+    db()
+      .query(
+        `INSERT INTO distillations
+         (id, project_id, session_id, narrative, facts, observations,
+          source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, '', '', ?, '[]', 0, 0, 0, ?)`,
+      )
+      .run(
+        synthId.slice(2),
+        ensureProject(PROJECT),
+        sessionID,
+        content,
+        Date.now(),
+      );
 
     const wrote = appendKnowledgePromptDelta({
       sessionID,
@@ -442,6 +466,7 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     const id = "lat.md/rules#Dashboard";
     const title = "[lat.md/rules] Dashboard";
     const sessionID = `wiring-lat-edit-${crypto.randomUUID()}`;
+    seedLatSection(id, "Dashboard", "Revised dashboard rule");
     const wrote = appendKnowledgePromptDelta({
       sessionID,
       projectPath: PROJECT,
@@ -460,6 +485,7 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     const id = "lat.md/rules#New section";
     const title = "[lat.md/rules] New section";
     const sessionID = `wiring-lat-new-${crypto.randomUUID()}`;
+    seedLatSection(id, "New section", "Fresh dashboard rule");
     const wrote = appendKnowledgePromptDelta({
       sessionID,
       projectPath: PROJECT,
@@ -477,6 +503,8 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
   it("WIRING: a plain synthetic key without a hash reaches the durable delta", () => {
     const id = "lat.md/rules#Plain key";
     const sessionID = `wiring-lat-plain-${crypto.randomUUID()}`;
+    const title = "[lat.md/rules] Plain key";
+    seedLatSection(id, "Plain key", "Plain key rule");
     const wrote = appendKnowledgePromptDelta({
       sessionID,
       projectPath: PROJECT,
@@ -487,7 +515,7 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
         {
           id,
           category: "lat.md",
-          title: "Plain key",
+          title,
           content: "Plain key rule",
         },
       ],

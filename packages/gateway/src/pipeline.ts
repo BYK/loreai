@@ -67,6 +67,7 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  db,
   recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
@@ -2490,6 +2491,10 @@ const MAX_DELTA_BLOCKS = 8;
  *  ~200-token index; changed entries' IDs are always listed so durable
  *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
+/** Validate only a bounded prefix of ranked suggestions on the gateway thread.
+ *  Extra candidates let revoked or missing entries make room for later valid
+ *  ones without scanning the entire unselected knowledge pool. */
+const OVERFLOW_VALIDATION_MAX = 32;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
  *  the "A" floor). Present from turn 1 (before system[2] / any delta exists) so
@@ -3345,6 +3350,7 @@ export function detectSurfacedMutations(
     string,
     { category: string; title: string; content: string }
   >,
+  projectID?: string,
 ): {
   changed: Array<{
     id: string;
@@ -3381,7 +3387,10 @@ export function detectSurfacedMutations(
     // alongside any version-row compaction.
     const logicalId = ltm.logicalIdOf(id);
     const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
-    if (!current) {
+    if (
+      !current ||
+      (projectID && !eligibleForDeltaProject(current, projectID))
+    ) {
       // Not a resolvable `knowledge` row. Before treating it as a non-knowledge
       // synthetic, check the current selection snapshot: distillation/temporal
       // facts (`d:`/`t:`) and lat.md sections live outside the knowledge
@@ -3414,7 +3423,7 @@ export function detectSurfacedMutations(
       // model would be told to ignore still-valid pinned knowledge, and
       // (append-only) that false removal would be frozen into an immutable block
       // + advance the surfaced set past a non-knowledge id.
-      if (ltm.isTombstoned(logicalId)) removedIds.push(id);
+      if (current || ltm.isTombstoned(logicalId)) removedIds.push(id);
       continue;
     }
     const currentHash = surfaceSignature(current.title, current.content);
@@ -3514,11 +3523,11 @@ export function buildKnowledgeDeltaMessage(
               : e.id.startsWith("d:") || e.id.startsWith("t:")
                 ? e.id
                 : `k:${e.id}`;
-          return `* [${recallId}] ${e.title} (${e.category})`;
+          return `* [${recallId}] ${Array.from(e.title).slice(0, 120).join("")} (${e.category})`;
         })
         .join("\n")}${
         overflowToc.length > shownOverflow.length
-          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
+          ? `\n* At least ${overflowToc.length - shownOverflow.length} more validated matches — search recall for additional guidance.`
           : ""
       }`
     : "";
@@ -3588,10 +3597,19 @@ export function buildKnowledgeDeltaMessage(
  */
 type DeltaMutation = {
   /** ids whose content was surfaced as changed, with the surfaced hash. */
-  changed: Array<{ id: string; h: string }>;
+  changed: Array<{
+    id: string;
+    h: string;
+    /** Non-knowledge sources have no DB row to reconstruct at compaction. */
+    snapshot?: { category: string; title: string; content: string };
+  }>;
   /** ids surfaced as removed/superseded. */
   removed: string[];
 };
+
+// A compaction keeps the latest tasks actionable without turning the single
+// replacement block into an ever-growing catalog of every past task.
+const MAX_CUMULATIVE_DELTA_ENTRIES = 24;
 
 /** Read a block's stashed {@link DeltaMutation} from its selector JSON. */
 function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
@@ -3602,13 +3620,35 @@ function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
     const removed = Array.isArray(mut.removed)
       ? mut.removed.filter((x): x is string => typeof x === "string")
       : [];
-    const changed = Array.isArray(mut.changed)
-      ? mut.changed.filter(
-          (x): x is { id: string; h: string } =>
-            !!x &&
-            typeof (x as { id?: unknown }).id === "string" &&
-            typeof (x as { h?: unknown }).h === "string",
-        )
+    const changed: DeltaMutation["changed"] = Array.isArray(mut.changed)
+      ? mut.changed.flatMap((x: unknown) => {
+          if (!x || typeof x !== "object") return [];
+          const entry = x as Record<string, unknown>;
+          if (typeof entry.id !== "string" || typeof entry.h !== "string")
+            return [];
+          const snapshot = entry.snapshot;
+          if (snapshot && typeof snapshot === "object") {
+            const data = snapshot as Record<string, unknown>;
+            if (
+              typeof data.category === "string" &&
+              typeof data.title === "string" &&
+              typeof data.content === "string"
+            ) {
+              return [
+                {
+                  id: entry.id,
+                  h: entry.h,
+                  snapshot: {
+                    category: data.category,
+                    title: data.title,
+                    content: data.content,
+                  },
+                },
+              ];
+            }
+          }
+          return [{ id: entry.id, h: entry.h }];
+        })
       : [];
     return { changed, removed };
   } catch {
@@ -3667,6 +3707,8 @@ export function appendKnowledgePromptDelta(input: {
    *  (a previous design used `now?: number` and treated undefined as "skip
    *  debounce, always append", which was an easy footgun for future callers). */
   now?: number;
+  /** A new user task may surface previously unseen, unchanged entries. */
+  taskShift?: boolean;
   previousKeys: string[] | undefined;
   nextKeys: string[] | undefined;
   entries: Array<{
@@ -3677,9 +3719,9 @@ export function appendKnowledgePromptDelta(input: {
   }>;
   overflow?: Array<{ id: string; category: string; title: string }>;
 }): boolean {
-  // Source the delta from GENUINE DB mutations to the ADVANCING surfaced set,
-  // NOT from the per-turn relevance selection. `previousKeys` is the frozen
-  // system[2] pin baseline; the surfaced set is that baseline advanced through
+  // Source ordinary deltas from DB mutations to the advancing surfaced set.
+  // A task switch also admits newly selected entries. `previousKeys` is the
+  // frozen context pin baseline; the surfaced set is that baseline advanced through
   // every block already appended this session (each block records the
   // `id:hash` mutations it surfaced in its selector). `detectSurfacedMutations`
   // compares the surfaced set against the CURRENT DB state, so:
@@ -3693,16 +3735,8 @@ export function appendKnowledgePromptDelta(input: {
   // `nextKeys` is retained on the input for the gate sites (hasMaterialLtmDelta).
   // `entries` supplies content for SYNTHETIC context-source ids (see
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
-  let blocks = listSessionPromptDeltas(input.sessionID);
-  // Bound pathological growth: if too many blocks have accumulated without a
-  // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
-  // from the frozen pin baseline below (advanceSurfacedKeys over [] == the pin,
-  // so detectSurfacedMutations re-captures the full pin→DB delta). Costs one
-  // bust, paid only when MAX_DELTA_BLOCKS is reached.
-  if (blocks.length >= MAX_DELTA_BLOCKS) {
-    deleteSessionPromptDelta(input.sessionID);
-    blocks = [];
-  }
+  const projectID = ensureProject(input.projectPath);
+  const blocks = listSessionPromptDeltas(input.sessionID);
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
   // Synthetic selections (recalled context and lat.md) don't live in knowledge.
   // Supply their current content so an edited section can be surfaced too.
@@ -3722,30 +3756,37 @@ export function appendKnowledgePromptDelta(input: {
       });
     }
   }
-  // A newly indexed synthetic has no key in the frozen pin. Ordinary knowledge
-  // retains the existing frozen-entry policy: a relevance reshuffle must not
-  // append previously unsurfaced, unchanged entries to the conversation.
+  const databaseMutations = detectSurfacedMutations(
+    surfacedKeys,
+    syntheticEntries,
+    projectID,
+  );
+  // Synthetic context may be new at any time. Ordinary knowledge only joins
+  // when a real user task changes: routine re-ranking must not rewrite the
+  // prompt, but a newly relevant entry must actually reach the agent.
   const seen = entryKeyIds(surfacedKeys);
+  // Edits create a new version ID. The old surfaced ID still resolves through
+  // its logical ID; the mutation detector below handles its changed content.
+  // Treating the new version as an unseen task entry would inject it twice.
+  const seenLogical = new Set([...seen].map((id) => ltm.logicalIdOf(id)));
+  const selected = new Set((input.entries ?? []).map((entry) => entry.id));
   for (const key of input.nextKeys ?? []) {
     const separator = key.lastIndexOf(":");
     const id = separator === -1 ? key : key.slice(0, separator);
-    if (syntheticEntries.has(id) && !seen.has(id)) {
+    if (
+      !seenLogical.has(ltm.logicalIdOf(id)) &&
+      (syntheticEntries.has(id) || (input.taskShift && selected.has(id)))
+    ) {
       surfacedKeys.push(`${id}:`);
       seen.add(id);
+      seenLogical.add(ltm.logicalIdOf(id));
     }
   }
   const { changed, removedIds } = detectSurfacedMutations(
     surfacedKeys,
     syntheticEntries,
+    projectID,
   );
-  const messages = buildKnowledgeDeltaMessage(
-    changed,
-    removedIds,
-    loreSessionToken(input.sessionID),
-    input.overflow,
-  );
-  if (!messages.length) return false;
-
   // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
   // rewriting one coalesced row in place. The insertAt is computed tool-pair-
   // safe at the call site against the CURRENT array tail, so the new message
@@ -3770,50 +3811,130 @@ export function appendKnowledgePromptDelta(input: {
     changed: changed.map((c) => ({
       id: c.id,
       h: surfaceSignature(c.title, c.content),
+      ...(syntheticEntries.has(c.id)
+        ? {
+            snapshot: {
+              category: c.category,
+              title: c.title,
+              content: c.content,
+            },
+          }
+        : {}),
     })),
     removed: removedIds,
   };
+  // Revalidate current sources even on first delivery. Keep the entire initial
+  // selection in the mutation so the text budget can list every omitted entry
+  // by full recall ID. Only later rebuilds retire older task additions.
+  const current = renderCurrentDelta(
+    mut,
+    input.sessionID,
+    projectID,
+    input.overflow,
+    entryKeyIds(surfacedKeys),
+    Infinity,
+  );
+  if (!current.messages.length) return false;
 
   const latest = blocks[blocks.length - 1];
+  const debouncedMut = latest
+    ? mergeMutations(parseDeltaMutation(latest.selector), mut)
+    : null;
   const now = input.now ?? Date.now();
-  if (latest && withinDebounceWindow(latest.selector, now)) {
-    // Merge into the latest block: union muts, union content, update insertAt.
-    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
-    const mergedMessages = mergeDeltaContent(
-      JSON.parse(latest.content) as GatewayMessage[],
-      messages,
+  if (blocks.length >= MAX_DELTA_BLOCKS) {
+    // Only compact on a real change. Keep additions from earlier task switches:
+    // they may never have belonged to the frozen pin baseline. This is the one
+    // bounded cache rewrite after MAX_DELTA_BLOCKS immutable tail additions.
+    const compactedMutations = blocks.reduce<DeltaMutation | null>(
+      (acc, block) =>
+        mergeMutations(
+          acc,
+          parseDeltaMutation(block.selector) ?? { changed: [], removed: [] },
+        ),
+      null,
     );
+    const rendered = renderCurrentDelta(
+      mergeMutations(compactedMutations, mut),
+      input.sessionID,
+      projectID,
+      input.overflow,
+      entryKeyIds(input.previousKeys),
+    );
+    if (!rendered.messages.length) return false;
+    // Legacy blocks lack source IDs and signatures. Their text cannot be
+    // revalidated after revocation or deletion, so omit it at compaction.
+    const content = JSON.stringify(rendered.messages);
+    withSavepoint("compact_knowledge_delta", () => {
+      deleteSessionPromptDelta(input.sessionID);
+      appendSessionPromptDelta({
+        sessionID: input.sessionID,
+        projectID,
+        selector: JSON.stringify({
+          target: "messages",
+          insertAt: input.insertAt,
+          mut: rendered.mut,
+          debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+        }),
+        content,
+      });
+    });
+    return true;
+  }
+  if (
+    latest &&
+    debouncedMut &&
+    debouncedMut.changed.length <= MAX_CUMULATIVE_DELTA_ENTRIES &&
+    (!input.taskShift ||
+      databaseMutations.changed.length > 0 ||
+      databaseMutations.removedIds.length > 0) &&
+    withinDebounceWindow(latest.selector, now)
+  ) {
+    // Rebuild from the latest state of each id: rapid repeated edits must not
+    // retain earlier revisions inside the debounced block.
+    const rendered = renderCurrentDelta(
+      debouncedMut,
+      input.sessionID,
+      projectID,
+      input.overflow,
+      new Set([
+        ...entryKeyIds(
+          advanceSurfacedKeys(input.previousKeys, blocks.slice(0, -1)),
+        ),
+        ...entryKeyIds(surfacedKeys),
+      ]),
+    );
+    if (!rendered.messages.length) return false;
     updateSessionPromptDeltaSelector(
       input.sessionID,
       latest.seq,
       JSON.stringify({
         target: "messages",
         insertAt: input.insertAt,
-        mut: mergedMut,
+        mut: rendered.mut,
         debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
       }),
     );
     updateSessionPromptDeltaContent(
       input.sessionID,
       latest.seq,
-      JSON.stringify(mergedMessages),
+      JSON.stringify(rendered.messages),
     );
     log.info(
-      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
+      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${debouncedMut.changed.length} changed, ${debouncedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
     );
     return true;
   }
 
   appendSessionPromptDelta({
     sessionID: input.sessionID,
-    projectID: ensureProject(input.projectPath),
+    projectID,
     selector: JSON.stringify({
       target: "messages",
       insertAt: input.insertAt,
-      mut,
+      mut: current.mut,
       debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
     }),
-    content: JSON.stringify(messages),
+    content: JSON.stringify(current.messages),
   });
   log.info(
     `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
@@ -3832,55 +3953,179 @@ function withinDebounceWindow(rawSelector: string, now: number): boolean {
 }
 
 /**
- * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
- * hash wins (curator may have re-surfaced the same id with new content). `removed`
- * entries: union of both sets.
+ * Merge two DeltaMutations in order. `changed` entries: same id → keep the later
+ * hash (curator may have re-surfaced the same id with new content). `removed`
+ * entries: a later addition supersedes a prior removal; a later removal
+ * supersedes the earlier addition.
  */
 function mergeMutations(
   prev: DeltaMutation | null,
   next: DeltaMutation,
 ): DeltaMutation {
   if (!prev) return next;
-  const changedMap = new Map<string, { id: string; h: string }>();
+  const changedMap = new Map<string, DeltaMutation["changed"][number]>();
   for (const c of prev.changed) changedMap.set(c.id, c);
-  for (const c of next.changed) changedMap.set(c.id, c);
-  const removed = new Set([...prev.removed, ...next.removed]);
+  const removed = new Set(prev.removed);
+  for (const c of next.changed) {
+    changedMap.delete(c.id);
+    changedMap.set(c.id, c);
+    removed.delete(c.id);
+  }
+  for (const id of next.removed) removed.add(id);
   return {
     changed: [...changedMap.values()],
     removed: [...removed],
   };
 }
 
-/**
- * Merge the new delta messages into the existing block's content. The existing
- * block has a user-turn payload + assistant-closer pair; we replace the user
- * payload with a union of all changed entries (deduped by id, latest content
- * wins) and remove any removed ids from the rendered list.
- */
-function mergeDeltaContent(
-  prev: GatewayMessage[],
-  next: GatewayMessage[],
-): GatewayMessage[] {
-  // The existing block is [user(payload), assistant(closer)]. The new block is
-  // the same shape. Concatenate the payloads and keep the closer.
-  const userText = firstText(prev[0]) ?? "";
-  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
-  // Reuse the next block's payload text directly — it was just built by
-  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
-  // a superset of the previous block's (the previous block's entries are
-  // already in the surfaced set, so they would NOT appear in `changed` again;
-  // the new payload contains only the genuinely-new mutations).
-  const nextUserText = firstText(next[0]) ?? "";
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
-    },
-    {
-      role: "assistant",
-      content: [{ type: "text", text: closerText }],
-    },
-  ];
+function eligibleForDeltaProject(
+  entry: ltm.KnowledgeEntry,
+  projectID: string,
+): boolean {
+  return (
+    entry.confidence > 0.2 &&
+    (entry.project_id === projectID ||
+      entry.project_id === null ||
+      entry.cross_project === 1)
+  );
+}
+
+/** Snapshots may be reused only while their source remains live in this project. */
+function liveSyntheticSnapshot(
+  id: string,
+  snapshot: NonNullable<DeltaMutation["changed"][number]["snapshot"]>,
+  projectID: string,
+): boolean {
+  if (id.startsWith("d:")) {
+    const row = db()
+      .query(
+        "SELECT observations FROM distillations WHERE id = ? AND project_id = ? AND archived = 0",
+      )
+      .get(id.slice(2), projectID) as { observations: string } | null;
+    return (
+      row?.observations === snapshot.content &&
+      snapshot.title === "Relevant earlier context"
+    );
+  }
+  if (id.startsWith("t:")) {
+    const row = db()
+      .query(
+        "SELECT role, content FROM temporal_messages WHERE id = ? AND project_id = ?",
+      )
+      .get(id.slice(2), projectID) as {
+      role: string;
+      content: string;
+    } | null;
+    return (
+      row?.content === snapshot.content &&
+      snapshot.title === `Relevant earlier message (${row?.role})`
+    );
+  }
+  if (snapshot.category === "lat.md") {
+    const row = db()
+      .query(
+        "SELECT file, heading, content, first_paragraph FROM lat_sections WHERE id = ? AND project_id = ?",
+      )
+      .get(id, projectID) as {
+      file: string;
+      heading: string;
+      content: string;
+      first_paragraph: string | null;
+    } | null;
+    return (
+      row != null &&
+      snapshot.title === `[${row.file}] ${row.heading}` &&
+      snapshot.content === (row.first_paragraph ?? row.content)
+    );
+  }
+  return false;
+}
+
+/** Rebuild a coalesced block from the latest eligible version of every surfaced id. */
+function renderCurrentDelta(
+  merged: DeltaMutation,
+  sessionID: string,
+  projectID: string,
+  overflow?: Array<{ id: string; category: string; title: string }>,
+  retainedRemovedIds?: Set<string>,
+  maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
+): { messages: GatewayMessage[]; mut: DeltaMutation } {
+  const removed = new Set(merged.removed);
+  const changed: DeltaMutation["changed"] = [];
+  const entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }> = [];
+  for (const retired of merged.changed.slice(0, -maxEntries)) {
+    if (retainedRemovedIds?.has(retired.id)) removed.add(retired.id);
+  }
+  for (const mutation of merged.changed.slice(-maxEntries)) {
+    if (removed.has(mutation.id)) continue;
+    if (
+      mutation.snapshot &&
+      !liveSyntheticSnapshot(mutation.id, mutation.snapshot, projectID)
+    ) {
+      removed.add(mutation.id);
+      continue;
+    }
+    const currentKnowledge = mutation.snapshot
+      ? null
+      : (ltm.get(mutation.id) ??
+        ltm.getByLogical(ltm.logicalIdOf(mutation.id)));
+    const current = mutation.snapshot
+      ? { id: mutation.id, ...mutation.snapshot }
+      : currentKnowledge;
+    if (
+      !current ||
+      (currentKnowledge &&
+        !eligibleForDeltaProject(currentKnowledge, projectID))
+    ) {
+      removed.add(mutation.id);
+      continue;
+    }
+    entries.push({
+      // Keep the id already surfaced to the model. Recall-by-id resolves a
+      // superseded version through its stable logical id to the current entry.
+      id: mutation.id,
+      category: current.category,
+      title: current.title,
+      content: current.content,
+    });
+    changed.push({
+      ...mutation,
+      h: surfaceSignature(current.title, current.content),
+    });
+  }
+  const persistedRemoved = [...removed].filter(
+    (id) => !retainedRemovedIds || retainedRemovedIds.has(id),
+  );
+  const visibleOverflow: Array<{
+    id: string;
+    category: string;
+    title: string;
+  }> = [];
+  for (const { id } of overflow?.slice(0, OVERFLOW_VALIDATION_MAX) ?? []) {
+    const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+    if (current && eligibleForDeltaProject(current, projectID)) {
+      visibleOverflow.push({
+        id,
+        category: current.category,
+        title: current.title,
+      });
+      if (visibleOverflow.length === OVERFLOW_TOC_MAX) break;
+    }
+  }
+  return {
+    messages: buildKnowledgeDeltaMessage(
+      entries,
+      persistedRemoved,
+      loreSessionToken(sessionID),
+      visibleOverflow,
+    ),
+    mut: { changed, removed: persistedRemoved },
+  };
 }
 
 /**
@@ -21005,13 +21250,14 @@ async function handleConversationTurnPrepared(
     | {
         previousKeys: string[] | undefined;
         nextKeys: string[] | undefined;
+        taskShift?: boolean;
         entries: Array<{
           id: string;
           category: string;
           title: string;
           content: string;
         }>;
-        // #917: relevance-scored entries that didn't fit the system[2] budget,
+        // #917: relevance-scored entries that didn't fit the context budget,
         // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
         overflow?: Array<{ id: string; category: string; title: string }>;
       }
@@ -21061,6 +21307,8 @@ async function handleConversationTurnPrepared(
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
+      const taskSelection = selectionTaskHint(req);
+      const selectionHint = taskSelection.hint;
 
       // --- system[1]: Stable LTM (preferences) + known entities ---
       // Computed once per session and pinned for ≥1h. NOT invalidated by
@@ -21129,11 +21377,16 @@ async function handleConversationTurnPrepared(
       // still works: contextHint comes from the incoming request, not temporal
       // storage). (issue #796)
       if (!isFirstTurn || largeColdStart) {
-        const selectionRevision = ltm.selectionRevision(
+        const selectionRevision = taskSelectionRevision(
           projectPath,
           cfg.knowledge.contextSources,
+          taskSelection.identity,
         );
         let cached = ltmSessionCache.get(sessionID);
+        const taskShift =
+          !!selectionHint &&
+          !!ltmPinnedText.get(sessionID) &&
+          taskDigest(cached?.revision) !== taskDigest(selectionRevision);
         // Only content changes invalidate the selected context. This stamp is
         // persisted with the selection, so idle resumes and restarts are cheap
         // when knowledge and this session's context sources have not changed.
@@ -21159,7 +21412,7 @@ async function handleConversationTurnPrepared(
           | undefined;
 
         if (!cached) {
-          // Full context-bound budget — preferences have their own dedicated budget.
+          // Preferences have their own dedicated budget and remain pinned.
           const contextBudget = ltmBudget;
           // Feed the previously-pinned entry set back in as a stability hint so
           // per-turn relevance re-scoring doesn't churn the budget-boundary
@@ -21230,7 +21483,7 @@ async function handleConversationTurnPrepared(
                       currentProjectID,
                       checkpoint.digest,
                       contextBudget,
-                      contextHint,
+                      selectionHint,
                       selectionRevision,
                       [...stickyIds].sort(),
                       cfg.knowledge.contextSources,
@@ -21252,7 +21505,7 @@ async function handleConversationTurnPrepared(
                 {
                   signal,
                   excludeCategories: ["preference"],
-                  ...(contextHint ? { contextHint } : {}),
+                  ...(selectionHint ? { contextHint: selectionHint } : {}),
                   ...(stickyIds.size ? { stickyIds } : {}),
                   ...(cfg.knowledge.contextSources?.length
                     ? { includeContextSources: cfg.knowledge.contextSources }
@@ -21444,6 +21697,7 @@ async function handleConversationTurnPrepared(
             pendingKnowledgeDelta = {
               previousKeys: pinned.entryKeys,
               nextKeys: cachedKeys,
+              taskShift,
               entries: freshContextEntries,
               overflow: freshContextOverflow,
             };
@@ -21743,18 +21997,29 @@ async function handleConversationTurnPrepared(
       const ltmBudget = getLtmBudget(ltmFraction, sessionID, {
         isSubagent: !!sessionState.isSubagent,
       });
-      // Full context-bound budget — preferences have their own dedicated budget.
+      // Preferences have their own dedicated budget and remain pinned.
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const contextHint = lastUserTextTrimmed(req);
+      const taskSelection = selectionTaskHint(req);
+      const contextHint = taskSelection.hint;
       // Stability hint: keep the previously-pinned set sticky so consecutive
       // Layer-4 turns don't churn the selection (see step-6).
       const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
       const overflowSink: ltm.KnowledgeEntry[] = [];
-      const refreshRevision = ltm.selectionRevision(
+      const refreshRevision = taskSelectionRevision(
         projectPath,
         cfg.knowledge.contextSources,
+        taskSelection.identity,
       );
+      // Step 6 may already have saved refreshRevision to the session cache.
+      // Preserve its task-switch decision when Layer 4 replaces that turn's
+      // pending delta; recomputing from the updated cache loses new entries.
+      const taskShift =
+        pendingKnowledgeDelta?.taskShift === true ||
+        (!!contextHint &&
+          !!ltmPinnedText.get(sessionID) &&
+          taskDigest(ltmSessionCache.get(sessionID)?.revision) !==
+            taskDigest(refreshRevision));
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -21810,11 +22075,16 @@ async function handleConversationTurnPrepared(
 
           if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
             // Same entry set — nothing to surface. The durable delta already
-            // carries the full set; do NOT emit a system[2] block.
+            // carries the full set; keep cache text byte-identical to the pin.
+            ltmSessionCache.set(sessionID, {
+              formatted: pinned.formatted,
+              tokenCount: pinned.tokenCount,
+              revision: refreshRevision,
+            });
             setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
-              ltmCacheText: formatted,
-              ltmCacheTokens: tokenCount,
+              ltmCacheText: pinned.formatted,
+              ltmCacheTokens: pinned.tokenCount,
               ltmCacheRevision: refreshRevision,
               // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
             });
@@ -21839,6 +22109,7 @@ async function handleConversationTurnPrepared(
             pendingKnowledgeDelta = {
               previousKeys: frozenKeys,
               nextKeys: entryKeys,
+              taskShift,
               entries: contextEntries,
               overflow: contextOverflow,
             };
@@ -24386,6 +24657,65 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
     return text;
   }
   return "";
+}
+
+/** Keep tool-result turns and Lore's own deltas out of the task query. */
+function boundedTaskHint(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars / 4);
+  return `${text.slice(0, headChars)}\n${text.slice(-(maxChars - headChars - 1))}`;
+}
+
+function selectionTaskHint(req: GatewayRequest): {
+  hint: string;
+  identity: string;
+} {
+  const userTurns: string[] = [];
+  for (const message of req.messages.toReversed()) {
+    if (message.role !== "user") continue;
+    const text = message.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (!text || text.startsWith(KNOWLEDGE_DELTA_FRAMING_PREFIX)) continue;
+    userTurns.push(text);
+    if (userTurns.length === 2) break;
+  }
+  const latest = userTurns[0] ?? "";
+  const previous = userTurns[1];
+  // Only an acknowledgement or an explicit continuation needs the preceding
+  // task. Length alone is not evidence: "fix auth" can be a distinct new task.
+  if (
+    !previous ||
+    (!/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)[.!?]*$/i.test(
+      latest,
+    ) &&
+      !/^(?:please\s+)?(?:continue (?:the|this|that) (?:work|task|issue)|go ahead with (?:the|this|that) (?:plan|task|work))[.!?]*$/i.test(
+        latest,
+      ))
+  ) {
+    return { hint: boundedTaskHint(latest, 4_096), identity: latest };
+  }
+  return {
+    hint: `${boundedTaskHint(latest, 1_024)}\n${boundedTaskHint(previous, 3_071)}`,
+    identity: `${latest}\n${previous}`,
+  };
+}
+
+function taskSelectionRevision(
+  projectPath: string,
+  contextSources: Parameters<typeof ltm.selectionRevision>[1],
+  taskHint: string,
+): string {
+  const revision = ltm.selectionRevision(projectPath, contextSources);
+  return taskHint
+    ? `${revision}:task:${createHash("sha256").update(taskHint).digest("hex")}`
+    : revision;
+}
+
+function taskDigest(revision: string | undefined): string {
+  return revision?.match(/:task:([a-f0-9]{64})$/)?.[1] ?? "";
 }
 
 // ---------------------------------------------------------------------------
