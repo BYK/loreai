@@ -3527,7 +3527,7 @@ export function buildKnowledgeDeltaMessage(
         })
         .join("\n")}${
         overflowToc.length > shownOverflow.length
-          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
+          ? `\n* At least ${overflowToc.length - shownOverflow.length} more validated matches — search recall for additional guidance.`
           : ""
       }`
     : "";
@@ -3831,12 +3831,15 @@ export function appendKnowledgePromptDelta(input: {
     input.sessionID,
     projectID,
     input.overflow,
-    entryKeyIds(input.previousKeys),
+    entryKeyIds(surfacedKeys),
     Infinity,
   );
   if (!current.messages.length) return false;
 
   const latest = blocks[blocks.length - 1];
+  const debouncedMut = latest
+    ? mergeMutations(parseDeltaMutation(latest.selector), mut)
+    : null;
   const now = input.now ?? Date.now();
   if (blocks.length >= MAX_DELTA_BLOCKS) {
     // Only compact on a real change. Keep additions from earlier task switches:
@@ -3879,6 +3882,8 @@ export function appendKnowledgePromptDelta(input: {
   }
   if (
     latest &&
+    debouncedMut &&
+    debouncedMut.changed.length <= MAX_CUMULATIVE_DELTA_ENTRIES &&
     (!input.taskShift ||
       databaseMutations.changed.length > 0 ||
       databaseMutations.removedIds.length > 0) &&
@@ -3886,13 +3891,12 @@ export function appendKnowledgePromptDelta(input: {
   ) {
     // Rebuild from the latest state of each id: rapid repeated edits must not
     // retain earlier revisions inside the debounced block.
-    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
     const rendered = renderCurrentDelta(
-      mergedMut,
+      debouncedMut,
       input.sessionID,
       projectID,
       input.overflow,
-      entryKeyIds(advanceSurfacedKeys(input.previousKeys, blocks.slice(0, -1))),
+      entryKeyIds(surfacedKeys),
     );
     if (!rendered.messages.length) return false;
     updateSessionPromptDeltaSelector(
@@ -3911,7 +3915,7 @@ export function appendKnowledgePromptDelta(input: {
       JSON.stringify(rendered.messages),
     );
     log.info(
-      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
+      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${debouncedMut.changed.length} changed, ${debouncedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
     );
     return true;
   }

@@ -174,6 +174,56 @@ describe("append-only durable knowledge deltas", () => {
     expect(listSessionPromptDeltas(batchSessionID)).toHaveLength(1);
   });
 
+  it("keeps every first-delivery recall reference when an edit arrives during debounce", () => {
+    const sessionID = `debounce-coverage-${Date.now()}`;
+    const entries = Array.from({ length: 30 }, (_, index) => {
+      const title = `Debounced note ${index}`;
+      const content = `Advice for debounced note ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const keys = entries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [],
+        nextKeys: keys,
+        entries,
+        taskShift: true,
+        now: 1_000,
+      }),
+    ).toBe(true);
+    ltm.update(entries[29].id, { content: "Updated advice for note 29." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 12,
+        previousKeys: [],
+        nextKeys: keys,
+        entries,
+        now: 1_001,
+      }),
+    ).toBe(true);
+    const text = deltaContents(sessionID).join("\n");
+    for (const entry of entries) {
+      expect(
+        text.includes(entry.content) || text.includes(`k:${entry.id}`),
+      ).toBe(true);
+    }
+    expect(text).toContain("Updated advice for note 29.");
+  });
+
   it("surfaces a newly selected entry on a task switch without rewriting the old block", () => {
     const a = ltm.create({
       projectPath: PROJECT,
@@ -444,6 +494,83 @@ describe("append-only durable knowledge deltas", () => {
     // Zero blocks, ever — a removal-only never busts the cache.
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(0);
   });
+
+  it.each([
+    { mode: "appended", now: 100_000 },
+    { mode: "coalesced", now: 1_001 },
+  ])(
+    "records removal of a previous task addition in a $mode block",
+    ({ now }) => {
+      const obsolete = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: "Earlier task note",
+        content: "Use the earlier task guidance.",
+      });
+      const fresh = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title: "New task note",
+        content: "Use the new task guidance.",
+      });
+      const sessionID = `dynamic-removal-${Date.now()}`;
+      const previousKeys: string[] = [];
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10,
+          previousKeys,
+          nextKeys: [
+            keyOf(
+              obsolete,
+              "Earlier task note",
+              "Use the earlier task guidance.",
+            ),
+          ],
+          entries: [
+            {
+              id: obsolete,
+              category: "gotcha",
+              title: "Earlier task note",
+              content: "Use the earlier task guidance.",
+            },
+          ],
+          taskShift: true,
+          now: 1_000,
+        }),
+      ).toBe(true);
+      ltm.remove(obsolete);
+      const freshEntry = {
+        id: fresh,
+        category: "gotcha",
+        title: "New task note",
+        content: "Use the new task guidance.",
+      };
+      const next = {
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 12,
+        previousKeys,
+        nextKeys: [keyOf(fresh, freshEntry.title, freshEntry.content)],
+        entries: [freshEntry],
+        taskShift: true,
+        now,
+      };
+      expect(appendKnowledgePromptDelta(next)).toBe(true);
+      const blocks = listSessionPromptDeltas(sessionID);
+      const latest = blocks[blocks.length - 1];
+      const selector = JSON.parse(latest.selector) as {
+        mut: { removed: string[] };
+      };
+      expect(selector.mut.removed).toContain(obsolete);
+      expect(deltaText(latest.content)).not.toContain("Earlier task note");
+      expect(appendKnowledgePromptDelta({ ...next, now: 200_000 })).toBe(false);
+      expect(listSessionPromptDeltas(sessionID)).toEqual(blocks);
+    },
+  );
 
   it("an appended block is immutable — a later append never rewrites earlier blocks", () => {
     const a = ltm.create({
