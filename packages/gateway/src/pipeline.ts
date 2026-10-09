@@ -1824,6 +1824,21 @@ function conflictsWithConfidentSessionProject(
   );
 }
 
+/** Reject a project switch before any session-scoped prompt data or controls run. */
+function assertBoundSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): void {
+  if (!conflictsWithConfidentSessionProject(sessionID, pathResult)) return;
+  // Preserve the established system-prompt correction for an exact stale
+  // header. A reminder or an unrelated new header cannot rebind this session.
+  const previous =
+    sessions.get(sessionID)?.projectPath ??
+    loadSessionTracking(sessionID)?.projectPath;
+  if (previous === pathResult.overrodeHeaderPath) return;
+  throw new ProjectPathConflictError();
+}
+
 function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
   return loadSessionTracking(sessionID)?.credentialFingerprint === "";
 }
@@ -20236,6 +20251,7 @@ async function handleConversationTurnPrepared(
   const { identified } = admitted;
   preparation.assertActive();
   const { sessionID, isNew, tier } = identified;
+  if (!isNew) assertBoundSessionProject(sessionID, pathResult);
   try {
     onSessionIdentified?.(sessionID);
   } catch (error) {
@@ -24412,10 +24428,11 @@ async function handleLoreSlashCommand(
     );
   }
 
+  const pathResult = getRequestProjectPath(req);
+
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
   if (!state && indexedSessionID) {
-    const pathResult = getRequestProjectPath(req);
     state = getOrCreateSession(
       indexedSessionID,
       pathResult.path,
@@ -24426,6 +24443,7 @@ async function handleLoreSlashCommand(
   }
   const sessionID = indexedSessionID ?? state?.sessionID;
   if (sessionID) {
+    assertBoundSessionProject(sessionID, pathResult);
     await claimSession(sessionID);
     if (
       indexedSessionID &&

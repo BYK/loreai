@@ -1381,6 +1381,21 @@ export function getProjectPath(
   // override a header and fall through to the cwd fallback, which never merges).
   const inferred = inferProjectPathDetailed(systemPrompt);
 
+  // A reminder never outranks an authoritative system path, but disagreement
+  // means the request's project identity is inconsistent. Validate it even when
+  // system inference would otherwise return early.
+  const reminderPath = openingReminder
+    ? inferClaudeCodeReminderProjectPath(openingReminder, headerPath)
+    : null;
+  if (
+    reminderPath &&
+    (inferred?.authoritative
+      ? inferred.path !== reminderPath.path
+      : headerPath !== undefined && headerPath !== reminderPath.path)
+  ) {
+    throw new ProjectPathConflictError();
+  }
+
   // 1. Authoritative per-request inference is the STRONGEST signal — it
   //    describes the agent's actual workspace for THIS exact request. A header
   //    is a per-client/per-environment constant that can go stale (e.g. a fixed
@@ -1405,13 +1420,6 @@ export function getProjectPath(
   // but a disagreement is unsafe: a static header could join distinct
   // projects. Reject the request instead of trusting either lower-priority
   // signal or rebinding the session.
-  const reminderPath = openingReminder
-    ? inferClaudeCodeReminderProjectPath(openingReminder, headerPath)
-    : null;
-  if (headerPath && reminderPath && headerPath !== reminderPath.path) {
-    throw new ProjectPathConflictError();
-  }
-
   // 2. Explicit project headers remain the preferred source for clients
   // without a conflicting reminder (including OpenCode and Pi).
   if (headerPath) return { path: headerPath, source: "header", gitRemote };

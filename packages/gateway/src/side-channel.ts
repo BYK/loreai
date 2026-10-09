@@ -79,15 +79,18 @@ export function hasClaudeCodeCodingPrompt(system: string): boolean {
  * workspace inference. Later user text and tool results can quote arbitrary
  * paths and must never bind a session to a different project.
  */
+function openingReminderText(text: string): string | null {
+  const opening = /^\s*<system-reminder>/.exec(text);
+  if (!opening) return null;
+  const end = text.indexOf("</system-reminder>", opening[0].length);
+  return end === -1 ? null : text.slice(opening[0].length, end);
+}
+
 function openingReminder(
   message: GatewayRequest["messages"][number] | undefined,
 ): string | null {
   const block = message?.role === "user" ? message.content[0] : undefined;
-  if (block?.type !== "text") return null;
-  const opening = /^\s*<system-reminder>/.exec(block.text);
-  if (!opening) return null;
-  const end = block.text.indexOf("</system-reminder>", opening[0].length);
-  return end === -1 ? null : block.text.slice(opening[0].length, end);
+  return block?.type === "text" ? openingReminderText(block.text) : null;
 }
 
 function claudeCodeOpeningReminder(req: GatewayRequest): string | null {
@@ -108,13 +111,25 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
     // The first reminder can be retained across turns. A later instruction
     // record naming a different project means it no longer identifies the
     // current workspace; reject before reading or storing either project's data.
+    const headerPath = extractProjectHeader(req.rawHeaders);
     for (const message of req.messages.slice(1)) {
-      const reminder = openingReminder(message);
-      const later = reminder
-        ? inferClaudeCodeReminderProjectPath(reminder)
-        : null;
-      if (later && later.path !== result.path) {
-        throw new ProjectPathConflictError();
+      if (message.role !== "user") continue;
+      for (const block of message.content) {
+        if (block.type !== "text") continue;
+        const reminder = openingReminderText(block.text);
+        const later = reminder
+          ? inferClaudeCodeReminderProjectPath(reminder, headerPath)
+          : null;
+        if (
+          later &&
+          later.path !== result.path &&
+          !(
+            headerPath === result.path &&
+            later.path.startsWith(`${headerPath}/`)
+          )
+        ) {
+          throw new ProjectPathConflictError();
+        }
       }
     }
   }
