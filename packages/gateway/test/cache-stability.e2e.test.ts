@@ -1587,6 +1587,74 @@ describe("cache stability (e2e)", () => {
     }
   });
 
+  it.each(["continue the work", "go ahead with the plan"])(
+    "keeps the preceding task for the explicit continuation %s",
+    async (continuation) => {
+      const turns = [
+        {
+          userMessage: "Fix chart palette colors.",
+          assistantText: "Chart done.",
+        },
+        { userMessage: continuation, assistantText: "Continuing." },
+      ];
+      harness = await createHarness({
+        fixtures: makeConversationFixtures(turns),
+      });
+      const projectPath = `/tmp/lore-explicit-continuation-${Date.now()}`;
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": `explicit-continuation-${Date.now()}`,
+      };
+      const history: unknown[] = [];
+      const first = await harness.chat(
+        makeBody(turns[0].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.json();
+      history.push({ role: "user", content: turns[0].userMessage });
+      history.push({ role: "assistant", content: turns[0].assistantText });
+
+      const { ltm } = await import("@loreai/core");
+      ltm.create({
+        projectPath: `${projectPath}-other`,
+        scope: "project",
+        crossProject: true,
+        category: "gotcha",
+        title: "Chart palette note",
+        content: "Use soft orange for chart palette colors.",
+      });
+      const original = ltm.forSession;
+      const hints: string[] = [];
+      const selection = vi
+        .spyOn(ltm, "forSession")
+        .mockImplementation((...args) => {
+          if (args[3]?.excludeCategories?.includes("preference")) {
+            hints.push(args[3]?.contextHint ?? "");
+          }
+          return original(...args);
+        });
+      try {
+        const second = await harness.chat(
+          makeBody(turns[1].userMessage, history),
+          "test-key",
+          headers,
+        );
+        expect(second.status).toBe(200);
+        await second.json();
+        expect(hints.some((hint) => hint.includes(turns[0].userMessage))).toBe(
+          true,
+        );
+        expect(serializedMessages(harness.upstreamBodies()[1])).toContain(
+          "Use soft orange",
+        );
+      } finally {
+        selection.mockRestore();
+      }
+    },
+  );
+
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
     // End-to-end proof of the #917 wiring: knowledge that is relevance-scored
     // but doesn't fit the system[2] injection budget must reach the wire as a

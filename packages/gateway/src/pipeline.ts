@@ -24679,9 +24679,12 @@ function selectionTaskHint(req: GatewayRequest): {
   // task. Length alone is not evidence: "fix auth" can be a distinct new task.
   if (
     !previous ||
-    !/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)[.!?]*$/i.test(
+    (!/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)[.!?]*$/i.test(
       latest,
-    )
+    ) &&
+      !/^(?:please\s+)?(?:continue (?:the|this|that) (?:work|task|issue)|go ahead with (?:the|this|that) (?:plan|task|work))[.!?]*$/i.test(
+        latest,
+      ))
   ) {
     return { hint: boundedTaskHint(latest, 4_096), identity: latest };
   }
