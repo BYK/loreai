@@ -1509,6 +1509,84 @@ describe("cache stability (e2e)", () => {
     },
   );
 
+  it("does not carry a foreign shared chart entry into a new 'ok fix auth' task", async () => {
+    const turns = [
+      {
+        userMessage: "Fix chart palette colors.",
+        assistantText: "Chart done.",
+      },
+      { userMessage: "ok fix auth", assistantText: "Auth done." },
+    ];
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-ack-task-switch-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `ack-task-switch-${Date.now()}`,
+    };
+    const { ltm } = await import("@loreai/core");
+    const original = ltm.forSession;
+    const hints: string[] = [];
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          hints.push(args[3]?.contextHint ?? "");
+        }
+        return original(...args);
+      });
+    const history: unknown[] = [];
+    try {
+      const first = await harness.chat(
+        makeBody(turns[0].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.json();
+      history.push({ role: "user", content: turns[0].userMessage });
+      history.push({ role: "assistant", content: turns[0].assistantText });
+
+      ltm.create({
+        projectPath: `${projectPath}-other`,
+        scope: "project",
+        crossProject: true,
+        category: "gotcha",
+        title: "Chart palette shared note",
+        content: "FOREIGN_PALETTE_SENTINEL use cerulean for the palette.",
+      });
+      ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Auth credential routing",
+        content: "Scope auth credentials before forwarding.",
+      });
+      const second = await harness.chat(
+        makeBody(turns[1].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(second.status).toBe(200);
+      await second.json();
+      expect(hints).toContain("ok fix auth");
+      const body = harness.upstreamBodies()[1];
+      expect(serializedMessages(body)).toContain("Auth credential routing");
+      expect(serializedMessages(body)).not.toContain(
+        "FOREIGN_PALETTE_SENTINEL",
+      );
+      const deltas = harness.queryDB<{ content: string }>(
+        "SELECT content FROM session_prompt_deltas",
+      );
+      expect(deltas.map((delta) => delta.content).join(" ")).not.toContain(
+        "FOREIGN_PALETTE_SENTINEL",
+      );
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
     // End-to-end proof of the #917 wiring: knowledge that is relevance-scored
     // but doesn't fit the system[2] injection budget must reach the wire as a

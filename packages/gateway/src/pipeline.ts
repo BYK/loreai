@@ -24679,7 +24679,7 @@ function selectionTaskHint(req: GatewayRequest): {
   // task. Length alone is not evidence: "fix auth" can be a distinct new task.
   if (
     !previous ||
-    !/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)(?:\b|[.!?]|$)/i.test(
+    !/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)[.!?]*$/i.test(
       latest,
     )
   ) {
