@@ -4088,12 +4088,18 @@ function renderCurrentDelta(
   const persistedRemoved = [...removed].filter(
     (id) => !retainedRemovedIds || retainedRemovedIds.has(id),
   );
+  const visibleOverflow = overflow?.flatMap(({ id }) => {
+    const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+    return current && eligibleForDeltaProject(current, projectID)
+      ? [{ id, category: current.category, title: current.title }]
+      : [];
+  });
   return {
     messages: buildKnowledgeDeltaMessage(
       entries,
       persistedRemoved,
       loreSessionToken(sessionID),
-      overflow,
+      visibleOverflow,
     ),
     mut: { changed, removed: persistedRemoved },
   };

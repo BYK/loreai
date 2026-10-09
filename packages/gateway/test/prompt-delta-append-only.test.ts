@@ -758,6 +758,85 @@ describe("append-only durable knowledge deltas", () => {
     expect(body).toContain(entries[8].content);
   });
 
+  it("does not render revoked overflow titles in a new or coalesced block", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-revoked-overflow",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Private overflow title",
+      content: "Private overflow content.",
+    });
+    const local = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Local overflow anchor",
+      content: "Visible local guidance.",
+    });
+    const entry = {
+      id: local,
+      category: "gotcha",
+      title: "Local overflow anchor",
+      content: "Visible local guidance.",
+    };
+    const staleOverflow = [
+      { id: foreign, category: "gotcha", title: "Private overflow title" },
+    ];
+    db()
+      .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+      .run(foreign);
+    expect(ltm.get(foreign)?.cross_project).toBe(0);
+
+    const sessionID = `revoked-overflow-${crypto.randomUUID()}`;
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 10,
+        previousKeys: [`${local}:`],
+        nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+        entries: [entry],
+        overflow: staleOverflow,
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(true);
+    const initial = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(initial).toContain(entry.content);
+    expect(initial).not.toContain("Private overflow title");
+    expect(initial).not.toContain(foreign);
+
+    ltm.update(local, { content: "Updated visible local rule." });
+    const second = ltm.getByLogical(local);
+    if (!second) throw new Error("Missing updated local anchor");
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 11,
+        previousKeys: [`${local}:`],
+        nextKeys: [keyOf(second.id, second.title, second.content)],
+        entries: [
+          {
+            id: second.id,
+            category: "gotcha",
+            title: second.title,
+            content: second.content,
+          },
+        ],
+        overflow: staleOverflow,
+        now: 100_001,
+      }),
+    ).toBe(true);
+    const coalesced = listSessionPromptDeltas(sessionID);
+    expect(coalesced).toHaveLength(1);
+    const body = deltaText(coalesced[0].content);
+    expect(body).toContain("Updated visible local rule.");
+    expect(body).not.toContain("Private overflow title");
+    expect(body).not.toContain(foreign);
+  });
+
   it("restores re-shared guidance during a debounced edit after revocation", () => {
     const foreign = ltm.create({
       projectPath: "/tmp/lore-delta-reshare-source",
