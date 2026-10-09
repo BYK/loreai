@@ -46,8 +46,8 @@ import type { GatewayRequest } from "./translate/types";
  */
 const CLAUDE_CODE_CWD_MARKER_RE = /(?:^|\n)[ \t]*Working directory:[ \t]*\S/i;
 
-// skipSystemPromptPrefix removes Claude Code's coding preamble from auxiliary
-// requests. A quoted reminder and a tools array alone cannot identify a turn.
+// Auxiliary requests can contain this preamble and tools. Neither signal alone
+// identifies a coding turn; the opening reminder must identify a project too.
 const CLAUDE_CODE_CODING_PREAMBLE_RE =
   /(?:^|\n)[ \t]*You are Claude Code(?:[.,\s]|$)/i;
 
@@ -147,9 +147,9 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
 export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
   if (!isClaudeCodeClient(req.rawHeaders)) return false;
   if (hasClaudeCodeCodingPrompt(req.system)) return false;
-  // Claude Code's classifier and naming calls do not offer tools. Their first
-  // user message can quote an earlier coding reminder, so reminder text alone
-  // must never turn a tool-less auxiliary call into a conversation turn.
+  // Classifier calls can offer tools. Their first user message can quote an
+  // earlier coding reminder, so reminder text alone must never turn a tool-less
+  // auxiliary call into a conversation turn.
   if (
     req.protocol !== "anthropic" ||
     req.tools.length === 0 ||
