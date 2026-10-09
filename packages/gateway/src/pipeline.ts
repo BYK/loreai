@@ -394,7 +394,11 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
-import { getRequestProjectPath, isClaudeCodeSideChannel } from "./side-channel";
+import {
+  getClaudeCodeRequestClass,
+  getRequestProjectPath,
+  isClaudeCodeSideChannel,
+} from "./side-channel";
 import {
   analyzeCacheTurn,
   categorizeBust,
@@ -5238,6 +5242,10 @@ export function resolveSessionProjectPath(
       return previous;
     }
 
+    // A confident stale-header correction changes the owner of every
+    // session-keyed prompt cache. Drop the old project's pins before selecting
+    // knowledge for this turn; never reuse its stable LTM under the new path.
+    if (confidentlyWrong) evictPipelineSessionState(sessionState.sessionID);
     sessionState.projectPath = projectPath;
     sessionState.projectPathProvisional = false;
 
@@ -20307,6 +20315,9 @@ async function handleConversationTurnPrepared(
     sessionID,
     preparation.signal,
   );
+  // Another turn may have changed this binding while we waited for its claim
+  // or preparation lock. Recheck before reading session-scoped prompt state.
+  if (!isNew) assertBoundSessionProject(sessionID, pathResult);
   const legacyGlobalProvider = cred
     ? captureLegacyGlobalAuth(req, config, cred)
     : undefined;
@@ -20319,7 +20330,6 @@ async function handleConversationTurnPrepared(
     config,
   );
   await beforeUpstreamCaptureForTest?.(req, sessionState);
-  const sessionSignal = sessionLifecycleSignal(sessionID);
   const suppressTemporalStorage =
     sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
   const preUpstreamPause = pipelinePreUpstreamPauseForTest;
@@ -20329,6 +20339,8 @@ async function handleConversationTurnPrepared(
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+  // Project re-attribution may retire the previous session lifecycle signal.
+  const sessionSignal = sessionLifecycleSignal(sessionID);
 
   // Routing and policy are request intent, not a property of a successful
   // response. Capture now so a failed policy-tightening request still governs
@@ -24969,6 +24981,14 @@ async function handleRequestInner(
       );
     }
 
+    const claudeCodeRequestClass = getClaudeCodeRequestClass(req);
+    // Auxiliary payloads can quote slash commands from a conversation. Bypass
+    // before even looking up a session so those records cannot mutate it.
+    if (claudeCodeRequestClass === "auxiliary") {
+      log.info("claude-code side-channel: passthrough (explicit auxiliary class)");
+      return await handlePassthrough(req, config);
+    }
+
     // Preserve the process-global legacy credential only for a local,
     // header-less request to the exact configured provider base.
     const earlyAuth = extractAuth(req.rawHeaders);
@@ -25058,7 +25078,13 @@ async function handleRequestInner(
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req, requestSourceMessageCount(req))) {
+    // A recognized Claude Code class has already established routing intent.
+    // Do not let generic short-prompt/few-tools heuristics reclassify a main
+    // turn after the explicit auxiliary bypass above has accepted it.
+    if (
+      claudeCodeRequestClass === undefined &&
+      isMetaRequest(req, requestSourceMessageCount(req))
+    ) {
       log.info(
         `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
           ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,

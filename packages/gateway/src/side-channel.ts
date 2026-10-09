@@ -4,8 +4,9 @@
  * Claude Code issues several auxiliary API calls that are NOT conversation
  * turns: the auto-mode permission classifier (one call per tool action),
  * conversation title/topic generation, and subagent naming/summary. These are
- * built with `skipSystemPromptPrefix: true`, so they lack workspace markers
- * in the system prompt. Since Claude Code 2.1.258, the classifier can carry
+ * identified by `x-claude-code-request-class: auxiliary` on current clients.
+ * Older clients use `skipSystemPromptPrefix: true`, so they lack workspace
+ * markers in the system prompt. Since Claude Code 2.1.258, the classifier can carry
  * an OAuth billing header at `system[0]` via `forceAttributionHeader: true`;
  * that header is not a reliable discriminator.
  * All of these calls still carry the SAME `x-claude-code-session-id` header as
@@ -120,14 +121,7 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
         const later = reminder
           ? inferClaudeCodeReminderProjectPath(reminder, headerPath)
           : null;
-        if (
-          later &&
-          later.path !== result.path &&
-          !(
-            headerPath === result.path &&
-            later.path.startsWith(`${headerPath}/`)
-          )
-        ) {
+        if (later && later.path !== result.path) {
           throw new ProjectPathConflictError();
         }
       }
@@ -136,16 +130,42 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
   return result;
 }
 
+/** Known client routing intent; never an authorization or project identity. */
+export function getClaudeCodeRequestClass(
+  req: GatewayRequest,
+): "main" | "subagent" | "workflow" | "compaction" | "auxiliary" | undefined {
+  if (req.protocol !== "anthropic" || !isClaudeCodeClient(req.rawHeaders)) {
+    return undefined;
+  }
+  // Verified against isolated Claude Code 2.1.289 and 2.1.302 auto-mode
+  // clients: auto-mode calls are "auxiliary"; coding turns are "main".
+  // This is routing intent only: project and credential ownership still have
+  // to pass normal pipeline guards. Unknown/older clients use the fallback.
+  const requestClass = req.rawHeaders["x-claude-code-request-class"];
+  switch (requestClass) {
+    case "auxiliary":
+    case "main":
+    case "subagent":
+    case "workflow":
+    case "compaction":
+      return requestClass;
+  }
+}
+
 /**
  * True when a request is a Claude Code side-channel / auxiliary call that must
  * be forwarded upstream untouched.
  *
- * Bypass requests with neither a system workspace marker nor an authoritative
- * marker in the opening user reminder. Do not use the billing header or an
- * arbitrary quoted path in user text as a coding-turn signal.
+ * Prefer the client's explicit request class; legacy clients fall back to
+ * system workspace markers and the opening user reminder. Neither a billing
+ * header nor an arbitrary quoted path identifies a coding turn.
  */
 export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
   if (!isClaudeCodeClient(req.rawHeaders)) return false;
+  const requestClass = getClaudeCodeRequestClass(req);
+  // Copied prompt text, tools, or workspace records cannot override the
+  // client's explicit auxiliary/conversation classification.
+  if (requestClass !== undefined) return requestClass === "auxiliary";
   if (hasClaudeCodeCodingPrompt(req.system)) return false;
   // Classifier calls can offer tools. Their first user message can quote an
   // earlier coding reminder, so reminder text alone must never turn a tool-less

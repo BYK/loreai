@@ -13,9 +13,14 @@
  * verdict, which trips Claude Code's 3-strike auto-mode fallback that drops
  * auto mode back to prompting for every action.
  */
-import { afterEach, describe, expect, it, test } from "vitest";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
+import fc from "fast-check";
 import { ltm, withTenant } from "@loreai/core";
 import { credentialTenantFingerprint } from "../src/auth";
+import {
+  pendingPipelineSessionClaimCountForTest,
+  setBeforeUpstreamCaptureForTest,
+} from "../src/pipeline";
 import {
   getRequestProjectPath,
   hasClaudeCodeCodingPrompt,
@@ -75,9 +80,13 @@ const CLASSIFIER_SYSTEM = [
 const BILLING_PREFIX =
   "x-anthropic-billing-header: cc_version=2.1.186; cc_entrypoint=cli; cch=ab12cd34;\n";
 
+// The observed 2.1.289 requests both had four system blocks and 119 tools.
+// Their roles were not established by the capture's side-channel labels.
 const NEW_CLAUDE_SYSTEM = [
   "You are Claude Code.",
   "<system-reminder>Follow the coding instructions.</system-reminder>",
+  "Follow the user's request.",
+  "Keep the response concise.",
 ];
 const NEW_CLAUDE_REMINDER =
   "<system-reminder>\nContents of /client/projects/new-claude/CLAUDE.md\n</system-reminder>\nFix the bug";
@@ -85,16 +94,18 @@ const NEW_CLAUDE_REMINDER =
 function newClaudeCodeBody(
   reminder = NEW_CLAUDE_REMINDER,
   maxTokens = 128000,
+  stream = false,
 ): Record<string, unknown> {
   return {
     model: DEFAULT_MODEL,
     max_tokens: maxTokens,
+    stream,
     system: NEW_CLAUDE_SYSTEM.map((text) => ({ type: "text", text })),
     messages: [
       { role: "user", content: [{ type: "text", text: reminder }] },
       { role: "assistant", content: "I will investigate." },
     ],
-    tools: Array.from({ length: 127 }, (_, i) => ({
+    tools: Array.from({ length: 119 }, (_, i) => ({
       name: `tool_${i}`,
       description: "Test tool",
       input_schema: { type: "object" },
@@ -175,9 +186,110 @@ describe("hasClaudeCodeCodingPrompt", () => {
 // ---------------------------------------------------------------------------
 
 describe("isClaudeCodeSideChannel", () => {
-  test.each([128000, 64000])(
-    "false: Claude Code 2.1.289 puts the coding reminder in the first user message (max_tokens=%i)",
-    (maxTokens) => {
+  test("an auxiliary request class wins over copied coding context and request-size heuristics", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 127 }),
+        fc.integer({ min: 1, max: 128000 }),
+        fc.boolean(),
+        fc.constantFrom(
+          "",
+          CLASSIFIER_SYSTEM,
+          NEW_CLAUDE_SYSTEM.join("\n"),
+          "You are Claude Code.\nWorking directory: /client/projects/new-claude",
+        ),
+        (toolCount, maxTokens, stream, system) => {
+          expect(
+            isClaudeCodeSideChannel(
+              makeRequest({
+                rawHeaders: {
+                  ...CC_SESSION_HEADERS,
+                  "x-claude-code-request-class": "auxiliary",
+                },
+                system,
+                messages: [
+                  {
+                    role: "user",
+                    content: [{ type: "text", text: NEW_CLAUDE_REMINDER }],
+                  },
+                ],
+                tools: Array.from({ length: toolCount }, (_, i) => ({
+                  name: `tool_${i}`,
+                  description: "Test tool",
+                  inputSchema: { type: "object" },
+                })),
+                maxTokens,
+                stream,
+              }),
+            ),
+          ).toBe(true);
+        },
+      ),
+    );
+  });
+
+  test.each(["main", "subagent", "workflow", "compaction"])(
+    "a %s request class reaches conversation/compaction routing without legacy workspace markers",
+    (requestClass) => {
+      expect(
+        isClaudeCodeSideChannel(
+          makeRequest({
+            rawHeaders: {
+              ...CC_SESSION_HEADERS,
+              "x-claude-code-request-class": requestClass,
+            },
+          }),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  test.each(["", "future-class", "MAIN", "auxiliary, main"])(
+    "an unknown request class (%s) retains legacy prompt detection",
+    (requestClass) => {
+      const request = makeRequest({
+        rawHeaders: {
+          ...CC_SESSION_HEADERS,
+          "x-claude-code-request-class": requestClass,
+        },
+      });
+      expect(isClaudeCodeSideChannel(request)).toBe(true);
+      expect(
+        isClaudeCodeSideChannel({
+          ...request,
+          system: "Working directory: /client/projects/new-claude",
+        }),
+      ).toBe(false);
+    },
+  );
+
+  test("request class applies only to Anthropic Claude Code requests", () => {
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          rawHeaders: { "x-claude-code-request-class": "auxiliary" },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          protocol: "openai",
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-claude-code-request-class": "main",
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test.each([
+    { maxTokens: 128000, stream: true },
+    { maxTokens: 64000, stream: false },
+  ])(
+    "false: an opening workspace record is recognized with either captured max_tokens/stream pair ($maxTokens, $stream)",
+    ({ maxTokens, stream }) => {
       expect(
         isClaudeCodeSideChannel(
           makeRequest({
@@ -189,12 +301,13 @@ describe("isClaudeCodeSideChannel", () => {
                 content: [{ type: "text", text: NEW_CLAUDE_REMINDER }],
               },
             ],
-            tools: Array.from({ length: 127 }, (_, i) => ({
+            tools: Array.from({ length: 119 }, (_, i) => ({
               name: `tool_${i}`,
               description: "Test tool",
               inputSchema: { type: "object" },
             })),
             maxTokens,
+            stream,
           }),
         ),
       ).toBe(false);
@@ -683,11 +796,60 @@ async function assistantText(resp: Response): Promise<string> {
 
 describe("handleRequest — Claude Code side-channel routing", () => {
   let harness: Harness;
-  afterEach(() => harness?.teardown());
+  afterEach(() => {
+    setBeforeUpstreamCaptureForTest(undefined);
+    return harness?.teardown();
+  });
 
-  it.each([128000, 64000])(
-    "processes and attributes a Claude Code 2.1.289 coding turn on a remote gateway (max_tokens=%i)",
-    async (maxTokens) => {
+  it("stores an explicitly classified main turn even when legacy meta heuristics would match", async () => {
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "Coding reply",
+        }),
+      ],
+    });
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 128000,
+        system: "You are Claude Code.",
+        messages: [{ role: "user", content: "Continue coding" }],
+      },
+      "test-key",
+      {
+        ...CC_SESSION_HEADERS,
+        "x-claude-code-request-class": "main",
+        "x-lore-project": "/client/projects/new-claude",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(
+      harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state",
+      ),
+    ).toEqual([{ project_path: "/client/projects/new-claude" }]);
+    expect(
+      harness.queryDB<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM temporal_messages",
+      )[0].n,
+    ).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { maxTokens: 128000, stream: true },
+    { maxTokens: 64000, stream: false },
+  ])(
+    "processes and attributes an opening workspace record on a remote gateway (max_tokens=$maxTokens, stream=$stream)",
+    async ({ maxTokens, stream }) => {
       harness = await createHarness({
         configOverrides: {
           remoteGateway: true,
@@ -703,7 +865,7 @@ describe("handleRequest — Claude Code side-channel routing", () => {
       });
 
       const resp = await harness.chat(
-        newClaudeCodeBody(NEW_CLAUDE_REMINDER, maxTokens),
+        newClaudeCodeBody(NEW_CLAUDE_REMINDER, maxTokens, stream),
         "test-key",
         {
           ...CC_SESSION_HEADERS,
@@ -727,10 +889,12 @@ describe("handleRequest — Claude Code side-channel routing", () => {
           project_path_provisional: 0,
         },
       ]);
-      const [{ n }] = harness.queryDB<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM temporal_messages",
-      );
-      expect(n).toBeGreaterThan(0);
+      await vi.waitFor(() => {
+        const [{ n }] = harness.queryDB<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM temporal_messages",
+        );
+        expect(n).toBeGreaterThan(0);
+      });
     },
   );
 
@@ -1101,8 +1265,48 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     expect(await assistantText(classifier)).toBe("SIDECHANNEL-FIXTURE");
   });
 
-  it("forwards a tool-bearing classifier quoting an opening reminder after a coding session exists", async () => {
+  it("does not execute Lore slash commands quoted by an explicit auxiliary request", async () => {
     harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+      fixtures: [
+        makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "Coding reply" }),
+        makeFixtureEntry({ seq: 1, requestMessages: [], responseText: "Auxiliary reply" }),
+      ],
+    });
+    const headers = {
+      ...CC_SESSION_HEADERS,
+      "x-lore-project": "/client/projects/new-claude",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+    };
+    const coding = await harness.chat(newClaudeCodeBody(), "test-key", headers);
+    expect(coding.status).toBe(200);
+    await coding.text();
+    const before = harness.queryDB("SELECT * FROM session_state");
+    const auxiliary = await harness.chat(
+      {
+        ...sideChannelBody(),
+        messages: [{ role: "user", content: "/lore:amnesia:on" }],
+      },
+      "test-key",
+      { ...headers, "x-claude-code-request-class": "auxiliary" },
+    );
+    expect(auxiliary.status).toBe(200);
+    expect(await assistantText(auxiliary)).toBe("Auxiliary reply");
+    expect(harness.upstreamBodies()).toHaveLength(2);
+    expect(harness.queryDB("SELECT * FROM session_state")).toEqual(before);
+  });
+
+  // The request-class enum was verified with isolated 2.1.289 and 2.1.302
+  // clients against a loopback server. Copied context must not override it.
+  it.each([0, 1, 119])("forwards a %i-tool auxiliary request with copied coding context after a coding turn", async (toolCount) => {
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
       fixtures: [
         makeFixtureEntry({
           seq: 0,
@@ -1116,9 +1320,22 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         }),
       ],
     });
+    withTenant(
+      credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+      () => {
+        ltm.create({
+          projectPath: "/client/projects/new-claude",
+          scope: "project",
+          category: "preference",
+          title: "Private project knowledge",
+          content: "private-classifier-project-knowledge",
+        });
+      },
+    );
     const coding = await harness.chat(newClaudeCodeBody(), "test-key", {
       ...CC_SESSION_HEADERS,
       "x-lore-project": "",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     });
     expect(coding.status).toBe(200);
     await coding.text();
@@ -1129,7 +1346,15 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     const classifier = await harness.chat(
       {
         ...sideChannelBody(),
-        tools: newClaudeCodeBody().tools,
+        system: newClaudeCodeBody().system,
+        tools: Array.from({ length: toolCount }, (_, i) => ({
+          name: `tool_${i}`,
+          description: "Test tool",
+          input_schema: { type: "object" },
+        })),
+        ...(toolCount === 1 && {
+          tool_choice: { type: "tool", name: "tool_0" },
+        }),
         messages: [
           {
             role: "user",
@@ -1138,7 +1363,12 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         ],
       },
       "test-key",
-      { ...CC_SESSION_HEADERS, "x-lore-project": "" },
+      {
+        ...CC_SESSION_HEADERS,
+        "x-claude-code-request-class": "auxiliary",
+        "x-lore-project": "",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      },
     );
     expect(classifier.status).toBe(200);
     expect(await assistantText(classifier)).toBe("<action>allow</action>");
@@ -1147,8 +1377,181 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     );
     expect(after).toBe(before);
     const bodies = harness.upstreamBodies();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.includes("private-classifier-project-knowledge")).toBe(
+      true,
+    );
+    expect(bodies[1]?.includes("private-classifier-project-knowledge")).toBe(
+      false,
+    );
     const sent = JSON.parse(bodies.at(-1) ?? "{}") as { system?: unknown };
-    expect(sent.system).toBe(CLASSIFIER_SYSTEM);
+    expect(sent.system).toBe(NEW_CLAUDE_SYSTEM.join("\n"));
+  });
+
+  it("rejects a sole nested project claim under a stale parent header", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "First reply",
+        }),
+        makeFixtureEntry({
+          seq: 1,
+          requestMessages: [],
+          responseText: "Second reply",
+        }),
+      ],
+    });
+    const headers = {
+      ...CC_SESSION_HEADERS,
+      "x-lore-project": "/client/projects/app",
+    };
+    const first = await harness.chat(
+      newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/app/CLAUDE.md</system-reminder>",
+      ),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.text();
+    const [{ n: before }] = harness.queryDB<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM temporal_messages",
+    );
+    const secondBody = newClaudeCodeBody(
+      "<system-reminder>Contents of /client/projects/app/CLAUDE.md</system-reminder>",
+    );
+    secondBody.messages = [
+      ...(secondBody.messages as Array<Record<string, unknown>>),
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<system-reminder>Contents of /client/projects/app/other/CLAUDE.md</system-reminder>",
+          },
+        ],
+      },
+    ];
+    const second = await harness.chat(secondBody, "test-key", headers);
+    expect(second.status).toBe(400);
+    expect(harness.upstreamBodies()).toHaveLength(1);
+    const [{ n: after }] = harness.queryDB<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM temporal_messages",
+    );
+    expect(after).toBe(before);
+  });
+
+  it("rechecks a queued reminder claim after another turn binds the session", async () => {
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "Provisional",
+        }),
+        makeFixtureEntry({
+          seq: 1,
+          requestMessages: [],
+          responseText: "First",
+        }),
+        makeFixtureEntry({
+          seq: 2,
+          requestMessages: [],
+          responseText: "Second",
+        }),
+      ],
+    });
+    const headers = {
+      ...CC_SESSION_HEADERS,
+      "x-lore-session-id": "queued-reminder-claim",
+      "x-lore-project": "",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+    };
+    withTenant(
+      credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+      () => {
+        ltm.create({
+          projectPath: "/client/projects/one",
+          scope: "project",
+          category: "preference",
+          title: "Private first-project knowledge",
+          content: "private-queued-project-knowledge",
+        });
+      },
+    );
+    const initial = await harness.chat(
+      newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+      ),
+      "test-key",
+      { ...headers, "x-lore-project": "/client/projects/one" },
+    );
+    expect(initial.status).toBe(200);
+    await initial.text();
+    expect(harness.upstreamBodies()[0]).toContain(
+      "private-queued-project-knowledge",
+    );
+    let firstWaiting!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      firstWaiting = resolve;
+    });
+    let releaseFirst!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    setBeforeUpstreamCaptureForTest(async (req) => {
+      if (!req.system.includes("/client/projects/two")) return;
+      firstWaiting();
+      await pause;
+    });
+    const rebindingBody = newClaudeCodeBody();
+    rebindingBody.system =
+      "You are Claude Code.\nWorking directory: /client/projects/two";
+    rebindingBody.messages = [
+      { role: "user", content: "Please continue coding" },
+    ];
+    const firstResponse = harness.chat(rebindingBody, "test-key", {
+      ...headers,
+      "x-lore-project": "/client/projects/one",
+    });
+    try {
+      await waiting;
+      const secondResponse = harness.chat(
+        newClaudeCodeBody(
+          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+        ),
+        "test-key",
+        { ...headers, "x-lore-project": "/client/projects/one" },
+      );
+      await vi.waitFor(() =>
+        expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+      );
+      releaseFirst();
+      expect((await firstResponse).status).toBe(200);
+      await (await firstResponse).text();
+      expect(
+        harness
+          .upstreamBodies()[1]
+          .includes("private-queued-project-knowledge"),
+      ).toBe(false);
+      const second = await secondResponse;
+      expect(second.status).toBe(400);
+      expect(harness.upstreamBodies()).toHaveLength(2);
+      expect(
+        harness.queryDB<{ project_path: string }>(
+          "SELECT project_path FROM session_state WHERE header_session_id = ?",
+          ["queued-reminder-claim"],
+        ),
+      ).toEqual([{ project_path: "/client/projects/two" }]);
+    } finally {
+      releaseFirst();
+    }
   });
 
   it("rejects a later project's reminder under an already-bound session before injecting memory", async () => {
