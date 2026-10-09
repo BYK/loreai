@@ -1135,77 +1135,80 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     ).toEqual([{ project_path: "/client/projects/one" }]);
   });
 
-  it("rejects a new opening project before reusing the previous session's memory", async () => {
-    harness = await createHarness({
-      configOverrides: {
-        remoteGateway: true,
-        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
-      },
-      fixtures: [
-        makeFixtureEntry({
-          seq: 0,
-          requestMessages: [],
-          responseText: "First reply",
-        }),
-        makeFixtureEntry({
-          seq: 1,
-          requestMessages: [],
-          responseText: "Second reply",
-        }),
-      ],
-    });
-    withTenant(
-      credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
-      () => {
-        ltm.create({
-          projectPath: "/client/projects/one",
-          scope: "project",
-          category: "preference",
-          title: "Only first project knowledge",
-          content: "private-first-project-knowledge",
-        });
-      },
-    );
-    const headers = {
-      ...CC_SESSION_HEADERS,
-      "x-lore-project": "",
-      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
-    };
-    const first = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
-      ),
-      "test-key",
-      headers,
-    );
-    expect(first.status).toBe(200);
-    await first.text();
-    expect(
-      harness.upstreamBodies()[0].includes("private-first-project-knowledge"),
-    ).toBe(true);
-    const [{ n: before }] = harness.queryDB<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM temporal_messages",
-    );
-    const second = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
-      ),
-      "test-key",
-      headers,
-    );
-    expect(second.status).toBe(400);
-    expect(harness.upstreamBodies()).toHaveLength(1);
-    const [{ n: after }] = harness.queryDB<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM temporal_messages",
-    );
-    expect(after).toBe(before);
-    expect(
-      harness.queryDB<{ project_path: string }>(
-        "SELECT project_path FROM session_state WHERE header_session_id = ?",
-        [CC_SESSION_HEADERS["x-claude-code-session-id"]],
-      ),
-    ).toEqual([{ project_path: "/client/projects/one" }]);
-  });
+  it.each(["", "/client/projects/two"])(
+    "rejects a new opening project before reusing the previous session's memory (header=%s)",
+    async (secondProject) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [
+          makeFixtureEntry({
+            seq: 0,
+            requestMessages: [],
+            responseText: "First reply",
+          }),
+          makeFixtureEntry({
+            seq: 1,
+            requestMessages: [],
+            responseText: "Second reply",
+          }),
+        ],
+      });
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => {
+          ltm.create({
+            projectPath: "/client/projects/one",
+            scope: "project",
+            category: "preference",
+            title: "Only first project knowledge",
+            content: "private-first-project-knowledge",
+          });
+        },
+      );
+      const headers = {
+        ...CC_SESSION_HEADERS,
+        "x-lore-project": "",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      };
+      const first = await harness.chat(
+        newClaudeCodeBody(
+          "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
+        ),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(
+        harness.upstreamBodies()[0].includes("private-first-project-knowledge"),
+      ).toBe(true);
+      const [{ n: before }] = harness.queryDB<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM temporal_messages",
+      );
+      const second = await harness.chat(
+        newClaudeCodeBody(
+          "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
+        ),
+        "test-key",
+        { ...headers, "x-lore-project": secondProject },
+      );
+      expect(second.status).toBe(400);
+      expect(harness.upstreamBodies()).toHaveLength(1);
+      const [{ n: after }] = harness.queryDB<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM temporal_messages",
+      );
+      expect(after).toBe(before);
+      expect(
+        harness.queryDB<{ project_path: string }>(
+          "SELECT project_path FROM session_state WHERE header_session_id = ?",
+          [CC_SESSION_HEADERS["x-claude-code-session-id"]],
+        ),
+      ).toEqual([{ project_path: "/client/projects/one" }]);
+    },
+  );
 
   it("rejects a conflicting later reminder in the second user text block", async () => {
     harness = await createHarness({

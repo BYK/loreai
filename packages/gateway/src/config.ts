@@ -1311,6 +1311,8 @@ export type ProjectPathSource = "header" | "inferred" | "cwd";
 export type ProjectPathResult = {
   path: string;
   source: ProjectPathSource;
+  /** A qualifying opening reminder was present on this request. */
+  openingReminderProjectPath?: string;
   /** Normalized git remote URL from `X-Lore-Git-Remote` header, if provided. */
   gitRemote?: string;
   /**
@@ -1409,10 +1411,16 @@ export function getProjectPath(
         source: "inferred",
         gitRemote,
         overrodeHeaderPath: headerPath,
+        ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
       };
     }
     // Header agrees with the inference, or no header was sent.
-    return { path: inferred.path, source: "inferred", gitRemote };
+    return {
+      path: inferred.path,
+      source: "inferred",
+      gitRemote,
+      ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
+    };
   }
 
   // Claude Code 2.1.289 moved the workspace marker from `system` into the
@@ -1422,11 +1430,23 @@ export function getProjectPath(
   // signal or rebinding the session.
   // 2. Explicit project headers remain the preferred source for clients
   // without a conflicting reminder (including OpenCode and Pi).
-  if (headerPath) return { path: headerPath, source: "header", gitRemote };
+  if (headerPath) {
+    return {
+      path: headerPath,
+      source: "header",
+      gitRemote,
+      ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
+    };
+  }
 
   // 3. The reminder can identify a project only when no other signal exists.
   if (reminderPath) {
-    return { path: reminderPath.path, source: "inferred", gitRemote };
+    return {
+      path: reminderPath.path,
+      source: "inferred",
+      gitRemote,
+      openingReminderProjectPath: reminderPath.path,
+    };
   }
 
   // 4. Fall back to gateway's own cwd (with workspace root discovery)

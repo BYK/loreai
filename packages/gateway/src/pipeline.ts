@@ -1829,13 +1829,11 @@ function assertBoundSessionProject(
   sessionID: string,
   pathResult: ProjectPathResult,
 ): void {
+  // Only a reminder-derived claim needs this early guard. Explicit project
+  // headers and system workspace markers retain their existing, separately
+  // checked session-adoption and clone-migration paths.
+  if (!pathResult.openingReminderProjectPath) return;
   if (!conflictsWithConfidentSessionProject(sessionID, pathResult)) return;
-  // Preserve the established system-prompt correction for an exact stale
-  // header. A reminder or an unrelated new header cannot rebind this session.
-  const previous =
-    sessions.get(sessionID)?.projectPath ??
-    loadSessionTracking(sessionID)?.projectPath;
-  if (previous === pathResult.overrodeHeaderPath) return;
   throw new ProjectPathConflictError();
 }
 
