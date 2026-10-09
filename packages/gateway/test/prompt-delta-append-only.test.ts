@@ -131,15 +131,16 @@ describe("append-only durable knowledge deltas", () => {
         return { id, category: "gotcha", title, content };
       }),
     ];
+    const batchKeys = batchEntries.map((entry) =>
+      keyOf(entry.id, entry.title, entry.content),
+    );
     expect(
       appendKnowledgePromptDelta({
         sessionID: batchSessionID,
         projectPath: PROJECT,
         insertAt: 10,
         previousKeys: [],
-        nextKeys: batchEntries.map((entry) =>
-          keyOf(entry.id, entry.title, entry.content),
-        ),
+        nextKeys: batchKeys,
         entries: batchEntries,
         taskShift: true,
         now: 0,
@@ -148,8 +149,28 @@ describe("append-only durable knowledge deltas", () => {
     const batch = listSessionPromptDeltas(batchSessionID);
     expect(batch).toHaveLength(1);
     expect(batch[0].content.length).toBeLessThan(8_000);
-    expect(deltaText(batch[0].content)).not.toContain(entries[0].content);
-    expect(deltaText(batch[0].content)).toContain(batchEntries[59].title);
+    const batchText = deltaText(batch[0].content);
+    for (const entry of batchEntries) {
+      // Every selected entry is either rendered or has a complete recall ID.
+      expect(
+        batchText.includes(entry.content) ||
+          batchText.includes(`k:${entry.id}`),
+      ).toBe(true);
+    }
+    expect(ltm.get(batchEntries[0].id)?.content).toBe(batchEntries[0].content);
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID: batchSessionID,
+        projectPath: PROJECT,
+        insertAt: 11,
+        previousKeys: [],
+        nextKeys: batchKeys,
+        entries: batchEntries,
+        taskShift: true,
+        now: 100_000,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(batchSessionID)).toHaveLength(1);
   });
 
   it("surfaces a newly selected entry on a task switch without rewriting the old block", () => {

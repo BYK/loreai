@@ -3606,7 +3606,6 @@ type DeltaMutation = {
 // A compaction keeps the latest tasks actionable without turning the single
 // replacement block into an ever-growing catalog of every past task.
 const MAX_CUMULATIVE_DELTA_ENTRIES = 24;
-const MAX_INITIAL_DELTA_ENTRIES = 48;
 
 /** Read a block's stashed {@link DeltaMutation} from its selector JSON. */
 function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
@@ -3820,13 +3819,16 @@ export function appendKnowledgePromptDelta(input: {
     })),
     removed: removedIds,
   };
+  // Revalidate current sources even on first delivery. Keep the entire initial
+  // selection in the mutation so the text budget can list every omitted entry
+  // by full recall ID. Only later rebuilds retire older task additions.
   const current = renderCurrentDelta(
     mut,
     input.sessionID,
     projectID,
     input.overflow,
     entryKeyIds(input.previousKeys),
-    MAX_INITIAL_DELTA_ENTRIES,
+    Infinity,
   );
   if (!current.messages.length) return false;
 
