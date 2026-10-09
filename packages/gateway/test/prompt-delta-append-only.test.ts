@@ -501,6 +501,120 @@ describe("append-only durable knowledge deltas", () => {
     expect(body).toContain("cap v2 0.");
   });
 
+  it("compacts repeated edits to the latest revision rather than replaying every stale revision", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Revision history",
+      content: "original guidance.",
+    });
+    const sessionID = `revision-cap-${Date.now()}`;
+    const pin = [keyOf(id, "Revision history", "original guidance.")];
+
+    for (const revision of Array.from({ length: 9 }, (_, index) => index + 1)) {
+      ltm.update(id, { content: `guidance revision ${revision}.` });
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + revision,
+          previousKeys: pin,
+          nextKeys: pin,
+          entries: [],
+          now: revision * 100_000,
+        }),
+      ).toBe(true);
+    }
+
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).toContain("guidance revision 9.");
+    for (const revision of Array.from({ length: 8 }, (_, index) => index + 1)) {
+      expect(body).not.toContain(`guidance revision ${revision}.`);
+    }
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+        now: 1_000_000,
+      }),
+    ).toBe(false);
+  });
+
+  it("drops deleted guidance when compacting earlier task-switch additions", () => {
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      const title = `Switch ${index}`;
+      const content = `Guidance for switch ${index}.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const sessionID = `deleted-cap-${Date.now()}`;
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8) ltm.remove(entries[0].id);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    expect(body).not.toContain(entries[0].content);
+    expect(body).not.toContain(entries[0].id);
+    for (const entry of entries.slice(1)) {
+      expect(body).toContain(entry.content);
+    }
+  });
+
+  it("keeps earlier distillation snapshots when a later block triggers compaction", () => {
+    const sessionID = `synthetic-cap-${Date.now()}`;
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      id: `d:synthetic-${index}`,
+      category: ltm.RECALLED_CONTEXT_CATEGORY,
+      title: `Distilled task ${index}`,
+      content: `Distinct guidance from task ${index}.`,
+    }));
+    for (const [index, entry] of entries.entries()) {
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          now: index * 100_000,
+        }),
+      ).toBe(true);
+    }
+    const compacted = listSessionPromptDeltas(sessionID);
+    expect(compacted).toHaveLength(1);
+    const body = deltaText(compacted[0].content);
+    for (const entry of entries) {
+      expect(body).toContain(entry.content);
+    }
+  });
+
   it("keeps task-switch additions when compacting the eighth block and ignores a no-op at the cap", () => {
     const sessionID = `task-cap-${Date.now()}`;
     const ids = Array.from({ length: 9 }, (_, index) =>

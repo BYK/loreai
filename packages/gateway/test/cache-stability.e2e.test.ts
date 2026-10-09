@@ -1261,8 +1261,8 @@ describe("cache stability (e2e)", () => {
     // NOTE: with the knowledge-delta debounce (60s window), rapid successive
     // mutations coalesce into the LATEST block. Since both the first injection
     // and the material change happen within the debounce window in this test
-    // (back-to-back turns), they coalesce into ONE block that carries both
-    // mutations in its `mut` and renders both the initial and updated content.
+    // (back-to-back turns), they coalesce into ONE block that carries the
+    // latest mutation in its `mut` and renders only the current content.
     const rows = harness.queryDB<{
       seq: number;
       selector: string;
@@ -1278,8 +1278,8 @@ describe("cache stability (e2e)", () => {
     };
     expect(selector0.target).toBe("messages");
     expect(Number.isInteger(selector0.insertAt)).toBe(true);
-    // The coalesced block carries BOTH the initial and updated content.
-    expect(rows[0].content).toContain("Initial context-bound knowledge");
+    // Replaying the coalesced block must not repeat superseded guidance.
+    expect(rows[0].content).not.toContain("Initial context-bound knowledge");
     expect(rows[0].content).toContain("Updated context-bound knowledge");
     expect(rows[0].content).toContain(`[k:${largeContextID}]`);
     const mergedMut = JSON.parse(rows[0].selector).mut as {

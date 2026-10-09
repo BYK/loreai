@@ -3588,7 +3588,12 @@ export function buildKnowledgeDeltaMessage(
  */
 type DeltaMutation = {
   /** ids whose content was surfaced as changed, with the surfaced hash. */
-  changed: Array<{ id: string; h: string }>;
+  changed: Array<{
+    id: string;
+    h: string;
+    /** Non-knowledge sources have no DB row to reconstruct at compaction. */
+    snapshot?: { category: string; title: string; content: string };
+  }>;
   /** ids surfaced as removed/superseded. */
   removed: string[];
 };
@@ -3602,13 +3607,35 @@ function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
     const removed = Array.isArray(mut.removed)
       ? mut.removed.filter((x): x is string => typeof x === "string")
       : [];
-    const changed = Array.isArray(mut.changed)
-      ? mut.changed.filter(
-          (x): x is { id: string; h: string } =>
-            !!x &&
-            typeof (x as { id?: unknown }).id === "string" &&
-            typeof (x as { h?: unknown }).h === "string",
-        )
+    const changed: DeltaMutation["changed"] = Array.isArray(mut.changed)
+      ? mut.changed.flatMap((x: unknown) => {
+          if (!x || typeof x !== "object") return [];
+          const entry = x as Record<string, unknown>;
+          if (typeof entry.id !== "string" || typeof entry.h !== "string")
+            return [];
+          const snapshot = entry.snapshot;
+          if (snapshot && typeof snapshot === "object") {
+            const data = snapshot as Record<string, unknown>;
+            if (
+              typeof data.category === "string" &&
+              typeof data.title === "string" &&
+              typeof data.content === "string"
+            ) {
+              return [
+                {
+                  id: entry.id,
+                  h: entry.h,
+                  snapshot: {
+                    category: data.category,
+                    title: data.title,
+                    content: data.content,
+                  },
+                },
+              ];
+            }
+          }
+          return [{ id: entry.id, h: entry.h }];
+        })
       : [];
     return { changed, removed };
   } catch {
@@ -3776,6 +3803,15 @@ export function appendKnowledgePromptDelta(input: {
     changed: changed.map((c) => ({
       id: c.id,
       h: surfaceSignature(c.title, c.content),
+      ...(syntheticEntries.has(c.id)
+        ? {
+            snapshot: {
+              category: c.category,
+              title: c.title,
+              content: c.content,
+            },
+          }
+        : {}),
     })),
     removed: removedIds,
   };
@@ -3786,13 +3822,6 @@ export function appendKnowledgePromptDelta(input: {
     // Only compact on a real change. Keep additions from earlier task switches:
     // they may never have belonged to the frozen pin baseline. This is the one
     // bounded cache rewrite after MAX_DELTA_BLOCKS immutable tail additions.
-    const compactedMessages = blocks
-      .slice(1)
-      .reduce(
-        (acc, block) =>
-          mergeDeltaContent(acc, JSON.parse(block.content) as GatewayMessage[]),
-        JSON.parse(blocks[0].content) as GatewayMessage[],
-      );
     const compactedMutations = blocks.reduce<DeltaMutation | null>(
       (acc, block) =>
         mergeMutations(
@@ -3802,9 +3831,24 @@ export function appendKnowledgePromptDelta(input: {
       null,
     );
     const projectID = ensureProject(input.projectPath);
-    const content = JSON.stringify(
-      mergeDeltaContent(compactedMessages, messages),
+    const rendered = renderCurrentDelta(
+      mergeMutations(compactedMutations, mut),
+      input.sessionID,
+      input.overflow,
     );
+    if (!rendered.messages.length) return false;
+    // Legacy blocks have no structured mutation metadata. Preserve their
+    // original content, while every new-format block is rebuilt from current
+    // entries so old revisions never accumulate in the compacted payload.
+    const legacy = blocks.filter(
+      (block) => !parseDeltaMutation(block.selector),
+    );
+    const compactedMessages = legacy.reduce(
+      (acc, block) =>
+        mergeDeltaContent(acc, JSON.parse(block.content) as GatewayMessage[]),
+      rendered.messages,
+    );
+    const content = JSON.stringify(compactedMessages);
     withSavepoint("compact_knowledge_delta", () => {
       deleteSessionPromptDelta(input.sessionID);
       appendSessionPromptDelta({
@@ -3813,7 +3857,7 @@ export function appendKnowledgePromptDelta(input: {
         selector: JSON.stringify({
           target: "messages",
           insertAt: input.insertAt,
-          mut: mergeMutations(compactedMutations, mut),
+          mut: rendered.mut,
           debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
         }),
         content,
@@ -3828,26 +3872,29 @@ export function appendKnowledgePromptDelta(input: {
       databaseMutations.removedIds.length > 0) &&
     withinDebounceWindow(latest.selector, now)
   ) {
-    // Merge into the latest block: union muts, union content, update insertAt.
+    // Rebuild from the latest state of each id: rapid repeated edits must not
+    // retain earlier revisions inside the debounced block.
     const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
-    const mergedMessages = mergeDeltaContent(
-      JSON.parse(latest.content) as GatewayMessage[],
-      messages,
+    const rendered = renderCurrentDelta(
+      mergedMut,
+      input.sessionID,
+      input.overflow,
     );
+    if (!rendered.messages.length) return false;
     updateSessionPromptDeltaSelector(
       input.sessionID,
       latest.seq,
       JSON.stringify({
         target: "messages",
         insertAt: input.insertAt,
-        mut: mergedMut,
+        mut: rendered.mut,
         debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
       }),
     );
     updateSessionPromptDeltaContent(
       input.sessionID,
       latest.seq,
-      JSON.stringify(mergedMessages),
+      JSON.stringify(rendered.messages),
     );
     log.info(
       `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
@@ -3892,7 +3939,7 @@ function mergeMutations(
   next: DeltaMutation,
 ): DeltaMutation {
   if (!prev) return next;
-  const changedMap = new Map<string, { id: string; h: string }>();
+  const changedMap = new Map<string, DeltaMutation["changed"][number]>();
   for (const c of prev.changed) changedMap.set(c.id, c);
   for (const c of next.changed) changedMap.set(c.id, c);
   const removed = new Set([...prev.removed, ...next.removed]);
@@ -3902,11 +3949,57 @@ function mergeMutations(
   };
 }
 
+/** Rebuild a coalesced block from the latest live version of every surfaced id. */
+function renderCurrentDelta(
+  merged: DeltaMutation,
+  sessionID: string,
+  overflow?: Array<{ id: string; category: string; title: string }>,
+): { messages: GatewayMessage[]; mut: DeltaMutation } {
+  const removed = new Set(merged.removed);
+  const changed: DeltaMutation["changed"] = [];
+  const entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+  }> = [];
+  for (const mutation of merged.changed) {
+    if (removed.has(mutation.id)) continue;
+    const current = mutation.snapshot
+      ? { id: mutation.id, ...mutation.snapshot }
+      : (ltm.get(mutation.id) ??
+        ltm.getByLogical(ltm.logicalIdOf(mutation.id)));
+    if (!current) {
+      removed.add(mutation.id);
+      continue;
+    }
+    entries.push({
+      // Keep the id already surfaced to the model. Recall-by-id resolves a
+      // superseded version through its stable logical id to the current entry.
+      id: mutation.id,
+      category: current.category,
+      title: current.title,
+      content: current.content,
+    });
+    changed.push({
+      ...mutation,
+      h: surfaceSignature(current.title, current.content),
+    });
+  }
+  return {
+    messages: buildKnowledgeDeltaMessage(
+      entries,
+      [...removed],
+      loreSessionToken(sessionID),
+      overflow,
+    ),
+    mut: { changed, removed: [...removed] },
+  };
+}
+
 /**
- * Merge the new delta messages into the existing block's content. The existing
- * block has a user-turn payload + assistant-closer pair; we replace the user
- * payload with a union of all changed entries (deduped by id, latest content
- * wins) and remove any removed ids from the rendered list.
+ * Preserve a legacy block whose selector predates structured mutations.
+ * New-format blocks are rebuilt by renderCurrentDelta instead.
  */
 function mergeDeltaContent(
   prev: GatewayMessage[],
@@ -3916,11 +4009,6 @@ function mergeDeltaContent(
   // the same shape. Concatenate the payloads and keep the closer.
   const userText = firstText(prev[0]) ?? "";
   const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
-  // Reuse the next block's payload text directly — it was just built by
-  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
-  // a superset of the previous block's (the previous block's entries are
-  // already in the surfaced set, so they would NOT appear in `changed` again;
-  // the new payload contains only the genuinely-new mutations).
   const nextUserText = firstText(next[0]) ?? "";
   return [
     {
