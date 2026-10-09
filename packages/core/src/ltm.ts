@@ -58,6 +58,7 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import { buildEmbeddingUnits } from "./embedding-units";
 import { currentTenantId } from "./tenant";
 
 /**
@@ -2972,21 +2973,63 @@ export async function forSession(
   // A gateway request already contains the latest real user turns. Prefer that
   // hint even when a distillation or tool result was stored for this session:
   // the old order ignored the hint and let unrelated tool output dominate FTS.
-  // Direct callers without a hint use the latest plain user messages. Only
+  // Direct callers without a hint use the latest user prose. Only
   // fall back to the last distillation if neither source has a task to score.
   const contextHint = options?.contextHint?.trim();
   let sessionContext = contextHint?.slice(0, 4_096) ?? "";
   if (!sessionContext && sessionID) {
+    type TaskRow = {
+      id: string;
+      content: string;
+      metadata: string | null;
+      created_at: number;
+    };
     const recentMsgs = db()
       .query(
-        `SELECT content FROM temporal_messages
+        `SELECT id, content, metadata, created_at FROM temporal_messages
          WHERE project_id = ? AND session_id = ? AND role = 'user'
-           AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
-         ORDER BY created_at DESC LIMIT 2`,
+          ORDER BY created_at DESC, id DESC LIMIT 10`,
       )
-      .all(pid, sessionID) as Array<{ content: string }>;
-    sessionContext = recentMsgs
-      .map((m) => m.content.slice(0, 2_048))
+      .all(pid, sessionID) as TaskRow[];
+    const userProse = (m: TaskRow): string => {
+      try {
+        const metadata = m.metadata
+          ? (JSON.parse(m.metadata) as Record<string, unknown>)
+          : {};
+        if (!Array.isArray(metadata.tools) || metadata.tools.length === 0)
+          return m.content.trim();
+        // A mixed user row contains both task text and a tool result.
+        // Keep only structural text chunks; tool bodies are never task hints.
+        return buildEmbeddingUnits(m.content)
+          .filter((unit) => unit.kind === "text")
+          .map((unit) => unit.text)
+          .join("\n")
+          .trim();
+      } catch {
+        return "";
+      }
+    };
+    // Keep the two latest plain rows reachable even after many tool-only
+    // messages. The bounded recent scan also admits mixed user/tool rows.
+    const plainMsgs =
+      recentMsgs.filter((m) => userProse(m)).length < 2
+        ? (db()
+            .query(
+              `SELECT id, content, metadata, created_at FROM temporal_messages
+               WHERE project_id = ? AND session_id = ? AND role = 'user'
+                 AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
+               ORDER BY created_at DESC, id DESC LIMIT 2`,
+            )
+            .all(pid, sessionID) as TaskRow[])
+        : [];
+    sessionContext = [
+      ...new Map([...recentMsgs, ...plainMsgs].map((m) => [m.id, m])).values(),
+    ]
+      .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id))
+      .map(userProse)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((text) => text.slice(0, 2_048))
       .join("\n")
       .trim();
     if (!sessionContext) {

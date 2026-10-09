@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
+import * as temporal from "../src/temporal";
 
 test("current task outranks stale observations and recent tool output", async () => {
   const projectPath = "/test/ltm/current-task";
@@ -104,10 +105,99 @@ test("tool results never become the fallback task query", async () => {
     Date.now(),
     '{"tools":["read"]}',
   );
+  for (const index of Array.from({ length: 12 }, (_, i) => i)) {
+    insertMessage.run(
+      `tool-result-task-tool-${index}`,
+      projectID,
+      sessionID,
+      "[tool:read] Chart palette colors and chart labels were changed earlier.",
+      Date.now() + index + 1,
+      '{"tools":["read"]}',
+    );
+  }
 
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
   try {
     const selected = await ltm.forSession(projectPath, sessionID, 65, {
+      deferEffects: true,
+    });
+    expect(selected.map((entry) => entry.id)).toContain(needed);
+    expect(selected.map((entry) => entry.id)).not.toContain(distractor);
+  } finally {
+    available.mockRestore();
+  }
+});
+
+test("a mixed user message keeps its task text while excluding its tool output", async () => {
+  const projectPath = "/test/ltm/mixed-user-task";
+  const sessionID = "mixed-user-task-session";
+  const needed = ltm.create({
+    projectPath,
+    scope: "project",
+    category: "gotcha",
+    title: "Tenant credential routing",
+    content:
+      "Scope gateway credentials to the tenant before forwarding requests.",
+  });
+  const distractor = ltm.create({
+    projectPath,
+    scope: "project",
+    category: "gotcha",
+    title: "Chart palette colors",
+    content: "Use blue for chart labels and yellow for palette badges.",
+  });
+  temporal.store({
+    projectPath,
+    info: {
+      id: "mixed-user-old",
+      sessionID,
+      role: "user",
+      time: { created: Date.now() - 1_000 },
+    },
+    parts: [
+      {
+        id: "mixed-user-old-text",
+        sessionID,
+        messageID: "mixed-user-old",
+        type: "text",
+        text: "Change chart palette colors and chart labels.",
+      },
+    ],
+  });
+  temporal.store({
+    projectPath,
+    info: {
+      id: "mixed-user-new",
+      sessionID,
+      role: "user",
+      time: { created: Date.now() },
+    },
+    parts: [
+      {
+        id: "mixed-user-new-text",
+        sessionID,
+        messageID: "mixed-user-new",
+        type: "text",
+        text: "Fix tenant-scoped gateway credential routing on requests.",
+      },
+      {
+        id: "mixed-user-new-tool",
+        sessionID,
+        messageID: "mixed-user-new",
+        type: "tool",
+        tool: "read",
+        callID: "mixed-user-call",
+        state: {
+          status: "completed",
+          output: "Chart palette colors and chart labels were changed earlier.",
+        },
+      },
+    ],
+  });
+
+  const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
+  try {
+    const selected = await ltm.forSession(projectPath, sessionID, 40, {
       deferEffects: true,
     });
     expect(selected.map((entry) => entry.id)).toContain(needed);
