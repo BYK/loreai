@@ -26,6 +26,7 @@ import {
   data,
   db,
   ensureProject,
+  log,
   ltm,
   listSessionPromptDeltas,
   updateSessionPromptDeltaSelector,
@@ -835,6 +836,93 @@ describe("append-only durable knowledge deltas", () => {
     expect(body).toContain("Updated visible local rule.");
     expect(body).not.toContain("Private overflow title");
     expect(body).not.toContain(foreign);
+  });
+
+  it("bounds overflow reads while finding a valid suggestion after revoked ones", () => {
+    const revoked = ltm.create({
+      projectPath: "/tmp/lore-delta-overflow-load-foreign",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Revoked overflow candidate",
+      content: "Not visible here.",
+    });
+    const visible = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Eligible later candidate",
+      content: "Recallable guidance.",
+    });
+    const anchor = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Overflow load anchor",
+      content: "Visible selected guidance.",
+    });
+    db()
+      .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+      .run(revoked);
+    const missing = Array.from({ length: 500 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      category: "gotcha",
+      title: "Unavailable candidate",
+    }));
+    const overflow = [
+      { id: revoked, category: "gotcha", title: "Revoked overflow candidate" },
+      ...missing.slice(0, 14),
+      { id: visible, category: "gotcha", title: "Stale eligible title" },
+      ...missing.slice(14),
+    ];
+    const sink = { info() {}, warn() {}, error() {}, captureException() {} };
+    const reads = { count: 0 };
+    log.registerSink({
+      ...sink,
+      withDbSpan(sql, fn) {
+        if (
+          sql.includes("knowledge_current") ||
+          sql.includes("FROM knowledge")
+        ) {
+          reads.count++;
+        }
+        return fn();
+      },
+    });
+    try {
+      const sessionID = `overflow-load-${crypto.randomUUID()}`;
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10,
+          previousKeys: [],
+          nextKeys: [
+            keyOf(anchor, "Overflow load anchor", "Visible selected guidance."),
+          ],
+          entries: [
+            {
+              id: anchor,
+              category: "gotcha",
+              title: "Overflow load anchor",
+              content: "Visible selected guidance.",
+            },
+          ],
+          overflow,
+          taskShift: true,
+          now: 100_000,
+        }),
+      ).toBe(true);
+      const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+      expect(body).toContain("Eligible later candidate");
+      expect(body).toContain(`k:${visible}`);
+      expect(body).not.toContain("Stale eligible title");
+      expect(body).not.toContain("Revoked overflow candidate");
+      expect(body).not.toContain(revoked);
+      expect(reads.count).toBeLessThanOrEqual(120);
+    } finally {
+      log.registerSink(sink);
+    }
   });
 
   it("restores re-shared guidance during a debounced edit after revocation", () => {

@@ -2491,6 +2491,10 @@ const MAX_DELTA_BLOCKS = 8;
  *  ~200-token index; changed entries' IDs are always listed so durable
  *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
+/** Validate only a bounded prefix of ranked suggestions on the gateway thread.
+ *  Extra candidates let revoked or missing entries make room for later valid
+ *  ones without scanning the entire unselected knowledge pool. */
+const OVERFLOW_VALIDATION_MAX = 32;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
  *  the "A" floor). Present from turn 1 (before system[2] / any delta exists) so
@@ -4088,12 +4092,22 @@ function renderCurrentDelta(
   const persistedRemoved = [...removed].filter(
     (id) => !retainedRemovedIds || retainedRemovedIds.has(id),
   );
-  const visibleOverflow = overflow?.flatMap(({ id }) => {
+  const visibleOverflow: Array<{
+    id: string;
+    category: string;
+    title: string;
+  }> = [];
+  for (const { id } of overflow?.slice(0, OVERFLOW_VALIDATION_MAX) ?? []) {
     const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
-    return current && eligibleForDeltaProject(current, projectID)
-      ? [{ id, category: current.category, title: current.title }]
-      : [];
-  });
+    if (current && eligibleForDeltaProject(current, projectID)) {
+      visibleOverflow.push({
+        id,
+        category: current.category,
+        title: current.title,
+      });
+      if (visibleOverflow.length === OVERFLOW_TOC_MAX) break;
+    }
+  }
   return {
     messages: buildKnowledgeDeltaMessage(
       entries,
