@@ -1424,6 +1424,18 @@ describe("cache stability (e2e)", () => {
     const deltasByTurn: Array<Array<{ seq: number; content: string }>> = [];
     for (const [index, turn] of turns.entries()) {
       if (index === 1) {
+        if (!emergency) {
+          for (const distractor of Array.from({ length: 12 }, (_, i) => i)) {
+            ltm.create({
+              projectPath,
+              scope: "project",
+              category: "gotcha",
+              title: `Unrelated chart palette ${distractor}`,
+              content: `Use contrasting colors for chart label ${distractor}.`,
+              confidence: 0.95,
+            });
+          }
+        }
         ltm.create({
           projectPath,
           scope: "project",
@@ -1437,6 +1449,7 @@ describe("cache stability (e2e)", () => {
           category: "gotcha",
           title: "Auth credential routing",
           content: "Scope auth credentials to the tenant before forwarding.",
+          confidence: 0.8,
         });
       }
       if (index === 2 && emergency) setForceMinLayer(4, sessionID);

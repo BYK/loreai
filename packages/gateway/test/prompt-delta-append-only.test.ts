@@ -28,6 +28,7 @@ import {
   ensureProject,
   ltm,
   listSessionPromptDeltas,
+  updateSessionPromptDeltaSelector,
 } from "@loreai/core";
 import {
   appendKnowledgePromptDelta,
@@ -660,6 +661,177 @@ describe("append-only durable knowledge deltas", () => {
     expect(body).not.toContain(foreign);
     expect(body).toContain(entries[8].content);
   });
+
+  it("restores re-shared guidance during a debounced edit after revocation", () => {
+    const foreign = ltm.create({
+      projectPath: "/tmp/lore-delta-reshare-source",
+      scope: "project",
+      crossProject: true,
+      category: "gotcha",
+      title: "Re-shared guidance",
+      content: "Visible again after sharing resumes.",
+    });
+    const entries = Array.from({ length: 9 }, (_, index) => {
+      if (index === 0)
+        return {
+          id: foreign,
+          category: "gotcha",
+          title: "Re-shared guidance",
+          content: "Visible again after sharing resumes.",
+        };
+      const topic = [
+        "parser checksum",
+        "gateway routing",
+        "index recovery",
+        "cache expiration",
+        "session ownership",
+        "artifact upload",
+        "schema upgrade",
+        "worker timeout",
+      ][index - 1];
+      const title = `Local ${topic}`;
+      const content = `Apply the ${topic} rule to this task.`;
+      const id = ltm.create({
+        projectPath: PROJECT,
+        scope: "project",
+        category: "gotcha",
+        title,
+        content,
+      });
+      return { id, category: "gotcha", title, content };
+    });
+    const sessionID = `reshared-cap-${Date.now()}`;
+    expect(new Set(entries.map((entry) => entry.id)).size).toBe(entries.length);
+    for (const [index, entry] of entries.entries()) {
+      if (index === 8)
+        db()
+          .query("UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?")
+          .run(foreign);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath: PROJECT,
+          insertAt: 10 + index,
+          previousKeys: [],
+          nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+          entries: [entry],
+          taskShift: true,
+          now: index * 100_000,
+        }),
+        `re-share setup index ${index}`,
+      ).toBe(true);
+    }
+    expect(
+      deltaText(listSessionPromptDeltas(sessionID)[0].content),
+    ).not.toContain(entries[0].content);
+    db()
+      .query("UPDATE knowledge SET cross_project = 1 WHERE logical_id = ?")
+      .run(foreign);
+    const editedContent = "Updated local guidance after sharing resumes.";
+    ltm.update(entries[8].id, { content: editedContent });
+    const edited = { ...entries[8], content: editedContent };
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 20,
+        previousKeys: [],
+        nextKeys: [
+          keyOf(foreign, entries[0].title, entries[0].content),
+          keyOf(edited.id, edited.title, edited.content),
+        ],
+        entries: [entries[0], edited],
+        taskShift: true,
+        now: 800_001,
+      }),
+    ).toBe(true);
+    const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
+    expect(body).toContain(entries[0].content);
+    expect(body).toContain(editedContent);
+  });
+
+  it.each(["revoked sharing", "deleted distillation"] as const)(
+    "drops unverified legacy content after %s when later changes compact the block",
+    (source) => {
+      const legacyContent = "Legacy guidance lost before compaction.";
+      const legacyID =
+        source === "revoked sharing"
+          ? ltm.create({
+              projectPath: "/tmp/lore-delta-legacy-source",
+              scope: "project",
+              crossProject: true,
+              category: "gotcha",
+              title: "Legacy shared guidance",
+              content: legacyContent,
+            })
+          : `d:legacy-source-${Date.now()}`;
+      if (source === "deleted distillation")
+        seedDistillation(legacyID.slice(2), legacyContent);
+      const sessionID = `legacy-cap-${source}-${Date.now()}`;
+      const entries = Array.from({ length: 9 }, (_, index) => {
+        if (index === 0)
+          return {
+            id: legacyID,
+            category:
+              source === "revoked sharing"
+                ? "gotcha"
+                : ltm.RECALLED_CONTEXT_CATEGORY,
+            title:
+              source === "revoked sharing"
+                ? "Legacy shared guidance"
+                : "Relevant earlier context",
+            content: legacyContent,
+          };
+        const title = `Legacy follow-up ${index}`;
+        const content = `Follow-up content ${index}.`;
+        const id = ltm.create({
+          projectPath: PROJECT,
+          scope: "project",
+          category: "gotcha",
+          title,
+          content,
+        });
+        return { id, category: "gotcha", title, content };
+      });
+      for (const [index, entry] of entries.entries()) {
+        if (index === 1) {
+          updateSessionPromptDeltaSelector(
+            sessionID,
+            0,
+            JSON.stringify({ target: "messages", insertAt: 10 }),
+          );
+          if (source === "revoked sharing")
+            db()
+              .query(
+                "UPDATE knowledge SET cross_project = 0 WHERE logical_id = ?",
+              )
+              .run(legacyID);
+          else expect(data.deleteDistillation(legacyID.slice(2))).toBe(true);
+        }
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath: PROJECT,
+            insertAt: 10 + index,
+            previousKeys: [],
+            nextKeys: [keyOf(entry.id, entry.title, entry.content)],
+            entries: [entry],
+            taskShift: true,
+            now: index * 100_000,
+          }),
+        ).toBe(true);
+      }
+      const compacted = listSessionPromptDeltas(sessionID);
+      expect(compacted).toHaveLength(1);
+      expect(deltaText(compacted[0].content)).not.toContain(entries[0].content);
+      expect(deltaText(compacted[0].content)).toContain(entries[8].content);
+      const replayed = applySessionPromptDeltas(
+        [{ role: "user", content: [{ type: "text", text: "New request" }] }],
+        sessionID,
+      );
+      expect(JSON.stringify(replayed)).not.toContain(entries[0].content);
+    },
+  );
 
   it("keeps earlier distillation snapshots when a later block triggers compaction", () => {
     const sessionID = `synthetic-cap-${Date.now()}`;

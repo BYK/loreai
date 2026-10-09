@@ -3845,18 +3845,9 @@ export function appendKnowledgePromptDelta(input: {
       input.overflow,
     );
     if (!rendered.messages.length) return false;
-    // Legacy blocks have no structured mutation metadata. Preserve their
-    // original content, while every new-format block is rebuilt from current
-    // entries so old revisions never accumulate in the compacted payload.
-    const legacy = blocks.filter(
-      (block) => !parseDeltaMutation(block.selector),
-    );
-    const compactedMessages = legacy.reduce(
-      (acc, block) =>
-        mergeDeltaContent(acc, JSON.parse(block.content) as GatewayMessage[]),
-      rendered.messages,
-    );
-    const content = JSON.stringify(compactedMessages);
+    // Legacy blocks lack source IDs and signatures. Their text cannot be
+    // revalidated after revocation or deletion, so omit it at compaction.
+    const content = JSON.stringify(rendered.messages);
     withSavepoint("compact_knowledge_delta", () => {
       deleteSessionPromptDelta(input.sessionID);
       appendSessionPromptDelta({
@@ -3939,9 +3930,10 @@ function withinDebounceWindow(rawSelector: string, now: number): boolean {
 }
 
 /**
- * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
- * hash wins (curator may have re-surfaced the same id with new content). `removed`
- * entries: union of both sets.
+ * Merge two DeltaMutations in order. `changed` entries: same id → keep the later
+ * hash (curator may have re-surfaced the same id with new content). `removed`
+ * entries: a later addition supersedes a prior removal; a later removal
+ * supersedes the earlier addition.
  */
 function mergeMutations(
   prev: DeltaMutation | null,
@@ -3950,8 +3942,12 @@ function mergeMutations(
   if (!prev) return next;
   const changedMap = new Map<string, DeltaMutation["changed"][number]>();
   for (const c of prev.changed) changedMap.set(c.id, c);
-  for (const c of next.changed) changedMap.set(c.id, c);
-  const removed = new Set([...prev.removed, ...next.removed]);
+  const removed = new Set(prev.removed);
+  for (const c of next.changed) {
+    changedMap.set(c.id, c);
+    removed.delete(c.id);
+  }
+  for (const id of next.removed) removed.add(id);
   return {
     changed: [...changedMap.values()],
     removed: [...removed],
@@ -4082,31 +4078,6 @@ function renderCurrentDelta(
     ),
     mut: { changed, removed: [...removed] },
   };
-}
-
-/**
- * Preserve a legacy block whose selector predates structured mutations.
- * New-format blocks are rebuilt by renderCurrentDelta instead.
- */
-function mergeDeltaContent(
-  prev: GatewayMessage[],
-  next: GatewayMessage[],
-): GatewayMessage[] {
-  // The existing block is [user(payload), assistant(closer)]. The new block is
-  // the same shape. Concatenate the payloads and keep the closer.
-  const userText = firstText(prev[0]) ?? "";
-  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
-  const nextUserText = firstText(next[0]) ?? "";
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
-    },
-    {
-      role: "assistant",
-      content: [{ type: "text", text: closerText }],
-    },
-  ];
 }
 
 /**

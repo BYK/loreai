@@ -3142,8 +3142,9 @@ export async function forSession(
         ftsScores,
       ));
     }
-  } else if (sessionContext.trim().length > 20) {
-    // Embeddings unavailable — use FTS5 BM25 as fallback
+  } else if (sessionContext.trim().length > 0) {
+    // Short tasks and unavailable embeddings still use FTS5 BM25. A short
+    // request must not fall through to unrelated confidence-ranked entries.
     const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
     ({ scoredProject, scoredCross } = scoreFTS(
       projectEntries,
