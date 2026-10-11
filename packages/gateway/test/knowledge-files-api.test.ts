@@ -194,11 +194,13 @@ describe("GET /api/v1/knowledge/:id/files", () => {
     expect(body.omitted).toBe(6);
   });
 
-  it("merges verified file anchors without line numbers and ignores symbols", async () => {
+  it("omits basename-only file anchors and merges repository-relative file anchors", async () => {
     const seeded = seedEntry({
       title: `Anchor merge ${randomUUID()}`,
       paths: ["src/used.ts"],
       anchors: [
+        { kind: "file", anchor: "ltm.ts:42" },
+        { kind: "file", anchor: "src/a.ts:42" },
         { kind: "file", anchor: "src/used.ts:42" },
         { kind: "file", anchor: "src/range.ts:2-4" },
         { kind: "file", anchor: "src/column.ts:2:4" },
@@ -208,12 +210,15 @@ describe("GET /api/v1/knowledge/:id/files", () => {
     const response = await responseFor(seeded.id);
     const body = (await response.json()) as {
       files: Array<{ path: string; recorded: boolean; verified: boolean }>;
+      omitted: number;
     };
     expect(body.files).toEqual([
+      { path: "src/a.ts", recorded: false, verified: true },
       { path: "src/column.ts", recorded: false, verified: true },
       { path: "src/range.ts", recorded: false, verified: true },
       { path: "src/used.ts", recorded: true, verified: true },
     ]);
+    expect(body.omitted).toBe(1);
   });
 
   it("returns only a well-formed recorded gitHead and the project remote", async () => {

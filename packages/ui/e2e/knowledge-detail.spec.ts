@@ -26,6 +26,23 @@ async function projectAndEntry(page: Page) {
   };
 }
 
+async function fileLinkProjectAndEntry(page: Page) {
+  const projects = await (await page.request.get("/api/v1/projects")).json();
+  const project = projects.find(
+    (item: { name: string }) => item.name === "file-links",
+  );
+  expect(project).toBeTruthy();
+  const knowledge = await (
+    await page.request.get(`/api/v1/projects/${project.id}/knowledge`)
+  ).json();
+  const entry = knowledge.find(
+    (item: { title: string }) =>
+      item.title === "GitHub file link provenance fixture",
+  );
+  expect(entry).toBeTruthy();
+  return { project, entry };
+}
+
 test.describe("knowledge detail provenance and history", () => {
   test("shows current and superseded versions with old content", async ({
     page,
@@ -59,8 +76,8 @@ test.describe("knowledge detail provenance and history", () => {
   test("links recorded knowledge files to the recorded GitHub commit", async ({
     page,
   }) => {
-    const { project, live } = await projectAndEntry(page);
-    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    const { project, entry } = await fileLinkProjectAndEntry(page);
+    await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
     await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
     await expect(
       page.getByText("packages/ui/src/contracts/url.ts"),

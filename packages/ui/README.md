@@ -1489,9 +1489,10 @@ source. Retained-summary evidence lazily loads the distillation text from
 `GET /api/v1/knowledge/:id/files` lists paths recorded in the local
 `knowledge_file_refs` sidecar and file anchors verified by the latest reference
 check. It does not infer paths from entry prose or run git/LLM maintenance.
-Unsafe paths and absolute paths outside the project's recorded root are omitted
-and counted; accepted paths are returned repository-relative. Commit links use
-only a valid recorded `gitHead`, and repository links are created only for
+Unsafe paths, basename-only citations, and absolute paths outside the project's
+recorded root are omitted and counted; accepted paths are returned
+repository-relative. Commit links use only a valid recorded `gitHead`, and
+repository links are created only for
 `github.com/owner/repo` remotes, with each path segment encoded independently.
 Without a recorded commit, links target the default branch and may have moved.
 File-reference and verified-anchor sidecars are local-only and are not

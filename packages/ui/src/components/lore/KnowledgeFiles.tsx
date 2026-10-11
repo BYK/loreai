@@ -85,21 +85,27 @@ export const KnowledgeFiles: Component<{
                 </For>
               </ul>
             </Show>
-            <Show when={!supportsGitHub()}>
-              <p class="mb-0 mt-2 text-muted">
-                Repository links are available for GitHub remotes.
-              </p>
+            <Show when={value().files.length > 0}>
+              <Show
+                when={supportsGitHub()}
+                fallback={
+                  <p class="mb-0 mt-2 text-muted">
+                    Repository links are available for GitHub remotes.
+                  </p>
+                }
+              >
+                <p class="mb-0 mt-2 text-muted">
+                  {value().commit
+                    ? "Links point at the commit the session was on when this version was written; it may not be pushed."
+                    : "No commit recorded — links open the default branch, which may have changed."}
+                </p>
+              </Show>
             </Show>
-            <p class="mb-0 mt-2 text-muted">
-              {value().commit
-                ? "Links point at the commit the session was on when this version was written; it may not be pushed."
-                : "No commit recorded — links open the default branch, which may have changed."}
-            </p>
             <Show when={value().omitted > 0}>
               <p class="mb-0 mt-2 text-muted">
-                {value().omitted} recorded path
-                {value().omitted === 1 ? "" : "s"} outside this repository not
-                shown.
+                {value().omitted} recorded{" "}
+                {value().omitted === 1 ? "path" : "paths"} not shown — outside
+                this repository or not a repository-relative path.
               </p>
             </Show>
           </>

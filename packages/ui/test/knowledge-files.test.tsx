@@ -55,10 +55,11 @@ describe("KnowledgeFiles", () => {
       screen.getByText("No files recorded for this entry on this gateway."),
     ).toBeTruthy();
     expect(
-      screen.getByText(
-        "Links point at the commit the session was on when this version was written; it may not be pushed.",
-      ),
-    ).toBeTruthy();
+      screen.queryByText("Repository links are available for GitHub remotes."),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/Links point at the commit|No commit recorded/),
+    ).toBeNull();
   });
 
   it("renders both evidence badges and a safe external link", () => {
@@ -99,11 +100,21 @@ describe("KnowledgeFiles", () => {
       screen.getByText("Repository links are available for GitHub remotes."),
     ).toBeTruthy();
     expect(screen.queryByRole("link")).toBeNull();
+    expect(
+      screen.queryByText(/Links point at the commit|No commit recorded/),
+    ).toBeNull();
   });
 
   it("explains that links without a commit use the default branch", () => {
     render(() => (
-      <KnowledgeFiles loader={loader(result({ commit: null, files: [] }))} />
+      <KnowledgeFiles
+        loader={loader(
+          result({
+            commit: null,
+            files: [{ path: "src/file.ts", recorded: true, verified: false }],
+          }),
+        )}
+      />
     ));
     expect(
       screen.getByText(
@@ -115,7 +126,9 @@ describe("KnowledgeFiles", () => {
   it("shows the omitted-path note", () => {
     render(() => <KnowledgeFiles loader={loader(result({ omitted: 2 }))} />);
     expect(
-      screen.getByText("2 recorded paths outside this repository not shown."),
+      screen.getByText(
+        "2 recorded paths not shown — outside this repository or not a repository-relative path.",
+      ),
     ).toBeTruthy();
   });
 

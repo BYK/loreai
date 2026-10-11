@@ -91,7 +91,12 @@ export function handleKnowledgeFiles(
   for (const path of refs) addPath(path, "recorded");
   for (const anchor of anchors) {
     if (anchor.kind !== "file") continue;
-    addPath(anchor.anchor.replace(/:\d+(?::\d+|-\d+)?$/, ""), "verified");
+    const citedPath = anchor.anchor.replace(/:\d+(?::\d+|-\d+)?$/, "");
+    if (!citedPath.includes("/")) {
+      omitted++;
+      continue;
+    }
+    addPath(citedPath, "verified");
   }
 
   return jsonResponse({
