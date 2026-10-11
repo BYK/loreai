@@ -110,22 +110,35 @@ const QuotaLine: Component<{ quota: QuotaRow; now: () => number }> = (
   );
 };
 
-function budgetUnitLabel(unit: BudgetRow["unit"]): string {
-  return unit === "usd" ? "USD" : unit === "tokens" ? "Tokens" : "Quota";
+function budgetLabel(budget: BudgetRow): string {
+  if (budget.mode === "pace") return `Pace · ${budget.window}`;
+  if (budget.mode === "off") return `Pace off · ${budget.window}`;
+  const unit =
+    budget.unit === "usd"
+      ? "USD"
+      : budget.unit === "tokens"
+        ? "Tokens"
+        : "Quota";
+  return `${unit} cap · ${budget.window}`;
 }
 
 function budgetValue(
   budget: BudgetRow,
   money: (usd: number) => string,
 ): string {
+  if (budget.mode === "off") return "off";
   if (budget.used === null) return "—";
-  if (budget.unit === "usd") {
-    return `${money(budget.used)} / ${money(budget.amount)}`;
+  if (budget.mode === "pace") {
+    return budget.target === null
+      ? `${budget.used.toFixed(0)}%`
+      : `${budget.used.toFixed(0)}% / ${budget.target.toFixed(0)}% pace`;
   }
+  const amount = budget.amount ?? 0;
+  if (budget.unit === "usd") return `${money(budget.used)} / ${money(amount)}`;
   if (budget.unit === "tokens") {
-    return `${count(budget.used)} / ${count(budget.amount)}`;
+    return `${count(budget.used)} / ${count(amount)}`;
   }
-  return `${budget.used.toFixed(0)}% / ${budget.amount.toFixed(0)}%`;
+  return `${budget.used.toFixed(0)}% / ${amount.toFixed(0)}%`;
 }
 
 const BudgetLine: Component<{
@@ -133,12 +146,9 @@ const BudgetLine: Component<{
   money: (usd: number) => string;
 }> = (props) => (
   <div class="flex items-baseline justify-between gap-3 text-xs">
-    <span class="text-muted">
-      {budgetUnitLabel(props.budget.unit)} ·{" "}
-      {props.budget.window === "daily" ? "daily" : props.budget.window}
-    </span>
+    <span class="text-muted">{budgetLabel(props.budget)}</span>
     <span
-      class={`tabular-nums ${(props.budget.fraction ?? 0) >= 1 ? "text-danger" : ""}`}
+      class={`tabular-nums ${props.budget.pressure >= 1 ? "text-danger" : ""}`}
     >
       {budgetValue(props.budget, props.money)}
       {props.budget.stale ? " (stale)" : ""}

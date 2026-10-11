@@ -23,13 +23,12 @@ import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Readable } from "node:stream";
-import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { db, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
 import {
   assertGatewayAccessConfigured,
   DEFAULT_PORT,
   type GatewayConfig,
 } from "./config";
-import { bootstrapDailySpend } from "./cost-tracker";
 import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
@@ -112,8 +111,13 @@ export async function startServer(
     );
   }
 
-  // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
-  bootstrapDailySpend();
+  // Open (and migrate) the database before serving so the schema exists
+  // ahead of the first request. Non-fatal: the next db() call retries.
+  try {
+    db();
+  } catch (error) {
+    log.warn(`database open at startup failed: ${String(error)}`);
+  }
 
   // Wire embedding-worker OOM backoff/latch events to Sentry. Idempotent: the
   // hook is assigned (not stacked), so a repeat startServer() is harmless.

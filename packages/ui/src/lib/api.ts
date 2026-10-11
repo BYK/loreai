@@ -26,7 +26,6 @@ import {
   cursorPage,
   circuitBreakerResetResult,
   costsSnapshot,
-  dailyBudgetResult,
   dedupPreviewResponse,
   contradictionDecisionResult,
   contradictionListResponse,
@@ -837,19 +836,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
     getCosts(signal?: AbortSignal): Promise<CostsSnapshot> {
       return getJson("/costs", costsSnapshot, signal);
-    },
-    setDailyBudget(
-      amount: number,
-      signal?: AbortSignal,
-    ): Promise<{ amount: number; disabled: boolean }> {
-      return mutateJson(
-        "PATCH",
-        "/costs/budget",
-        { amount },
-        dailyBudgetResult,
-
-        signal,
-      );
     },
     listContradictions(
       signal?: AbortSignal,

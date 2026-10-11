@@ -2471,6 +2471,14 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- credentials; they will be repopulated with stable account IDs (#2022).
   DELETE FROM provider_quotas WHERE auth_kind = 'subscription';
   `,
+  `
+  -- Version 102: the global daily budget is retired in favour of
+  -- per-provider budgets (#1927). No-op marker: the delete of the
+  -- 'daily_budget' kv_meta row runs in migrate() by
+  -- DAILY_BUDGET_RETIRE_MIGRATION_INDEX, because kv_meta can be missing on
+  -- a damaged database (it is recreated later by recovery).
+  SELECT 1;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2501,6 +2509,7 @@ const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
 const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
 const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
+const DAILY_BUDGET_RETIRE_MIGRATION_INDEX = 101; // 0-based index of version-102
 
 /**
  * Add durable tenant ownership without re-keying or deleting historical local
@@ -4182,6 +4191,16 @@ function migrate(database: Database) {
       applySyncTenantIsolation(database);
     } else if (i === TEMPORAL_IDENTITY_MIGRATION_INDEX) {
       applyTemporalIdentity(database);
+    } else if (i === DAILY_BUDGET_RETIRE_MIGRATION_INDEX) {
+      if (
+        database
+          .query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+          )
+          .get() !== null
+      ) {
+        database.exec("DELETE FROM kv_meta WHERE key = 'daily_budget'");
+      }
     } else {
       // Pre-strip any column-side ALTERs that are already satisfied by the
       // current schema (ADD COLUMN where the column exists, RENAME COLUMN

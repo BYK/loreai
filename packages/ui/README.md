@@ -1349,7 +1349,7 @@ The owner signs this gate off; the implementation agent does not. Each row names
   `src/contracts/`; timestamps are epoch milliseconds). The warming and cost
   screens add `GET /api/v1/warming`, `PATCH /warming/settings`,
   `PATCH /warming/sessions/:id/mode`, `POST /warming/circuit-breaker/reset`,
-  `GET /costs`, and `PATCH /costs/budget`; management writes are refused in
+  `GET /costs`, and `PUT /costs/budgets`; management writes are refused in
   hosted mode, and environment-owned settings stay read-only. Entity writes
   reconcile the returned detail into the store and IndexedDB; a delete
   removes the row and invalidates the cached list. A 2xx body
@@ -1474,7 +1474,7 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Charts (cost / compression / latency) | CSS bars for daily costs and warming histograms; no chart library | Plot work deferred | UI-08 |
 | Entity list, detail + rebuild card | `EntitiesPage`, `EntityPage`, `RebuildCard` (in `EntitiesPage`) | `ListRow`, `Select`, `TextField`, `Badge`, `ConfirmDialog` | UI-08 |
 | Cache warming controls + histograms | `WarmingPage` | global toggle, breaker reset, per-session modes | UI-08 |
-| Cost intelligence + daily budget | `CostsPage` | live/historical totals, workers, budget | UI-08 |
+| Cost intelligence + provider budgets | `CostsPage` | provider cards, quota pacing, budgets, workers | UI-08 |
 | Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
 | Project actions (rename / move sessions / clear / delete / merge) | `ProjectActions`, `MergeProjectsAction` | `ConfirmDialog`, `Dialog`, `Select`, `TextField`, inline notices | UI-08 |
 | Import history table | `ImportHistoryPage` | plain table, `?cursor=` keyset paging, `formatWhen` | UI-08 |

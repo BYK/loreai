@@ -158,6 +158,27 @@ export const historicalCosts = type({
   worker_breakdown: workerBreakdown,
 });
 
+/** One provider budget with its live status (#1927). */
+export const providerBudgetStatus = type({
+  provider: "string",
+  auth_kind: "'api_key' | 'subscription'",
+  account: "string | null",
+  mode: "'pace' | 'cap' | 'off'",
+  window: "'5h' | '7d' | 'day' | 'week'",
+  "headroom?": "number",
+  "unit?": "'usd' | 'tokens' | 'percent'",
+  "amount?": "number",
+  used: "number | null",
+  target: "number | null",
+  ahead: "number | null",
+  fraction: "number | null",
+  pressure: "number",
+  resets_at: "number | null",
+  stale: "boolean",
+  implicit: "boolean",
+  status: "'ok' | 'throttling' | 'paused' | 'stale' | 'unknown' | 'off'",
+});
+
 export const costsSnapshot = type({
   live: liveCosts,
   totals: {
@@ -172,14 +193,6 @@ export const costsSnapshot = type({
   historical: historicalCosts,
   daily: {
     entries: type({ date: "string", cost: "number" }).array(),
-    budget: {
-      amount: "number",
-      spend: "number",
-      date: "string",
-      rate: "number",
-      env_override: "string | null",
-      can_edit: "boolean",
-    },
   },
   sessions: operationsSession.array(),
   providers: type({
@@ -210,23 +223,8 @@ export const costsSnapshot = type({
     observed_at: "number",
     stale: "boolean",
   }).array(),
-  provider_budgets: type({
-    provider: "string",
-    auth_kind: "'api_key' | 'subscription' | null",
-    account: "string | null",
-    unit: "'usd' | 'tokens' | 'percent'",
-    window: "'daily' | '5h' | '7d'",
-    amount: "number",
-    used: "number | null",
-    fraction: "number | null",
-    resets_at: "number | null",
-    stale: "boolean",
-  }).array(),
+  provider_budgets: providerBudgetStatus.array(),
+  can_edit_budgets: "boolean",
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;
-
-export const dailyBudgetResult = type({
-  amount: "number",
-  disabled: "boolean",
-});

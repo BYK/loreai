@@ -378,6 +378,32 @@ describe("db", () => {
     ]);
   });
 
+  test("v102 deletes the retired daily_budget KV row and keeps provider budgets", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('daily_budget', '25');
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_budgets', '[]');
+      UPDATE schema_version SET version = 101;
+    `);
+    close();
+
+    const migrated = db();
+    expect(
+      migrated
+        .query(
+          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')",
+        )
+        .all(),
+    ).toEqual([{ key: "provider_budgets" }]);
+    expect(
+      (
+        migrated.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
   test("upgrades legacy pending embeddings in place without dropping their work", () => {
     const connection = db();
     const project = ensureProject("/test/legacy-temporal-queue-upgrade");

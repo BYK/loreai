@@ -155,19 +155,12 @@ const costsData: CostsSnapshot = {
       date: `2026-09-${String(index + 1).padStart(2, "0")}`,
       cost: index === 13 ? 0.45 : 0,
     })),
-    budget: {
-      amount: 5,
-      spend: 1.25,
-      date: "2026-09-14",
-      rate: 0.3,
-      env_override: null,
-      can_edit: true,
-    },
   },
   sessions: warmingData.sessions.slice(0, 1),
   providers: [],
   quotas: [],
   provider_budgets: [],
+  can_edit_budgets: true,
 };
 
 function clientWith(partial: Partial<ApiClient>): ApiClient {
@@ -316,81 +309,22 @@ describe("WarmingPage", () => {
 });
 
 describe("CostsPage", () => {
-  it("rejects an empty daily budget instead of disabling the limit", async () => {
-    const setBudget = vi.fn(async (amount: number) => ({
-      amount,
-      disabled: amount === 0,
-    }));
-    mountPage(
-      "costs",
-      clientWith({
-        getCosts: async () => costsData,
-        setDailyBudget: setBudget,
-      }),
-    );
-
-    const input = await screen.findByLabelText("Daily budget in US dollars");
-    fireEvent.input(input, { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Enter a daily budget between $0 and $1,000,000.",
-    );
-    expect(setBudget).not.toHaveBeenCalled();
-  });
-
-  it("accepts sub-cent budget amounts supported by the API", async () => {
-    const setBudget = vi.fn(async (amount: number) => ({
-      amount,
-      disabled: amount === 0,
-    }));
-    mountPage(
-      "costs",
-      clientWith({
-        getCosts: async () => costsData,
-        setDailyBudget: setBudget,
-      }),
-    );
-
-    const input = (await screen.findByLabelText(
-      "Daily budget in US dollars",
-    )) as HTMLInputElement;
-    fireEvent.input(input, { target: { value: "0.005" } });
-    expect(input.checkValidity()).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
-    await waitFor(() => expect(setBudget).toHaveBeenCalledWith(0.005));
-  });
-
-  it("shows costs, history and per-session rows; saves and disables the budget", async () => {
-    const setBudget = vi.fn(async (amount: number) => ({
-      amount,
-      disabled: amount === 0,
-    }));
-    mountPage(
-      "costs",
-      clientWith({
-        getCosts: async () => costsData,
-        setDailyBudget: setBudget,
-      }),
-    );
+  it("shows costs, history and per-session rows without a global budget", async () => {
+    mountPage("costs", clientWith({ getCosts: async () => costsData }));
 
     expect(await screen.findByText("Historical estimates")).toBeInTheDocument();
     expect(screen.getByText("Per-session costs")).toBeInTheDocument();
     expect(screen.getByText("Avoided compactions · 3")).toBeInTheDocument();
     expect(screen.getByText("session-1")).toBeInTheDocument();
-
-    fireEvent.input(screen.getByLabelText("Daily budget in US dollars"), {
-      target: { value: "8.5" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
-    await waitFor(() => expect(setBudget).toHaveBeenCalledWith(8.5));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Disable budget" }),
-      ).not.toBeDisabled(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Disable budget" }));
-    await waitFor(() => expect(setBudget).toHaveBeenCalledWith(0));
+    for (const gone of [
+      "Daily budget",
+      "Current spend",
+      "Current net savings",
+      "Combined spend",
+    ]) {
+      expect(screen.queryByText(gone)).toBeNull();
+    }
+    expect(screen.queryByLabelText("Daily budget in US dollars")).toBeNull();
   });
 
   it("formats money with $, right-aligns numeric columns, never renders US$", async () => {
@@ -420,34 +354,5 @@ describe("CostsPage", () => {
     );
     expect(await screen.findByText("No live costs yet")).toBeInTheDocument();
     expect(screen.getByText("Historical estimates")).toBeInTheDocument();
-  });
-
-  it("warns when saving succeeds but refreshing cost data fails", async () => {
-    let reads = 0;
-    mountPage(
-      "costs",
-      clientWith({
-        getCosts: async () => {
-          if (reads++ === 1) throw new Error("gateway offline");
-          return costsData;
-        },
-        setDailyBudget: async (amount: number) => ({
-          amount,
-          disabled: amount === 0,
-        }),
-      }),
-    );
-
-    fireEvent.input(
-      await screen.findByLabelText("Daily budget in US dollars"),
-      { target: { value: "8.5" } },
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
-    const warning = await screen.findByRole("alert");
-    expect(warning).toHaveTextContent("Showing the last successful snapshot");
-    expect(warning).toHaveTextContent("gateway offline");
-
-    fireEvent.click(within(warning).getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 });

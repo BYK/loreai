@@ -1,5 +1,7 @@
 /** Pure helpers for the per-provider cost cards (#1926 UI half). */
 
+import type { CostsSnapshot } from "~/contracts";
+
 export type ProviderRow = {
   provider: string;
   auth_kind: "api_key" | "subscription";
@@ -47,18 +49,7 @@ export function quotaStale(row: QuotaRow, now: number): boolean {
     : age > QUOTA_STALE_FALLBACK_MS;
 }
 
-export type BudgetRow = {
-  provider: string;
-  auth_kind: "api_key" | "subscription" | null;
-  account: string | null;
-  unit: "usd" | "tokens" | "percent";
-  window: "daily" | "5h" | "7d";
-  amount: number;
-  used: number | null;
-  fraction: number | null;
-  resets_at: number | null;
-  stale: boolean;
-};
+export type BudgetRow = CostsSnapshot["provider_budgets"][number];
 
 export type ProviderCardModel = {
   key: string;
@@ -202,8 +193,8 @@ export function groupProviderCards(
 }
 
 /**
- * Budgets that apply to a card: same provider, with auth_kind/account either
- * unset (wildcard) or equal to the card's.
+ * Budgets that apply to a card: same provider and auth_kind, with account
+ * either unset (every account) or equal to the card's.
  */
 export function budgetsForCard(
   budgets: BudgetRow[],
@@ -212,7 +203,7 @@ export function budgetsForCard(
   return budgets.filter(
     (b) =>
       b.provider === card.provider &&
-      (b.auth_kind === null || b.auth_kind === card.auth_kind) &&
+      b.auth_kind === card.auth_kind &&
       (b.account === null || b.account === card.account),
   );
 }

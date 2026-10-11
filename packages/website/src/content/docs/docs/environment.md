@@ -27,7 +27,6 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_DAILY_BUDGET` | Get the effective daily budget in USD. Resolution priority: 1. `LORE_DAILY_BUDGET` env var (override for automation / CI) 2. DB-persisted value from `kv_meta` (set via UI) 3. 0 (disabled) |
 | `LORE_MAX_RETRIES` | Number of times a worker upstream call retries a transient failure before falling back to the caller's own handling (default: 8). Override with the LORE_MAX_RETRIES env var. |
 | `LORE_WARMING_ENABLED` | Whether cache warming is enabled. Resolution priority (highest first): 1. `LORE_WARMING_ENABLED` env var — "0"/"false"/"off"/"no" disable, anything else enables (override for automation / CI). 2. DB-persisted KV override, set via the dashboard or `/lore:warm:on\|off` ("1" = on, "0" = off). Absent → fall through. 3. `cache.warming.enabled` from `.lore.json` (schema default: true). This makes the file-only config flag runtime-settable without a restart — mirroring the daily-budget toggle. The gate lives in `shouldWarm`, so warming can be turned off globally the moment it stops paying for itself. |
 

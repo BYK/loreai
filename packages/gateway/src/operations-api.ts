@@ -37,11 +37,6 @@ import {
   computeHistoricalEstimates,
   costWithoutLore,
   getAllSessionCosts,
-  getCostRate,
-  getDailyBudget,
-  getDailyBudgetEnvOverride,
-  getDailySpend,
-  setDailyBudget,
   totalActualCost,
   totalSavings,
   totalWorkerCost,
@@ -496,8 +491,6 @@ export function handleGetCosts(configuredHostedMode = false): Response {
     live.spend +
     historicalRaw.persistedConversationCost +
     historicalRaw.totalWorkerCost;
-  const { date, spend } = getDailySpend();
-  const budgetOverride = getDailyBudgetEnvOverride();
   const historical = {
     distillation_cost: historicalRaw.distillationCost,
     distillation_calls: historicalRaw.distillationCalls,
@@ -533,14 +526,6 @@ export function handleGetCosts(configuredHostedMode = false): Response {
     historical,
     daily: {
       entries: computeDailyCosts(14),
-      budget: {
-        amount: getDailyBudget(),
-        spend,
-        date,
-        rate: getCostRate(),
-        env_override: budgetOverride,
-        can_edit: !budgetOverride && !requestIsHosted(configuredHostedMode),
-      },
     },
     sessions: liveRows,
     providers: getProviderCostSummary(),
@@ -560,75 +545,39 @@ export function handleGetCosts(configuredHostedMode = false): Response {
       stale: isProviderQuotaStale(row, Date.now()),
     })),
     provider_budgets: evaluateProviderBudgets(),
+    can_edit_budgets: !requestIsHosted(configuredHostedMode),
   });
 }
 
-/** `PATCH /api/v1/costs/budget` — set an amount, or pass 0 to disable. */
-export async function handleSetDailyBudget(
+/**
+ * `PUT /api/v1/costs/budgets` — replace the explicit provider budget list.
+ * Implicit pace budgets are derived, never stored; an explicit `off` entry
+ * disables one.
+ */
+export async function handlePutProviderBudgets(
   req: Request,
   configuredHostedMode = false,
 ): Promise<Response> {
-  const blocked = hostedWriteError(
-    "Daily budget controls",
-    configuredHostedMode,
-  );
+  const blocked = hostedWriteError("Provider budgets", configuredHostedMode);
   if (blocked) return blocked;
   const parsed = await readJsonBody(req);
   if (parsed instanceof Response) return parsed;
   const body = jsonObject(parsed);
-  const keys = body ? Object.keys(body) : [];
-  const hasAmount = body !== null && "amount" in body;
-  const hasProviderBudgets = body !== null && "provider_budgets" in body;
   if (
     !body ||
-    (!hasAmount && !hasProviderBudgets) ||
-    keys.length !== (hasAmount ? 1 : 0) + (hasProviderBudgets ? 1 : 0)
+    Object.keys(body).length !== 1 ||
+    !("provider_budgets" in body)
   ) {
     return errorResponse(
       400,
       "invalid_request",
-      "Body must be { amount } and/or { provider_budgets }.",
+      "Body must be { provider_budgets: [...] }.",
     );
   }
-  if (
-    hasAmount &&
-    (typeof body.amount !== "number" ||
-      !Number.isFinite(body.amount) ||
-      body.amount < 0 ||
-      body.amount > 1_000_000)
-  ) {
-    return errorResponse(
-      400,
-      "invalid_request",
-      "Body must be { amount: a finite number between 0 and 1000000 }.",
-    );
+  const budgets = parseProviderBudgets(body.provider_budgets);
+  if (typeof budgets === "string") {
+    return errorResponse(400, "invalid_request", budgets);
   }
-  // LORE_DAILY_BUDGET governs only the global amount — provider budgets are
-  // unaffected by it.
-  if (hasAmount && getDailyBudgetEnvOverride() !== null) {
-    return errorResponse(
-      409,
-      "conflict",
-      "The daily budget is controlled by LORE_DAILY_BUDGET.",
-    );
-  }
-  if (hasProviderBudgets) {
-    const budgets = parseProviderBudgets(body.provider_budgets);
-    if (typeof budgets === "string") {
-      return errorResponse(400, "invalid_request", budgets);
-    }
-    setProviderBudgets(budgets);
-  }
-  if (hasAmount) setDailyBudget(body.amount as number);
-  if (hasProviderBudgets) {
-    return jsonResponse({
-      amount: getDailyBudget(),
-      disabled: hasAmount ? body.amount === 0 : getDailyBudget() === 0,
-      provider_budgets: evaluateProviderBudgets(),
-    });
-  }
-  return jsonResponse({
-    amount: getDailyBudget(),
-    disabled: body.amount === 0,
-  });
+  setProviderBudgets(budgets);
+  return jsonResponse({ provider_budgets: evaluateProviderBudgets() });
 }
