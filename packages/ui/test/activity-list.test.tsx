@@ -1,6 +1,6 @@
 import { MemoryRouter, Route } from "@solidjs/router";
 import { render, screen, waitFor } from "@solidjs/testing-library";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ActivityListBody } from "~/components/shell/ActivityListBody";
 import type { ActivityPage } from "~/contracts";
@@ -25,27 +25,77 @@ const PAGE: ActivityPage = {
   next_cursor: null,
 };
 
-const clientHeight = Object.getOwnPropertyDescriptor(
-  HTMLElement.prototype,
+const LAYOUT_PROPS = [
+  "offsetHeight",
   "clientHeight",
+  "scrollHeight",
+  "getBoundingClientRect",
+  "scrollTo",
+] as const;
+const realLayout = LAYOUT_PROPS.map(
+  (name): [(typeof LAYOUT_PROPS)[number], PropertyDescriptor | undefined] => [
+    name,
+    Object.getOwnPropertyDescriptor(HTMLElement.prototype, name) ??
+      Object.getOwnPropertyDescriptor(Element.prototype, name),
+  ],
 );
-const boundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+const sizeOf = (element: HTMLElement) =>
+  element.dataset.testid === "activity-list-body" ? 400 : 76;
 
-beforeEach(() => {
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return sizeOf(this);
+    },
+  });
   Object.defineProperty(HTMLElement.prototype, "clientHeight", {
     configurable: true,
-    value: 400,
+    get(this: HTMLElement) {
+      return sizeOf(this);
+    },
   });
-  HTMLElement.prototype.getBoundingClientRect = () =>
-    new DOMRect(0, 0, 400, 400);
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.dataset.testid === "activity-list-body" ? 1e7 : sizeOf(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value(this: HTMLElement): DOMRect {
+      const height = sizeOf(this);
+      return {
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: height,
+        width: 800,
+        height,
+        toJSON: () => ({}),
+      };
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value(this: HTMLElement, options?: ScrollToOptions | number) {
+      const top = typeof options === "number" ? options : options?.top;
+      if (typeof top !== "number") return;
+      this.scrollTop = Math.max(0, Math.floor(top));
+      this.dispatchEvent(new Event("scroll"));
+    },
+  });
 });
 
-afterEach(() => {
-  HTMLElement.prototype.getBoundingClientRect = boundingClientRect;
-  if (clientHeight) {
-    Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeight);
-  } else {
-    Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
+afterAll(() => {
+  for (const [name, descriptor] of realLayout) {
+    if (descriptor) {
+      Object.defineProperty(HTMLElement.prototype, name, descriptor);
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, name);
+    }
   }
 });
 

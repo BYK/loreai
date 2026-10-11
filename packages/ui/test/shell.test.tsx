@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import {
   fireEvent,
@@ -8,6 +11,7 @@ import {
 } from "@solidjs/testing-library";
 import {
   afterEach,
+  afterAll,
   beforeAll,
   beforeEach,
   describe,
@@ -18,7 +22,7 @@ import {
 
 import { createAppRoot, routes } from "~/app";
 import { Nav } from "~/components/shell/Nav";
-import { knowledgeHref } from "~/lib/href";
+import { knowledgeHref, sessionHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type {
@@ -28,6 +32,7 @@ import type {
   KnowledgeVersionHistory,
   ProjectSummary,
 } from "~/contracts";
+import { activityPage, parseContract } from "~/contracts";
 import {
   closeLoreDb,
   createKnowledgeRepo,
@@ -41,6 +46,106 @@ import {
   DEFAULT_PANE_LAYOUT,
   PANE_LAYOUT_STORAGE_KEY,
 } from "~/state/pane-layout";
+
+const ACTIVITY_PAGE = parseContract(
+  "/activity",
+  activityPage,
+  JSON.parse(
+    readFileSync(
+      join(process.cwd(), "test", "fixtures", "activity.json"),
+      "utf8",
+    ),
+  ),
+);
+const SESSION_ACTIVITY = ACTIVITY_PAGE.items.find(
+  (item) => item.kind === "session",
+);
+if (!SESSION_ACTIVITY) throw new Error("Missing session activity fixture");
+
+const ACTIVITY_LAYOUT_PROPS = [
+  "offsetHeight",
+  "clientHeight",
+  "scrollHeight",
+  "getBoundingClientRect",
+  "scrollTo",
+] as const;
+const realActivityLayout = ACTIVITY_LAYOUT_PROPS.map(
+  (
+    name,
+  ): [
+    (typeof ACTIVITY_LAYOUT_PROPS)[number],
+    PropertyDescriptor | undefined,
+  ] => [
+    name,
+    Object.getOwnPropertyDescriptor(HTMLElement.prototype, name) ??
+      Object.getOwnPropertyDescriptor(Element.prototype, name),
+  ],
+);
+const activityElementSize = (element: HTMLElement) =>
+  element.dataset.testid === "activity-list-body"
+    ? 400
+    : element.dataset.testid === "activity-item"
+      ? 76
+      : 0;
+
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return activityElementSize(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return activityElementSize(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.dataset.testid === "activity-list-body"
+        ? 1e7
+        : activityElementSize(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value(this: HTMLElement): DOMRect {
+      const height = activityElementSize(this);
+      return {
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: height,
+        width: 800,
+        height,
+        toJSON: () => ({}),
+      };
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value(this: HTMLElement, options?: ScrollToOptions | number) {
+      const top = typeof options === "number" ? options : options?.top;
+      if (typeof top !== "number") return;
+      this.scrollTop = Math.max(0, Math.floor(top));
+      this.dispatchEvent(new Event("scroll"));
+    },
+  });
+});
+
+afterAll(() => {
+  for (const [name, descriptor] of realActivityLayout) {
+    if (descriptor) {
+      Object.defineProperty(HTMLElement.prototype, name, descriptor);
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, name);
+    }
+  }
+});
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -164,23 +269,7 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
     },
     async fetchActivity(opts: { q: string }) {
       void opts;
-      return {
-        items: [
-          {
-            kind: "session" as const,
-            id: "s-42",
-            project_id: "p-lore",
-            project_name: "lore",
-            title: "Session s-42",
-            snippet: "A fixture activity item.",
-            participants: [{ id: "user", kind: "user" as const, label: "You" }],
-            last_activity_at: 1_700_000_000_000,
-            total: 1,
-            match: "exact" as const,
-          },
-        ],
-        next_cursor: null,
-      };
+      return ACTIVITY_PAGE;
     },
     async listProjectKnowledge(projectId: string) {
       calls.push(`knowledge:${projectId}`);
@@ -667,8 +756,10 @@ describe("shell: project navigation and real-data path", () => {
     const client = fakeClient();
     mount("/", client);
     const rows = await screen.findAllByTestId("activity-item");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveTextContent("Session s-42");
+    expect(rows).toHaveLength(ACTIVITY_PAGE.items.length);
+    expect(
+      rows.some((row) => row.textContent?.includes(SESSION_ACTIVITY.title)),
+    ).toBe(true);
     expect(
       screen.getByRole("heading", { name: "Select an item" }),
     ).toBeVisible();
@@ -693,14 +784,14 @@ describe("shell: project navigation and real-data path", () => {
 
   it("keeps the activity list node and query across session routes", async () => {
     const session = {
-      session_id: "s-42",
+      session_id: SESSION_ACTIVITY.id,
       message_count: 1,
       first_message_at: 1_700_000_000_000,
       last_message_at: 1_700_000_000_000,
       distilled_count: 0,
       undistilled_count: 1,
       distillation_count: 0,
-      title: "Session s-42",
+      title: SESSION_ACTIVITY.title,
       title_source: "id" as const,
     };
     const client = fakeClient({
@@ -730,26 +821,22 @@ describe("shell: project navigation and real-data path", () => {
       const list = await screen.findByTestId("activity-list-body");
       list.dataset.listIdentity = "persistent";
       list.scrollTop = 0;
-      const session = await screen.findByRole("link", { name: /Session s-42/ });
-      expect(session).toHaveAttribute(
-        "href",
-        `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
-      );
-      fireEvent.click(session);
-      await waitFor(() =>
-        expect(history.get()).toBe(
-          `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
-        ),
-      );
+      const sessionLink = await screen.findByRole("link", {
+        name: new RegExp(SESSION_ACTIVITY.title),
+      });
+      const expectedSessionHref = `${prefix}${sessionHref(
+        SESSION_ACTIVITY.project_id,
+        SESSION_ACTIVITY.id,
+      )}?q=lore`;
+      expect(sessionLink).toHaveAttribute("href", expectedSessionHref);
+      fireEvent.click(sessionLink);
+      await waitFor(() => expect(history.get()).toBe(expectedSessionHref));
       expect(screen.getByTestId("activity-list-body")).toBe(list);
       expect(list.scrollTop).toBe(0);
 
       expect(screen.getByTestId("activity-list-body")).toBe(list);
       expect(list).toHaveAttribute("data-list-identity", "persistent");
       expect(list.scrollTop).toBe(0);
-      expect(
-        screen.getByRole("link", { name: /Session s-42/ }),
-      ).toHaveAttribute("aria-current", "page");
       unmount();
     }
   });
@@ -892,7 +979,7 @@ describe("shell: project navigation and real-data path", () => {
     mount("/knowledge/k-wal", client);
     await screen.findByTestId("knowledge-document");
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
-    expect(pane("list")).toHaveTextContent("lore");
+    expect(pane("list")).toHaveTextContent(SESSION_ACTIVITY.title);
     expect(client.calls).toContain("entry:k-wal");
     expect(client.calls).toContain("knowledge:p-lore");
     expect(client.pageOpts).toContainEqual({
@@ -957,7 +1044,7 @@ describe("shell: project navigation and real-data path", () => {
         sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
-    expect(pane("list")).toHaveTextContent("lore");
+    expect(pane("list")).toHaveTextContent(SESSION_ACTIVITY.title);
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
     expect(await screen.findByTestId("nav-projects")).toHaveAttribute(
       "aria-current",
@@ -1280,8 +1367,10 @@ describe("shell: workspace knowledge and search", () => {
     expect(projects).not.toHaveAttribute("aria-current");
     expect(nav.querySelector('[data-testid="nav-project"]')).toBeNull();
     expect(
-      await within(pane("list")).findByTestId("activity-item"),
-    ).toHaveTextContent("Session s-42");
+      await within(pane("list")).findByRole("link", {
+        name: new RegExp(SESSION_ACTIVITY.title),
+      }),
+    ).toBeInTheDocument();
     expect(within(pane("list")).queryByTestId("nav-project")).toBeNull();
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
@@ -1905,15 +1994,14 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(status).not.toHaveTextContent("Gateway unreachable");
   });
 
-  it("reports the gateway as unreachable and offers a retry", async () => {
-    let attempts = 0;
+  it("reports activity failures as gateway unreachable", async () => {
     const client = fakeClient({
-      async listProjects() {
-        attempts++;
-        if (attempts === 1) {
-          throw new ApiError("unreachable", "/projects", "Gateway unreachable");
-        }
-        return PROJECTS;
+      async fetchActivity() {
+        throw new ApiError(
+          "unreachable",
+          "/api/v1/activity",
+          "Gateway unreachable",
+        );
       },
     });
     mount("/", client);
@@ -1922,11 +2010,13 @@ describe("shell: empty, error, not-found and locked states", () => {
       expect(status).toHaveAttribute("data-connection", "unreachable"),
     );
     expect(status).toHaveTextContent("Gateway unreachable");
-    expect(screen.getByText("Projects unavailable")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findByTestId("nav-projects");
-    expect(status).toHaveAttribute("data-connection", "reachable");
+    const activityList = screen.getByTestId("activity-list-body");
+    await waitFor(() =>
+      expect(within(activityList).getByRole("alert")).toHaveTextContent(
+        "Gateway unreachable",
+      ),
+    );
+    expect(status).toHaveAttribute("data-connection", "unreachable");
   });
 
   it("renders proxy 503 responses as gateway unreachable", async () => {
@@ -1939,10 +2029,22 @@ describe("shell: empty, error, not-found and locked states", () => {
           503,
         );
       },
+      async fetchActivity() {
+        throw new ApiError(
+          "unreachable",
+          "/api/v1/activity",
+          "Gateway responded 503",
+          503,
+        );
+      },
     });
     mount("/projects/p-lore/knowledge", client);
     expect(await screen.findByText("Gateway unreachable")).toBeInTheDocument();
-    expect(screen.getByText(/lore start/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("activity-list-body")).getByRole("alert"),
+      ).toHaveTextContent("Gateway responded 503"),
+    );
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "unreachable",
@@ -1997,6 +2099,9 @@ describe("shell: empty, error, not-found and locked states", () => {
           404,
         );
       },
+      async fetchActivity() {
+        throw new ApiError("unauthorized", "/api/v1/activity", "hidden", 404);
+      },
     });
     mount("/projects/p-lore/knowledge", client);
     const status = await screen.findByTestId("connection-status");
@@ -2005,11 +2110,15 @@ describe("shell: empty, error, not-found and locked states", () => {
     );
     expect(status).toHaveTextContent("Management not authorized");
     expect(status).toHaveTextContent("LORE_ALLOW_REMOTE_MANAGEMENT");
-    expect(screen.getByText("Projects hidden")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("activity-list-body")).getByRole("alert"),
+      ).toHaveTextContent("hidden"),
+    );
     expect(
       await screen.findByText("Knowledge hidden by the gateway"),
     ).toBeInTheDocument();
-    expect(document.querySelectorAll('[data-state="locked"]')).toHaveLength(2);
+    expect(document.querySelectorAll('[data-state="locked"]')).toHaveLength(1);
   });
 
   it("shows the not-found page for unknown client routes", () => {

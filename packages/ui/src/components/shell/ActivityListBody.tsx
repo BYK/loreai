@@ -15,6 +15,7 @@ import { parseActivityQuery } from "@loreai/core/activity-query";
 import type { ActivityItem } from "~/contracts";
 import { useWorkspace } from "~/routes/workspace";
 import { ACTIVITY_KIND_UI } from "~/lib/activity-kinds";
+import { withWorkspaceQuery } from "~/lib/href";
 import {
   activityItemKey,
   clientFilter,
@@ -52,7 +53,6 @@ export const ActivityListBody: Component<{
     ),
   );
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
-    initialRect: { width: 0, height: 400 },
     get count() {
       return visibleItems().length;
     },
@@ -215,13 +215,20 @@ export const ActivityListBody: Component<{
                       const registry = ACTIVITY_KIND_UI[row.kind];
                       return (
                         <A
-                          href={registry.href(row)}
+                          href={withWorkspaceQuery(
+                            registry.href(row),
+                            props.query,
+                          )}
                           end
                           activeClass="bg-selected text-selected-text"
                           data-list-key={`${row.kind}:${row.project_id}:${row.id}`}
                           data-testid="activity-item"
                           data-activity-kind={row.kind}
-                          ref={(element) => virtualizer.measureElement(element)}
+                          ref={(element) =>
+                            virtualizer.measureElement(
+                              element as unknown as HTMLDivElement,
+                            )
+                          }
                           data-index={virtualItem.index}
                           class="group absolute left-0 top-0 flex min-h-[68px] w-full flex-col gap-0.5 border-b border-hairline px-3 py-2 text-left no-underline hover:bg-soft"
                           style={{
