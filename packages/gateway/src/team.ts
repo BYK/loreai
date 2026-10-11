@@ -658,6 +658,7 @@ export interface DomainJoinRequest {
   id: string;
   domain: string;
   userId: string;
+  label: string | null;
   status: string;
   requestedAt: string;
 }
@@ -699,6 +700,24 @@ export async function listDomainJoinRequests(
   client: SupabaseClient,
   orgId: string,
 ): Promise<DomainJoinRequest[]> {
+  const { data: profileData, error: profileError } = await client.rpc(
+    "domain_join_request_profiles",
+    { p_org: orgId },
+  );
+  if (profileError)
+    throw new TeamRpcError(
+      `domain_join_request_profiles: ${profileError.message}`,
+      profileError.code,
+    );
+  const profiles = new Map(
+    (
+      (profileData ?? []) as Array<
+        Pick<TeamMemberProfile, "display_name" | "github_login" | "email"> & {
+          request_id: string;
+        }
+      >
+    ).map((profile) => [profile.request_id, profile]),
+  );
   const { data, error } = await client
     .from("domain_join_requests")
     .select("id, domain, user_id, status, requested_at")
@@ -714,6 +733,13 @@ export async function listDomainJoinRequests(
     id: r.id as string,
     domain: r.domain as string,
     userId: r.user_id as string,
+    label: identityLabel(
+      profiles.get(r.id as string) ?? {
+        display_name: null,
+        github_login: null,
+        email: null,
+      },
+    ),
     status: r.status as string,
     requestedAt: r.requested_at as string,
   }));

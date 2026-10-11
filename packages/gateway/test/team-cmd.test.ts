@@ -298,12 +298,12 @@ describe("leave", () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it("removes the caller from a team resolved by name and reports unlinked projects", async () => {
+  it("lets an editor leave a team resolved by name and reports unlinked projects", async () => {
     vi.mocked(getCurrentUser).mockResolvedValue({
       user_id: "self-user",
     } as never);
     vi.mocked(team.listTeams).mockResolvedValue([
-      { scopeId: "scope-1", name: "Acme", role: "admin" },
+      { scopeId: "scope-1", name: "Acme", role: "editor" },
     ]);
     vi.mocked(team.removeTeamMember).mockResolvedValue({
       newEpoch: 4,
@@ -661,13 +661,15 @@ describe("domain (E-5-b)", () => {
         id: "req-1",
         domain: "acme.dev",
         userId: "u-2",
+        label: "Ada Lovelace",
         status: "pending",
         requestedAt: "t",
       },
     ]);
     await run("domain", "requests", "org-1");
     expect(logs.join("\n")).toContain("req-1");
-    expect(logs.join("\n")).toContain("u-2");
+    expect(logs.join("\n")).toContain("Ada Lovelace");
+    expect(logs.join("\n")).not.toContain("u-2");
   });
 
   it("requests prints a friendly message when there are none", async () => {

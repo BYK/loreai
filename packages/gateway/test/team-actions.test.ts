@@ -229,6 +229,7 @@ beforeEach(() => {
       id: "domain-request-1",
       domain: "example.test",
       userId: OTHER,
+      label: "Other User",
       status: "pending",
       requestedAt: "2025-01-01T00:00:00.000Z",
     },
@@ -515,7 +516,13 @@ describe("team action routes", () => {
     expect(await requested.json()).toEqual({ request_id: "domain-request-1" });
     const listed = await request(`/api/v1/orgs/${TEAM}/domains/requests`);
     expect(await listed.json()).toMatchObject({
-      requests: [{ id: "domain-request-1", user_id: OTHER }],
+      requests: [
+        {
+          id: "domain-request-1",
+          user_id: OTHER,
+          label: "Other User",
+        },
+      ],
     });
     const approved = await request(
       `/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/approve`,
@@ -808,6 +815,31 @@ describe("team action routes", () => {
     expect(teamMocks.teamMembers).not.toHaveBeenCalled();
     expect(teamMocks.setTeamRole).not.toHaveBeenCalled();
     expect(teamMocks.removeTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("allows a non-admin to remove only their own membership", async () => {
+    enableWrites();
+    db()
+      .query("UPDATE scope_members SET role = 'editor' WHERE scope_id = ?")
+      .run(TEAM);
+    teamMocks.teamMembers.mockResolvedValue([
+      { userId: USER, role: "editor" },
+      { userId: OTHER, role: "editor" },
+    ]);
+
+    const response = await request(
+      `/api/v1/teams/${TEAM}/members/${USER}/remove`,
+      "POST",
+      JSON.stringify({ expected_role: "editor" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ removed: USER });
+    expect(teamMocks.removeTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      USER,
+    );
   });
 
   it("maps role and removal RPC codes, including atomic rotation conflicts", async () => {

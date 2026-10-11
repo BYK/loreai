@@ -781,7 +781,9 @@ export async function commandTeam(
               break;
             }
             for (const r of reqs)
-              console.log(`${r.id}  ${r.userId}  @${r.domain}`);
+              console.log(
+                `${r.id}  ${r.label ?? "Unknown requester"}  @${r.domain}`,
+              );
             break;
           }
           case "approve": {

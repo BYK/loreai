@@ -577,6 +577,7 @@ async function domainRequests(
         id: request.id,
         domain: request.domain,
         user_id: request.userId,
+        label: request.label,
         status: request.status,
         requested_at: request.requestedAt,
       })),
@@ -755,7 +756,7 @@ async function removeMember(
   }
   const access = await teamMutationAccess(scopeId, config);
   if (access instanceof Response) return access;
-  if (access.role !== "admin") {
+  if (access.role !== "admin" && userId !== access.me) {
     return errorResponse(
       403,
       "not_admin",
