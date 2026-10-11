@@ -474,7 +474,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   function revealMark(mark: HTMLElement) {
     mark.scrollIntoView?.({ block: "center" });
     const el = scrollEl;
-    if (!el || typeof requestAnimationFrame !== "function") return;
+    if (!el) return;
+    // The virtualizer learns the native scroll from the scroll event, a
+    // frame away; the first measures of the rows around the mark would
+    // otherwise adjust against the offset it still holds and drag the mark
+    // back out before the hold below can see it.
+    virtualizer.scrollOffset = el.scrollTop;
+    if (typeof requestAnimationFrame !== "function") return;
     /** The mark's distances to the visible band's edges. */
     const place = () => {
       const m = mark.getBoundingClientRect();
