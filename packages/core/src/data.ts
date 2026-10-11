@@ -772,6 +772,16 @@ export function clearProject(projectPath: string): ClearResult {
     deleteOwnedProjectSessionStates(database, pid);
     // session_meta is a derived cache — sweep the project's rows with the rest.
     database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
+    // Discussions are project-owned application data (APP-01): replies and
+    // response bindings first, then discussions, then threads.
+    for (const table of [
+      "discussion_replies",
+      "response_bindings",
+      "discussions",
+      "threads",
+    ]) {
+      database.query(`DELETE FROM ${table} WHERE project_id = ?`).run(pid);
+    }
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
@@ -933,6 +943,18 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM session_meta WHERE project_id = ?")
       .run(projectId);
+    // Discussions are project-owned application data (APP-01): replies and
+    // response bindings first, then discussions, then threads.
+    for (const table of [
+      "discussion_replies",
+      "response_bindings",
+      "discussions",
+      "threads",
+    ]) {
+      database
+        .query(`DELETE FROM ${table} WHERE project_id = ?`)
+        .run(projectId);
+    }
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
@@ -1696,6 +1718,23 @@ export function moveSessions(
       database
         .query(
           `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+      // Session-anchored discussions follow their source session; their
+      // replies and verified response bindings move with them.
+      database
+        .query(
+          `UPDATE discussion_replies SET project_id = ? WHERE project_id = ? AND discussion_id IN (SELECT id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}))`,
+        )
+        .run(toId, fromProjectId, fromProjectId, ...allIds);
+      database
+        .query(
+          `UPDATE discussions SET project_id = ?, thread_id = NULL WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+      database
+        .query(
+          `UPDATE response_bindings SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
       // Clear both projects' fair cursors within this write transaction whenever

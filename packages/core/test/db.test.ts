@@ -310,6 +310,45 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("v103: discussion tables exist and enforce the reply XOR", () => {
+    const tables = (
+      db()
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('threads', 'discussions', 'discussion_replies', 'response_bindings')",
+        )
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    expect(tables.sort()).toEqual([
+      "discussion_replies",
+      "discussions",
+      "response_bindings",
+      "threads",
+    ]);
+    const sqlText = (
+      db()
+        .query(
+          "SELECT sql FROM sqlite_master WHERE name = 'discussion_replies'",
+        )
+        .get() as { sql: string }
+    ).sql;
+    expect(sqlText).toContain(
+      "(body IS NULL) <> (response_binding_id IS NULL)",
+    );
+  });
+
+  test("v103 recovery re-creates dropped discussion tables", () => {
+    db().exec(
+      "DROP TABLE discussion_replies; DROP TABLE response_bindings; DROP TABLE discussions; DROP TABLE threads;",
+    );
+    close();
+    const tables = db()
+      .query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('threads', 'discussions', 'discussion_replies', 'response_bindings')",
+      )
+      .all();
+    expect(tables).toHaveLength(4);
+  });
+
   test("v100: session_prompt_deltas.created_at exists on a fresh DB", () => {
     const cols = db()
       .query("PRAGMA table_info(session_prompt_deltas)")
