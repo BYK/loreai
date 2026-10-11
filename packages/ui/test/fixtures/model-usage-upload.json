@@ -1,0 +1,17 @@
+{
+  "snapshot": {
+    "format": "model-tides-weekly",
+    "version": 2,
+    "weeks": [
+      {
+        "week": "2023-11-13",
+        "models": {
+          "anthropic/claude-sonnet-4": 2
+        }
+      }
+    ]
+  },
+  "snapshot_sha256": "d4e7f0c6ca30932de76a3a68a2fa7a7ca6dc9fdaa1471b0432337836a6092394",
+  "upload_os": "linux",
+  "report": null
+}

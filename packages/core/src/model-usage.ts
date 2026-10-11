@@ -4,6 +4,9 @@
  * model-tides "daily" document format (format/version/constants ported from
  * model-tides src/daily-usage.ts and src/weekly-snapshot.ts).
  */
+import { createHash } from "node:crypto";
+
+import { db } from "./db";
 import { sql } from "./sql";
 import { currentTenantId } from "./tenant";
 import {
@@ -204,4 +207,352 @@ export async function buildDailyModelUsage(
     source: "lore",
     days,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Weekly snapshot + owner credential (#2026 PR3, consented Model Tides upload).
+// Everything below ports model-tides src/weekly-snapshot.ts and
+// scripts/contribute.mjs verbatim in behaviour.
+// ---------------------------------------------------------------------------
+
+// Ported from model-tides src/weekly-snapshot.ts.
+export const WEEKLY_FORMAT = "model-tides-weekly";
+export const WEEKLY_VERSION = 2;
+export const MAX_WEEKS = 520;
+export const MAX_WEEKLY_CELLS = 2048;
+export const MAX_MODEL_COUNT = 10_000;
+export const MAX_REVIEW_CELLS = 8192;
+// Stored reports may predate the upload limits, which bound uploads only.
+export const MAX_REVIEW_WEEKS = 2048;
+const WEEK_MS = 7 * 86_400_000;
+const weekPattern = /^\d{4}-\d{2}-\d{2}$/;
+
+export interface WeeklySnapshot {
+  readonly format: typeof WEEKLY_FORMAT;
+  readonly version: 1 | typeof WEEKLY_VERSION;
+  readonly weeks: readonly {
+    readonly week: string;
+    readonly models: Readonly<Record<string, number>>;
+  }[];
+}
+
+export interface OwnedReport {
+  readonly id: string;
+  readonly published: boolean;
+  readonly inAggregate: boolean | null;
+  readonly revision: number;
+  readonly metricVersion: 1 | typeof WEEKLY_VERSION;
+  readonly snapshot: WeeklySnapshot | null;
+}
+
+/** Ported verbatim (behaviour) from model-tides src/weekly-snapshot.ts. */
+export function weekStart(time: number): string {
+  if (
+    !Number.isSafeInteger(time) ||
+    time < MIN_WEEK_TIME ||
+    time > Date.now() + FUTURE_MARGIN_MS
+  ) {
+    throw new RangeError("The event date is outside the supported range.");
+  }
+  // Thursday 1970-01-01 is three days after Monday.
+  return new Date(
+    Math.floor((time + 3 * 86_400_000) / WEEK_MS) * WEEK_MS - 3 * 86_400_000,
+  )
+    .toISOString()
+    .slice(0, 10);
+}
+
+function exactKeys(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    Object.keys(value).every((key) => keys.includes(key))
+  );
+}
+
+function parseSnapshotWithLimits(
+  input: unknown,
+  maxWeeks: number,
+  maxCells: number,
+): WeeklySnapshot {
+  if (
+    !exactKeys(input, ["format", "version", "weeks"]) ||
+    input.format !== WEEKLY_FORMAT ||
+    (input.version !== 1 && input.version !== WEEKLY_VERSION) ||
+    !Array.isArray(input.weeks) ||
+    input.weeks.length < 1 ||
+    input.weeks.length > maxWeeks
+  ) {
+    throw new TypeError("Invalid weekly snapshot.");
+  }
+  const seen = new Set<string>();
+  const weeks: { week: string; models: Record<string, number> }[] = [];
+  const latest = Date.now() + FUTURE_MARGIN_MS;
+  const cells = input.weeks.reduce<number>((total, item: unknown) => {
+    if (
+      !exactKeys(item, ["week", "models"]) ||
+      typeof item.week !== "string" ||
+      !weekPattern.test(item.week) ||
+      seen.has(item.week) ||
+      !item.models ||
+      typeof item.models !== "object" ||
+      Array.isArray(item.models)
+    ) {
+      throw new TypeError("Invalid weekly snapshot.");
+    }
+    const date = Date.parse(`${item.week}T00:00:00Z`);
+    if (
+      !Number.isFinite(date) ||
+      date < MIN_WEEK_TIME ||
+      date > latest ||
+      weekStart(date) !== item.week
+    ) {
+      throw new TypeError("Invalid weekly snapshot.");
+    }
+    const entries = Object.entries(item.models);
+    if (
+      entries.length > maxCells ||
+      entries.some(
+        ([model, count]) =>
+          !validWeeklyModel(model) ||
+          !Number.isSafeInteger(count) ||
+          (count as number) < 1 ||
+          (count as number) > MAX_MODEL_COUNT,
+      )
+    ) {
+      throw new TypeError("Invalid weekly snapshot.");
+    }
+    seen.add(item.week);
+    weeks.push({ week: item.week, models: Object.fromEntries(entries) });
+    return total + entries.length;
+  }, 0);
+  if (cells < 1 || cells > maxCells)
+    throw new TypeError("Invalid weekly snapshot.");
+  return { format: WEEKLY_FORMAT, version: input.version, weeks };
+}
+
+export function parseSnapshot(input: unknown): WeeklySnapshot {
+  return parseSnapshotWithLimits(input, MAX_WEEKS, MAX_WEEKLY_CELLS);
+}
+
+export function parseOwnedReport(input: unknown, id: string): OwnedReport {
+  const hasAggregate =
+    input !== null && typeof input === "object" && "inAggregate" in input;
+  const hasMetric =
+    input !== null && typeof input === "object" && "metricVersion" in input;
+  const fields = [
+    ...(hasAggregate ? ["inAggregate"] : []),
+    ...(hasMetric ? ["metricVersion"] : []),
+  ];
+  const oversized =
+    exactKeys(input, ["id", "published", "revision", "tooLarge", ...fields]) &&
+    input.tooLarge === true;
+  if (
+    (!oversized &&
+      !exactKeys(input, [
+        "id",
+        "counts",
+        "published",
+        "revision",
+        ...fields,
+      ])) ||
+    input.id !== id ||
+    typeof input.published !== "boolean" ||
+    !Number.isSafeInteger(input.revision) ||
+    (input.revision as number) < 0 ||
+    (hasAggregate && typeof input.inAggregate !== "boolean")
+  ) {
+    throw new TypeError("Invalid personal report.");
+  }
+  const inAggregate = hasAggregate ? (input.inAggregate as boolean) : null;
+  const version = hasMetric ? input.metricVersion : 1;
+  if (version !== 1 && version !== WEEKLY_VERSION)
+    throw new TypeError("Invalid report metric.");
+  if (oversized)
+    return {
+      id,
+      published: input.published,
+      inAggregate,
+      revision: input.revision as number,
+      metricVersion: version,
+      snapshot: null,
+    };
+  if (
+    !Array.isArray(input.counts) ||
+    input.counts.length < 1 ||
+    input.counts.length > MAX_REVIEW_CELLS
+  ) {
+    throw new TypeError("Invalid personal report.");
+  }
+  const weeks = new Map<string, Map<string, number>>();
+  for (const row of input.counts) {
+    if (
+      !exactKeys(row, ["week", "model", "count"]) ||
+      typeof row.week !== "string" ||
+      !validWeeklyModel(row.model) ||
+      !Number.isSafeInteger(row.count) ||
+      (row.count as number) < 1 ||
+      (row.count as number) > MAX_MODEL_COUNT
+    ) {
+      throw new TypeError("Invalid personal report.");
+    }
+    const models = weeks.get(row.week) ?? new Map<string, number>();
+    if (models.has(row.model)) throw new TypeError("Invalid personal report.");
+    models.set(row.model, row.count as number);
+    weeks.set(row.week, models);
+  }
+  const snapshot = parseSnapshotWithLimits(
+    {
+      format: WEEKLY_FORMAT,
+      version,
+      weeks: [...weeks]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([week, models]) => ({
+          week,
+          models: Object.fromEntries(
+            [...models].sort(([a], [b]) => a.localeCompare(b)),
+          ),
+        })),
+    },
+    MAX_REVIEW_WEEKS,
+    MAX_REVIEW_CELLS,
+  );
+  return {
+    id,
+    published: input.published,
+    inAggregate,
+    revision: input.revision as number,
+    metricVersion: version,
+    snapshot,
+  };
+}
+
+/**
+ * Sum a daily document into Monday-UTC weekly counts — model-tides
+ * buildActiveWeeklySnapshot. Limit breaches throw `ModelUsageLimitError`
+ * naming the limit and the actual value (the gateway maps it to 422).
+ */
+export function buildWeeklySnapshot(doc: DailyUsageDocument): WeeklySnapshot {
+  const weeks = new Map<string, Map<string, number>>();
+  for (const { day, models: daily } of doc.days) {
+    const week = weekStart(Date.parse(`${day}T00:00:00Z`));
+    const models = weeks.get(week) ?? new Map<string, number>();
+    for (const [model, count] of Object.entries(daily)) {
+      models.set(model, (models.get(model) ?? 0) + count);
+    }
+    weeks.set(week, models);
+  }
+  if (weeks.size > MAX_WEEKS) {
+    throw new ModelUsageLimitError(
+      `Weekly snapshot has ${weeks.size} weeks; Model Tides accepts at most ${MAX_WEEKS}`,
+    );
+  }
+  const cells = [...weeks.values()].reduce(
+    (sum, models) => sum + models.size,
+    0,
+  );
+  if (cells > MAX_WEEKLY_CELLS) {
+    throw new ModelUsageLimitError(
+      `Weekly snapshot has ${cells} model-week cells; Model Tides accepts at most ${MAX_WEEKLY_CELLS}`,
+    );
+  }
+  // No usage yet → an empty snapshot (parseSnapshot requires >=1 week, which
+  // is a server-side bound, not a reason to 500 on first-time users).
+  if (weeks.size === 0) {
+    return { format: WEEKLY_FORMAT, version: WEEKLY_VERSION, weeks: [] };
+  }
+  const peak = Math.max(
+    0,
+    ...[...weeks.values()].flatMap((models) => [...models.values()]),
+  );
+  if (peak > MAX_MODEL_COUNT) {
+    throw new ModelUsageLimitError(
+      `Weekly snapshot has a model count of ${peak}; Model Tides accepts at most ${MAX_MODEL_COUNT}`,
+    );
+  }
+  return parseSnapshot({
+    format: WEEKLY_FORMAT,
+    version: WEEKLY_VERSION,
+    weeks: [...weeks]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, models]) => ({
+        week,
+        models: Object.fromEntries(
+          [...models].sort(([a], [b]) => a.localeCompare(b)),
+        ),
+      })),
+  });
+}
+
+/** sha256 hex over exactly the bytes that get brotli-compressed for upload. */
+export function snapshotSha256(snapshot: WeeklySnapshot): string {
+  return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Owner credential in kv_meta — model-tides' contribution.json, keyed per
+// tenant because kv_meta itself is not tenant-scoped. The token is never
+// logged and never leaves the gateway.
+// ---------------------------------------------------------------------------
+
+const OWNER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const OWNER_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+export interface ModelTidesOwner {
+  readonly id: string;
+  readonly token: string;
+}
+
+const ownerKey = (): string => `model-tides.owner:${currentTenantId()}`;
+
+function parseOwner(input: unknown): ModelTidesOwner {
+  if (
+    !exactKeys(input, ["id", "token"]) ||
+    typeof input.id !== "string" ||
+    !OWNER_ID_RE.test(input.id) ||
+    typeof input.token !== "string" ||
+    !OWNER_TOKEN_RE.test(input.token)
+  ) {
+    throw new Error("Invalid local private key.");
+  }
+  return { id: input.id, token: input.token };
+}
+
+export function loadOwner(): ModelTidesOwner | null {
+  const row = db()
+    .query("SELECT value FROM kv_meta WHERE key = ?")
+    .get(ownerKey()) as { value: string } | null;
+  if (row === null) return null;
+  return parseOwner(JSON.parse(row.value));
+}
+
+export function saveOwner(owner: ModelTidesOwner): void {
+  const parsed = parseOwner(owner);
+  db()
+    .query(
+      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .run(ownerKey(), JSON.stringify(parsed));
+}
+
+export function deleteOwner(): void {
+  db().query("DELETE FROM kv_meta WHERE key = ?").run(ownerKey());
+}
+
+/**
+ * Plain INSERT — throws (SQLite UNIQUE constraint) when an owner already
+ * exists. Used only by the create path, mirroring the CLI's
+ * `writeFileSync(..., { flag: "wx" })`.
+ */
+export function createOwner(owner: ModelTidesOwner): void {
+  const parsed = parseOwner(owner);
+  db()
+    .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+    .run(ownerKey(), JSON.stringify(parsed));
 }
