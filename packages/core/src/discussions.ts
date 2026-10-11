@@ -1128,10 +1128,11 @@ export function deleteReply(
            WHERE parent_reply_id = ${replyId}`,
     );
     sql.run(db(), sql`DELETE FROM discussion_replies WHERE id = ${replyId}`);
+    const t = now();
     sql.run(
       db(),
       sql`UPDATE discussions
-             SET revision = revision + 1, updated_at = ${now()}
+             SET revision = revision + 1, updated_at = ${t}, last_activity_at = ${t}
            WHERE id = ${discussionId}`,
     );
   });

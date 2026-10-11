@@ -8,6 +8,7 @@ import {
   createDiscussion,
   createThread,
   deleteDiscussion,
+  deleteReply,
   deleteThread,
   getDiscussion,
   getThread,
@@ -543,6 +544,26 @@ describe("discussions", () => {
     expect(activity.indexOf(made[0].id)).toBeLessThan(
       activity.indexOf(made[2].id),
     );
+  });
+
+  it("deleting a reply is activity: the discussion moves to the top", () => {
+    const older = start().discussion;
+    const { reply } = addReply(p.id, older.id, {
+      expectedRevision: 1,
+      body: "to delete",
+    });
+    const newer = start().discussion;
+    const order = () =>
+      listDiscussions({ projectId: p.id, limit: 10 }).discussions.map(
+        (d) => d.id,
+      );
+    expect(order()).toEqual([newer.id, older.id]);
+    deleteReply(p.id, older.id, reply.id, reply.revision);
+    expect(order()).toEqual([older.id, newer.id]);
+    expect(
+      listDiscussionsByActivity({ projectId: p.id, limit: 10 }).discussions[0]
+        ?.id,
+    ).toBe(older.id);
   });
 
   it("links discussions to threads and unlinks on thread delete", () => {
