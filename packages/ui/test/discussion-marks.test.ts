@@ -131,6 +131,14 @@ describe("discussion anchors → highlights", () => {
     expect(
       overlappingDiscussions([d1], { ...sel, start: 10, end: 12 }),
     ).toEqual([]);
+    // A whole-block selection covers every non-empty anchor in the block, but
+    // still not the empty one.
+    expect(
+      overlappingDiscussions([d1, d2, whole, empty], {
+        ...sel,
+        partIndex: undefined,
+      }).map((d) => d.id),
+    ).toEqual(["d1", "d2", "d3"]);
   });
 
   it("round-trips wire anchors and encodes knowledge anchors for ?a=", () => {

@@ -92,11 +92,12 @@ export function discussionsAtBlock(
 
 function intersects(a: DiscussionAnchor, s: SourceAnchor): boolean {
   if (a.block_id !== s.blockId) return false;
+  // Empty part anchors draw no highlight (see discussionSpans), so nothing to
+  // reply in, not even from a whole-block selection.
+  if (a.part_index !== undefined && a.end <= a.start) return false;
   // Whole-block on either side covers every part of the block.
   if (a.part_index === undefined || s.partIndex === undefined) return true;
   if (a.part_index !== s.partIndex) return false;
-  // Empty part anchors draw no highlight (see discussionSpans), so nothing to reply in.
-  if (a.end <= a.start) return false;
   return a.start < s.end && s.start < a.end;
 }
 
