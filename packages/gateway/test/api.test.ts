@@ -1591,7 +1591,7 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
   });
 
   it("excludes a clustered shared entry by logical id when it was edited between runs", async () => {
-    const { ensureProject, ltm } = await import("@loreai/core");
+    const { ensureProject, db, ltm } = await import("@loreai/core");
     const projectPath = `/test/api/dedup-edit-${Date.now()}-${seq++}`;
     const projectId = ensureProject(projectPath, "dedup-project");
     const otherPath = `/test/api/dedup-edit-q-${Date.now()}-${seq++}`;
@@ -1621,12 +1621,18 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     const nullShared = ltm.create({
       id: crypto.randomUUID(),
       category: "gotcha",
-      title,
+      title: `${title} (legacy duplicate)`,
       content: "The shared rule, global.",
       session: "test-session",
       scope: "global",
       crossProject: true,
     });
+    // Model a legacy duplicate that the shared-title write guard now rejects.
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(title, nullShared);
     // S is edited after the shared run snapshots it: the snapshot holds v2
     // while v3 is already current — same logical id, still duplicating A.
     const sharedV2 = ltm.appendVersion(sharedV1, {
