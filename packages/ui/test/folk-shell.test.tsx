@@ -152,9 +152,11 @@ describe("Folk shell status", () => {
 
     fireEvent.click(await screen.findByTestId("folk-status"));
     fireEvent.click(await screen.findByTestId("sync-now"));
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Sync complete: pushed 2, pulled 3.",
-    );
+    expect(
+      await screen.findByText("Sync complete: pushed 2, pulled 3.", {
+        exact: true,
+      }),
+    ).toBeInTheDocument();
     expect(runSync).toHaveBeenCalledTimes(1);
   });
 

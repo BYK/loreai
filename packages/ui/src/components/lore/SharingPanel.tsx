@@ -5,6 +5,7 @@ import {
   For,
   Match,
   on,
+  onMount,
   Show,
   Switch,
 } from "solid-js";
@@ -76,6 +77,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   const [linkSuccess, setLinkSuccess] = createSignal("");
   const teams = () => ws.state.folk.teams.data()?.teams ?? [];
   const shownStatus = () => receipt() ?? sharing.data();
+  onMount(() => ws.state.folk.loadTeams());
   createEffect(
     on(
       () => props.projectId,

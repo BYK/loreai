@@ -1115,7 +1115,9 @@ describe("TeamParityActions", () => {
     );
 
     await screen.findByTestId("organization-domains");
-    fireEvent.click(screen.getByRole("button", { name: "Load join requests" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load join requests" }),
+    );
     expect(await screen.findByTestId("domain-join-request")).toHaveTextContent(
       "example.test",
     );
@@ -1131,7 +1133,9 @@ describe("TeamParityActions", () => {
     fireEvent.input(screen.getByLabelText("Verified email domain"), {
       target: { value: "example.test" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Claim domain" }));
+    const claimButton = screen.getByRole("button", { name: "Claim domain" });
+    await waitFor(() => expect(claimButton).toBeEnabled());
+    fireEvent.click(claimButton);
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "You don't have permission to perform this action.",
     );
@@ -1351,6 +1355,7 @@ describe("SharingPanel team link control", () => {
       }),
     );
 
+    await screen.findByRole("option", { name: "Acme" });
     const picker = await screen.findByRole("combobox", {
       name: "Link to team",
     });
