@@ -136,8 +136,13 @@ export function createActivityLocalState(
   const [snapshot, setSnapshot] =
     createSignal<ActivityLocalSnapshot>(EMPTY_SNAPSHOT);
   const [loaded, setLoaded] = createSignal(false);
-  const pendingRecords = new Map<string, ActivityStateRecord>();
-  const pendingFolders = new Map<string, ActivityFolderRecord | null>();
+  const recordTransitions = new Map<
+    string,
+    Array<(record: ActivityStateRecord) => ActivityStateRecord>
+  >();
+  const folderTransitions: Array<
+    (folders: readonly ActivityFolderRecord[]) => ActivityFolderRecord[]
+  > = [];
   const pendingWrites = new Set<Promise<void>>();
 
   const ready = getDb()
@@ -151,13 +156,41 @@ export function createActivityLocalState(
       const recordMap = Object.fromEntries(
         records.map((record) => [record.key, record]),
       );
-      for (const [key, record] of pendingRecords) recordMap[key] = record;
-      const folderMap = new Map(folders.map((folder) => [folder.key, folder]));
-      for (const [key, folder] of pendingFolders) {
-        if (folder) folderMap.set(key, folder);
-        else folderMap.delete(key);
+      const changed = new Map<string, ActivityStateRecord>();
+      for (const [key, transitions] of recordTransitions) {
+        let record = recordMap[key] ?? { key };
+        for (const transition of transitions) record = transition(record);
+        recordMap[key] = record;
+        changed.set(key, record);
       }
-      setSnapshot({ records: recordMap, folders: [...folderMap.values()] });
+      const nextFolders = folderTransitions.reduce(
+        (current, transition) => transition(current),
+        folders,
+      );
+      if (db && (changed.size > 0 || folderTransitions.length > 0)) {
+        const tx = db.transaction(
+          ["activityState", "activityFolders"],
+          "readwrite",
+        );
+        for (const record of changed.values()) {
+          await tx.objectStore("activityState").put(record);
+        }
+        if (folderTransitions.length > 0) {
+          const nextKeys = new Set(nextFolders.map((folder) => folder.key));
+          for (const folder of folders) {
+            if (!nextKeys.has(folder.key)) {
+              await tx.objectStore("activityFolders").delete(folder.key);
+            }
+          }
+          for (const folder of nextFolders) {
+            await tx.objectStore("activityFolders").put(folder);
+          }
+        }
+        await tx.done;
+      }
+      setSnapshot({ records: recordMap, folders: nextFolders });
+      recordTransitions.clear();
+      folderTransitions.length = 0;
       setLoaded(true);
       return db;
     })
@@ -186,17 +219,23 @@ export function createActivityLocalState(
       const next = transition(changed.get(key) ?? records[key] ?? { key });
       records[key] = next;
       changed.set(key, next);
-      pendingRecords.set(key, next);
+      if (!loaded()) {
+        const queued = recordTransitions.get(key) ?? [];
+        queued.push(transition);
+        recordTransitions.set(key, queued);
+      }
     }
     setSnapshot({ ...current, records });
-    trackWrite(
-      ready.then(async (db) => {
-        if (!db) return;
-        const tx = db.transaction("activityState", "readwrite");
-        for (const record of changed.values()) await tx.store.put(record);
-        await tx.done;
-      }),
-    );
+    if (loaded()) {
+      trackWrite(
+        ready.then(async (db) => {
+          if (!db) return;
+          const tx = db.transaction("activityState", "readwrite");
+          for (const record of changed.values()) await tx.store.put(record);
+          await tx.done;
+        }),
+      );
+    }
   }
 
   function updateRecord(
@@ -206,32 +245,42 @@ export function createActivityLocalState(
     applyBatch([{ key, transition }]);
   }
 
-  function replaceFolders(next: ActivityFolderRecord[]) {
+  function updateFolders(
+    transition: (
+      folders: readonly ActivityFolderRecord[],
+    ) => ActivityFolderRecord[],
+  ) {
+    if (!loaded()) folderTransitions.push(transition);
     const previous = snapshot().folders;
-    const nextMap = new Map(next.map((folder) => [folder.key, folder]));
-    const previousMap = new Map(previous.map((folder) => [folder.key, folder]));
-    for (const key of new Set([...previousMap.keys(), ...nextMap.keys()])) {
-      pendingFolders.set(key, nextMap.get(key) ?? null);
+    let next = previous as ActivityFolderRecord[];
+    try {
+      next = transition(previous);
+    } catch (error) {
+      if (loaded()) throw error;
     }
     setSnapshot((current) => ({ ...current, folders: next }));
-    trackWrite(
-      ready.then(async (db) => {
-        if (!db) return;
-        const tx = db.transaction("activityFolders", "readwrite");
-        for (const [key, folder] of pendingFolders) {
-          if (folder) await tx.store.put(folder);
-          else await tx.store.delete(key);
-        }
-        await tx.done;
-      }),
-    );
+    if (loaded()) {
+      trackWrite(
+        ready.then(async (db) => {
+          if (!db) return;
+          const tx = db.transaction("activityFolders", "readwrite");
+          const nextKeys = new Set(next.map((folder) => folder.key));
+          for (const folder of previous) {
+            if (!nextKeys.has(folder.key)) await tx.store.delete(folder.key);
+          }
+          for (const folder of next) await tx.store.put(folder);
+          await tx.done;
+        }),
+      );
+    }
   }
 
   return {
     snapshot,
     loaded,
     ready,
-    flush: () => Promise.all(pendingWrites).then(() => undefined),
+    flush: () =>
+      ready.then(() => Promise.all(pendingWrites)).then(() => undefined),
     record: (key: string) => snapshot().records[key] ?? { key },
     applyBatch,
     markRead: (key: string, total: number, now = Date.now()) =>
@@ -248,19 +297,19 @@ export function createActivityLocalState(
     unpin: (key: string) => updateRecord(key, unpin),
     createFolder(name: string, key?: string, createdAt?: number) {
       const id = key ?? crypto.randomUUID();
-      replaceFolders(
-        createFolder(snapshot().folders, name, id, createdAt ?? Date.now()),
-      );
+      const timestamp = createdAt ?? Date.now();
+      updateFolders((folders) => createFolder(folders, name, id, timestamp));
       return id;
     },
     renameFolder(key: string, name: string) {
-      replaceFolders(renameFolder(snapshot().folders, key, name));
+      updateFolders((folders) => renameFolder(folders, key, name));
     },
     deleteFolder(key: string) {
-      replaceFolders(deleteFolder(snapshot().folders, key));
+      updateFolders((folders) => deleteFolder(folders, key));
     },
     moveToFolder(keys: readonly string[], folderId: string) {
-      replaceFolders(moveToFolder(snapshot().folders, keys, folderId));
+      const selected = [...keys];
+      updateFolders((folders) => moveToFolder(folders, selected, folderId));
     },
   };
 }

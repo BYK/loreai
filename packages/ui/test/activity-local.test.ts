@@ -24,7 +24,7 @@ import {
 } from "~/state/activity-filter";
 import type { ActivityItem } from "~/contracts";
 import { parseActivityQuery } from "@loreai/core/activity-query";
-import { closeLoreDb, openLoreDb } from "~/db";
+import { closeLoreDb, openLoreDb, type LoreUiDb } from "~/db";
 
 afterEach(async () => {
   await closeLoreDb();
@@ -42,6 +42,14 @@ const item: ActivityItem = {
   total: 4,
   match: "exact",
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 describe("activity local transitions", () => {
   it("keeps read positions monotonic and supports unread, archive, and pin", () => {
@@ -90,6 +98,75 @@ describe("activity local transitions", () => {
     state.createFolder("Work", "folder-1", 11);
     expect(state.record("session:p:s").read_total).toBe(1);
     expect(state.snapshot().folders[0]?.name).toBe("Work");
+  });
+
+  it("replays pre-hydration reads over persisted activity fields", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("database did not open");
+    const key = "knowledge:project-1:entry-1";
+    await db.put("activityState", {
+      key,
+      archived_at: 5,
+      pinned_at: 6,
+    });
+    const pendingDb = deferred<LoreUiDb | null>();
+    const state = createActivityLocalState(() => pendingDb.promise);
+
+    state.markRead(key, 3, 10);
+    pendingDb.resolve(db);
+    await state.flush();
+
+    expect(state.record(key)).toMatchObject({
+      archived_at: 5,
+      pinned_at: 6,
+      read_total: 3,
+      read_at: 10,
+    });
+    expect((await db.getAll("activityState")).find((record) => record.key === key))
+      .toMatchObject({
+        archived_at: 5,
+        pinned_at: 6,
+        read_total: 3,
+        read_at: 10,
+      });
+  });
+
+  it("replays a pre-hydration folder move over persisted folders", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("database did not open");
+    await db.put("activityFolders", {
+      key: "F1",
+      name: "First",
+      keys: ["a"],
+      created_at: 1,
+    });
+    await db.put("activityFolders", {
+      key: "F2",
+      name: "Second",
+      keys: ["b"],
+      created_at: 2,
+    });
+    const pendingDb = deferred<LoreUiDb | null>();
+    const state = createActivityLocalState(() => pendingDb.promise);
+
+    state.moveToFolder(["a"], "F2");
+    pendingDb.resolve(db);
+    await state.flush();
+
+    const folders = state.snapshot().folders;
+    const persistedFolders = await db.getAll("activityFolders");
+    expect(
+      folders.map((folder) => [folder.key, [...folder.keys].sort()]),
+    ).toEqual([
+      ["F1", []],
+      ["F2", ["a", "b"]],
+    ]);
+    expect(
+      persistedFolders.map((folder) => [folder.key, [...folder.keys].sort()]),
+    ).toEqual([
+      ["F1", []],
+      ["F2", ["a", "b"]],
+    ]);
   });
 
   it("validates unique folder names and moves keys exclusively", () => {
