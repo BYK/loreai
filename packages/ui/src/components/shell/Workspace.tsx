@@ -199,8 +199,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const itemSelected = () => !rootMatch();
   const full = () => mode() === "full";
   const narrow = () => mode() !== "full";
-  const activeMaximized = () =>
-    full() ? layoutState().maximized : null;
+  const activeMaximized = () => (full() ? layoutState().maximized : null);
   const hiddenByMaximize = (pane: Pane) => {
     const maximized = activeMaximized();
     return maximized !== null && maximized !== pane;
@@ -219,8 +218,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     (full() || (!itemSelected() && mode() !== "full"));
   const showDocument = () =>
     activeMaximized() === "document" ||
-    (activeMaximized() === null &&
-      (full() || itemSelected() || !showList()));
+    (activeMaximized() === null && (full() || itemSelected() || !showList()));
   const showDivider = () =>
     full() && showList() && showDocument() && activeMaximized() === null;
   const navChip = () => layoutState().nav === "min" || hiddenByMaximize("nav");

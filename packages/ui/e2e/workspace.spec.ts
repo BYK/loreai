@@ -282,9 +282,7 @@ test.describe("persistent workspace panes", () => {
     await expect(document).toBeVisible();
     await maximize.click();
 
-    const project = list
-      .getByTestId("nav-project")
-      .filter({ hasText: "lore" });
+    const project = list.getByTestId("nav-project").filter({ hasText: "lore" });
     await project.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
     await expect(list).toBeVisible();
