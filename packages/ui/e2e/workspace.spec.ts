@@ -369,9 +369,15 @@ test.describe("persistent workspace panes", () => {
     await expect(document).toBeVisible();
     await maximize.click();
 
-    const project = list.getByTestId("nav-project").filter({ hasText: "lore" });
-    await project.click();
-    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:session");
+    await search.press("Enter");
+    const item = list
+      .locator('[data-testid="activity-item"][data-activity-kind="session"]')
+      .nth(2);
+    await expect(item).toBeVisible();
+    await item.click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+/);
     await expect(list).toBeVisible();
     await expect(document).toBeHidden();
 
