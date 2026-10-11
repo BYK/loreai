@@ -78,6 +78,12 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_BATCH_DISABLED` | Disables the batch-queue wrapper for non-urgent worker calls (distillation, curation, embedding). With batching on, the gateway groups these calls and submits them via the Anthropic Message Batches API for ~50% cost savings. Set `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each call immediately (useful for low-latency debugging or when the upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`. |
 | `LORE_MEMORY_PREPARATION_TIMEOUT_MS` | Override the normal-turn memory preparation budget at admission. Values from 1000–60000 ms are accepted; invalid values use .lore.json or the 8000 ms default. This budget ends before upstream generation. |
 
+## model-tides-client
+
+| Variable | Description |
+|---|---|
+| `LORE_MODEL_TIDES_ENDPOINT` | Model Tides contribution client (#2026 PR3): a verbatim-behaviour port of scripts/contribute.mjs from BYK/model-tides (publishSnapshot, getOwnedReport, setSharing, reportVisibility, setAggregate, the delete/rotate requests and the upload-response validation + rollback, minus gist support). Endpoint: `process.env.LORE_MODEL_TIDES_ENDPOINT` (read only so tests can point at a local stub; deliberately not a config field) defaulting to https://modeltides.dev/api/contributions. Nothing uploads automatically — every call here is driven by an explicit confirmed UI request. |
+
 ## runtime-files
 
 | Variable | Description |

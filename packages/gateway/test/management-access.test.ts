@@ -6,6 +6,7 @@ import { loadConfig, type GatewayConfig } from "../src/config";
 import { isLoopbackAddress, startServer } from "../src/server";
 
 type ServerHandle = Awaited<ReturnType<typeof startServer>>;
+const REMOTE_MANAGEMENT_TOKEN = "remote-management-test-token-012345";
 
 function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -37,7 +38,10 @@ describe("management route access control", () => {
       peerAddressForRequest: () => "192.0.2.10",
     });
     remoteManagementPeer = await startServer(
-      makeConfig({ allowRemoteManagement: true }),
+      makeConfig({
+        allowRemoteManagement: true,
+        gatewayAuthToken: REMOTE_MANAGEMENT_TOKEN,
+      }),
       { peerAddressForRequest: () => "192.0.2.10" },
     );
     mappedLoopbackPeer = await startServer(makeConfig(), {
@@ -92,7 +96,7 @@ describe("management route access control", () => {
     );
   });
 
-  test.each(["/api/v1/projects", "/ui", "/"])(
+  test.each(["/ui", "/"])(
     "allows remote management route %s only with the explicit override",
     async (path) => {
       const response = await fetch(urlFor(remoteManagementPeer, path), {
@@ -103,6 +107,103 @@ describe("management route access control", () => {
       expect(response.status).not.toBe(500);
     },
   );
+
+  test("hides remote management API access without a Bearer token", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  test.each(["/ui", "/"])(
+    "keeps the remote dashboard shell public at %s while API routes stay gated",
+    async (path) => {
+      const response = await fetch(urlFor(remoteManagementPeer, path), {
+        redirect: "manual",
+      });
+      expect(response.status).not.toBe(404);
+      expect(response.status).not.toBe(500);
+    },
+  );
+
+  test("hides public remote management when remote management is not enabled", async () => {
+    const response = await fetch(urlFor(remotePeer, "/api/v1/projects"), {
+      headers: { authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}` },
+    });
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  test.each([
+    ["missing scheme", REMOTE_MANAGEMENT_TOKEN],
+    ["wrong scheme", `Basic ${REMOTE_MANAGEMENT_TOKEN}`],
+    ["wrong token", "Bearer wrong-token"],
+    ["extra credentials", `Bearer ${REMOTE_MANAGEMENT_TOKEN},other`],
+  ])(
+    "rejects remote API credentials with %s",
+    async (_label, authorization) => {
+      const response = await fetch(
+        urlFor(remoteManagementPeer, "/api/v1/projects"),
+        { headers: { authorization } },
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    },
+  );
+
+  test("accepts the configured remote-management Bearer token", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+      {
+        headers: {
+          authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expect.any(Array));
+  });
+
+  test("allows a CORS preflight for Authorization without exposing the API", async () => {
+    const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
+    const origin = `https://${host}`;
+    const response = await new Promise<{
+      status: number;
+      headers: import("node:http").IncomingHttpHeaders;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/api/v1/projects",
+          method: "OPTIONS",
+          headers: {
+            host,
+            origin,
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization",
+          },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () =>
+            resolve({ status: res.statusCode ?? 0, headers: res.headers }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers["access-control-allow-headers"]).toContain(
+      "authorization",
+    );
+  });
 
   test("allows the external dashboard's exact browser origin", async () => {
     const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
@@ -116,7 +217,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();
@@ -149,7 +254,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();
@@ -181,7 +290,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();

@@ -5,15 +5,27 @@
  */
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
+import { createHash } from "node:crypto";
 import {
   buildDailyModelUsage,
+  buildWeeklySnapshot,
+  createOwner,
+  deleteOwner,
+  loadOwner,
+  parseOwnedReport,
+  parseSnapshot,
+  saveOwner,
+  snapshotSha256,
+  weekStart,
+  MAX_WEEKLY_CELLS,
+  MAX_WEEKS,
   MAX_DAILY_CELLS,
   ModelUsageFilterError,
   ModelUsageLimitError,
   ModelUsageUnavailableError,
 } from "../src/model-usage";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "../src/read-offload";
-import { withTenant } from "../src/tenant";
+import { withTenant, LOCAL_TENANT_ID } from "../src/tenant";
 
 vi.mock("../src/read-offload", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/read-offload")>();
@@ -328,4 +340,187 @@ describe("buildDailyModelUsage", () => {
       );
     },
   );
+});
+
+describe("weekly snapshot", () => {
+  const doc = (days: { day: string; models: Record<string, number> }[]) => ({
+    format: "model-tides-daily" as const,
+    version: 2 as const,
+    source: "lore" as const,
+    days,
+  });
+
+  test("weekStart buckes days into Monday-UTC weeks", () => {
+    expect(weekStart(Date.UTC(2025, 2, 3))).toBe("2025-03-03"); // Mon
+    expect(weekStart(Date.UTC(2025, 2, 9))).toBe("2025-03-03"); // Sun
+    expect(weekStart(Date.UTC(2025, 2, 10))).toBe("2025-03-10"); // next Mon
+    expect(() => weekStart(Date.UTC(1990, 0, 1))).toThrow(RangeError);
+  });
+
+  test("buildWeeklySnapshot sums daily counts per week and sorts", async () => {
+    const snap = buildWeeklySnapshot(
+      doc([
+        { day: "2025-03-04", models: { "b/m2": 2, "a/m1": 1 } },
+        { day: "2025-03-06", models: { "a/m1": 3 } },
+        { day: "2025-03-11", models: { "a/m1": 1 } },
+      ]),
+    );
+    expect(snap).toEqual({
+      format: "model-tides-weekly",
+      version: 2,
+      weeks: [
+        { week: "2025-03-03", models: { "a/m1": 4, "b/m2": 2 } },
+        { week: "2025-03-10", models: { "a/m1": 1 } },
+      ],
+    });
+  });
+
+  test("empty document yields an empty snapshot, not a TypeError", () => {
+    expect(buildWeeklySnapshot(doc([]))).toEqual({
+      format: "model-tides-weekly",
+      version: 2,
+      weeks: [],
+    });
+  });
+
+  test("limit errors name the limit and the actual value", () => {
+    const manyWeeks = Array.from({ length: MAX_WEEKS + 1 }, (_, i) => ({
+      day: new Date(Date.UTC(2000, 0, 4) + i * 7 * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      models: { "a/m": 1 },
+    }));
+    expect(() => buildWeeklySnapshot(doc(manyWeeks))).toThrow(
+      `${MAX_WEEKS + 1} weeks; Model Tides accepts at most ${MAX_WEEKS}`,
+    );
+    const manyCells = [
+      {
+        day: "2025-03-04",
+        models: Object.fromEntries(
+          Array.from({ length: MAX_WEEKLY_CELLS + 1 }, (_, i) => [
+            `p/m${i}`,
+            1,
+          ]),
+        ),
+      },
+    ];
+    expect(() => buildWeeklySnapshot(doc(manyCells))).toThrow(
+      `${MAX_WEEKLY_CELLS + 1} model-week cells; Model Tides accepts at most ${MAX_WEEKLY_CELLS}`,
+    );
+  });
+
+  test("snapshotSha256 matches sha256 of the serialized snapshot", () => {
+    const snap = buildWeeklySnapshot(
+      doc([{ day: "2025-03-04", models: { "a/m1": 1 } }]),
+    );
+    expect(snapshotSha256(snap)).toBe(
+      createHash("sha256").update(JSON.stringify(snap)).digest("hex"),
+    );
+  });
+
+  test("parseOwnedReport accepts review bounds past the upload limits", () => {
+    const id = "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b";
+    // 600 consecutive Mondays starting 2000-01-03 — over MAX_WEEKS (520)
+    // for uploads, under MAX_REVIEW_WEEKS (2048) for stored reports.
+    const counts = Array.from({ length: 600 }, (_, i) => ({
+      week: new Date(Date.UTC(2000, 0, 3) + i * 7 * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      model: "a/m",
+      count: 1,
+    }));
+    const report = parseOwnedReport(
+      { id, published: false, revision: 1, counts },
+      id,
+    );
+    expect(report.snapshot?.weeks).toHaveLength(600);
+    expect(() =>
+      parseSnapshot({
+        format: "model-tides-weekly",
+        version: 2,
+        weeks: counts.map(({ week, model, count }) => ({
+          week,
+          models: { [model]: count },
+        })),
+      }),
+    ).toThrow("Invalid weekly snapshot.");
+  });
+
+  test("parseOwnedReport rejects past MAX_REVIEW_WEEKS", () => {
+    const id = "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b";
+    const counts = Array.from({ length: 2049 }, (_, i) => ({
+      week: new Date(Date.UTC(1999, 11, 27) + i * 7 * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      model: "a/m",
+      count: 1,
+    }));
+    expect(() =>
+      parseOwnedReport({ id, published: false, revision: 1, counts }, id),
+    ).toThrow("Invalid weekly snapshot.");
+  });
+
+  test("parseSnapshot/parseOwnedReport reject malformed input", () => {
+    expect(() => parseSnapshot({ format: "x" })).toThrow(
+      "Invalid weekly snapshot.",
+    );
+    const report = parseOwnedReport(
+      {
+        id: "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b",
+        published: true,
+        inAggregate: false,
+        revision: 3,
+        metricVersion: 2,
+        counts: [{ week: "2025-03-03", model: "a/m", count: 2 }],
+      },
+      "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b",
+    );
+    expect(report.snapshot?.weeks[0]).toEqual({
+      week: "2025-03-03",
+      models: { "a/m": 2 },
+    });
+    expect(() =>
+      parseOwnedReport({ id: "nope" }, "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b"),
+    ).toThrow("Invalid personal report.");
+  });
+});
+
+describe("owner credential", () => {
+  const owner = {
+    id: "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b",
+    token: "A".repeat(43),
+  };
+
+  test("save/load/delete round-trips per tenant in kv_meta", () => {
+    withTenant(LOCAL_TENANT_ID, () => {
+      deleteOwner();
+      expect(loadOwner()).toBeNull();
+      saveOwner(owner);
+      expect(loadOwner()).toEqual(owner);
+      // Another tenant sees nothing.
+      withTenant("other-tenant", () => expect(loadOwner()).toBeNull());
+      deleteOwner();
+      expect(loadOwner()).toBeNull();
+    });
+  });
+
+  test("createOwner inserts only once — a second create conflicts", () => {
+    withTenant(LOCAL_TENANT_ID, () => {
+      deleteOwner();
+      createOwner(owner);
+      expect(loadOwner()).toEqual(owner);
+      expect(() => createOwner({ ...owner, token: "B".repeat(43) })).toThrow();
+      expect(loadOwner()).toEqual(owner);
+      deleteOwner();
+    });
+  });
+
+  test("rejects malformed credentials", () => {
+    expect(() => saveOwner({ id: "bad", token: owner.token })).toThrow(
+      "Invalid local private key.",
+    );
+    expect(() => saveOwner({ id: owner.id, token: "short" })).toThrow(
+      "Invalid local private key.",
+    );
+  });
 });

@@ -462,9 +462,10 @@ export const TeamPage: Component = () => {
     member?: TeamMember,
   ) => {
     const capability = members()?.actions[action];
-    const selfLeave = action === "remove" && member?.me;
-    if (!selfLeave && (!members()?.can_manage || capability === "admin_only"))
-      return "Only team admins can manage members.";
+    if (!members()?.can_manage || capability === "admin_only")
+      return action === "remove" && member?.me
+        ? "Only team admins can leave this team."
+        : "Only team admins can manage members.";
     if (capability === "unavailable")
       return "This action is unavailable while the team service is offline.";
     return "";
@@ -787,12 +788,9 @@ export const TeamPage: Component = () => {
                                           variant="outline"
                                           disabled={
                                             busy() ||
-                                            (row.original.me
-                                              ? current().actions.remove ===
-                                                "unavailable"
-                                              : !current().can_manage ||
-                                                current().actions.remove !==
-                                                  "available")
+                                            !current().can_manage ||
+                                            current().actions.remove !==
+                                              "available"
                                           }
                                           onClick={() =>
                                             setRemoveTarget(row.original)

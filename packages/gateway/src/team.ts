@@ -375,6 +375,7 @@ export async function removeTeamMember(
   client: SupabaseClient,
   scopeId: string,
   userId: string,
+  expectedRole?: "admin" | "editor" | "viewer",
 ): Promise<{
   newEpoch: number;
   rewrapped: number;
@@ -401,6 +402,24 @@ export async function removeTeamMember(
       throw new Error("team key epoch: invalid remote epoch");
 
     const members = await teamMembers(client, scopeId);
+    const actor = members.find((member) => member.userId === self);
+    if (!actor || actor.role !== "admin") {
+      throw new TeamRpcError(
+        "only a scope admin may remove team members",
+        "42501",
+      );
+    }
+    const target = members.find((member) => member.userId === userId);
+    if (!target) {
+      throw new TeamRpcError("team member not found", "P0002");
+    }
+    if (expectedRole && target.role !== expectedRole) {
+      throw new TeamRpcError(
+        "team member role changed; reload the team",
+        "P0001",
+      );
+    }
+    const targetRole = expectedRole ?? target.role;
     const remaining = members.filter((member) => member.userId !== userId);
     const recipients: { userId: string; publicKey: Uint8Array }[] = [];
     const skipped: string[] = [];
@@ -422,6 +441,7 @@ export async function removeTeamMember(
       p_scope: scopeId,
       p_user: userId,
       p_expected_epoch: expectedEpoch,
+      p_expected_role: targetRole,
       p_wraps: wraps,
     });
     if (error?.code === "40001") {

@@ -1728,11 +1728,10 @@ describe("shell: empty, error, not-found and locked states", () => {
   });
 
   it("renders the locked state when the gateway hides management from this peer", async () => {
+    let knowledgeRequests = 0;
     const client = fakeClient({
-      async listProjects() {
-        throw new ApiError("unauthorized", "/projects", "hidden", 404);
-      },
       async listProjectKnowledgePage() {
+        knowledgeRequests += 1;
         throw new ApiError(
           "unauthorized",
           "/projects/p-lore/knowledge",
@@ -1742,17 +1741,16 @@ describe("shell: empty, error, not-found and locked states", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client);
-    const status = await screen.findByTestId("connection-status");
-    await waitFor(() =>
-      expect(status).toHaveAttribute("data-connection", "unauthorized"),
+    const gate = await screen.findByTestId("gateway-auth-gate");
+    expect(gate).toHaveTextContent("Connect to your gateway");
+    expect(gate).toHaveTextContent("LORE_GATEWAY_AUTH_TOKEN");
+    expect(screen.getByLabelText("Gateway token")).toHaveAttribute(
+      "type",
+      "password",
     );
-    expect(status).toHaveTextContent("Management not authorized");
-    expect(status).toHaveTextContent("LORE_ALLOW_REMOTE_MANAGEMENT");
-    expect(screen.getByText("Projects hidden")).toBeInTheDocument();
-    expect(
-      await screen.findByText("Knowledge hidden by the gateway"),
-    ).toBeInTheDocument();
-    expect(document.querySelectorAll('[data-state="locked"]')).toHaveLength(2);
+    expect(knowledgeRequests).toBe(1);
+    expect(screen.queryByTestId("connection-status")).toBeNull();
+    expect(screen.queryByText("Keep SQLite")).toBeNull();
   });
 
   it("shows the not-found page for unknown client routes", () => {

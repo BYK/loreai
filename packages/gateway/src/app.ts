@@ -38,6 +38,7 @@ import {
   headersToRecord,
   hiddenManagementResponse,
   isLoopbackAddress,
+  managementBearerMatches,
   managementCorsOrigin,
   withManagementCors,
   withoutCors,
@@ -175,6 +176,22 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
 
     if (c.req.method === "OPTIONS") {
       return withManagementCors(new Response(null, { status: 204 }), origin);
+    }
+
+    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
+    const managementApiPath =
+      c.req.path === "/api" || c.req.path.startsWith("/api/");
+    if (
+      remotePeer &&
+      managementApiPath &&
+      (!config.gatewayAuthToken ||
+        !managementBearerMatches(
+          c.req.raw.headers,
+          config.gatewayAuthToken,
+          c.env.rawHeaders,
+        ))
+    ) {
+      return withManagementCors(hiddenManagementResponse(), origin);
     }
     return next();
   };

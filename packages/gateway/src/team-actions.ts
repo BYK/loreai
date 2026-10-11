@@ -92,6 +92,8 @@ function teamRpcError(error: unknown): Response {
         return errorResponse(409, "rotation_conflict", error.message);
       case "P0002":
         return errorResponse(404, "not_found", error.message);
+      case "P0001":
+        return errorResponse(409, "stale_member", error.message);
       case "22023":
         return errorResponse(400, "invalid_request", error.message);
     }
@@ -756,11 +758,11 @@ async function removeMember(
   }
   const access = await teamMutationAccess(scopeId, config);
   if (access instanceof Response) return access;
-  if (access.role !== "admin" && userId !== access.me) {
+  if (access.role !== "admin") {
     return errorResponse(
       403,
       "not_admin",
-      "Only team admins can change or remove members.",
+      "Only team admins can remove members.",
     );
   }
   try {
@@ -777,7 +779,12 @@ async function removeMember(
         { current_role: target.role },
       );
     }
-    const receipt = await removeTeamMember(access.client, scopeId, userId);
+    const receipt = await removeTeamMember(
+      access.client,
+      scopeId,
+      userId,
+      body.expected_role as "admin" | "editor" | "viewer",
+    );
     return json({
       removed: userId,
       new_epoch: receipt.newEpoch,
@@ -786,6 +793,23 @@ async function removeMember(
       unlinked_projects: receipt.unlinkedProjects,
     });
   } catch (error) {
+    if (error instanceof TeamRpcError && error.code === "P0001") {
+      let currentRole: string | null = null;
+      try {
+        currentRole =
+          (await teamMembers(access.client, scopeId)).find(
+            (member) => member.userId === userId,
+          )?.role ?? null;
+      } catch {
+        // The fixed stale-member response remains useful if the reload also fails.
+      }
+      return errorResponse(
+        409,
+        "stale_member",
+        "Team member role changed; reload the team.",
+        { current_role: currentRole },
+      );
+    }
     return teamRpcError(error);
   }
 }

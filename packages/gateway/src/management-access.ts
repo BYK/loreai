@@ -54,7 +54,10 @@ export function withManagementCors(
   if (!origin) return response;
   response.headers.set("access-control-allow-origin", origin);
   response.headers.set("access-control-allow-methods", CORS_METHODS);
-  response.headers.set("access-control-allow-headers", "content-type");
+  response.headers.set(
+    "access-control-allow-headers",
+    "authorization, content-type",
+  );
   response.headers.set("access-control-max-age", "600");
   response.headers.append("vary", "Origin");
   return response;
@@ -219,6 +222,20 @@ export function gatewayAccessMatches(
     ? singleRawHeaderValue(rawHeaders, GATEWAY_AUTH_HEADER)
     : headers.get(GATEWAY_AUTH_HEADER);
   return actual !== null && constantTimeTokenMatches(actual, expected);
+}
+
+/** Validate the single configured token at the remote management boundary. */
+export function managementBearerMatches(
+  headers: Headers,
+  expected: string,
+  rawHeaders?: readonly string[],
+): boolean {
+  if (rawHeaderCount(rawHeaders, "authorization") !== 1) return false;
+  const authorization = rawHeaders
+    ? singleRawHeaderValue(rawHeaders, "authorization")
+    : headers.get("authorization");
+  const match = /^Bearer ([\x21-\x2b\x2d-\x7e]+)$/i.exec(authorization ?? "");
+  return match !== null && constantTimeTokenMatches(match[1] ?? "", expected);
 }
 
 export function hasRawConflictingProviderAuth(

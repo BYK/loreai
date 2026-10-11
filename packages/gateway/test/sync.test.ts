@@ -5,6 +5,7 @@ import {
   close as closeDb,
   ensureProject as ensureProjectCore,
   getKV,
+  projectScope,
   setKV,
   deleteTeamConfig,
   reinstallSyncCapture,
@@ -354,6 +355,7 @@ function makeClient() {
           const filters: Array<{ op: string; col: string; val: string }> = [];
           const orders: string[] = [];
           let lim = Infinity;
+          let offset = 0;
           const run = () => {
             let rows = tableRows(table).slice();
             if (table === "scope_members") {
@@ -403,7 +405,7 @@ function makeClient() {
               }
               return 0;
             });
-            return { data: rows.slice(0, lim), error: null };
+            return { data: rows.slice(offset, offset + lim), error: null };
           };
           const b: Record<string, unknown> = {
             gte(c: string, v: string) {
@@ -424,6 +426,11 @@ function makeClient() {
             },
             limit(n: number) {
               lim = n;
+              return b;
+            },
+            range(from: number, to: number) {
+              offset = from;
+              lim = to - from + 1;
               return b;
             },
             // supabase-js single-row terminator: resolves to the first match or null.
@@ -474,6 +481,7 @@ import {
   pushOnce,
   pullOnce,
   reconcileScopeWraps,
+  refreshRegistryMirror,
   type SyncProgress,
   syncOnce,
   startSyncScheduler,
@@ -577,6 +585,80 @@ beforeEach(() => {
 });
 
 afterEach(() => syncData.assertSyncInvariants()); // #834 — continuous invariant guard
+
+describe("removed-member registry refresh", () => {
+  test("unlinks and requeues team projects after the complete membership snapshot", async () => {
+    const scopeId = "removed-member-team-scope";
+    const memberId = "removed-member-current-user";
+    mockUserId = memberId;
+    const timestamp = new Date().toISOString();
+    const projectId = ensureProject("/tmp/removed-member-registry-refresh");
+    db()
+      .query(
+        "INSERT OR REPLACE INTO scopes (id, org_id, kind, name, created_at, updated_at) VALUES (?, NULL, 'team', ?, ?, ?)",
+      )
+      .run(scopeId, "Team", now(), now());
+    db()
+      .query(
+        "INSERT OR REPLACE INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES (?, ?, 'admin', ?, ?)",
+      )
+      .run(scopeId, memberId, now(), now());
+    setProjectScope(projectId, scopeId);
+    db()
+      .query(
+        `INSERT INTO knowledge
+           (id, project_id, category, title, content, created_at, updated_at)
+         VALUES (?, ?, 'pattern', 'Removed member', 'Local team content', ?, ?)`,
+      )
+      .run("k-removed-member-refresh", projectId, now(), now());
+    syncData.enableSync("basic");
+    db().exec("DELETE FROM sync_outbox");
+
+    remote.set("scopes", [
+      {
+        id: scopeId,
+        org_id: null,
+        kind: "team",
+        name: "Team",
+        created_at: timestamp,
+        updated_at: timestamp,
+      },
+    ]);
+    remote.set("scope_members", [
+      {
+        scope_id: scopeId,
+        user_id: "remaining-member",
+        role: "admin",
+        created_at: timestamp,
+        updated_at: timestamp,
+      },
+    ]);
+
+    const reconcile = vi.spyOn(syncData, "reconcileRemovedTeamProjects");
+    await refreshRegistryMirror(makeClient() as never);
+    const reconciliationResult = reconcile.mock.results[0]?.value;
+    const reconciliationCalls = reconcile.mock.calls;
+    reconcile.mockRestore();
+
+    expect(reconciliationCalls).toEqual([[memberId]]);
+    expect(reconciliationResult).toBe(1);
+    expect(
+      db()
+        .query("SELECT user_id FROM scope_members WHERE scope_id = ?")
+        .all(scopeId),
+    ).toEqual([{ user_id: "remaining-member" }]);
+    expect(projectScope(projectId)).toBeNull();
+    expect(
+      syncData
+        .readOutbox(0, 1000)
+        .some(
+          (row) =>
+            row.table_name === "knowledge" &&
+            row.row_id === "k-removed-member-refresh",
+        ),
+    ).toBe(true);
+  });
+});
 
 // E-3b (#827/#1260): publishIdentityPub publishes this device's account PUBLIC key to the
 // remote identity_pub directory. Unit-covered here (the integration test needs Docker, so it

@@ -18,6 +18,8 @@
 import { type as schema, type Type } from "arktype";
 
 import {
+  modelTidesMutationResult,
+  modelUsageUploadState,
   accountStatus,
   crossProjectKnowledgeEntry,
   ApiError,
@@ -97,7 +99,9 @@ import {
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
+  type ModelTidesMutationResult,
   type ModelUsageDocument,
+  type ModelUsageUploadState,
   type ContradictionDecision,
   type ContradictionDecisionResult,
   type ContradictionListResponse,
@@ -190,6 +194,36 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   /** Path prefix, defaults to `/api/v1` (same-origin; the Vite dev server proxies it). */
   base?: string;
+  /** Injected for tests; production keeps this browser-local in sessionStorage. */
+  getGatewayAuthToken?: () => string | null;
+  /** Injected for tests; production removes a rejected token from sessionStorage. */
+  clearGatewayAuthToken?: () => void;
+}
+
+const GATEWAY_AUTH_STORAGE_KEY = "lore.gateway-auth-token";
+
+function storedGatewayAuthToken(): string | null {
+  try {
+    return globalThis.sessionStorage?.getItem(GATEWAY_AUTH_STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setGatewayAuthToken(token: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(GATEWAY_AUTH_STORAGE_KEY, token);
+  } catch {
+    // Keep the token in the browser's available storage only; never send it elsewhere.
+  }
+}
+
+export function clearGatewayAuthToken(): void {
+  try {
+    globalThis.sessionStorage?.removeItem(GATEWAY_AUTH_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in privacy-restricted browser contexts.
+  }
 }
 
 async function readErrorDetails(res: Response): Promise<{
@@ -240,6 +274,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   const base = options.base ?? API_BASE;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const getGatewayAuthToken =
+    options.getGatewayAuthToken ?? storedGatewayAuthToken;
+  const clearRejectedGatewayAuthToken =
+    options.clearGatewayAuthToken ?? clearGatewayAuthToken;
 
   /**
    * Shared transport + error classifier for GET (getJson) and the write
@@ -253,6 +291,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
+    const gatewayAuthToken = getGatewayAuthToken();
+    if (gatewayAuthToken) {
+      headers.set("authorization", `Bearer ${gatewayAuthToken}`);
+    }
     let res: Response;
     try {
       res = await doFetch(`${base}${path}`, {
@@ -268,6 +310,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (res.status === 401) {
       const details = await readErrorDetails(res);
+      clearRejectedGatewayAuthToken();
       throw new ApiError(
         "unauthorized",
         path,
@@ -293,6 +336,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         );
       }
       if (details.message === null) {
+        clearRejectedGatewayAuthToken();
         throw new ApiError(
           "unauthorized",
           path,
@@ -328,6 +372,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
         if (details.message === null) {
+          clearRejectedGatewayAuthToken();
           throw new ApiError(
             "unauthorized",
             path,
@@ -1240,6 +1285,59 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["model-usage"], { project: opts.project }),
         modelUsageDocument,
+        signal,
+      );
+    },
+    /**
+     * Consented Model Tides upload (#2026 PR3). Nothing is uploaded
+     * automatically — every mutation carries `{ confirm: "YES" }` plus the
+     * hash/revision the user just reviewed.
+     */
+    getModelUsageUpload(signal?: AbortSignal): Promise<ModelUsageUploadState> {
+      return getJson(
+        apiPath(["model-usage", "upload"]),
+        modelUsageUploadState,
+        signal,
+      );
+    },
+    postModelUsageUpload(
+      body: {
+        confirm: "YES";
+        snapshot_sha256: string;
+        reviewed_revision?: number;
+      },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    postModelUsageUploadAction(
+      action: "share" | "unshare" | "contribute" | "withdraw" | "rotate",
+      body: { confirm: "YES"; reviewed_revision?: number },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload", action]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    deleteModelUsageUpload(
+      body: { confirm: "YES" },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
         signal,
       );
     },

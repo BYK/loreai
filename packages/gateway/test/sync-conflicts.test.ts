@@ -213,7 +213,7 @@ describe("sync conflict routes", () => {
     const id = recordKnowledgeConflict(logicalId, {
       title: initial.title,
       content: "Restored local content",
-      category: "pattern",
+      category: "decision",
     });
     const response = await request(
       `/api/v1/sync/conflicts/${id}/keep-local`,
@@ -232,7 +232,38 @@ describe("sync conflict routes", () => {
       },
     });
     expect(body.current.version_id).not.toBe(initial.version_id);
+    expect(ltm.getByLogical(logicalId)?.category).toBe("decision");
     expect(syncData.getSyncConflict(id)).toBeNull();
+  });
+
+  it("rolls back keep-local when deleting the conflict fails in SQLite", async () => {
+    const logicalId = makeKnowledge();
+    const initial = currentEntry(logicalId);
+    const id = recordKnowledgeConflict(logicalId, {
+      title: "Restored title",
+      content: "Restored local content",
+      category: "decision",
+    });
+    db().exec(`
+      CREATE TEMP TRIGGER fail_sync_conflict_delete
+      BEFORE DELETE ON sync_conflicts
+      BEGIN SELECT RAISE(ABORT, 'forced conflict-delete failure'); END;
+    `);
+
+    try {
+      await expect(
+        request(
+          `/api/v1/sync/conflicts/${id}/keep-local`,
+          "POST",
+          JSON.stringify({ expected_version_id: initial.version_id }),
+        ),
+      ).rejects.toThrow("forced conflict-delete failure");
+    } finally {
+      db().exec("DROP TRIGGER fail_sync_conflict_delete");
+    }
+
+    expect(currentEntry(logicalId)).toEqual(initial);
+    expect(syncData.getSyncConflict(id)).not.toBeNull();
   });
 
   it("leaves a conflict intact when the expected current version is stale", async () => {
@@ -321,6 +352,7 @@ describe("sync conflict routes", () => {
     });
     expect(syncData.getSyncConflict(id)).toBeNull();
     expect(ltm.getByLogical(logicalId)).toMatchObject({
+      category: "decision",
       approval_status: "auto",
       metadata: {
         gitHead: "b".repeat(40),
@@ -377,6 +409,7 @@ describe("sync conflict routes", () => {
         content: "Local content",
       },
     });
+    expect(ltm.getByLogical(logicalId)?.category).toBe("decision");
     expect(syncData.getSyncConflict(id)).toBeNull();
   });
 

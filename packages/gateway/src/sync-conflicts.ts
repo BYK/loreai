@@ -1,4 +1,10 @@
-import { currentTenantId, db, ltm, syncData } from "@loreai/core";
+import {
+  currentTenantId,
+  db,
+  ltm,
+  syncData,
+  withSavepoint,
+} from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import {
   errorResponse,
@@ -239,58 +245,64 @@ export function keepSyncConflictLocal(
   if (!local)
     return actionError(409, "not_recoverable", "Local snapshot is unreadable.");
   const isRemoteDelete = conflict.resolution === "remote_delete_wins";
-  const current = currentKnowledge(conflict.row_id, isRemoteDelete);
-  if (isRemoteDelete && current?.is_deleted === 1) {
-    const result = ltm.restoreDeletedKnowledge(conflict.row_id, {
-      expectedDeletedVersionId: expectedVersionId,
-      conflictId: id,
-      title: local.title,
-      content: local.content,
-      metadata: parseLocalKnowledge(conflict.local_content)
-        ?.metadata as RestoreMetadata,
-    });
-    if (!result.ok) {
-      return actionError(
-        409,
-        "stale_version",
-        "Knowledge entry changed; reload the conflict.",
-        { current_version_id: result.currentVersionId },
-      );
-    }
-  } else {
-    if (!current) {
-      return actionError(
-        409,
-        "not_recoverable",
-        "The current knowledge entry is no longer available.",
-      );
-    }
-    if (expectedVersionId !== current.version_id) {
-      return actionError(
-        409,
-        "stale_version",
-        "Knowledge entry changed; reload the conflict.",
-        { current_version_id: current.version_id },
-      );
-    }
-    ltm.update(conflict.row_id, {
-      title: local.title,
-      content: local.content,
-    });
-  }
-  syncData.deleteSyncConflict(id);
-  const updated = currentKnowledge(conflict.row_id);
-  return updated
-    ? {
-        ok: true,
-        status: 200,
-        value: { kept: "local", current: currentShape(updated) },
+  return withSavepoint("keep_sync_conflict_local", () => {
+    const current = currentKnowledge(conflict.row_id, isRemoteDelete);
+    if (isRemoteDelete && current?.is_deleted === 1) {
+      const result = ltm.restoreDeletedKnowledge(conflict.row_id, {
+        expectedDeletedVersionId: expectedVersionId,
+        conflictId: id,
+        title: local.title,
+        content: local.content,
+        ...(local.category !== undefined ? { category: local.category } : {}),
+        metadata: parseLocalKnowledge(conflict.local_content)
+          ?.metadata as RestoreMetadata,
+      });
+      if (!result.ok) {
+        return actionError(
+          409,
+          "stale_version",
+          "Knowledge entry changed; reload the conflict.",
+          { current_version_id: result.currentVersionId },
+        );
       }
-    : actionError(
-        409,
-        "not_recoverable",
-        "The knowledge entry is no longer available.",
-      );
+    } else {
+      if (!current) {
+        return actionError(
+          409,
+          "not_recoverable",
+          "The current knowledge entry is no longer available.",
+        );
+      }
+      if (expectedVersionId !== current.version_id) {
+        return actionError(
+          409,
+          "stale_version",
+          "Knowledge entry changed; reload the conflict.",
+          { current_version_id: current.version_id },
+        );
+      }
+      ltm.update(conflict.row_id, {
+        title: local.title,
+        content: local.content,
+        category: local.category ?? current.category,
+      });
+    }
+    if (!syncData.deleteSyncConflict(id)) {
+      throw new Error("Sync conflict was already resolved");
+    }
+    const updated = currentKnowledge(conflict.row_id);
+    return updated
+      ? {
+          ok: true,
+          status: 200,
+          value: { kept: "local", current: currentShape(updated) },
+        }
+      : actionError(
+          409,
+          "not_recoverable",
+          "The knowledge entry is no longer available.",
+        );
+  });
 }
 
 export function discardSyncConflict(id: number): SyncConflictActionResult {

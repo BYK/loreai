@@ -130,12 +130,13 @@ async function remove(
   scope: string,
   target: string,
   expectedEpoch: number,
+  expectedRole: "admin" | "editor" | "viewer",
   wraps: unknown,
 ) {
   return h.asUser(caller, (client) =>
     client.query(
-      "select public.remove_scope_member_rotating($1, $2, $3, $4::jsonb) as epoch",
-      [scope, target, expectedEpoch, JSON.stringify(wraps)],
+      "select public.remove_scope_member_rotating($1, $2, $3, $4, $5::jsonb) as epoch",
+      [scope, target, expectedEpoch, expectedRole, JSON.stringify(wraps)],
     ),
   );
 }
@@ -196,272 +197,273 @@ const invalidWraps: [string, WrapFactory][] = [
   ],
 ];
 
-describe.skipIf(SKIP)(
-  "0054 atomic scope-member removal and key rotation",
-  () => {
-    it.each(invalidWraps)(
-      "rejects %s without mutating removal state",
-      async (_name, makeWraps) => {
-        const fixture = await makeRemovalFixture();
-        const before = await snapshot(fixture.scope, fixture.target);
-        const error = await expectPgError(() =>
-          remove(
-            fixture.owner,
-            fixture.scope,
-            fixture.target,
-            0,
-            makeWraps(fixture.owner, fixture.secondAdmin, fixture.target),
-          ),
-        );
-        expect(error.code).toBe("22023");
-        expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
-      },
-    );
-
-    it("rejects a stale epoch without changing membership, epoch, wraps, or invites", async () => {
+describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
+  it.each(invalidWraps)(
+    "rejects %s without mutating removal state",
+    async (_name, makeWraps) => {
       const fixture = await makeRemovalFixture();
       const before = await snapshot(fixture.scope, fixture.target);
       const error = await expectPgError(() =>
-        remove(fixture.owner, fixture.scope, fixture.target, 99, [
-          wrap(fixture.owner),
-          wrap(fixture.secondAdmin),
-        ]),
+        remove(
+          fixture.owner,
+          fixture.scope,
+          fixture.target,
+          0,
+          "viewer",
+          makeWraps(fixture.owner, fixture.secondAdmin, fixture.target),
+        ),
       );
-      expect(error.code).toBe("40001");
-      expect(error.message).toContain("team key changed concurrently; retry");
+      expect(error.code).toBe("22023");
       expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
-    });
+    },
+  );
 
-    it("protects last-admin self-removal and demotion with the specified messages", async () => {
-      const admin = await h.createUser();
-      const scope = await createTeam(admin);
-      const before = await snapshot(scope, admin);
-      const removalError = await expectPgError(() =>
-        remove(admin, scope, admin, 0, []),
-      );
-      expect(removalError.code).toBe("23514");
-      expect(removalError.message).toContain(
-        "cannot remove the last admin; promote another member to admin first",
-      );
+  it("rejects a stale epoch without changing membership, epoch, wraps, or invites", async () => {
+    const fixture = await makeRemovalFixture();
+    const before = await snapshot(fixture.scope, fixture.target);
+    const error = await expectPgError(() =>
+      remove(fixture.owner, fixture.scope, fixture.target, 99, "viewer", [
+        wrap(fixture.owner),
+        wrap(fixture.secondAdmin),
+      ]),
+    );
+    expect(error.code).toBe("40001");
+    expect(error.message).toContain("team key changed concurrently; retry");
+    expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
+  });
 
-      const demotionError = await expectPgError(() =>
-        setRole(admin, scope, admin, "editor"),
-      );
-      expect(demotionError.code).toBe("23514");
-      expect(demotionError.message).toContain(
-        "cannot demote the last admin; promote another member to admin first",
-      );
-      expect(await snapshot(scope, admin)).toEqual(before);
-    });
+  it("rejects a non-admin's direct self-removal without changing team state", async () => {
+    const fixture = await makeRemovalFixture();
+    const before = await snapshot(fixture.scope, fixture.target);
+    const error = await expectPgError(() =>
+      remove(fixture.target, fixture.scope, fixture.target, 0, "viewer", [
+        wrap(fixture.owner),
+        wrap(fixture.secondAdmin),
+      ]),
+    );
 
-    it("lets a non-owner admin leave atomically and removes their access and wraps", async () => {
-      const owner = await h.createUser();
-      const leaver = await h.createUser();
-      const editor = await h.createUser();
-      const scope = await createTeam(owner);
-      await addMember(owner, scope, leaver, "admin");
-      await addMember(owner, scope, editor, "editor");
-      await publishKey(owner);
-      await publishKey(leaver);
-      await publishKey(editor);
-      await seedScopeKeys(scope, owner, [owner, leaver, editor]);
-      await addInvite(owner, scope);
+    expect(error.code).toBe("42501");
+    expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
+  });
 
-      const result = await remove(leaver, scope, leaver, 0, [
-        wrap(owner),
-        wrap(editor),
-      ]);
-      expect(result.rows[0].epoch).toBe(1);
-      const newWraps = await h.client
+  it("rejects a stale expected role after a concurrent promotion", async () => {
+    const fixture = await makeRemovalFixture();
+    await setRole(fixture.owner, fixture.scope, fixture.target, "editor");
+    const before = await snapshot(fixture.scope, fixture.target);
+    const error = await expectPgError(() =>
+      h.asUser(fixture.owner, (client) =>
+        client.query(
+          "select public.remove_scope_member_rotating($1, $2, $3, $4, $5::jsonb)",
+          [
+            fixture.scope,
+            fixture.target,
+            0,
+            "viewer",
+            JSON.stringify([wrap(fixture.owner), wrap(fixture.secondAdmin)]),
+          ],
+        ),
+      ),
+    );
+
+    expect(error.code).toBe("P0001");
+    expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
+  });
+
+  it("protects last-admin self-removal and demotion with the specified messages", async () => {
+    const admin = await h.createUser();
+    const scope = await createTeam(admin);
+    const before = await snapshot(scope, admin);
+    const removalError = await expectPgError(() =>
+      remove(admin, scope, admin, 0, "admin", []),
+    );
+    expect(removalError.code).toBe("23514");
+    expect(removalError.message).toContain(
+      "cannot remove the last admin; promote another member to admin first",
+    );
+
+    const demotionError = await expectPgError(() =>
+      setRole(admin, scope, admin, "editor"),
+    );
+    expect(demotionError.code).toBe("23514");
+    expect(demotionError.message).toContain(
+      "cannot demote the last admin; promote another member to admin first",
+    );
+    expect(await snapshot(scope, admin)).toEqual(before);
+  });
+
+  it("lets a non-owner admin leave atomically and removes their access and wraps", async () => {
+    const owner = await h.createUser();
+    const leaver = await h.createUser();
+    const editor = await h.createUser();
+    const scope = await createTeam(owner);
+    await addMember(owner, scope, leaver, "admin");
+    await addMember(owner, scope, editor, "editor");
+    await publishKey(owner);
+    await publishKey(leaver);
+    await publishKey(editor);
+    await seedScopeKeys(scope, owner, [owner, leaver, editor]);
+    await addInvite(owner, scope);
+
+    const result = await remove(leaver, scope, leaver, 0, "admin", [
+      wrap(owner),
+      wrap(editor),
+    ]);
+    expect(result.rows[0].epoch).toBe(1);
+    const newWraps = await h.client
+      .query(
+        "select member_user_id, author_id, wrapped_dek from public.scope_keys where scope_id=$1 and key_epoch=1",
+        [scope],
+      )
+      .then((response) => response.rows);
+    expect(newWraps).toEqual(
+      [editor, owner].sort().map((memberUserId) => ({
+        member_user_id: memberUserId,
+        author_id: leaver,
+        wrapped_dek: "next-wrap",
+      })),
+    );
+    expect(
+      await h.client
         .query(
-          "select member_user_id, author_id, wrapped_dek from public.scope_keys where scope_id=$1 and key_epoch=1",
+          "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
+          [scope, leaver],
+        )
+        .then((response) => response.rows[0].count),
+    ).toBe(0);
+    expect(
+      await h.client
+        .query(
+          "select role from public.scope_members where scope_id=$1 and user_id=$2",
+          [scope, leaver],
+        )
+        .then((response) => response.rows[0]?.role ?? null),
+    ).toBeNull();
+    expect(
+      await h.client
+        .query(
+          "select count(*)::int as count from public.pending_invites where scope_id=$1",
           [scope],
         )
-        .then((response) => response.rows);
-      expect(newWraps).toEqual(
-        [editor, owner].sort().map((memberUserId) => ({
-          member_user_id: memberUserId,
-          author_id: leaver,
-          wrapped_dek: "next-wrap",
-        })),
-      );
-      expect(
-        await h.client
-          .query(
-            "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
-            [scope, leaver],
-          )
-          .then((response) => response.rows[0].count),
-      ).toBe(0);
-      expect(
-        await h.client
-          .query(
-            "select role from public.scope_members where scope_id=$1 and user_id=$2",
-            [scope, leaver],
-          )
-          .then((response) => response.rows[0]?.role ?? null),
-      ).toBeNull();
-      expect(
-        await h.client
-          .query(
-            "select count(*)::int as count from public.pending_invites where scope_id=$1",
-            [scope],
-          )
-          .then((response) => response.rows[0].count),
-      ).toBe(0);
-      expect(
-        await h.client
-          .query(
-            "select count(*)::int as count from public.org_members where org_id=(select org_id from public.scopes where id=$1) and user_id=$2",
-            [scope, leaver],
-          )
-          .then((response) => response.rows[0].count),
-      ).toBe(0);
-      expect(
-        await h.asUser(leaver, (client) =>
-          client
-            .query("select id from public.scopes where id=$1", [scope])
-            .then((response) => response.rowCount),
-        ),
-      ).toBe(0);
-    });
-
-    it("lets an editor leave with rotated wraps and verifies member/key reads under RLS", async () => {
-      const owner = await h.createUser();
-      const editor = await h.createUser();
-      const viewer = await h.createUser();
-      const scope = await createTeam(owner);
-      await addMember(owner, scope, editor, "editor");
-      await addMember(owner, scope, viewer, "viewer");
-      await publishKey(owner);
-      await publishKey(editor);
-      await publishKey(viewer);
-      await seedScopeKeys(scope, owner, [owner, editor, viewer]);
-
-      const visibleMembers = await h.asUser(editor, (client) =>
-        client.query(
-          "select user_id from public.scope_members where scope_id=$1",
-          [scope],
-        ),
-      );
-      expect(
-        visibleMembers.rows
-          .map((row) => row.user_id)
-          .sort((a, b) => a.localeCompare(b)),
-      ).toEqual([owner, editor, viewer].sort((a, b) => a.localeCompare(b)));
-      const visibleKey = await h.asUser(editor, (client) =>
-        client.query(
-          "select user_id, public_key from public.identity_pub where user_id=$1",
-          [owner],
-        ),
-      );
-      expect(visibleKey.rows).toHaveLength(1);
-      expect(visibleKey.rows[0].user_id).toBe(owner);
-
-      const result = await remove(editor, scope, editor, 0, [
-        wrap(owner),
-        wrap(viewer),
-      ]);
-      expect(result.rows[0].epoch).toBe(1);
-      const newWraps = await h.client
+        .then((response) => response.rows[0].count),
+    ).toBe(0);
+    expect(
+      await h.client
         .query(
-          "select member_user_id, author_id, wrapped_dek from public.scope_keys where scope_id=$1 and key_epoch=1 order by member_user_id",
-          [scope],
+          "select count(*)::int as count from public.org_members where org_id=(select org_id from public.scopes where id=$1) and user_id=$2",
+          [scope, leaver],
         )
-        .then((response) => response.rows);
-      expect(newWraps).toEqual(
-        [owner, viewer]
-          .sort((a, b) => a.localeCompare(b))
-          .map((memberUserId) => ({
-            member_user_id: memberUserId,
-            author_id: editor,
-            wrapped_dek: "next-wrap",
-          })),
-      );
-      expect(
-        await h.client
-          .query(
-            "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
-            [scope, editor],
-          )
-          .then((response) => response.rows[0].count),
-      ).toBe(0);
-      expect(
-        await h.client
-          .query("select key_epoch from public.scopes where id=$1", [scope])
-          .then((response) => response.rows[0].key_epoch),
-      ).toBe(1);
-    });
+        .then((response) => response.rows[0].count),
+    ).toBe(0);
+    expect(
+      await h.asUser(leaver, (client) =>
+        client
+          .query("select id from public.scopes where id=$1", [scope])
+          .then((response) => response.rowCount),
+      ),
+    ).toBe(0);
+  });
 
-    it("lets a viewer leave without granting them permission to remove others", async () => {
-      const owner = await h.createUser();
-      const viewer = await h.createUser();
-      const editor = await h.createUser();
-      const scope = await createTeam(owner);
-      await addMember(owner, scope, viewer, "viewer");
-      await addMember(owner, scope, editor, "editor");
-      await publishKey(owner);
-      await publishKey(viewer);
-      await publishKey(editor);
-      await seedScopeKeys(scope, owner, [owner, viewer, editor]);
+  it("rejects an editor attempting self-removal without changing team state", async () => {
+    const owner = await h.createUser();
+    const editor = await h.createUser();
+    const viewer = await h.createUser();
+    const scope = await createTeam(owner);
+    await addMember(owner, scope, editor, "editor");
+    await addMember(owner, scope, viewer, "viewer");
+    await publishKey(owner);
+    await publishKey(editor);
+    await publishKey(viewer);
+    await seedScopeKeys(scope, owner, [owner, editor, viewer]);
 
-      const result = await remove(viewer, scope, viewer, 0, [
-        wrap(owner),
-        wrap(editor),
-      ]);
+    const visibleMembers = await h.asUser(editor, (client) =>
+      client.query(
+        "select user_id from public.scope_members where scope_id=$1",
+        [scope],
+      ),
+    );
+    expect(
+      visibleMembers.rows
+        .map((row) => row.user_id)
+        .sort((a, b) => a.localeCompare(b)),
+    ).toEqual([owner, editor, viewer].sort((a, b) => a.localeCompare(b)));
+    const visibleKey = await h.asUser(editor, (client) =>
+      client.query(
+        "select user_id, public_key from public.identity_pub where user_id=$1",
+        [owner],
+      ),
+    );
+    expect(visibleKey.rows).toHaveLength(1);
+    expect(visibleKey.rows[0].user_id).toBe(owner);
 
-      expect(result.rows[0].epoch).toBe(1);
-      expect(await snapshot(scope, viewer)).toMatchObject({
-        membership: null,
-        epoch: 1,
-      });
-      expect(
-        await h.client
-          .query(
-            "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
-            [scope, viewer],
-          )
-          .then((response) => response.rows[0].count),
-      ).toBe(0);
-    });
+    const before = await snapshot(scope, editor);
+    const error = await expectPgError(() =>
+      remove(editor, scope, editor, 0, "editor", [wrap(owner), wrap(viewer)]),
+    );
+    expect(error.code).toBe("42501");
+    expect(await snapshot(scope, editor)).toEqual(before);
+    expect(
+      await h.client
+        .query("select key_epoch from public.scopes where id=$1", [scope])
+        .then((response) => response.rows[0].key_epoch),
+    ).toBe(0);
+  });
 
-    it("revokes direct execution of the old removal RPC", async () => {
-      const admin = await h.createUser();
-      const target = await h.createUser();
-      const scope = await createTeam(admin);
-      await addMember(admin, scope, target, "viewer");
-      const error = await expectPgError(() =>
-        h.asUser(admin, (client) =>
-          client.query("select public.remove_scope_member($1, $2)", [
-            scope,
-            target,
-          ]),
-        ),
-      );
-      expect(error.code).toBe("42501");
-    });
+  it("rejects a viewer attempting self-removal without changing team state", async () => {
+    const owner = await h.createUser();
+    const viewer = await h.createUser();
+    const editor = await h.createUser();
+    const scope = await createTeam(owner);
+    await addMember(owner, scope, viewer, "viewer");
+    await addMember(owner, scope, editor, "editor");
+    await publishKey(owner);
+    await publishKey(viewer);
+    await publishKey(editor);
+    await seedScopeKeys(scope, owner, [owner, viewer, editor]);
 
-    it("returns 42501 when an editor removes someone else and P0002 for a missing target", async () => {
-      const owner = await h.createUser();
-      const editor = await h.createUser();
-      const scope = await createTeam(owner);
-      await addMember(owner, scope, editor, "editor");
-      await addInvite(owner, scope);
-      const missing = await h.createUser();
+    const before = await snapshot(scope, viewer);
+    const error = await expectPgError(() =>
+      remove(viewer, scope, viewer, 0, "viewer", [wrap(owner), wrap(editor)]),
+    );
+    expect(error.code).toBe("42501");
+    expect(await snapshot(scope, viewer)).toEqual(before);
+  });
 
-      const ownerBefore = await snapshot(scope, owner);
-      const nonAdminError = await expectPgError(() =>
-        remove(editor, scope, owner, 0, [wrap(editor)]),
-      );
-      expect(nonAdminError.code).toBe("42501");
-      expect(await snapshot(scope, owner)).toEqual(ownerBefore);
+  it("revokes direct execution of the old removal RPC", async () => {
+    const admin = await h.createUser();
+    const target = await h.createUser();
+    const scope = await createTeam(admin);
+    await addMember(admin, scope, target, "viewer");
+    const error = await expectPgError(() =>
+      h.asUser(admin, (client) =>
+        client.query("select public.remove_scope_member($1, $2)", [
+          scope,
+          target,
+        ]),
+      ),
+    );
+    expect(error.code).toBe("42501");
+  });
 
-      const missingBefore = await snapshot(scope, missing);
-      const missingError = await expectPgError(() =>
-        remove(owner, scope, missing, 0, [wrap(owner)]),
-      );
-      expect(missingError.code).toBe("P0002");
-      expect(await snapshot(scope, missing)).toEqual(missingBefore);
-    });
-  },
-);
+  it("returns 42501 when an editor removes someone else and P0002 for a missing target", async () => {
+    const owner = await h.createUser();
+    const editor = await h.createUser();
+    const scope = await createTeam(owner);
+    await addMember(owner, scope, editor, "editor");
+    await addInvite(owner, scope);
+    const missing = await h.createUser();
+
+    const ownerBefore = await snapshot(scope, owner);
+    const nonAdminError = await expectPgError(() =>
+      remove(editor, scope, owner, 0, "admin", [wrap(editor)]),
+    );
+    expect(nonAdminError.code).toBe("42501");
+    expect(await snapshot(scope, owner)).toEqual(ownerBefore);
+
+    const missingBefore = await snapshot(scope, missing);
+    const missingError = await expectPgError(() =>
+      remove(owner, scope, missing, 0, "viewer", [wrap(owner)]),
+    );
+    expect(missingError.code).toBe("P0002");
+    expect(await snapshot(scope, missing)).toEqual(missingBefore);
+  });
+});

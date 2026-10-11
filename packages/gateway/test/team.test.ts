@@ -265,7 +265,10 @@ describe("removeTeamMember", () => {
       scopeId: "s-4",
       newEpoch: 1,
       epoch: 0,
-      members: [{ user_id: SELF, role: "admin" }],
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: MEMBER, role: "viewer" },
+      ],
     });
     await createTeam(c, "T");
     const r = await removeTeamMember(c, "s-4", MEMBER);
@@ -282,6 +285,7 @@ describe("removeTeamMember", () => {
       p_scope: "s-4",
       p_user: MEMBER,
       p_expected_epoch: 0,
+      p_expected_role: "viewer",
       p_wraps: [
         {
           member_user_id: SELF,
@@ -303,6 +307,7 @@ describe("removeTeamMember", () => {
       members: [
         { user_id: SELF, role: "admin" },
         { user_id: "other", role: "editor" },
+        { user_id: MEMBER, role: "viewer" },
       ],
       pubFor: (uid) => (uid === "other" ? null : selfPubB64),
     });
@@ -320,6 +325,7 @@ describe("removeTeamMember", () => {
         { user_id: SELF, role: "admin" },
         { user_id: "other", role: "editor" },
         { user_id: "broken-key", role: "editor" },
+        { user_id: MEMBER, role: "viewer" },
       ],
       pubFor: (uid) =>
         uid === "other" ? selfPubB64 : uid === "broken-key" ? "AA==" : null,
@@ -337,7 +343,10 @@ describe("removeTeamMember", () => {
   it("does not persist local wraps when the atomic RPC fails", async () => {
     const c = makeClient({
       scopeId: "s-rpc-failure",
-      members: [{ user_id: SELF, role: "admin" }],
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: MEMBER, role: "viewer" },
+      ],
       rpc: (name) =>
         name === "remove_scope_member_rotating"
           ? {
@@ -362,6 +371,7 @@ describe("removeTeamMember", () => {
       members: [
         { user_id: SELF, role: "admin" },
         { user_id: "other", role: "editor" },
+        { user_id: MEMBER, role: "viewer" },
       ],
       pubFor: (uid) => (uid === "other" ? selfPubB64 : null),
       rpc: (name, params) => {
@@ -410,6 +420,7 @@ describe("removeTeamMember", () => {
       members: [
         { user_id: SELF, role: "admin" },
         { user_id: "other", role: "editor" },
+        { user_id: MEMBER, role: "viewer" },
       ],
       pubFor: (uid) => (uid === "other" ? selfPubB64 : null),
       rpc: (name) => {
@@ -452,7 +463,10 @@ describe("removeTeamMember", () => {
     }[] = [];
     const c = makeClient({
       scopeId: "s-crash",
-      members: [{ user_id: SELF, role: "admin" }],
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: MEMBER, role: "viewer" },
+      ],
       rpc: (name, params) => {
         if (name !== "remove_scope_member_rotating") return null;
         committedWraps = params.p_wraps as typeof committedWraps;
@@ -484,11 +498,33 @@ describe("removeTeamMember", () => {
     expect((await keystore.getScopeKey("s-crash", SELF)).byteLength).toBe(32);
   });
 
-  it("leaves as an editor without persisting a wrap and unlinks every local project", async () => {
+  it("rejects self-removal by a non-admin without changing local scope", async () => {
+    const c = makeClient({
+      scopeId: "s-editor-cannot-leave",
+      members: [
+        { user_id: SELF, role: "editor" },
+        { user_id: "other-admin", role: "admin" },
+      ],
+    });
+    await createTeam(c, "T");
+    const project = ensureProject("/test/team-editor-cannot-leave");
+    setProjectScope(project, "s-editor-cannot-leave");
+
+    await expect(
+      removeTeamMember(c, "s-editor-cannot-leave", SELF),
+    ).rejects.toMatchObject({ code: "42501" });
+
+    expect(projectScope(project)).toBe("s-editor-cannot-leave");
+    expect(
+      c.rpcCalls.some((call) => call.name === "remove_scope_member_rotating"),
+    ).toBe(false);
+  });
+
+  it("leaves as an admin without persisting a wrap and unlinks every local project", async () => {
     const c = makeClient({
       scopeId: "s-leave",
       members: [
-        { user_id: SELF, role: "editor" },
+        { user_id: SELF, role: "admin" },
         { user_id: "other-admin", role: "admin" },
         { user_id: "editor", role: "editor" },
       ],
@@ -500,7 +536,7 @@ describe("removeTeamMember", () => {
       ensureProject("/test/team-leave-project-two"),
     ];
     for (const project of projects) setProjectScope(project, "s-leave");
-    const receipt = await removeTeamMember(c, "s-leave", SELF);
+    const receipt = await removeTeamMember(c, "s-leave", SELF, "admin");
     expect(receipt).toMatchObject({
       unlinkedProjects: 2,
       rewrapped: 2,
@@ -519,6 +555,7 @@ describe("removeTeamMember", () => {
         expect.objectContaining({ member_user_id: SELF }),
       ]),
     );
+    expect(c.rpcCalls[1]?.params.p_expected_role).toBe("admin");
   });
 });
 

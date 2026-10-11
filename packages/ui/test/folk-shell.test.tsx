@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import type { AccountStatus, SyncStatus, TeamList } from "~/contracts";
-import { ApiError, type ApiClient } from "~/lib/api";
+import { ApiError, clearGatewayAuthToken, type ApiClient } from "~/lib/api";
 
 const ANONYMOUS: AccountStatus = {
   signed_in: false,
@@ -56,6 +56,43 @@ function mount(apiClient: ApiClient) {
 }
 
 describe("Folk shell status", () => {
+  it("lets a remote dashboard session enter its gateway token and retry", async () => {
+    sessionStorage.clear();
+    const listProjects = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(
+          "unauthorized",
+          "/api/v1/projects",
+          "Gateway hid this route from the current peer",
+          404,
+        ),
+      )
+      .mockResolvedValue([]);
+    mount(client({ listProjects }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to your gateway" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/LORE_GATEWAY_AUTH_TOKEN/)).toBeInTheDocument();
+    const tokenInput = screen.getByLabelText("Gateway token");
+    expect(tokenInput).toHaveAttribute("type", "password");
+    fireEvent.input(tokenInput, { target: { value: "server-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Connect to your gateway" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(sessionStorage.length).toBeGreaterThan(0);
+    expect(sessionStorage.getItem("lore.gateway-auth-token")).toBe(
+      "server-token",
+    );
+    clearGatewayAuthToken();
+  });
+
   it("shows anonymous status and lazily loads teams when opened", async () => {
     mount(client());
 

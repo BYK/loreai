@@ -622,11 +622,10 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
       ? JSON.stringify([{ member_user_id: uid, wrapped_dek: "next-wrap" }])
       : "[]";
     await h.asUser(uid, (c) =>
-      c.query("select public.remove_scope_member_rotating($1,$2,0,$3::jsonb)", [
-        scopeId,
-        other,
-        wraps,
-      ]),
+      c.query(
+        "select public.remove_scope_member_rotating($1,$2,0,$3,$4::jsonb)",
+        [scopeId, other, "editor", wraps],
+      ),
     );
     // The next authoritative refresh deletes the now-absent local row.
     await refreshRegistryMirror(clientFor(uid));

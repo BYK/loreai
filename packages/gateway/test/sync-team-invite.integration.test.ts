@@ -430,6 +430,7 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
         p_scope: scope,
         p_user: invitee,
         p_expected_epoch: 0,
+        p_expected_role: "editor",
         p_wraps: [],
       },
     );

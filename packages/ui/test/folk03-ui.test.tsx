@@ -593,7 +593,7 @@ describe("TeamPage", () => {
     expect(confirm).toBeEnabled();
   });
 
-  it("lets an editor leave while keeping removal of others admin-only", async () => {
+  it("keeps member removal admin-only, including self-leave", async () => {
     const editorResponse: TeamMembersResponse = {
       ...memberResponse,
       my_role: "editor",
@@ -627,7 +627,10 @@ describe("TeamPage", () => {
     );
     if (!selfRow) throw new Error("current-user row missing");
     const leave = within(selfRow).getByRole("button", { name: "Leave team" });
-    expect(leave).toBeEnabled();
+    expect(leave).toBeDisabled();
+    expect(
+      within(selfRow).getByText("Only team admins can leave this team."),
+    ).toBeInTheDocument();
     const otherRow = screen
       .getAllByTestId("team-member-row")
       .find((row) => row.getAttribute("data-user-id") !== "user-me");
@@ -636,17 +639,7 @@ describe("TeamPage", () => {
       within(otherRow).getByRole("button", { name: "Remove" }),
     ).toBeDisabled();
 
-    fireEvent.click(leave);
-    const dialog = await screen.findByTestId("team-remove-confirmation");
-    expect(dialog).toHaveTextContent("Leave team?");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Leave team" }));
-    await waitFor(() =>
-      expect(removeTeamMember).toHaveBeenCalledWith(
-        "team-1",
-        "user-me",
-        "editor",
-      ),
-    );
+    expect(removeTeamMember).not.toHaveBeenCalled();
   });
 
   it("confirms removal, supports offline invites, and keeps the token in its receipt", async () => {

@@ -1304,14 +1304,15 @@ async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
  * keyset delta pull can never see it) propagates to the local mirror, without the forbidden
  * reconcile-by-absence of an evicted content table (these tiny tables are never evicted, and the RLS
  * result IS the complete current set). Runs BEFORE reconcileScopeWraps so an admin never re-wraps a
- * DEK to a member who was just removed. Best-effort: a failure logs and leaves the stale mirror in
- * place (cosmetic — RLS + DEK rotation remain the real access gate) to retry next tick.
+ * DEK to a member who was just removed. A failed refresh keeps the stale mirror and project links
+ * intact; removed-member projects are unlinked only after a complete scope_members snapshot.
  */
 export async function refreshRegistryMirror(
   client: SupabaseClient,
 ): Promise<void> {
   if (!syncData.isLocalSyncContext()) return;
   const PAGE = 1000; // registry tables are tiny; a page cap is pure defense-in-depth.
+  let scopeMembersRefreshed = false;
   for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
     if (!meta.mirrorSnapshot) continue;
     try {
@@ -1332,12 +1333,21 @@ export async function refreshRegistryMirror(
         if (page.length < PAGE) break;
       }
       syncData.replaceRegistryTable(meta.table, rows);
+      if (meta.table === "scope_members") scopeMembersRefreshed = true;
     } catch (e) {
       // A partial/failed fetch must NOT delete the local mirror (we'd lose valid rows). Skip this
       // table this cycle; the next successful refresh reconciles it.
       log.info(
         `sync: registry mirror ${meta.table} refresh skipped: ${(e as Error).message}`,
       );
+    }
+  }
+  if (scopeMembersRefreshed) {
+    try {
+      const user = await getCurrentUser();
+      if (user) syncData.reconcileRemovedTeamProjects(user.user_id);
+    } catch {
+      // Keep the current links intact and retry after the next authoritative snapshot.
     }
   }
 }

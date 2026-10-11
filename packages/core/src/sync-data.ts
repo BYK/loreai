@@ -24,6 +24,7 @@ import {
   getKV,
   getTeamConfig,
   onProjectRemoteBackfilled,
+  setProjectScope,
   setKV,
   setTeamConfig,
   withSavepoint,
@@ -1543,6 +1544,36 @@ export function reseedProjectContent(projectId: string): void {
   }
 }
 onProjectRemoteBackfilled(reseedProjectContent);
+
+/**
+ * Unlink projects whose local scope membership disappeared from an authoritative
+ * scope_members snapshot, then requeue their content under personal scope.
+ */
+export function reconcileRemovedTeamProjects(userId: string): number {
+  if (!isLocalSyncContext() || getTeamConfig(ENABLED_KEY) !== "1" || !userId) {
+    return 0;
+  }
+  return withSavepoint("reconcile_removed_team_projects", () => {
+    const projects = db()
+      .query(
+        `SELECT p.id
+           FROM projects p
+           JOIN scopes s ON s.id = p.scope_id AND s.kind = 'team'
+          WHERE p.tenant_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM scope_members sm
+               WHERE sm.scope_id = p.scope_id AND sm.user_id = ?
+            )
+          ORDER BY p.id`,
+      )
+      .all(LOCAL_TENANT_ID, userId) as { id: string }[];
+    for (const project of projects) {
+      setProjectScope(project.id, null);
+      reseedProjectContent(project.id);
+    }
+    return projects.length;
+  });
+}
 
 /**
  * E-5-F3 (#1307): when a knowledge entry is APPROVED into a team, re-enqueue its LINKED ENTITY GRAPH

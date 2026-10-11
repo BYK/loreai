@@ -27,10 +27,13 @@ begin
 end;
 $$;
 
+drop function if exists public.remove_scope_member_rotating(uuid, uuid, integer, jsonb);
+
 create or replace function public.remove_scope_member_rotating(
   p_scope uuid,
   p_user uuid,
   p_expected_epoch integer,
+  p_expected_role text,
   p_wraps jsonb
 )
 returns integer
@@ -49,14 +52,12 @@ declare
   v_field_count integer;
 begin
   perform pg_advisory_xact_lock(hashtextextended(p_scope::text, 0));
-  if public.scope_role(p_scope) is distinct from 'admin'
-     and not (
-       p_user = auth.uid()
-       and public.scope_role(p_scope) is not null
-     )
-  then
-    raise exception 'only a scope admin may remove other members'
+  if public.scope_role(p_scope) is distinct from 'admin' then
+    raise exception 'only a scope admin may remove team members'
       using errcode = '42501';
+  end if;
+  if p_expected_role is null or p_expected_role not in ('admin', 'editor', 'viewer') then
+    raise exception 'invalid expected team-member role' using errcode = '22023';
   end if;
 
   select role into v_target_role
@@ -64,6 +65,9 @@ begin
    where scope_id = p_scope and user_id = p_user;
   if not found then
     raise exception 'team member not found' using errcode = 'P0002';
+  end if;
+  if v_target_role is distinct from p_expected_role then
+    raise exception 'team member role changed; reload the team' using errcode = 'P0001';
   end if;
   if v_target_role = 'admin'
      and (select count(*) from public.scope_members where scope_id = p_scope and role = 'admin') <= 1
@@ -178,9 +182,9 @@ $$;
 
 revoke all on function public.remove_scope_member(uuid, uuid)
   from public, anon, authenticated;
-revoke all on function public.remove_scope_member_rotating(uuid, uuid, integer, jsonb)
+revoke all on function public.remove_scope_member_rotating(uuid, uuid, integer, text, jsonb)
   from public, anon, authenticated;
-grant execute on function public.remove_scope_member_rotating(uuid, uuid, integer, jsonb)
+grant execute on function public.remove_scope_member_rotating(uuid, uuid, integer, text, jsonb)
   to authenticated;
 revoke all on function public.rotate_scope_key(uuid)
   from public, anon, authenticated;

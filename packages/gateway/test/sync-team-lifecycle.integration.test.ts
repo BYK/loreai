@@ -71,12 +71,17 @@ const addMember = (
   h.asUser(admin, (c) =>
     c.query("select public.add_scope_member($1,$2,$3)", [scope, user, role]),
   );
-const removeMember = (admin: string, scope: string, user: string) =>
+const removeMember = (
+  admin: string,
+  scope: string,
+  user: string,
+  expectedRole: string,
+) =>
   h.asUser(admin, (c) =>
-    c.query("select public.remove_scope_member_rotating($1,$2,0,'[]'::jsonb)", [
-      scope,
-      user,
-    ]),
+    c.query(
+      "select public.remove_scope_member_rotating($1,$2,0,$3,'[]'::jsonb)",
+      [scope, user, expectedRole],
+    ),
   );
 const setRole = (admin: string, scope: string, user: string, role: string) =>
   h.asUser(admin, (c) =>
@@ -153,9 +158,9 @@ describe.skipIf(gate())("0029 team lifecycle RPCs (E-4c, #827)", () => {
     expect((await expectError(() => addMember(b, scope, d))).code).toBe(
       "42501",
     );
-    expect((await expectError(() => removeMember(b, scope, a))).code).toBe(
-      "42501",
-    );
+    expect(
+      (await expectError(() => removeMember(b, scope, a, "admin"))).code,
+    ).toBe("42501");
     // A total non-member cannot either (scope_role → null → not 'admin').
     expect((await expectError(() => addMember(d, scope, b))).code).toBe(
       "42501",
@@ -176,7 +181,7 @@ describe.skipIf(gate())("0029 team lifecycle RPCs (E-4c, #827)", () => {
       ),
     );
     expect(await seesKnowledge(b)).toBe(1);
-    await removeMember(a, scope, b);
+    await removeMember(a, scope, b, "editor");
     expect(await seesKnowledge(b)).toBe(0); // access revoked
     expect(
       await h.client
@@ -215,19 +220,19 @@ describe.skipIf(gate())("0029 team lifecycle RPCs (E-4c, #827)", () => {
         )
         .then((r) => r.rowCount);
     // Removed from scope 1 but still in scope 2 → keeps org membership.
-    await removeMember(a, scope, b);
+    await removeMember(a, scope, b, "editor");
     expect(await orgRows()).toBe(1);
     // Removed from the last remaining scope → org membership dropped.
-    await removeMember(a, scope2, b);
+    await removeMember(a, scope2, b, "editor");
     expect(await orgRows()).toBe(0);
   });
 
   it("cannot remove or demote the last admin of a scope", async () => {
     const a = await h.createUser();
     const scope = await createTeam(a, "Team E");
-    expect((await expectError(() => removeMember(a, scope, a))).code).toBe(
-      "23514",
-    );
+    expect(
+      (await expectError(() => removeMember(a, scope, a, "admin"))).code,
+    ).toBe("23514");
     expect((await expectError(() => setRole(a, scope, a, "editor"))).code).toBe(
       "23514",
     );

@@ -758,6 +758,12 @@ describe("team action routes", () => {
       removed: USER,
       unlinked_projects: 0,
     });
+    expect(teamMocks.removeTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      USER,
+      "admin",
+    );
 
     teamMocks.teamMembers.mockResolvedValueOnce([
       { userId: USER, role: "admin" },
@@ -808,7 +814,7 @@ describe("team action routes", () => {
     expect(await removal.json()).toMatchObject({
       error: {
         type: "not_admin",
-        message: "Only team admins can change or remove members.",
+        message: "Only team admins can remove members.",
       },
     });
 
@@ -817,7 +823,7 @@ describe("team action routes", () => {
     expect(teamMocks.removeTeamMember).not.toHaveBeenCalled();
   });
 
-  it("allows a non-admin to remove only their own membership", async () => {
+  it("rejects non-admin self-removal before cloud calls", async () => {
     enableWrites();
     db()
       .query("UPDATE scope_members SET role = 'editor' WHERE scope_id = ?")
@@ -833,13 +839,12 @@ describe("team action routes", () => {
       JSON.stringify({ expected_role: "editor" }),
     );
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ removed: USER });
-    expect(teamMocks.removeTeamMember).toHaveBeenCalledWith(
-      expect.anything(),
-      TEAM,
-      USER,
-    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: { type: "not_admin" },
+    });
+    expect(teamMocks.teamMembers).not.toHaveBeenCalled();
+    expect(teamMocks.removeTeamMember).not.toHaveBeenCalled();
   });
 
   it("maps role and removal RPC codes, including atomic rotation conflicts", async () => {
@@ -849,6 +854,7 @@ describe("team action routes", () => {
       ["23514", 409, "last_admin"],
       ["40001", 409, "rotation_conflict"],
       ["P0002", 404, "not_found"],
+      ["P0001", 409, "stale_member"],
       ["22023", 400, "invalid_request"],
       ["XX000", 502, "remote_unreachable"],
       [null, 502, "remote_unreachable"],

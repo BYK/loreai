@@ -298,6 +298,61 @@ describe("api client: happy path", () => {
   });
 });
 
+describe("api client: remote gateway authentication", () => {
+  it("sends the configured gateway token as a Bearer credential", async () => {
+    let authorization: string | null = null;
+    const token = "remote-management-test-token";
+    const client = createApiClient({
+      getGatewayAuthToken: () => token,
+      fetch: async (_url, init) => {
+        authorization = new Headers(init?.headers).get("authorization");
+        return json([PROJECT]);
+      },
+    });
+
+    await client.listProjects();
+
+    expect(authorization).toBe(`Bearer ${token}`);
+  });
+
+  it("sends the session token on management API writes", async () => {
+    const authorizations: string[] = [];
+    const client = createApiClient({
+      getGatewayAuthToken: () => "remote-management-test-token",
+      fetch: async (_url, init) => {
+        authorizations.push(
+          new Headers(init?.headers).get("authorization") ?? "",
+        );
+        return json({
+          removed: "user-2",
+          new_epoch: 1,
+          rewrapped: 1,
+          skipped_count: 0,
+          unlinked_projects: 0,
+        });
+      },
+    });
+
+    await client.removeTeamMember("team-1", "user-2", "editor");
+
+    expect(authorizations).toEqual(["Bearer remote-management-test-token"]);
+  });
+
+  it("clears a rejected token when the gateway hides the management route", async () => {
+    let cleared = false;
+    const client = createApiClient({
+      getGatewayAuthToken: () => "rejected-token",
+      clearGatewayAuthToken: () => {
+        cleared = true;
+      },
+      fetch: async () => new Response(null, { status: 404 }),
+    });
+
+    expect((await failure(client.listProjects())).kind).toBe("unauthorized");
+    expect(cleared).toBe(true);
+  });
+});
+
 describe("api client: error classification", () => {
   it("rejects a 2xx body that does not match the contract as `invalid`", async () => {
     const { client } = clientFor(() => json([{ nope: true }]));
