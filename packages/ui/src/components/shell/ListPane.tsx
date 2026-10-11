@@ -10,6 +10,7 @@ import { cn } from "~/lib/utils";
 type ListScrollSnapshot = {
   key: string | null;
   offset: number | null;
+  index: number | null;
   scrollTop: number;
 };
 
@@ -18,9 +19,11 @@ function captureListScroll(scroller: HTMLElement): ListScrollSnapshot {
   const row = [
     ...scroller.querySelectorAll<HTMLElement>("[data-list-key]"),
   ].find((candidate) => candidate.getBoundingClientRect().bottom > top);
+  const index = row ? Number(row.dataset.index) : NaN;
   return {
     key: row?.dataset.listKey ?? null,
     offset: row ? row.getBoundingClientRect().top - top : null,
+    index: Number.isInteger(index) ? index : null,
     scrollTop: scroller.scrollTop,
   };
 }
@@ -35,12 +38,12 @@ function restoreListScroll(
       )
     : undefined;
   if (!row || snapshot.offset === null) {
-    scroller.scrollTop = snapshot.scrollTop;
-    return;
+    return false;
   }
   const offset =
     row.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
   scroller.scrollTop += offset - snapshot.offset;
+  return true;
 }
 
 export const ListPane: Component<{
@@ -52,7 +55,7 @@ export const ListPane: Component<{
   query: string;
   onQueryInput: (value: string) => void;
   onCommitQuery?: (value: string) => void;
-  restoreVirtualizedScroll?: (scrollTop: number) => void;
+  restoreVirtualizedScroll?: (scrollTop: number, index: number | null) => void;
   children: JSX.Element;
 }> = (props) => {
   let section: HTMLElement | undefined;
@@ -82,9 +85,20 @@ export const ListPane: Component<{
         restoreFrame = undefined;
         const element = scroller();
         if (props.visible && element) {
-          props.restoreVirtualizedScroll?.(saved.scrollTop);
-          restoreListScroll(element, saved);
-          if (snapshot === saved) snapshot = null;
+          props.restoreVirtualizedScroll?.(saved.scrollTop, saved.index);
+          if (restoreListScroll(element, saved)) {
+            if (snapshot === saved) snapshot = null;
+          } else {
+            restoreFrame = requestAnimationFrame(() => {
+              restoreFrame = undefined;
+              const restoredElement = scroller();
+              if (!props.visible || !restoredElement) return;
+              if (!restoreListScroll(restoredElement, saved)) {
+                restoredElement.scrollTop = saved.scrollTop;
+              }
+              if (snapshot === saved) snapshot = null;
+            });
+          }
         }
       };
       if (typeof requestAnimationFrame === "function") {

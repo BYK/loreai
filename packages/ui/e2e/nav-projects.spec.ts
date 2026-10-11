@@ -1,6 +1,36 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("activity search navigation", () => {
+  test("updates the header range when infinite scroll loads another page", async ({
+    page,
+  }) => {
+    let activityResponses = 0;
+    let loadedActivityCount = 0;
+    page.on("response", (response) => {
+      if (new URL(response.url()).pathname.endsWith("/api/v1/activity")) {
+        void response.json().then((page) => {
+          activityResponses += 1;
+          loadedActivityCount += page.items.length;
+        });
+      }
+    });
+    await page.goto("/ui");
+
+    const scroller = page.getByTestId("activity-list-body");
+    const header = page.getByTestId("activity-list-header");
+    await expect(header).toContainText("Inbox 1 – 50");
+    await expect.poll(() => activityResponses).toBe(1);
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect.poll(() => activityResponses).toBe(2);
+    await expect
+      .poll(() => scroller.evaluate((element) => element.scrollHeight))
+      .toBeGreaterThan(4000);
+    await expect.poll(() => loadedActivityCount).toBeGreaterThan(50);
+    await expect(header).toContainText(`Inbox 1 – ${loadedActivityCount}`);
+  });
+
   test("searches with grammar and highlights the active built-in search", async ({
     page,
   }) => {

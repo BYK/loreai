@@ -29,7 +29,9 @@ const PAGE_BUDGET = 5;
 export const ActivityListBody: Component<{
   query: string;
   onCountChange?: (count: number) => void;
-  onVirtualizedScrollRestore?: (restore: (scrollTop: number) => void) => void;
+  onVirtualizedScrollRestore?: (
+    restore: (scrollTop: number, index: number | null) => void,
+  ) => void;
 }> = (props) => {
   const ws = useWorkspace();
   const [items, setItems] = createSignal<ActivityItem[]>([]);
@@ -65,9 +67,10 @@ export const ActivityListBody: Component<{
     },
     overscan: 6,
   });
-  props.onVirtualizedScrollRestore?.((scrollTop) =>
-    virtualizer.scrollToOffset(scrollTop),
-  );
+  props.onVirtualizedScrollRestore?.((scrollTop, index) => {
+    if (index === null) virtualizer.scrollToOffset(scrollTop);
+    else virtualizer.scrollToIndex(index, { align: "start" });
+  });
   const virtualItems = createMemo(() => virtualizer.getVirtualItems());
 
   const fetchPage = async (
@@ -81,7 +84,6 @@ export const ActivityListBody: Component<{
     if (currentGeneration !== generation) return;
     setItems((current) => (cursor ? [...current, ...page.items] : page.items));
     setNextCursor(page.next_cursor);
-    props.onCountChange?.(page.items.length);
   };
 
   const loadFirst = async (q: string) => {

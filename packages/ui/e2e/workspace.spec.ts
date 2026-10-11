@@ -89,6 +89,107 @@ async function expectActivityAnchorAfterReturn(
   expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(1);
 }
 
+async function expectPagedActivityScrollAfterReturn(
+  page: Page,
+  useBrowserBack: boolean,
+  loadSecondPage: boolean,
+) {
+  await page.setViewportSize({ width: 400, height: 800 });
+  let activityResponses = 0;
+  let loadedActivityCount = 0;
+  page.on("response", (response) => {
+    if (new URL(response.url()).pathname.endsWith("/api/v1/activity")) {
+      void response.json().then((page) => {
+        activityResponses += 1;
+        loadedActivityCount += page.items.length;
+      });
+    }
+  });
+  await page.goto("/ui");
+
+  const scroller = page.getByTestId("activity-list-body");
+  const header = page.getByTestId("activity-list-header");
+  await expect(scroller).toBeVisible();
+  await expect(header).toContainText("Inbox 1 – 50");
+  await expect.poll(() => activityResponses).toBe(1);
+  await expect
+    .poll(() => scroller.locator("[data-list-key]").count())
+    .toBeGreaterThan(0);
+
+  if (loadSecondPage) {
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect.poll(() => activityResponses).toBe(2);
+    await expect
+      .poll(() => scroller.evaluate((element) => element.scrollHeight))
+      .toBeGreaterThan(4000);
+    await expect.poll(() => loadedActivityCount).toBeGreaterThan(50);
+  }
+
+  const maxScrollTop = await scroller.evaluate(
+    (element) => element.scrollHeight - element.clientHeight,
+  );
+  const expectedScrollTop = loadSecondPage ? Math.min(4832, maxScrollTop) : 450;
+  await scroller.evaluate((element, top) => {
+    element.scrollTop = top;
+  }, expectedScrollTop);
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop))
+    .toBe(expectedScrollTop);
+  const beforeScrollTop = await scroller.evaluate(
+    (element) => element.scrollTop,
+  );
+  const before = await firstVisibleRow(scroller);
+  if (!before) throw new Error("activity list has no visible row");
+
+  const targetKey = await scroller.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const target = [
+      ...element.querySelectorAll<HTMLElement>("[data-list-key]"),
+    ].find((candidate) => {
+      const rowBounds = candidate.getBoundingClientRect();
+      return (
+        ["knowledge", "session"].includes(
+          candidate.dataset.activityKind ?? "",
+        ) &&
+        rowBounds.top >= bounds.top &&
+        rowBounds.bottom <= bounds.bottom
+      );
+    });
+    return target?.dataset.listKey ?? null;
+  });
+  if (!targetKey) throw new Error("activity list has no fully visible row");
+  const target = scroller.locator(`[data-list-key="${targetKey}"]`);
+  const targetBounds = await target.boundingBox();
+  if (!targetBounds) throw new Error("activity row has no bounding box");
+  await page.mouse.click(
+    targetBounds.x + targetBounds.width / 2,
+    targetBounds.y + targetBounds.height / 2,
+  );
+  await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/(sessions|knowledge)\//);
+  await expect(scroller).toBeHidden();
+  if (useBrowserBack) await page.goBack();
+  else await page.getByTestId("mobile-back").click();
+  await expect(page).toHaveURL(/\/ui\/?(\?q=[^#]*)?$/);
+  await expect(scroller).toBeVisible();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+
+  const afterScrollTop = await scroller.evaluate(
+    (element) => element.scrollTop,
+  );
+  expect(Math.abs(afterScrollTop - beforeScrollTop)).toBeLessThanOrEqual(2);
+  const after = await firstVisibleRow(scroller);
+  if (!after) throw new Error("activity list has no visible row after return");
+  expect(after.key).toBe(before.key);
+  expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(2);
+}
+
 test.describe("persistent workspace panes", () => {
   test("keeps the mobile app bar within 360px and 400px viewports", async ({
     page,
@@ -422,4 +523,28 @@ test.describe("persistent workspace panes", () => {
   }) => {
     await expectActivityAnchorAfterReturn(page, true);
   });
+
+  for (const scenario of [
+    { name: "first page", loadSecondPage: false },
+    { name: "after loading page two", loadSecondPage: true },
+  ]) {
+    for (const back of [
+      { name: "Back to list link", useBrowserBack: false },
+      { name: "browser Back", useBrowserBack: true },
+    ]) {
+      test(`preserves mobile activity scroll ${scenario.name} via ${back.name}`, async ({
+        page,
+      }, testInfo) => {
+        test.skip(
+          !testInfo.project.name.includes("mobile"),
+          "mobile activity list",
+        );
+        await expectPagedActivityScrollAfterReturn(
+          page,
+          back.useBrowserBack,
+          scenario.loadSecondPage,
+        );
+      });
+    }
+  }
 });

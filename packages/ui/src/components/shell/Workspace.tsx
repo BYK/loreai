@@ -264,7 +264,9 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
-  let restoreActivityScroll: ((scrollTop: number) => void) | undefined;
+  let restoreActivityScroll:
+    | ((scrollTop: number, index: number | null) => void)
+    | undefined;
   const backHref = () => withWorkspaceQuery("/", query());
   function commitSearchQuery(value: string) {
     if (searchTimer !== undefined) clearTimeout(searchTimer);
@@ -445,8 +447,8 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           query={queryInput()}
           onQueryInput={setSearchQuery}
           onCommitQuery={commitSearchQuery}
-          restoreVirtualizedScroll={(scrollTop) =>
-            restoreActivityScroll?.(scrollTop)
+          restoreVirtualizedScroll={(scrollTop, index) =>
+            restoreActivityScroll?.(scrollTop, index)
           }
         >
           <ActivityListBody
