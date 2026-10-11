@@ -1313,6 +1313,34 @@ describe("TeamParityActions", () => {
       "member",
     );
   });
+
+  it("asks for an organization ID before requesting to join by domain", async () => {
+    const requestOrganizationJoin = vi.fn<ApiClient["requestOrganizationJoin"]>(
+      async () => ({ request_id: "request-1" }),
+    );
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ requestOrganizationJoin }),
+    );
+
+    await screen.findByTestId("organization-domains");
+    fireEvent.input(screen.getByLabelText("Verified email domain"), {
+      target: { value: "example.test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Request to join" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Enter the organization ID you want to join.",
+    );
+    expect(requestOrganizationJoin).not.toHaveBeenCalled();
+  });
 });
 
 describe("SharingPanel auto-share control", () => {

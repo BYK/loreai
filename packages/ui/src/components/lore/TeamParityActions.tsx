@@ -204,21 +204,30 @@ export const TeamParityActions: Component<Props> = (props) => {
   };
 
   const updateDomain = async (action: "claim" | "request", orgId: string) => {
-    if (domainBusy() || !orgId || !domain().trim()) return;
-    setDomainBusy(true);
+    if (domainBusy()) return;
+    if (!orgId) {
+      setDomainError(
+        action === "request"
+          ? "Enter the organization ID you want to join."
+          : "Select an organization first.",
+      );
+      return;
+    }
+    const trimmedDomain = domain().trim();
+    if (!trimmedDomain) {
+      setDomainError("Enter a verified email domain.");
+      return;
+    }
     setDomainError("");
+    setDomainBusy(true);
     try {
       if (action === "claim") {
         await ws.tracked(() =>
-          ws.client.claimOrganizationDomain(
-            orgId,
-            domain().trim(),
-            domainRole(),
-          ),
+          ws.client.claimOrganizationDomain(orgId, trimmedDomain, domainRole()),
         );
       } else {
         await ws.tracked(() =>
-          ws.client.requestOrganizationJoin(orgId, domain().trim()),
+          ws.client.requestOrganizationJoin(orgId, trimmedDomain),
         );
       }
       setDomain("");
