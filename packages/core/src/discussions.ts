@@ -244,11 +244,11 @@ function loadSource(
 function currentAnchorHash(
   anchor: SourceAnchor,
   source: SourceBlocks,
-): string | null | undefined {
+): string | null {
   const parts = source.blocks.get(anchor.blockId);
   if (!parts) return null;
   if (anchor.partIndex === undefined) return blockHashOf(parts);
-  return parts[anchor.partIndex];
+  return parts[anchor.partIndex] ?? null;
 }
 
 /** `current` iff every anchored part still carries the anchor's hash. */
@@ -893,12 +893,16 @@ function insertReply(input: {
 }
 
 /**
- * Verify a native response: an assistant message stored in this project.
- * Returns the (idempotent) binding id and the participant that authored it.
+ * Verify a native response: an assistant message stored in this project
+ * and, for a session-anchored discussion, in that same session (so the
+ * reply, its binding and the response always move between projects
+ * together). Returns the (idempotent) binding id and the authoring
+ * participant.
  */
 function bindResponse(
   projectId: string,
   messageId: string,
+  sessionId: string | null,
   at: number,
 ): { bindingId: string; author: Participant } {
   const msg = sql.get<{
@@ -913,6 +917,12 @@ function bindResponse(
   if (!msg) fail("not_found", "response message not found in this project");
   if (msg.role !== "assistant") {
     fail("invalid", "only assistant responses can be bound");
+  }
+  if (sessionId !== null && msg.session_id !== sessionId) {
+    fail(
+      "invalid",
+      "a session discussion can only bind responses from its own session",
+    );
   }
   let agent = "unknown";
   let synthetic = false;
@@ -1002,6 +1012,7 @@ export function addReply(
       const bound = bindResponse(
         projectId,
         input.responseMessageId as string,
+        row.source_kind === "session" ? row.source_id : null,
         t,
       );
       if (requestedAuthor !== undefined && requestedAuthor !== bound.author) {

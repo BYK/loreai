@@ -1720,6 +1720,26 @@ export function moveSessions(
           `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
+      // A bound response is content of its session. Replies in discussions
+      // that stay behind (knowledge-anchored) and only point at a leaving
+      // session's response carry no authored text: drop them and bump their
+      // discussion's revision so stale writers conflict.
+      const strandedReplies = `project_id = ? AND response_binding_id IN (SELECT id FROM response_bindings WHERE project_id = ? AND session_id IN (${placeholders})) AND discussion_id NOT IN (SELECT id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}))`;
+      const strandedArgs = [
+        fromProjectId,
+        fromProjectId,
+        ...allIds,
+        fromProjectId,
+        ...allIds,
+      ];
+      database
+        .query(
+          `UPDATE discussions SET revision = revision + 1, updated_at = ? WHERE id IN (SELECT discussion_id FROM discussion_replies WHERE ${strandedReplies})`,
+        )
+        .run(Date.now(), ...strandedArgs);
+      database
+        .query(`DELETE FROM discussion_replies WHERE ${strandedReplies}`)
+        .run(...strandedArgs);
       // Session-anchored discussions follow their source session; their
       // replies and verified response bindings move with them.
       database

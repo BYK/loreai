@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { close, db, ensureProject } from "../src/db";
-import { deleteProject } from "../src/data";
+import { deleteProject, moveSessions } from "../src/data";
 import {
   DiscussionError,
   addReply,
@@ -368,6 +368,103 @@ describe("discussions", () => {
       listDiscussions({ projectId: p.id, limit: 10 }).discussions[0]
         ?.anchorStatus,
     ).toBe("source_missing");
+  });
+
+  it("marks source_missing when an anchored paragraph is removed", () => {
+    const logicalId = ltm.create({
+      projectPath: p.path,
+      scope: "project",
+      category: "gotcha",
+      title: "Two paragraphs",
+      content: "One.\n\nTwo.",
+    });
+    const { discussion } = createDiscussion({
+      projectId: p.id,
+      source: { kind: "knowledge", id: logicalId },
+      anchors: [
+        {
+          blockId: knowledgeBlockId(logicalId),
+          partIndex: 1,
+          start: 0,
+          end: 3,
+          contentHash: contentHash("Two."),
+        },
+      ],
+      quote: "Two",
+    });
+    ltm.update(logicalId, { content: "One." });
+    expect(getDiscussion(p.id, discussion.id).anchorStatus).toBe(
+      "source_missing",
+    );
+  });
+
+  it("binds only responses from a session discussion's own session", () => {
+    const { discussion } = start();
+    const elsewhere = message(p.id, "s2", "other session", "assistant");
+    expect(
+      code(() =>
+        addReply(p.id, discussion.id, {
+          expectedRevision: 1,
+          responseMessageId: elsewhere,
+        }),
+      ),
+    ).toBe("invalid");
+  });
+
+  it("moves session discussions with their session and drops stranded bound replies", () => {
+    const { discussion } = start();
+    const answer = message(p.id, "s1", "the answer", "assistant");
+    addReply(p.id, discussion.id, {
+      expectedRevision: 1,
+      responseMessageId: answer,
+    });
+    const logicalId = ltm.create({
+      projectPath: p.path,
+      scope: "project",
+      category: "gotcha",
+      title: "Stays behind",
+      content: "Para.",
+    });
+    const k = createDiscussion({
+      projectId: p.id,
+      source: { kind: "knowledge", id: logicalId },
+      anchors: [
+        {
+          blockId: knowledgeBlockId(logicalId),
+          partIndex: 0,
+          start: 0,
+          end: 4,
+          contentHash: contentHash("Para."),
+        },
+      ],
+      quote: "Para",
+    });
+    const bound = addReply(p.id, k.discussion.id, {
+      expectedRevision: k.discussion.revision,
+      responseMessageId: answer,
+    });
+    const text = addReply(p.id, k.discussion.id, {
+      expectedRevision: bound.discussion.revision,
+      body: "kept",
+    });
+
+    const target = `/test/discussions/move-${Date.now()}-${seq++}`;
+    moveSessions(["s1"], p.id, target);
+    const to = ensureProject(target);
+
+    expect(code(() => getDiscussion(p.id, discussion.id))).toBe("not_found");
+    expect(listReplies(to, discussion.id).replies).toHaveLength(1);
+    const kept = listReplies(p.id, k.discussion.id).replies;
+    expect(kept.map((r) => r.id)).toEqual([text.reply.id]);
+    expect(getDiscussion(p.id, k.discussion.id).revision).toBeGreaterThan(
+      text.discussion.revision,
+    );
+    const orphans = db()
+      .query(
+        "SELECT COUNT(*) AS n FROM discussion_replies r JOIN response_bindings b ON b.id = r.response_binding_id WHERE r.project_id <> b.project_id",
+      )
+      .get() as { n: number };
+    expect(orphans.n).toBe(0);
   });
 
   it("isolates projects", () => {
