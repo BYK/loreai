@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { expectConnectionStatus } from "./helpers";
+import { expectConnectionStatus, setTheme } from "./helpers";
 
 const FUTURE_ACTIONS = [
   "Save note",
@@ -120,15 +120,15 @@ test.describe("real data browsing", () => {
       "system",
     );
     await expect(html).not.toHaveClass(/dark/);
-    await page.getByTestId("theme-dark").click();
+    await setTheme(page, "dark");
     await expect(html).toHaveClass(/dark/);
     await page.reload();
     await expect(html).toHaveClass(/dark/);
-    await expect(page.getByTestId("theme-dark")).toHaveAttribute(
-      "aria-pressed",
-      "true",
+    await expect(page.getByTestId("theme-toggle")).toHaveAttribute(
+      "data-theme-choice",
+      "dark",
     );
-    await page.getByTestId("theme-system").click();
+    await setTheme(page, "system");
     await expect(html).not.toHaveClass(/dark/);
   });
 

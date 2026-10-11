@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { expectConnectionStatus } from "./helpers";
+import { expectConnectionStatus, setTheme } from "./helpers";
 
 async function fixtureIds(page: Page) {
   const projects = await (await page.request.get("/api/v1/projects")).json();
@@ -152,14 +152,14 @@ test.describe("production route deep links", () => {
             ? page.locator('[data-pane="list"]')
             : page.getByTestId(marker).first();
       await expect(target).toBeVisible();
-      await page.getByTestId("theme-light").click();
+      await setTheme(page, "light");
       const light = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
           document.querySelector("[data-pane='document']") ?? document.body,
         ).backgroundColor,
       }));
-      await page.getByTestId("theme-dark").click();
+      await setTheme(page, "dark");
       const dark = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { setTheme } from "./helpers";
 
 function focusName(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
@@ -29,9 +30,9 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       ...(mobile ? ["pane-chip-participants"] : []),
       "search",
       "Account and sync: Not signed in",
-      "theme-system",
-      "theme-light",
-      "theme-dark",
+      ...(mobile
+        ? ["theme-cycle"]
+        : ["theme-system", "theme-light", "theme-dark"]),
       mobile ? "Open navigation" : "pane-min-nav",
     ];
     const actual: string[] = [];
@@ -151,8 +152,11 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         (item: { name: string }) => item.name === "lore",
       );
       await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
-      await page.getByTestId(`theme-${choice}`).click();
-      await page.getByTestId(`theme-${choice}`).focus();
+      await setTheme(page, choice);
+      const themeControl = (await page.getByTestId("theme-cycle").isVisible())
+        ? page.getByTestId("theme-cycle")
+        : page.getByTestId(`theme-${choice}`);
+      await themeControl.focus();
       await page.keyboard.press("Tab");
       await expect
         .poll(() =>
