@@ -331,6 +331,35 @@ describe("api client: error classification", () => {
     expect(error.message).toBe("Not available in hosted mode");
   });
 
+  it("replaces provider budgets with PUT /costs/budgets", async () => {
+    const seen: { url?: string; method?: string; body?: string } = {};
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        seen.url = url;
+        seen.method = init?.method;
+        seen.body = typeof init?.body === "string" ? init.body : undefined;
+        return json({ provider_budgets: [] });
+      },
+    });
+    const budgets = [
+      {
+        provider: "anthropic",
+        auth_kind: "subscription" as const,
+        account: null,
+        mode: "off" as const,
+        window: "7d" as const,
+      },
+    ];
+    await expect(client.putProviderBudgets(budgets)).resolves.toEqual({
+      provider_budgets: [],
+    });
+    expect(seen).toEqual({
+      url: "/api/v1/costs/budgets",
+      method: "PUT",
+      body: JSON.stringify({ provider_budgets: budgets }),
+    });
+  });
+
   it("sends PATCH with a JSON body for entity metadata updates", async () => {
     const seen: { method?: string; body?: string; ct?: string } = {};
     const detail = {

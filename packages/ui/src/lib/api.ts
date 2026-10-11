@@ -26,6 +26,8 @@ import {
   cursorPage,
   circuitBreakerResetResult,
   costsSnapshot,
+  providerBudgetsResult,
+  type ProviderBudgetInput,
   dedupPreviewResponse,
   contradictionDecisionResult,
   contradictionListResponse,
@@ -316,7 +318,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
    * and a missing record as `not_found`.
    */
   function mutateJson<T>(
-    method: "POST" | "PATCH" | "DELETE",
+    method: "POST" | "PATCH" | "PUT" | "DELETE",
     path: string,
     body: unknown,
     schema: Type<T>,
@@ -836,6 +838,18 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
     getCosts(signal?: AbortSignal): Promise<CostsSnapshot> {
       return getJson("/costs", costsSnapshot, signal);
+    },
+    putProviderBudgets(
+      budgets: ProviderBudgetInput[],
+      signal?: AbortSignal,
+    ): Promise<{ provider_budgets: CostsSnapshot["provider_budgets"] }> {
+      return mutateJson(
+        "PUT",
+        "/costs/budgets",
+        { provider_budgets: budgets },
+        providerBudgetsResult,
+        signal,
+      );
     },
     listContradictions(
       signal?: AbortSignal,
