@@ -431,6 +431,40 @@ describe("provider budget pacing + editor", () => {
     ]);
   });
 
+  it("applyBudgetEditor stores default-headroom pace when an account-less pace would win", () => {
+    const wildcardPace = status({
+      account: null,
+      mode: "pace",
+      headroom: 20,
+      implicit: false,
+    });
+    const next = applyBudgetEditor([wildcardPace], card, {
+      kind: "subscription",
+      windows: {
+        "5h": { pace: true, headroom: "10", cap: "" },
+        "7d": { pace: true, headroom: "10", cap: "" },
+      },
+    });
+    expect(next).toEqual([
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: null,
+        mode: "pace",
+        window: "7d",
+        headroom: 20,
+      },
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: "a1",
+        mode: "pace",
+        window: "7d",
+        headroom: 10,
+      },
+    ]);
+  });
+
   it("applyBudgetEditor writes API-key USD/token caps per day/week", () => {
     const keyCard = {
       provider: "openai",

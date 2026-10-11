@@ -413,17 +413,18 @@ export function applyBudgetEditor(
         ) {
           return `Headroom for the ${w} window must be between 0 and 50 points.`;
         }
-        // The implicit default already paces at 10 points unless an
-        // account-less "off" entry would switch it off.
-        const wildcardOff = kept.some(
+        // The implicit default paces at 10 points, but any account-less
+        // pace/off entry for this window replaces it (gateway
+        // implicitBudgets), so the account then needs its own entry.
+        const wildcardGoverns = kept.some(
           (b) =>
-            b.mode === "off" &&
+            b.mode !== "cap" &&
             b.window === w &&
             b.account === null &&
             b.provider === card.provider &&
             b.auth_kind === card.auth_kind,
         );
-        if (headroom !== DEFAULT_PACE_HEADROOM || wildcardOff) {
+        if (headroom !== DEFAULT_PACE_HEADROOM || wildcardGoverns) {
           next.push({
             ...scope,
             auth_kind: "subscription",
