@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectConnectionStatus } from "./helpers";
 
 test.describe("import history (UI-08)", () => {
   test("project page → import history table", async ({ page }) => {
@@ -9,10 +10,7 @@ test.describe("import history (UI-08)", () => {
     expect(lore).toBeTruthy();
 
     await page.goto(`/ui/projects/${lore!.id}`);
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
     await page.getByRole("link", { name: "Import history →" }).click();
 
     await expect(page).toHaveURL(

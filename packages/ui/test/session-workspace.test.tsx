@@ -1,28 +1,14 @@
 /**
- * SessionWorkspace (#1924): ≥ lg renders transcript and context side by side
- * with no tablist; below lg a tablist switches panels, arrow keys rove and
- * activate tabs, and the transcript stays mounted while hidden.
+ * SessionWorkspace keeps both panes mounted and switches them with container
+ * queries rather than viewport JavaScript.
  */
 import { fireEvent, render, screen } from "@solidjs/testing-library";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { SessionWorkspace } from "~/components/reader/SessionWorkspace";
 
 const CONTENT = <div data-testid="context-content">context body</div>;
 const TRANSCRIPT = <div data-testid="transcript-content">transcript body</div>;
-
-function mockDesktop(matches: boolean) {
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    media: query,
-    matches,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    addListener: () => {},
-    removeListener: () => {},
-    onchange: null,
-    dispatchEvent: () => false,
-  }));
-}
 
 function mount() {
   return render(() => (
@@ -30,68 +16,34 @@ function mount() {
   ));
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 describe("SessionWorkspace", () => {
-  it("renders the aside and no tablist on desktop", () => {
-    mockDesktop(true);
+  it("uses container queries and keeps both panes mounted", () => {
     mount();
+    expect(screen.getByRole("tablist")).toHaveClass("@5xl:hidden");
+    expect(document.getElementById("session-panel-context")).toHaveClass(
+      "@5xl:block",
+    );
     expect(screen.getByTestId("transcript-content")).toBeInTheDocument();
-    expect(screen.getByLabelText("Context window")).toBeInTheDocument();
-    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByTestId("context-content")).toBeInTheDocument();
   });
 
-  it("shows tabs below lg and switches panels, keeping the transcript mounted", () => {
-    mockDesktop(false);
+  it("switches narrow-screen panels without unmounting the transcript", () => {
     mount();
-    expect(screen.getByRole("tablist")).toBeInTheDocument();
     const transcriptPanel = document.getElementById(
       "session-panel-transcript",
     )!;
     const contextPanel = document.getElementById("session-panel-context")!;
-    expect(transcriptPanel.hidden).toBe(false);
-    expect(contextPanel.hidden).toBe(true);
-    expect(screen.getByTestId("context-content")).toBeInTheDocument();
+    const transcript = screen.getByTestId("transcript-content");
+    expect(transcriptPanel).not.toHaveClass("hidden");
+    expect(contextPanel).toHaveClass("hidden");
 
     fireEvent.click(screen.getByTestId("session-tab-context"));
-    expect(transcriptPanel.hidden).toBe(true);
-    expect(contextPanel.hidden).toBe(false);
-    // The transcript stays mounted — its DOM is still there, just hidden.
-    expect(screen.getByTestId("transcript-content")).toBeInTheDocument();
-  });
-
-  it("keeps the same transcript DOM node across a breakpoint flip", () => {
-    let matches = false;
-    const listeners = new Set<(e: MediaQueryListEvent) => void>();
-    vi.stubGlobal("matchMedia", (query: string) => ({
-      media: query,
-      get matches() {
-        return matches;
-      },
-      addEventListener: (_type: string, l: (e: MediaQueryListEvent) => void) =>
-        listeners.add(l),
-      removeEventListener: (
-        _type: string,
-        l: (e: MediaQueryListEvent) => void,
-      ) => listeners.delete(l),
-      addListener: () => {},
-      removeListener: () => {},
-      onchange: null,
-      dispatchEvent: () => false,
-    }));
-    mount();
-    const before = screen.getByTestId("transcript-content");
-    expect(before).toBeInTheDocument();
-    matches = true;
-    for (const l of listeners) l({ matches } as MediaQueryListEvent);
-    expect(screen.queryByRole("tablist")).toBeNull();
-    expect(screen.getByTestId("transcript-content")).toBe(before);
+    expect(transcriptPanel).toHaveClass("hidden");
+    expect(contextPanel).not.toHaveClass("hidden");
+    expect(screen.getByTestId("transcript-content")).toBe(transcript);
   });
 
   it("roves tabs with arrow keys and activates on Enter/Space", () => {
-    mockDesktop(false);
     mount();
     const transcriptTab = screen.getByTestId("session-tab-transcript");
     const contextTab = screen.getByTestId("session-tab-context");
@@ -99,12 +51,14 @@ describe("SessionWorkspace", () => {
     fireEvent.keyDown(transcriptTab, { key: "ArrowRight" });
     expect(contextTab).toHaveAttribute("aria-selected", "true");
     expect(contextTab).toHaveFocus();
-    expect(
-      screen.getByRole("tabpanel", { name: "Context window" }).hidden,
-    ).toBe(false);
+    expect(document.getElementById("session-panel-context")).not.toHaveClass(
+      "hidden",
+    );
     fireEvent.keyDown(contextTab, { key: "ArrowLeft" });
     expect(transcriptTab).toHaveAttribute("aria-selected", "true");
-    expect(document.getElementById("session-panel-context")!.hidden).toBe(true);
+    expect(document.getElementById("session-panel-context")).toHaveClass(
+      "hidden",
+    );
     fireEvent.keyDown(transcriptTab, { key: "End" });
     expect(contextTab).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(contextTab, { key: "Home" });

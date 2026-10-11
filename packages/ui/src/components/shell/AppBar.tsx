@@ -58,27 +58,36 @@ export const ThemeToggle: Component<{ class?: string }> = (props) => {
 export const AppBar: Component<{
   /** Mobile-only: rendered left of the logo (a back link). */
   leading?: JSX.Element;
+  /** Minimized pane controls. */
+  chips?: JSX.Element;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
   searchProjectId?: string;
 }> = (props) => (
-  <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
+  <header class="flex h-12 flex-none items-center gap-2 border-b border-line bg-surface px-3 sm:gap-4 sm:px-4">
     <Show when={props.leading}>
-      <span class="lg:hidden">{props.leading}</span>
+      <span class="min-[1100px]:hidden">{props.leading}</span>
     </Show>
-    <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
+    <A
+      href="/"
+      aria-label="Lore.AI — home"
+      class="shrink-0 min-[1100px]:min-w-[150px]"
+    >
       <Logo wordmark="sm" />
     </A>
+    <Show when={props.chips}>
+      {(chips) => <div class="shrink-0">{chips()}</div>}
+    </Show>
     <SearchEntry searchProjectId={props.searchProjectId} />
-    <div class="ml-auto flex items-center gap-2 sm:gap-4">
+    <div class="ml-auto flex items-center gap-2">
       <FolkStatus />
       <ThemeToggle />
-      <Avatar label="You" class="hidden sm:inline-flex" />
+      <Avatar label="You" />
       <Show when={props.onOpenNav}>
         <Button
           variant="outline"
           size="sm"
-          class="lg:hidden"
+          class="min-[760px]:hidden"
           aria-label="Open navigation"
           data-testid="open-nav"
           onClick={() => props.onOpenNav?.()}

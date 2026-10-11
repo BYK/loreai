@@ -8,6 +8,7 @@ import {
   globalKnowledgeHref,
   importsHref,
   searchHref,
+  withWorkspaceQuery,
   workspaceSearchHref,
 } from "~/lib/href";
 
@@ -30,6 +31,26 @@ describe("buildHref", () => {
 });
 
 describe("route hrefs", () => {
+  it("merges the workspace query without replacing destination params", () => {
+    expect(withWorkspaceQuery("/projects/p", "build")).toBe(
+      "/projects/p?q=build",
+    );
+    expect(withWorkspaceQuery("/projects/p/sessions?s=7", "build")).toBe(
+      "/projects/p/sessions?s=7&q=build",
+    );
+    expect(withWorkspaceQuery("/projects/p/knowledge?q=SQLite", "build")).toBe(
+      "/projects/p/knowledge?q=SQLite",
+    );
+    expect(withWorkspaceQuery("/projects/p#recent", "build")).toBe(
+      "/projects/p?q=build#recent",
+    );
+  });
+
+  it("does not persist the default workspace query", () => {
+    expect(withWorkspaceQuery("/projects/p", "in:inbox")).toBe("/projects/p");
+    expect(withWorkspaceQuery("/projects/p", "")).toBe("/projects/p");
+  });
+
   it("duplicatesHref encodes the project id as one route segment", () => {
     expect(duplicatesHref("p/1")).toBe("/projects/p%2F1/duplicates");
   });

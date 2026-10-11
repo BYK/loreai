@@ -392,7 +392,7 @@ test.describe("cross-project knowledge", () => {
   }) => {
     const hostileId = await projectId(page, "hostile");
     await page.goto(`/ui/knowledge?project=${hostileId}`);
-    const detailPane = page.locator('[data-pane="detail"]');
+    const detailPane = page.locator('[data-pane="document"]');
     await expect(detailPane.getByText(/<script>/).first()).toBeVisible();
     await expect(
       detailPane.locator('img[src="x"], iframe, script'),

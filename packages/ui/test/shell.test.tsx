@@ -299,19 +299,22 @@ function mountBaseNav(path: string, activeProjectId: string | null = null) {
         path="*"
         component={() => (
           <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
-              projects={PROJECTS}
-              loading={false}
-              error={null}
-              activeProjectId={activeProjectId}
-              totalKnowledge={4}
-            />
+            <Nav activeProjectId={activeProjectId} />
           </ConnectionContext.Provider>
         )}
       />
     </MemoryRouter>
   ));
   return { ...utils, history };
+}
+
+function stubSinglePaneViewport() {
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
 }
 
 /** Seed a fake-indexeddb cache with the shared fixtures and hand it to mount. */
@@ -354,7 +357,7 @@ function isPreloadable(
   );
 }
 
-function pane(name: "nav" | "list" | "detail"): HTMLElement {
+function pane(name: "nav" | "list" | "document"): HTMLElement {
   const el = document.querySelector<HTMLElement>(`[data-pane="${name}"]`);
   if (!el) throw new Error(`no ${name} pane`);
   return el;
@@ -448,7 +451,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
   });
 
-  it("loads projects into the nav and shows the welcome document", async () => {
+  it("loads projects into the list pane and shows the welcome document", async () => {
     const client = fakeClient();
     mount("/", client);
     const rows = await screen.findAllByTestId("nav-project");
@@ -457,22 +460,110 @@ describe("shell: project navigation and real-data path", () => {
       "/home/me/empty0", // nameless project falls back to its path
     ]);
     expect(
-      screen.getByRole("heading", { name: "Choose a project" }),
+      screen.getByRole("heading", { name: "Select an item" }),
     ).toBeVisible();
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
     );
     expect(client.calls).toEqual(["projects"]);
-    // Only the nav + detail panes exist without a selected project.
-    expect(document.querySelector('[data-pane="list"]')).toBeNull();
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "nav",
-    );
+    expect(document.querySelector('[data-pane="list"]')).not.toBeNull();
+    expect(
+      screen
+        .getByRole("navigation", { name: "Workspace" })
+        .querySelector('[data-testid="nav-project"]'),
+    ).toBeNull();
+  });
+
+  it("keeps the project list node and query across project and session routes", async () => {
+    const session = {
+      session_id: "s-42",
+      message_count: 1,
+      first_message_at: 1_700_000_000_000,
+      last_message_at: 1_700_000_000_000,
+      distilled_count: 0,
+      undistilled_count: 1,
+      distillation_count: 0,
+      title: "Session s-42",
+      title_source: "id" as const,
+    };
+    const client = fakeClient({
+      async listProjectSessionsPage() {
+        return { items: [session], next_cursor: null };
+      },
+      async getSessionPage() {
+        return {
+          messages: [],
+          distillations: [],
+          next_cursor: null,
+          message_count: 1,
+          title: "s-42",
+          title_source: "id" as const,
+        };
+      },
+    });
+
+    for (const base of [undefined, "/ui"]) {
+      const prefix = base ?? "";
+      const { history, unmount } = mount(
+        `${prefix}/?q=lore`,
+        client,
+        undefined,
+        base,
+      );
+      const list = await screen.findByTestId("project-list-body");
+      list.dataset.listIdentity = "persistent";
+      list.scrollTop = 192;
+      const project = await screen.findByRole("link", { name: "lore" });
+      expect(project).toHaveAttribute(
+        "href",
+        `${prefix}/projects/p-lore?q=lore`,
+      );
+      fireEvent.click(project);
+      await waitFor(() =>
+        expect(history.get()).toBe(`${prefix}/projects/p-lore?q=lore`),
+      );
+      expect(screen.getByTestId("project-list-body")).toBe(list);
+      expect(list.scrollTop).toBe(192);
+
+      fireEvent.click(await screen.findByRole("link", { name: /s-42/ }));
+      await waitFor(() =>
+        expect(history.get()).toBe(
+          `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
+        ),
+      );
+      expect(screen.getByTestId("project-list-body")).toBe(list);
+      expect(list).toHaveAttribute("data-list-identity", "persistent");
+      expect(list.scrollTop).toBe(192);
+      expect(screen.getByRole("link", { name: "lore" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      unmount();
+    }
+  });
+
+  it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByTestId("list-divider");
+    expect(divider).toHaveAttribute("aria-valuenow", "340");
+
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+    expect(divider).toHaveAttribute("aria-valuenow", "356");
+    fireEvent.keyDown(divider, { key: "ArrowRight", shiftKey: true });
+    expect(divider).toHaveAttribute("aria-valuenow", "420");
+    fireEvent.keyDown(divider, { key: "Home" });
+    expect(divider).toHaveAttribute("aria-valuenow", "280");
+    fireEvent.keyDown(divider, { key: "End" });
+    expect(divider).toHaveAttribute("aria-valuenow", "640");
+    fireEvent.keyDown(divider, { key: "Enter" });
+    expect(divider).toHaveAttribute("aria-valuenow", "340");
+    expect(screen.getByLabelText("Maximise document")).toBeInTheDocument();
+    expect(screen.queryByTestId("pane-min-document")).toBeNull();
   });
 
   it("returns focus to the navigation opener when the drawer closes", async () => {
+    stubSinglePaneViewport();
     const client = fakeClient();
     mount("/", client);
     const opener = await screen.findByTestId("open-nav");
@@ -487,6 +578,7 @@ describe("shell: project navigation and real-data path", () => {
   });
 
   it("focuses a replacement opener after the original is removed", async () => {
+    stubSinglePaneViewport();
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       setTimeout(() => callback(0), 0);
       return 1;
@@ -524,10 +616,7 @@ describe("shell: project navigation and real-data path", () => {
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows[0]).toHaveTextContent("Keep SQLite");
     expect(rows[1]).toHaveTextContent("WAL recovery");
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "detail",
-    );
+    expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
 
     fireEvent.click(rows[1]!);
     await waitFor(() =>
@@ -544,17 +633,13 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).getByText("No source session recorded."),
     ).toBeInTheDocument();
-    const selectedRows = await screen.findAllByTestId("knowledge-row");
-    expect(selectedRows[1]).toHaveAttribute("aria-current", "page");
-    expect(selectedRows[0]).not.toHaveAttribute("aria-current");
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "detail",
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
+      (row) => row.getAttribute("aria-current") === "page",
     );
-    expect(screen.getByTestId("mobile-back")).toHaveAttribute(
-      "href",
-      "/projects/p-lore/knowledge",
-    );
+    expect(selectedProject).toBeDefined();
+    expect(selectedProject).toHaveAttribute("aria-current", "page");
+    expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
     expect(client.calls[0]).toBe("projects");
     expect(client.calls).toContain("entry:k-wal");
     expect(client.pageOpts).toEqual(
@@ -588,8 +673,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).getAllByText(/Portability|No remote cache/),
     ).toHaveLength(2);
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows[0]).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
     const [lore] = await screen.findAllByTestId("nav-project");
     expect(lore).toHaveAttribute("aria-current", "page");
   });
@@ -598,9 +682,12 @@ describe("shell: project navigation and real-data path", () => {
     const client = fakeClient();
     mount("/knowledge/k-wal", client);
     await screen.findByTestId("knowledge-document");
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows).toHaveLength(2);
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
+      (row) => row.getAttribute("aria-current") === "page",
+    );
+    expect(selectedProject).toBeDefined();
+    expect(pane("list")).toHaveTextContent("lore");
     expect(client.calls).toEqual([
       "projects",
       "entry:k-wal",
@@ -668,9 +755,12 @@ describe("shell: project navigation and real-data path", () => {
         sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
-    const [row] = await screen.findAllByTestId("knowledge-row");
-    expect(row).toHaveAttribute("aria-current", "page");
+    expect(pane("list")).toHaveTextContent("lore");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(await screen.findByTestId("nav-project")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("renders the future actions disabled with the exact wording", async () => {
@@ -1023,12 +1113,9 @@ describe("shell: workspace knowledge and search", () => {
     const projects = within(nav).getByTestId("nav-projects");
     expect(allKnowledge).toHaveAttribute("aria-current", "page");
     expect(projects).not.toHaveAttribute("aria-current");
-    const navLinks = [...nav.querySelectorAll("a[data-testid]")];
-    expect(navLinks.indexOf(allKnowledge)).toBeLessThan(
-      navLinks.findIndex(
-        (link) => link.getAttribute("data-testid") === "nav-project",
-      ),
-    );
+    expect(nav.querySelector('[data-testid="nav-project"]')).toBeNull();
+    expect(pane("list")).toHaveTextContent("No projects match");
+    expect(within(pane("list")).queryByTestId("nav-project")).toBeNull();
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
     if (!firstRow) throw new Error("Missing all-knowledge table row");
@@ -1100,16 +1187,17 @@ describe("shell: workspace knowledge and search", () => {
     await waitFor(() => expect(project).toHaveTextContent("p-unknown"));
   });
 
-  it("returns entry-only deep links to All knowledge", async () => {
+  it("returns narrow entry-only deep links to the workspace list", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
     mount("/knowledge/k-global", fakeClient());
     await screen.findByTestId("knowledge-document");
-    expect(screen.getByTestId("mobile-back")).toHaveAttribute(
-      "href",
-      "/knowledge",
-    );
-    expect(screen.getByTestId("mobile-back")).toHaveTextContent(
-      "All knowledge",
-    );
+    expect(screen.getByTestId("mobile-back")).toHaveAttribute("href", "/");
+    expect(screen.getByTestId("mobile-back")).toHaveTextContent("Back to list");
   });
 
   it("shows ranked search results and links to the complete table", async () => {
@@ -1292,7 +1380,7 @@ describe("shell: workspace knowledge and search", () => {
     });
     mount("/search?q=Hostile", client);
     expect(await screen.findByText(title)).toBeInTheDocument();
-    expect(pane("detail").querySelector("img")).toBeNull();
+    expect(pane("document").querySelector("img")).toBeNull();
     expect((window as Window & { __pwned?: number }).__pwned).toBeUndefined();
   });
 });
@@ -1880,8 +1968,16 @@ describe("shell: search entry, theme and fixture", () => {
   });
 
   it("mounts the fixture and compatibility smoke in dev only, never in production builds", async () => {
-    const paths = (defs: typeof routes) =>
-      defs.flatMap((r) => (Array.isArray(r.path) ? r.path : [r.path]));
+    const paths = (defs: typeof routes): (string | undefined)[] =>
+      defs.flatMap((route) => {
+        const own = Array.isArray(route.path) ? route.path : [route.path];
+        const children = route.children
+          ? paths(
+              Array.isArray(route.children) ? route.children : [route.children],
+            )
+          : [];
+        return [...own, ...children];
+      });
     expect(import.meta.env.DEV).toBe(true);
     expect(paths(routes)).toEqual(
       expect.arrayContaining(["/fixture", "/_compat"]),

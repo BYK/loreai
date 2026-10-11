@@ -13,11 +13,9 @@ import { StateCard } from "~/components/lore/StateCard";
 import { ContextWindowPane } from "~/components/reader/ContextWindow";
 import { SessionView } from "~/components/reader/SessionView";
 import { SessionWorkspace } from "~/components/reader/SessionWorkspace";
-import { Nav } from "~/components/shell/Nav";
-import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { knowledgeHref, projectHref } from "~/lib/href";
+import { knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
 
 function decodeParam(segment: string | undefined): string | undefined {
@@ -82,20 +80,6 @@ export const Session: Component = () => {
     const a = search.a;
     return typeof a === "string" && a !== "" ? a : null;
   };
-
-  const nav = () => (
-    <Nav
-      projects={ws.projects.data()}
-      loading={ws.projects.loading()}
-      error={ws.projects.error()}
-      activeProjectId={projectId()}
-      totalKnowledge={
-        ws.projects.data()?.reduce((n, p) => n + p.knowledge_count, 0) ?? null
-      }
-      onRetry={ws.projects.reload}
-      stale={ws.state.projects.status()}
-    />
-  );
 
   // Header title (#1921): the server's derived title once the page answer
   // carries one (title_source !== "id"), otherwise a cached list summary's
@@ -207,17 +191,5 @@ export const Session: Component = () => {
     </Switch>
   );
 
-  return (
-    <Shell
-      nav={nav}
-      detail={detail()}
-      mobilePane="detail"
-      searchProjectId={projectId() ?? undefined}
-      back={
-        projectId()
-          ? { href: projectHref(projectId()!), label: projectLabel() }
-          : undefined
-      }
-    />
-  );
+  return <>{detail()}</>;
 };

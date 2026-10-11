@@ -10,15 +10,12 @@ import type {
 } from "~/contracts";
 import {
   DEFAULT_ALL_KNOWLEDGE_QUERY,
-  DEFAULT_KNOWLEDGE_QUERY,
   parseAllKnowledgeQuery,
   parseKnowledgeQuery,
 } from "~/contracts";
 import {
   allKnowledgeHref,
   globalKnowledgeHref,
-  knowledgeHref,
-  knowledgeListHref,
   projectHref,
   workspaceSearchHref,
 } from "~/lib/href";
@@ -38,10 +35,7 @@ import { SessionList } from "~/components/lore/SessionList";
 import { ImportHistoryPage } from "~/components/lore/ImportHistoryPage";
 import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { errorStateFor } from "~/components/lore/ErrorState";
-import { ListRow, PaneHead } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
-import { Nav } from "~/components/shell/Nav";
-import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
 import { createLoader } from "~/lib/loader";
 import {
@@ -66,7 +60,7 @@ const WelcomeDetail: Component<{
 }> = (props) => (
   <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
     <div class="eyebrow mb-2">Memory browser</div>
-    <h1 class="mb-3 text-[25px] font-semibold">Choose a project</h1>
+    <h1 class="mb-3 text-[25px] font-semibold">Select an item</h1>
     <p class="mb-6 max-w-prose text-sm text-muted">
       Lore keeps what your agents learned about each project. Pick a project on
       the left to browse its knowledge.
@@ -221,10 +215,6 @@ export const Browse: Component<{
       ? { projectPath: sourceProject.path, sessionId: sourceSession }
       : null;
   });
-  const label = () =>
-    projectForEntry()?.name || projectForEntry()?.path || "Project";
-  const mobilePane = (): MobilePane =>
-    props.view === "welcome" ? "nav" : "detail";
   const projectFallback = () => {
     if (ws.projects.loading()) {
       return <StateCard kind="loading" title="Loading project" />;
@@ -233,94 +223,6 @@ export const Browse: Component<{
       return errorStateFor(ws.projects.error(), "Projects", ws.projects.reload);
     }
     return <StateCard kind="error" title="Project not found or inaccessible" />;
-  };
-  const nav = () => (
-    <Nav
-      projects={ws.projects.data()}
-      loading={ws.projects.loading()}
-      error={ws.projects.error()}
-      activeProjectId={projectId() ?? null}
-      totalKnowledge={
-        ws.projects.data()?.reduce((n, p) => n + p.knowledge_count, 0) ?? null
-      }
-      onRetry={ws.projects.reload}
-      stale={ws.state.projects.status()}
-      footer={
-        props.view === "welcome" ? (
-          <div class="border-t border-line px-3 pt-4">
-            <MergeProjectsAction />
-          </div>
-        ) : undefined
-      }
-    />
-  );
-  const list = () => {
-    const id = activeProjectId();
-    if (!id) return undefined;
-    const items = () => knowledgePage.loader.data()?.items;
-    return (
-      <div data-testid="knowledge-list">
-        <PaneHead
-          title={
-            <>
-              {`Knowledge · ${label()}`}
-              <Show when={items()}>
-                {(rows) =>
-                  ` · ${rows().length} ${rows().length === 1 ? "entry" : "entries"}`
-                }
-              </Show>
-            </>
-          }
-          trailing={
-            <A
-              class="text-xs text-accent underline"
-              href={knowledgeListHref(id, query())}
-            >
-              Open as table
-            </A>
-          }
-        />
-        <Show when={knowledgePage.loader.stale()}>
-          <div class="px-4 py-2 text-xs text-muted">
-            Showing cached knowledge while refreshing.
-          </div>
-        </Show>
-        <Switch>
-          <Match when={knowledgePage.loader.error() && !items()}>
-            {errorStateFor(
-              knowledgePage.loader.error(),
-              "Knowledge",
-              knowledgePage.loader.reload,
-              {
-                firstPage: () =>
-                  navigate(knowledgeListHref(id, DEFAULT_KNOWLEDGE_QUERY)),
-              },
-            )}
-          </Match>
-          <Match when={!items()}>
-            <StateCard kind="loading" title="Loading knowledge" />
-          </Match>
-          <Match when={items()?.length === 0}>
-            <StateCard kind="empty" title="No knowledge extracted yet" />
-          </Match>
-          <Match when={items()}>
-            <For each={items()}>
-              {(item) => (
-                <ListRow
-                  href={knowledgeHref(id, item.id, query())}
-                  title={item.title}
-                  preview={previewOf(item.content)}
-                  footLeft={item.category}
-                  footRight={formatWhen(item.updated_at ?? item.created_at)}
-                  selected={item.id === knowledgeId()}
-                  testId="knowledge-row"
-                />
-              )}
-            </For>
-          </Match>
-        </Switch>
-      </div>
-    );
   };
   const projectFilter = () => {
     const current = allQuery().project;
@@ -368,7 +270,14 @@ export const Browse: Component<{
     const id = projectId();
     switch (props.view) {
       case "welcome":
-        return <WelcomeDetail projects={ws.projects.data()} />;
+        return (
+          <>
+            <WelcomeDetail projects={ws.projects.data()} />
+            <div class="mx-auto max-w-[940px] px-5 pb-8 sm:px-7.5">
+              <MergeProjectsAction />
+            </div>
+          </>
+        );
       case "project":
         if (!id) return projectFallback();
         return (
@@ -540,37 +449,6 @@ export const Browse: Component<{
         );
     }
   };
-  const listView = createMemo(list);
   const detailView = createMemo(detail);
-  const back = () => {
-    const id = projectId();
-    if (props.view === "all-knowledge") return { href: "/", label: "Projects" };
-    if (props.view === "entry" && !id)
-      return { href: allKnowledgeHref(), label: "All knowledge" };
-    if (!id) return undefined;
-    switch (props.view) {
-      case "entry":
-        return { href: knowledgeListHref(id, query()), label: label() };
-      case "search":
-      case "sessions":
-      case "knowledge-table":
-      case "imports":
-      case "duplicates":
-        return { href: projectHref(id), label: label() };
-      case "project":
-        return { href: "/", label: "Projects" };
-      default:
-        return undefined;
-    }
-  };
-  return (
-    <Shell
-      nav={nav}
-      list={props.view === "entry" ? listView() : undefined}
-      detail={detailView()}
-      mobilePane={mobilePane()}
-      back={back()}
-      searchProjectId={projectId()}
-    />
-  );
+  return <>{detailView()}</>;
 };
