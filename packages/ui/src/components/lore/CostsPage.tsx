@@ -3,7 +3,7 @@ import type { Component, JSX } from "solid-js";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { A } from "@solidjs/router";
 
-import type { CostsSnapshot } from "~/contracts";
+import type { CostsSnapshot, ProviderBudgetInput } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatMoney } from "~/lib/money";
 import { useWorkspace } from "~/routes/workspace";
@@ -41,6 +41,11 @@ export const CostsPage: Component = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const saveBudgets = async (budgets: ProviderBudgetInput[]) => {
+    await ws.tracked(() => ws.client.putProviderBudgets(budgets));
+    await load();
   };
 
   onMount(() => void load());
@@ -98,6 +103,7 @@ export const CostsPage: Component = () => {
               quotas={data().quotas}
               budgets={data().provider_budgets}
               money={formatMoney}
+              onSaveBudgets={data().can_edit_budgets ? saveBudgets : undefined}
             />
 
             <Show when={data().daily.entries.some((day) => day.cost > 0)}>

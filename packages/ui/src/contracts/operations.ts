@@ -228,3 +228,24 @@ export const costsSnapshot = type({
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;
+
+/** `PUT /costs/budgets` body entry: one explicit (stored) provider budget. */
+export type ProviderBudgetInput = {
+  provider: string;
+  auth_kind: "api_key" | "subscription";
+  account: string | null;
+} & (
+  | { mode: "pace"; window: "5h" | "7d"; headroom: number }
+  | { mode: "off"; window: "5h" | "7d" }
+  | { mode: "cap"; unit: "percent"; window: "5h" | "7d"; amount: number }
+  | {
+      mode: "cap";
+      unit: "usd" | "tokens";
+      window: "day" | "week";
+      amount: number;
+    }
+);
+
+export const providerBudgetsResult = type({
+  provider_budgets: providerBudgetStatus.array(),
+});
