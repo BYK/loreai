@@ -19,7 +19,7 @@ import type {
 } from "~/contracts";
 
 import type {
-  DedupReviewMark as LocalDedupReviewMark,
+  DedupReviewRecord as LocalDedupReviewRecord,
   LocalDraft,
   PendingChange,
 } from "./local";
@@ -124,10 +124,10 @@ export interface LoreUiSchema extends DBSchema {
     value: PendingChange;
     indexes: { "by-created": number };
   };
-  /** Per-device, unapplied duplicate-review decisions. */
+  /** Per-device duplicate-review marks and pending idempotent applies. */
   reviewDecisions: {
     key: string;
-    value: LocalDedupReviewMark;
+    value: LocalDedupReviewRecord;
     indexes: { "by-project": string };
   };
 }

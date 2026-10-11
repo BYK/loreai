@@ -83,7 +83,23 @@ test.describe("cross-project knowledge", () => {
     await expect(
       table.getByText("scratch", { exact: true }).first(),
     ).toHaveText("scratch");
-    await expect(table.getByText("No project", { exact: true })).toHaveCount(3);
+    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const searchButton = page
+      .getByRole("search")
+      .getByRole("button", { name: "Search", exact: true });
+    for (const title of [
+      "Shared: prefer inert rendering",
+      "Shared-only evidence review seed alpha",
+      'Shared-only evidence review seed <img src=x onerror="window.__pwned=1">',
+    ]) {
+      await search.fill(title);
+      await searchButton.click();
+      const row = page.getByTestId("knowledge-row").filter({ hasText: title });
+      await expect(row).toHaveCount(1);
+      await expect(row.locator("td").nth(3)).toHaveText("No project");
+    }
+    await search.fill("");
+    await searchButton.click();
     const sharedRow = page
       .getByTestId("knowledge-row")
       .filter({ hasText: "Shared: prefer inert rendering" });

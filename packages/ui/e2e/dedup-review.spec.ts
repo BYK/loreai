@@ -86,7 +86,21 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
     await expect(review).toBeVisible();
-    await expect(review.getByTestId("duplicate-group")).toHaveCount(3);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Duplicate review evidence sample candidate alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Shared-only evidence review seed alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Cross pool duplicate tenant eviction ordering evidence",
+      }),
+    ).toHaveCount(1);
     await expect(
       review
         .getByText("Duplicate review evidence sample candidate alpha")
@@ -118,7 +132,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(review.getByText(/Updated /).first()).toBeVisible();
 
     const sharedGroup = review.getByTestId("duplicate-group").filter({
-      hasText: "Shared duplicate review evidence sample candidate alpha",
+      hasText: "Shared-only evidence review seed alpha",
     });
     await sharedGroup.click();
     await expect(review.getByText("Shared").first()).toBeVisible();
@@ -199,10 +213,12 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await page.keyboard.press("s");
     await expect(page.getByTestId("review-summary")).toContainText("1 skipped");
     await page.keyboard.press("u");
+    await expect(
+      sharedGroup.getByText("Pending", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByTestId("review-summary")).toContainText(
-      "1 accepted · 0 skipped · 2 pending",
+      "1 accepted · 0 skipped",
     );
-
     const afterResponse = await page.request.get(knowledgePath);
     expect(afterResponse.ok()).toBe(true);
     expect(await afterResponse.json()).toEqual(before);

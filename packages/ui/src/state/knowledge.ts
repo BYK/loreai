@@ -244,6 +244,9 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       store.remove(id);
       await repo.delete(id);
     },
+    async invalidateProject(projectId: string): Promise<void> {
+      await repo.deleteCollection(projectId);
+    },
     select: (id: string) => store.select(id),
     selectList: (projectId: string) => store.selectList(projectId),
     store,
