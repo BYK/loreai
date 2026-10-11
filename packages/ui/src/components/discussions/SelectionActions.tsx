@@ -82,7 +82,10 @@ export const SelectionActions: Component<{
             <Button
               size="sm"
               data-testid="start-thread"
-              onClick={() => setComposing(true)}
+              onClick={() => {
+                setError(null);
+                setComposing(true);
+              }}
             >
               {props.overlapping.length > 0
                 ? "Start independent thread"

@@ -69,7 +69,16 @@ export const Composer: Component<{
     });
     if (props.autofocus) input?.focus();
   });
-  onCleanup(() => void flush());
+  // Unmounting doesn't cancel the write; a tab being hidden or closed can
+  // end the page before the debounce fires, so flush right away.
+  const onHidden = () => {
+    if (document.visibilityState === "hidden") void flush();
+  };
+  document.addEventListener("visibilitychange", onHidden);
+  onCleanup(() => {
+    document.removeEventListener("visibilitychange", onHidden);
+    void flush();
+  });
 
   function edit(value: string) {
     setText(value);
@@ -84,16 +93,22 @@ export const Composer: Component<{
     if (busy() || (!value && !props.allowEmpty)) return;
     setBusy(true);
     setError(null);
+    let sent = false;
     try {
       await flush();
       const { key } = draft;
       await props.onSubmit(value);
+      sent = true;
       clearTimeout(saveTimer);
       pending = null;
-      await drafts.delete(key);
       setText("");
+      setRestored(false);
+      await drafts.delete(key);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setError(
+        sent ? `Sent, but the saved draft wasn't cleared: ${message}` : message,
+      );
     } finally {
       setBusy(false);
     }
