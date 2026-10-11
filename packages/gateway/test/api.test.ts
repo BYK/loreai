@@ -322,7 +322,7 @@ describe("GET /api/v1/knowledge/:id", () => {
 
   it("supports prefix resolution", async () => {
     const { knowledgeId } = await seedProject();
-    const prefix = knowledgeId.slice(0, 8);
+    const prefix = knowledgeId.slice(0, 20);
     const entry = await apiJSON<{ id: string }>(`/api/v1/knowledge/${prefix}`);
     expect(entry.id).toBe(knowledgeId);
   });
@@ -2204,6 +2204,7 @@ describe("GET /api/v1/projects/:id/knowledge — legacy shape is unchanged", () 
         "last_reinforced_at",
         "logical_id",
         "metadata",
+        "origin",
         "project_id",
         "promoted_at",
         "promotion_status",
