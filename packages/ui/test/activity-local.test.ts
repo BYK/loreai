@@ -132,6 +132,67 @@ describe("activity local transitions", () => {
     });
   });
 
+  it("writes through a replacement database handle and rehydrates its snapshot", async () => {
+    const oldDb = await openLoreDb({ factory: new IDBFactory() });
+    const newDb = await openLoreDb({ factory: new IDBFactory() });
+    if (!oldDb || !newDb) throw new Error("database did not open");
+    const key = "knowledge:project-1:entry-1";
+    await newDb.put("activityState", { key, archived_at: 5 });
+    let current = oldDb;
+    const state = createActivityLocalState(async () => current);
+    await state.ready;
+
+    current = newDb;
+    state.markRead(key, 3, 10);
+    await state.flush();
+
+    expect(await newDb.get("activityState", key)).toMatchObject({
+      archived_at: 5,
+      read_total: 3,
+      read_at: 10,
+    });
+    await state.rehydrate();
+    expect(state.record(key)).toMatchObject({
+      archived_at: 5,
+      read_total: 3,
+      read_at: 10,
+    });
+  });
+
+  it("keeps later writes enabled when a hydration replay put fails", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("database did not open");
+    const key = "knowledge:project-1:entry-1";
+    await db.put("activityState", { key, archived_at: 5 });
+
+    const transaction = db.transaction.bind(db);
+    let rejectReplayPut = true;
+    vi.spyOn(db, "transaction").mockImplementation((...args) => {
+      const tx = transaction(...args);
+      if (!rejectReplayPut || args[1] !== "readwrite") return tx;
+      rejectReplayPut = false;
+      const store = tx.objectStore("activityState");
+      const activityStore = store as unknown as {
+        put: (record: { key: string }) => Promise<string>;
+      };
+      activityStore.put = () => Promise.reject(new Error("replay put failed"));
+      return tx;
+    });
+
+    const state = createActivityLocalState(async () => db);
+    state.markRead(key, 3, 10);
+    await state.ready;
+    state.pin(key, 11);
+    await state.flush();
+
+    expect(await db.get("activityState", key)).toMatchObject({
+      archived_at: 5,
+      read_total: 3,
+      read_at: 10,
+      pinned_at: 11,
+    });
+  });
+
   it("persists actions arriving while hydration replay writes are pending", async () => {
     const db = await openLoreDb({ factory: new IDBFactory() });
     if (!db) throw new Error("database did not open");

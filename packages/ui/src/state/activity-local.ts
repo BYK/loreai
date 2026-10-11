@@ -202,7 +202,6 @@ export function createActivityLocalState(
       folderTransitions.length = 0;
       if (replayWrite) {
         trackWrite(replayWrite);
-        await replayWrite;
       }
       return db;
     })
@@ -240,12 +239,14 @@ export function createActivityLocalState(
     setSnapshot({ ...current, records });
     if (loaded()) {
       trackWrite(
-        ready.then(async (db) => {
-          if (!db) return;
-          const tx = db.transaction("activityState", "readwrite");
-          for (const record of changed.values()) await tx.store.put(record);
-          await tx.done;
-        }),
+        ready
+          .then(() => getDb())
+          .then(async (db) => {
+            if (!db) return;
+            const tx = db.transaction("activityState", "readwrite");
+            for (const record of changed.values()) await tx.store.put(record);
+            await tx.done;
+          }),
       );
     }
   }
@@ -273,16 +274,18 @@ export function createActivityLocalState(
     setSnapshot((current) => ({ ...current, folders: next }));
     if (loaded()) {
       trackWrite(
-        ready.then(async (db) => {
-          if (!db) return;
-          const tx = db.transaction("activityFolders", "readwrite");
-          const nextKeys = new Set(next.map((folder) => folder.key));
-          for (const folder of previous) {
-            if (!nextKeys.has(folder.key)) await tx.store.delete(folder.key);
-          }
-          for (const folder of next) await tx.store.put(folder);
-          await tx.done;
-        }),
+        ready
+          .then(() => getDb())
+          .then(async (db) => {
+            if (!db) return;
+            const tx = db.transaction("activityFolders", "readwrite");
+            const nextKeys = new Set(next.map((folder) => folder.key));
+            for (const folder of previous) {
+              if (!nextKeys.has(folder.key)) await tx.store.delete(folder.key);
+            }
+            for (const folder of next) await tx.store.put(folder);
+            await tx.done;
+          }),
       );
     }
   }
@@ -291,6 +294,23 @@ export function createActivityLocalState(
     snapshot,
     loaded,
     ready,
+    async rehydrate() {
+      await ready;
+      const db = await getDb();
+      const [records, folders] = db
+        ? await Promise.all([
+            db.getAll("activityState"),
+            db.getAll("activityFolders"),
+          ])
+        : [[], []];
+      setSnapshot({
+        records: Object.fromEntries(
+          records.map((record) => [record.key, record]),
+        ),
+        folders,
+      });
+      setLoaded(true);
+    },
     flush: () =>
       ready.then(() => Promise.all(pendingWrites)).then(() => undefined),
     record: (key: string) => snapshot().records[key] ?? { key },

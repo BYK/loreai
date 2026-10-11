@@ -195,6 +195,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
           },
         );
         await current;
+        await activityLocal.rehydrate();
       },
     },
     /** Resolves once the db handle (and so the repos) is ready. Test hook. */
