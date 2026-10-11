@@ -1,5 +1,6 @@
 import { MemoryRouter, Route } from "@solidjs/router";
 import { render, screen, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ActivityListBody } from "~/components/shell/ActivityListBody";
@@ -99,7 +100,11 @@ afterAll(() => {
   }
 });
 
-function mount(query: string, fetchActivity: ReturnType<typeof vi.fn>) {
+function mount(
+  query: string | (() => string),
+  fetchActivity: ReturnType<typeof vi.fn>,
+) {
+  const getQuery = typeof query === "function" ? query : () => query;
   const client = {
     listProjects: vi.fn(async () => []),
     fetchActivity,
@@ -107,7 +112,10 @@ function mount(query: string, fetchActivity: ReturnType<typeof vi.fn>) {
   return render(() => (
     <WorkspaceProvider client={client} db={Promise.resolve(null)}>
       <MemoryRouter>
-        <Route path="*" component={() => <ActivityListBody query={query} />} />
+        <Route
+          path="*"
+          component={() => <ActivityListBody query={getQuery()} />}
+        />
       </MemoryRouter>
     </WorkspaceProvider>
   ));
@@ -152,5 +160,65 @@ describe("ActivityListBody", () => {
     mount("in:archive", fetchActivity);
 
     await waitFor(() => expect(fetchActivity).toHaveBeenCalledTimes(6));
+  });
+
+  it("ignores a failed page from an obsolete query while the new query loads", async () => {
+    const oldPage: ActivityPage = {
+      ...PAGE,
+      items: PAGE.items.map((item) => ({
+        ...item,
+        id: "old-entry",
+        title: "Old query row",
+      })),
+      next_cursor: "old-cursor",
+    };
+    const newPage: ActivityPage = {
+      ...PAGE,
+      items: PAGE.items.map((item) => ({
+        ...item,
+        id: "new-entry",
+        title: "New query row",
+      })),
+    };
+    let rejectOldPage: ((cause: Error) => void) | undefined;
+    let resolveNewPage: ((page: ActivityPage) => void) | undefined;
+    const fetchActivity = vi.fn(
+      ({ q, cursor }: { q: string; cursor: string | null }) => {
+        if (q === "old query" && cursor === null)
+          return Promise.resolve(oldPage);
+        if (q === "old query") {
+          return new Promise<ActivityPage>((_resolve, reject) => {
+            rejectOldPage = reject;
+          });
+        }
+        if (q === "new query") {
+          return new Promise<ActivityPage>((resolve) => {
+            resolveNewPage = resolve;
+          });
+        }
+        return Promise.resolve(PAGE);
+      },
+    );
+    const [query, setQuery] = createSignal("old query");
+    mount(query, fetchActivity);
+
+    await waitFor(() => expect(fetchActivity).toHaveBeenCalledTimes(2));
+    if (!rejectOldPage) throw new Error("old page request did not start");
+
+    setQuery("new query");
+    await waitFor(() =>
+      expect(fetchActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "new query", cursor: null }),
+      ),
+    );
+    if (!resolveNewPage) throw new Error("new query request did not start");
+
+    rejectOldPage(new Error("obsolete page failed"));
+    expect(await screen.findByText("Loading activity…")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    resolveNewPage(newPage);
+    expect(await screen.findByText("New query row")).toBeInTheDocument();
+    expect(screen.queryByText("Old query row")).not.toBeInTheDocument();
   });
 });

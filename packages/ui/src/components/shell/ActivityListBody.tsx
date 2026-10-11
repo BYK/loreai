@@ -112,6 +112,7 @@ export const ActivityListBody: Component<{
   };
 
   const loadMore = async (filteredFill = false) => {
+    const currentGeneration = generation;
     const cursor = nextCursor();
     if (
       !cursor ||
@@ -125,13 +126,19 @@ export const ActivityListBody: Component<{
     if (filteredFill) pageBudget -= 1;
     setLoading(true);
     try {
-      await fetchPage(props.query, cursor, generation);
+      await fetchPage(props.query, cursor, currentGeneration);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Activity unavailable");
+      if (currentGeneration === generation) {
+        setError(
+          cause instanceof Error ? cause.message : "Activity unavailable",
+        );
+      }
     } finally {
       requestActive = false;
-      setLoading(false);
-      setScrollTick((tick) => tick + 1);
+      if (currentGeneration === generation) {
+        setLoading(false);
+        setScrollTick((tick) => tick + 1);
+      }
     }
   };
 
