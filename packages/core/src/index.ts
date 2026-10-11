@@ -96,6 +96,7 @@ export * as degradationSignals from "./degradation-signals";
 export * as instructionDetect from "./instruction-detect";
 export * as log from "./log";
 export * as conversationImport from "./import";
+export * as modelUsage from "./model-usage";
 
 export {
   runRecall,

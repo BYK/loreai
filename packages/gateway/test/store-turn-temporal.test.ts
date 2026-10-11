@@ -229,6 +229,28 @@ describe("storeTurnTemporal (#1084)", () => {
     });
   });
 
+  it("attributes the assistant message to the resolved provider (#2026)", () => {
+    const SESSION = freshSession();
+    storeTurnTemporal({
+      temporalInput: captureTurnTemporalInput(userMessages(SESSION, "hi")),
+      assistantContentBlocks: [{ type: "text", text: "reply" }],
+      usage: USAGE,
+      model: "gpt-5",
+      providerID: "openai",
+      projectPath: PROJECT,
+      sessionID: SESSION,
+      noStore: false,
+    });
+    const meta = db()
+      .query(
+        "SELECT metadata FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
+      )
+      .get(SESSION) as { metadata: string };
+    const parsed = JSON.parse(meta.metadata);
+    expect(parsed.providerID).toBe("openai");
+    expect(parsed.modelID).toBe("gpt-5");
+  });
+
   it("leaves assistant metadata untouched when temporalInput has no gradient", () => {
     const SESSION = freshSession();
     storeTurnTemporal({

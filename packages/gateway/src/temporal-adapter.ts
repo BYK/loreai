@@ -421,6 +421,7 @@ export function updateAssistantMessageTokens(
   msg: LoreMessageWithParts,
   usage: GatewayUsage,
   model: string,
+  providerID?: string,
 ): void {
   const info = msg.info;
   if (info.role !== "assistant") return;
@@ -430,6 +431,7 @@ export function updateAssistantMessageTokens(
   info.tokens.cache.read = usage.cacheReadInputTokens ?? 0;
   info.tokens.cache.write = usage.cacheCreationInputTokens ?? 0;
   info.modelID = model;
+  if (providerID !== undefined) info.providerID = providerID;
 }
 
 // ---------------------------------------------------------------------------

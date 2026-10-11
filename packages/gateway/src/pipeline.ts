@@ -16694,7 +16694,39 @@ export function recordCacheTurnUsage(
   return bustCause;
 }
 
-type CostAttributionUpstream = { providerID?: string; url?: string };
+type CostAttributionUpstream = {
+  providerID?: string;
+  url?: string;
+  /**
+   * Provider identity for temporal attribution (#2026). Unlike `providerID`
+   * (explicit route selection only), this falls back to the wire protocol so
+   * OpenAI/Codex/Gemini/Vertex traffic is not stored as `anthropic/<model>`.
+   */
+  temporalProviderID?: string;
+};
+
+/**
+ * Provider id for temporal model-usage stats: explicit route provider wins,
+ * else the effective wire protocol maps to the models.dev provider id.
+ */
+function temporalProviderIDForRoute(
+  route: ResolvedRequestUpstreamRoute,
+): string | undefined {
+  if (route.providerID) return route.providerID;
+  switch (route.effectiveProtocol) {
+    case "anthropic":
+      return "anthropic";
+    case "openai":
+    case "openai-responses":
+      return "openai";
+    case "vertex":
+      return "google-vertex";
+    case "gemini":
+      return "google";
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Attribution source captured at request time. The resolved route is always
@@ -16704,7 +16736,11 @@ type CostAttributionUpstream = { providerID?: string; url?: string };
 function routeAttributionUpstream(
   route: ResolvedRequestUpstreamRoute,
 ): CostAttributionUpstream {
-  return { providerID: route.providerID, url: route.effectiveUpstreamBase };
+  return {
+    providerID: route.providerID,
+    url: route.effectiveUpstreamBase,
+    temporalProviderID: temporalProviderIDForRoute(route),
+  };
 }
 
 function accountConversationUsage(
@@ -16851,6 +16887,7 @@ function postResponseForTenant(
       assistantContentBlocks: resp.content,
       usage,
       model: resp.model,
+      providerID: upstream?.temporalProviderID,
       projectPath,
       sessionID,
       noStore,
@@ -19864,6 +19901,7 @@ async function handleProvisionalConversationTurn(
         assistantContentBlocks: accumulated.content,
         usage: accumulated.usage ?? ZERO_USAGE,
         model: accumulated.model,
+        providerID: temporalProviderIDForRoute(requestUpstream.route),
         projectPath,
         sessionID: identified.sessionID,
         noStore,
