@@ -38,6 +38,7 @@ import { handleFolkStatusRequest } from "./folk-status";
 import { handlePromotionRequest } from "./promotions";
 import { handleTeamActionRequest } from "./team-actions";
 import { handleSyncConflictRequest } from "./sync-conflicts";
+import { handleSyncRunRequest } from "./sync-run";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 import {
   BadRequest,
@@ -1104,6 +1105,9 @@ export async function handleAPIRequest(
 
     const syncConflict = await handleSyncConflictRequest(req, url, config);
     if (syncConflict) return syncConflict;
+
+    const syncRun = await handleSyncRunRequest(req, pathname, config);
+    if (syncRun) return syncRun;
 
     // Literal routes first (before parameterized :id routes)
 

@@ -1476,7 +1476,18 @@ export async function reconcileScopeWraps(
   return { wrapped };
 }
 
-export async function syncOnce(
+let syncOnceInFlight: Promise<SyncResult> | null = null;
+
+export function syncOnce(onProgress?: SyncProgressFn): Promise<SyncResult> {
+  if (syncOnceInFlight) return syncOnceInFlight;
+  const run = performSyncOnce(onProgress).finally(() => {
+    if (syncOnceInFlight === run) syncOnceInFlight = null;
+  });
+  syncOnceInFlight = run;
+  return run;
+}
+
+async function performSyncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
   if (!syncData.isSyncEnabled()) {

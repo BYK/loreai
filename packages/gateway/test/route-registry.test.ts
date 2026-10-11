@@ -57,6 +57,14 @@ const MANAGEMENT_PATHS = [
   "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/versions",
   "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/effects",
   "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/restore",
+  "/api/v1/teams",
+  "/api/v1/teams/accept",
+  "/api/v1/teams/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/members",
+  "/api/v1/teams/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/discover",
+  "/api/v1/orgs",
+  "/api/v1/orgs/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/domains/requests",
+  "/api/v1/projects/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/sharing/link",
+  "/api/v1/sync/run",
   "/api/v1/entities",
   "/api/v1/entities/rebuild",
   "/api/v1/entities/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
@@ -265,5 +273,36 @@ describe("registry-driven access policy", () => {
     expect(JSON.parse(await res.text())).toMatchObject({
       error: { type: "not_found" },
     });
+  });
+
+  test("review-policy PUT is classified as a management write off-loopback", async () => {
+    const path =
+      "/api/v1/teams/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/review-policy";
+    expect(classifyPath(path)).toBe(MANAGEMENT_PLANE);
+    const app = createGatewayApp(makeConfig());
+    const response = await app.fetch(
+      new Request(`http://gateway.local${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ policy: "optional", expected: "required" }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  test("sync-run POST is classified as a management write off-loopback", async () => {
+    const app = createGatewayApp(makeConfig());
+    const response = await app.fetch(
+      new Request("http://gateway.local/api/v1/sync/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }),
+      env,
+    );
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
   });
 });

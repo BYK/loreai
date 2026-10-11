@@ -197,32 +197,39 @@ function conflictId(segment: string): number | Response {
     : errorResponse(400, "invalid_request", "Conflict id must be positive");
 }
 
-function unavailableConflict(id: number): Response {
-  return errorResponse(404, "not_found", `Sync conflict ${id} not found`);
-}
-
 function findConflict(id: number): ConflictRow | null {
   return syncData.getSyncConflict(id);
 }
 
-async function keepLocal(req: Request, id: number): Promise<Response> {
-  const body = await readObjectBody(req);
-  if (body instanceof Response) return body;
-  if (
-    Object.keys(body).some((key) => key !== "expected_version_id") ||
-    typeof body.expected_version_id !== "string"
-  ) {
-    return errorResponse(
-      400,
-      "invalid_request",
-      "expected_version_id is required",
-    );
-  }
+export type SyncConflictActionResult =
+  | { ok: true; status: 200; value: Record<string, unknown> }
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+    };
+
+function actionError(
+  status: number,
+  code: string,
+  message: string,
+  details?: Record<string, unknown>,
+): SyncConflictActionResult {
+  return { ok: false, status, code, message, ...(details ? { details } : {}) };
+}
+
+export function keepSyncConflictLocal(
+  id: number,
+  expectedVersionId: string,
+): SyncConflictActionResult {
   const conflict = findConflict(id);
-  if (!conflict) return unavailableConflict(id);
+  if (!conflict)
+    return actionError(404, "not_found", `Sync conflict ${id} not found`);
   const shaped = shapeConflict(conflict);
   if (!shaped.recoverable) {
-    return errorResponse(
+    return actionError(
       409,
       "not_recoverable",
       "This sync conflict cannot be restored as a knowledge entry.",
@@ -230,16 +237,12 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
   }
   const local = shaped.local;
   if (!local)
-    return errorResponse(
-      409,
-      "not_recoverable",
-      "Local snapshot is unreadable.",
-    );
+    return actionError(409, "not_recoverable", "Local snapshot is unreadable.");
   const isRemoteDelete = conflict.resolution === "remote_delete_wins";
   const current = currentKnowledge(conflict.row_id, isRemoteDelete);
   if (isRemoteDelete && current?.is_deleted === 1) {
     const result = ltm.restoreDeletedKnowledge(conflict.row_id, {
-      expectedDeletedVersionId: body.expected_version_id,
+      expectedDeletedVersionId: expectedVersionId,
       conflictId: id,
       title: local.title,
       content: local.content,
@@ -247,7 +250,7 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
         ?.metadata as RestoreMetadata,
     });
     if (!result.ok) {
-      return errorResponse(
+      return actionError(
         409,
         "stale_version",
         "Knowledge entry changed; reload the conflict.",
@@ -256,14 +259,14 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
     }
   } else {
     if (!current) {
-      return errorResponse(
+      return actionError(
         409,
         "not_recoverable",
         "The current knowledge entry is no longer available.",
       );
     }
-    if (body.expected_version_id !== current.version_id) {
-      return errorResponse(
+    if (expectedVersionId !== current.version_id) {
+      return actionError(
         409,
         "stale_version",
         "Knowledge entry changed; reload the conflict.",
@@ -278,27 +281,33 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
   syncData.deleteSyncConflict(id);
   const updated = currentKnowledge(conflict.row_id);
   return updated
-    ? json({ kept: "local", current: currentShape(updated) })
-    : errorResponse(
+    ? {
+        ok: true,
+        status: 200,
+        value: { kept: "local", current: currentShape(updated) },
+      }
+    : actionError(
         409,
         "not_recoverable",
         "The knowledge entry is no longer available.",
       );
 }
 
-async function discard(req: Request, id: number): Promise<Response> {
-  const body = await readObjectBody(req);
-  if (body instanceof Response) return body;
-  if (Object.keys(body).length !== 0) {
-    return errorResponse(
-      400,
-      "invalid_request",
-      "Discard accepts an empty object",
-    );
-  }
-  if (!findConflict(id)) return unavailableConflict(id);
+export function discardSyncConflict(id: number): SyncConflictActionResult {
+  if (!findConflict(id))
+    return actionError(404, "not_found", `Sync conflict ${id} not found`);
   syncData.deleteSyncConflict(id);
-  return json({ discarded: id });
+  return { ok: true, status: 200, value: { discarded: id } };
+}
+
+function actionResponse(result: SyncConflictActionResult): Response {
+  if (result.ok) return json(result.value, result.status);
+  return errorResponse(
+    result.status,
+    result.code,
+    result.message,
+    result.details,
+  );
 }
 
 export async function handleSyncConflictRequest(
@@ -329,7 +338,33 @@ export async function handleSyncConflictRequest(
     }
     const id = conflictId(match[1]);
     if (id instanceof Response) return id;
-    return match[2] === "keep-local" ? keepLocal(req, id) : discard(req, id);
+    if (match[2] === "keep-local") {
+      const body = await readObjectBody(req);
+      if (body instanceof Response) return body;
+      if (
+        Object.keys(body).some((key) => key !== "expected_version_id") ||
+        typeof body.expected_version_id !== "string"
+      ) {
+        return errorResponse(
+          400,
+          "invalid_request",
+          "expected_version_id is required",
+        );
+      }
+      return actionResponse(
+        keepSyncConflictLocal(id, body.expected_version_id),
+      );
+    }
+    const body = await readObjectBody(req);
+    if (body instanceof Response) return body;
+    if (Object.keys(body).length !== 0) {
+      return errorResponse(
+        400,
+        "invalid_request",
+        "Discard accepts an empty object",
+      );
+    }
+    return actionResponse(discardSyncConflict(id));
   }
   return null;
 }

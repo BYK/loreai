@@ -75,6 +75,7 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(seen.has("disable")).toBe(true);
     expect(seen.has("status")).toBe(true);
     expect(seen.has("now")).toBe(true);
+    expect(seen.has("conflicts")).toBe(true);
   });
 
   test("sync forwards positional subcommand to legacy handler", async () => {
@@ -117,6 +118,51 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(syncImpl).toHaveBeenCalledTimes(1);
     expect(calls[0]?.positionals).toEqual(["enable"]);
     expect(Buffer.concat(stdoutChunks).toString("utf8")).toContain("sync ok");
+    vi.resetModules();
+  });
+
+  test("sync forwards conflict action, ID, and expected-version flag", async () => {
+    vi.resetModules();
+    const calls: SyncCall[] = [];
+    const syncImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("conflict kept");
+      },
+    );
+    vi.doMock("../src/cli/sync-cmd", () => ({
+      commandSync: syncImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "sync",
+      "conflicts",
+      "keep",
+      "17",
+      "--expected-version",
+      "version-3",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls).toEqual([
+      {
+        positionals: ["conflicts", "keep", "17"],
+        values: { "expected-version": "version-3" },
+      },
+    ]);
     vi.resetModules();
   });
 
