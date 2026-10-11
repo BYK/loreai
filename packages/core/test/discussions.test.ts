@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { close, db, ensureProject } from "../src/db";
+import { close, db, ensureProject, mergeProjectInternal } from "../src/db";
 import { deleteProject, moveSessions } from "../src/data";
 import {
   DiscussionError,
@@ -703,6 +703,47 @@ describe("discussions", () => {
     expect(afterEdit).toBeGreaterThan(before);
     deleteReply(p.id, discussion.id, added.reply.id, edited.reply.revision);
     expect(getThread(p.id, thread.id).updatedAt).toBeGreaterThan(afterEdit);
+  });
+
+  it("bumps the threads a moved session's discussions leave", () => {
+    const thread = createThread({ projectId: p.id, title: "Moving" });
+    const { discussion } = start();
+    updateDiscussion(p.id, discussion.id, {
+      expectedRevision: discussion.revision,
+      threadId: thread.id,
+    });
+    const before = getThread(p.id, thread.id);
+    expect(before.discussionCount).toBe(1);
+    moveSessions(["s1"], p.id, `/test/discussions/move-${Date.now()}-${seq++}`);
+    const after = getThread(p.id, thread.id);
+    expect(after.discussionCount).toBe(0);
+    expect(after.updatedAt).toBeGreaterThan(before.updatedAt);
+  });
+
+  it("merges projects whose response bindings name the same message", () => {
+    const answer = message(p.id, "s1", "the answer", "assistant");
+    const { discussion } = start();
+    const bound = addReply(p.id, discussion.id, {
+      expectedRevision: discussion.revision,
+      responseMessageId: answer,
+    });
+    const other = project();
+    db()
+      .query(
+        "INSERT INTO response_bindings (id, project_id, session_id, message_id, agent, verified_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("stale-binding", other.id, "s1", answer, "codex", Date.now());
+    mergeProjectInternal(p.id, other.id);
+    const [reply] = listReplies(other.id, discussion.id).replies;
+    expect(reply.id).toBe(bound.reply.id);
+    expect(reply.content).toMatchObject({
+      kind: "response",
+      binding: { id: "stale-binding", messageId: answer },
+    });
+    const rows = db()
+      .query("SELECT project_id FROM response_bindings WHERE message_id = ?")
+      .all(answer) as Array<{ project_id: string }>;
+    expect(rows).toEqual([{ project_id: other.id }]);
   });
 
   it("links discussions to threads and unlinks on thread delete", () => {

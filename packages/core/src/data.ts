@@ -1752,6 +1752,12 @@ export function moveSessions(
           `UPDATE discussion_replies SET project_id = ? WHERE project_id = ? AND discussion_id IN (SELECT id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}))`,
         )
         .run(toId, fromProjectId, fromProjectId, ...allIds);
+      // Threads stay with the project, so the moved discussions leave them.
+      database
+        .query(
+          `UPDATE threads SET updated_at = MAX(?1, updated_at + 1) WHERE id IN (SELECT thread_id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}) AND thread_id IS NOT NULL)`,
+        )
+        .run(Date.now(), fromProjectId, ...allIds);
       database
         .query(
           `UPDATE discussions SET project_id = ?, thread_id = NULL WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,

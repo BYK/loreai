@@ -5416,6 +5416,29 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // A message belongs to one project, so a binding for the same message on
+    // both sides is a stale duplicate: keep the target's and re-point the
+    // source's replies at it, so the re-key below cannot hit
+    // UNIQUE (project_id, message_id).
+    d.query(
+      `UPDATE discussion_replies
+          SET response_binding_id = (
+            SELECT t.id FROM response_bindings AS t
+              JOIN response_bindings AS s ON s.message_id = t.message_id
+             WHERE s.id = discussion_replies.response_binding_id
+               AND t.project_id = ?2)
+        WHERE response_binding_id IN (
+          SELECT s.id FROM response_bindings AS s
+           WHERE s.project_id = ?1
+             AND EXISTS (SELECT 1 FROM response_bindings AS t
+                          WHERE t.project_id = ?2 AND t.message_id = s.message_id))`,
+    ).run(sourceId, targetId);
+    d.query(
+      `DELETE FROM response_bindings AS s
+        WHERE s.project_id = ?1
+          AND EXISTS (SELECT 1 FROM response_bindings AS t
+                       WHERE t.project_id = ?2 AND t.message_id = s.message_id)`,
+    ).run(sourceId, targetId);
     for (const table of [
       "threads",
       "discussions",
