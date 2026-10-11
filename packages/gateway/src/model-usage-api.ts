@@ -399,6 +399,19 @@ export async function handleModelUsageUploadAction(
   const body = jsonObject(parsed);
   const bad = confirmBody(body, needsReview ? ["reviewed_revision"] : []);
   if (bad) return bad;
+  const reviewedRevision = needsReview ? body!.reviewed_revision : undefined;
+  if (
+    needsReview &&
+    (typeof reviewedRevision !== "number" ||
+      !Number.isSafeInteger(reviewedRevision) ||
+      reviewedRevision < 0)
+  ) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "reviewed_revision must be a non-negative integer",
+    );
+  }
   try {
     const owner = modelUsage.loadOwner();
     if (!owner) {
@@ -410,7 +423,7 @@ export async function handleModelUsageUploadAction(
     }
     const report = await getOwnedReport(owner);
     if (needsReview) {
-      if (body!.reviewed_revision !== report.revision) {
+      if (reviewedRevision !== report.revision) {
         return errorResponse(
           409,
           "stale_review",

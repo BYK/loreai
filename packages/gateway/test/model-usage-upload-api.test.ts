@@ -601,6 +601,35 @@ describe("upload actions", () => {
     core.modelUsage.deleteOwner();
   });
 
+  it("share rejects malformed reviewed_revision with 400 before any remote call", async () => {
+    core.modelUsage.saveOwner({ id: OWNER_ID, token: OWNER_TOKEN });
+    resetStubState();
+    const realFetch = globalThis.fetch;
+    let fetches = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      fetches += 1;
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      for (const reviewed_revision of ["1", -1, 1.5]) {
+        const res = await api("/api/v1/model-usage/upload/share", {
+          method: "POST",
+          body: { confirm: "YES", reviewed_revision },
+        });
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.error.type).toBe("invalid_request");
+        expect(body.error.message).toBe(
+          "reviewed_revision must be a non-negative integer",
+        );
+      }
+      expect(fetches).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    core.modelUsage.deleteOwner();
+  });
+
   it("actions 409 no_report without an owner", async () => {
     core.modelUsage.deleteOwner();
     const res = await api("/api/v1/model-usage/upload/share", {
