@@ -686,7 +686,8 @@ describe("shell: project navigation and real-data path", () => {
       "Share finding",
     ]);
     for (const button of buttons) {
-      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).not.toHaveAttribute("disabled");
       expect(button).toHaveTextContent(NOT_AVAILABLE_YET);
     }
   });
@@ -1401,7 +1402,9 @@ describe("shell: search entry, theme and fixture", () => {
         "Start with selected context",
       ].sort(),
     );
-    for (const button of future) expect(button).toBeDisabled();
+    for (const button of future) {
+      expect(button).toHaveAttribute("aria-disabled", "true");
+    }
     // The fixture must not hit the gateway: the root's project fetch is the
     // only call, and it belongs to the shell provider, not the fixture.
     await waitFor(() => expect(client.calls).toEqual(["projects"]));

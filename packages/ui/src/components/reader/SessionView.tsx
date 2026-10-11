@@ -13,8 +13,8 @@
  *  - `?a=` deep links resolve through `resolveAnchor`: a hash mismatch is a
  *    visible "source changed" state, an unknown block "not in loaded
  *    history" (with older pages searched up to a bound), never a guess.
- *  - Copy-with-source is live; every discussion action is a labelled,
- *    disabled `FutureAction` until APP-02.
+ *  - Copy-with-source is live; a selection starts or joins a discussion
+ *    (APP-02), and later actions stay labelled, disabled `FutureAction`s.
  *  - In-session search (UI-06c) scans the logical rows in time-bounded
  *    slices — mounted or not — and walks hits with a distinct mark; the
  *    coverage declaration states what the view holds (captured / partial /

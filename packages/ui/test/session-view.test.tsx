@@ -430,7 +430,7 @@ describe("SessionView: selection panel", () => {
     expect(changes[0]).toContain("m.spec-u1");
     for (const label of FUTURE_ACTIONS) {
       const button = screen.getByRole("button", { name: new RegExp(label) });
-      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-disabled", "true");
     }
 
     fireEvent.click(screen.getByTestId("copy-with-source"));

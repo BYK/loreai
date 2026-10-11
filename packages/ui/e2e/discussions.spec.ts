@@ -203,6 +203,16 @@ test.describe("reply to selection", () => {
 
     await page.getByTestId("back-to-source").click();
     await expect(page.getByTestId("session-view")).toBeVisible();
+    // The restored passage sits above the selection panel, not behind it.
+    const target = page.locator("mark.passage-target").first();
+    await expect(target).toBeInViewport();
+    await expect
+      .poll(async () => {
+        const mark = await target.boundingBox();
+        const panel = await page.getByTestId("selection-panel").boundingBox();
+        return !!mark && (!panel || mark.y + mark.height <= panel.y);
+      })
+      .toBe(true);
     await indicator(page, id).click();
     await expect(page).toHaveURL(new RegExp(`/discussions/${id}$`));
   });
