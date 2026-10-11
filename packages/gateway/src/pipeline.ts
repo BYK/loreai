@@ -16628,7 +16628,15 @@ export function recordCacheTurnUsage(
     );
     bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
     if (turnAnalysis.prefixRewrite && previous && previousMeta) {
-      capturePrefixSnapshot(sessionState, { body: previous, ...previousMeta });
+      try {
+        capturePrefixSnapshot(sessionState, {
+          body: previous,
+          ...previousMeta,
+        });
+      } catch (e) {
+        // Losing a snapshot only makes an older anchor start cold.
+        log.warn("prefix snapshot capture failed:", e);
+      }
     }
     sessionState.cacheAnalytics.lastRequestMeta = wire
       ? { model, wire, sentAt: Date.now() }

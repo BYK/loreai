@@ -7,7 +7,7 @@
  * expire with the session's conversation TTL and are pruned on push and on
  * read. Bodies are stored as given (zstd-compressed by the gateway).
  */
-import { db, withTransaction } from "./db";
+import { databaseInTransaction, db, withTransaction } from "./db";
 
 /** Retained snapshots per session; the oldest are dropped first. */
 export const PREFIX_SNAPSHOT_LIMIT = 8;
@@ -51,7 +51,7 @@ export function pushPrefixSnapshot(
   input: PrefixSnapshotInput,
   now = Date.now(),
 ): void {
-  withTransaction(() => {
+  atomically(() => {
     prune(input.sessionID, now);
     if (input.expiresAt <= now) return;
     db()
@@ -90,7 +90,7 @@ export function listPrefixSnapshots(
   sessionID: string,
   now = Date.now(),
 ): PrefixSnapshot[] {
-  return withTransaction(() => {
+  return atomically(() => {
     prune(sessionID, now);
     const rows = db()
       .query(
@@ -122,4 +122,10 @@ function prune(sessionID: string, now: number): void {
       "DELETE FROM session_prefix_snapshots WHERE session_id = ? AND expires_at <= ?",
     )
     .run(sessionID, now);
+}
+
+/** Joins the caller's transaction (post-response processing runs inside a
+ *  savepoint) or opens one. */
+function atomically<T>(fn: () => T): T {
+  return databaseInTransaction(db()) ? fn() : withTransaction(fn);
 }
