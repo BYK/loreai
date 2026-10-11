@@ -505,7 +505,11 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   };
   const applyAccepted = async () => {
     const plans = applyPlans();
-    if (!plans.length || applyPending()) return;
+    if (!plans.length) {
+      setConfirmOpen(false);
+      return;
+    }
+    if (applyPending()) return;
     setConfirmOpen(false);
     setApplyPending(true);
     try {
