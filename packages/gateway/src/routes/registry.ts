@@ -19,6 +19,7 @@ import { modelsRoutes } from "./models";
 import { controlRoutes } from "./control";
 import { dashboardRoutes } from "./dashboard";
 import { knowledgeRoutes } from "./knowledge";
+import { modelUsageRoutes } from "./model-usage";
 import { managementRoutes } from "./management";
 import { geminiRoutes } from "./gemini";
 import { bedrockRoutes } from "./bedrock";
@@ -35,6 +36,7 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   controlRoutes,
   dashboardRoutes,
   knowledgeRoutes,
+  modelUsageRoutes,
   managementRoutes,
   geminiRoutes,
   bedrockRoutes,

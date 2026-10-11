@@ -67,6 +67,8 @@ export function storeTurnTemporal(input: {
   assistantContentBlocks: GatewayContentBlock[];
   usage: GatewayUsage;
   model: string;
+  /** Resolved upstream provider (models.dev id); falls back to "anthropic". */
+  providerID?: string;
   projectPath: string;
   sessionID: string;
   noStore: boolean;
@@ -109,7 +111,12 @@ export function storeTurnTemporal(input: {
       sessionID,
       temporalInput.assistantIndex,
     )[0];
-    updateAssistantMessageTokens(assistant, input.usage, input.model);
+    updateAssistantMessageTokens(
+      assistant,
+      input.usage,
+      input.model,
+      input.providerID,
+    );
     if (temporalInput.gradient && assistant.info.role === "assistant") {
       assistant.info.gradient = temporalInput.gradient;
     }
