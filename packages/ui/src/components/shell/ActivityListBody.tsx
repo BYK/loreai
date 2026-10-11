@@ -15,6 +15,7 @@ import { parseActivityQuery } from "@loreai/core/activity-query";
 import type { ActivityItem } from "~/contracts";
 import { useWorkspace } from "~/routes/workspace";
 import { ACTIVITY_KIND_UI } from "~/lib/activity-kinds";
+import { formatActivityTime } from "~/lib/format";
 import { withWorkspaceQuery } from "~/lib/href";
 import {
   activityItemKey,
@@ -161,7 +162,7 @@ export const ActivityListBody: Component<{
           <For each={errors()}>
             {(error) => (
               <span
-                class="rounded-sm bg-unread-soft px-2 py-1 text-xs text-unread"
+                class="rounded-sm bg-pastel-rose px-2 py-1 text-xs text-danger"
                 data-testid="activity-query-error"
                 data-offset={error.start}
               >
@@ -261,14 +262,7 @@ export const ActivityListBody: Component<{
                                 row.last_activity_at,
                               ).toISOString()}
                             >
-                              {new Intl.RelativeTimeFormat(undefined, {
-                                numeric: "auto",
-                              }).format(
-                                Math.round(
-                                  (row.last_activity_at - Date.now()) / 60_000,
-                                ),
-                                "minute",
-                              )}
+                              {formatActivityTime(row.last_activity_at)}
                             </time>
                           </span>
                         </A>
