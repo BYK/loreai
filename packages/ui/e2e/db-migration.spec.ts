@@ -42,6 +42,47 @@ async function createV1(page: Page) {
   });
 }
 
+async function createV4(page: Page) {
+  await deleteDatabase(page);
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open("lore-ui", 4);
+      req.onupgradeneeded = () => {
+        const database = req.result;
+        database
+          .createObjectStore("meta", { keyPath: "key" })
+          .put({ key: "e2e-legacy", value: "kept" });
+        for (const name of [
+          "projects",
+          "knowledge",
+          "sessions",
+          "entities",
+          "messageBlocks",
+        ]) {
+          const store = database.createObjectStore(name, { keyPath: "key" });
+          store.createIndex("by-scope", "scope");
+          store.createIndex("by-accessed", "accessedAt");
+          store.createIndex("by-stored", "storedAt");
+        }
+        database.createObjectStore("collections", { keyPath: "key" });
+        const drafts = database.createObjectStore("drafts", { keyPath: "key" });
+        drafts.createIndex("by-updated", "updatedAt");
+        const pending = database.createObjectStore("pendingChanges", {
+          keyPath: "key",
+        });
+        pending.createIndex("by-created", "createdAt");
+        const decisions = database.createObjectStore("reviewDecisions", {
+          keyPath: "key",
+        });
+        decisions.createIndex("by-project", "projectId");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+  });
+}
+
 async function openInfo(page: Page) {
   return page.evaluate(async () => {
     const names = (await indexedDB.databases()).find(
@@ -118,6 +159,19 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     expect(info.indexes.drafts).toEqual(["by-updated"]);
     expect(info.indexes.pendingChanges).toEqual(["by-created"]);
     expect(info.indexes.reviewDecisions).toEqual(["by-project"]);
+    expect(info.legacyValue).toEqual({ key: "e2e-legacy", value: "kept" });
+  });
+
+  test("upgrades v4 activity stores without dropping existing data", async ({
+    page,
+  }) => {
+    await page.goto("/ui");
+    await createV4(page);
+    await page.reload();
+    await expectConnectionStatus(page);
+    const info = await openInfo(page);
+    expect(info.version).toBe(5);
+    expect(info.stores.sort()).toEqual([...STORES].sort());
     expect(info.legacyValue).toEqual({ key: "e2e-legacy", value: "kept" });
   });
 

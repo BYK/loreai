@@ -115,6 +115,31 @@ describe("activity local transitions", () => {
   });
 });
 
+it("applies checked-item transitions together and persists every record", async () => {
+  const db = await openLoreDb({ factory: new IDBFactory() });
+  if (!db) throw new Error("database did not open");
+  const state = createActivityLocalState(async () => db);
+  await state.ready;
+  const keys = ["knowledge:project-1:alpha", "knowledge:project-1:beta"];
+
+  state.applyBatch(
+    keys.map((key) => ({
+      key,
+      transition: (record) => pin(record, 10),
+    })),
+  );
+  await state.flush();
+  expect(await db.getAll("activityState")).toEqual(
+    keys.map((key) => ({ key, pinned_at: 10 })),
+  );
+
+  state.applyBatch(keys.map((key) => ({ key, transition: unpin })));
+  await state.flush();
+  expect(await db.getAll("activityState")).toEqual(
+    keys.map((key) => ({ key })),
+  );
+});
+
 describe("activity client filtering", () => {
   const key = activityItemKey(item);
   const state = {

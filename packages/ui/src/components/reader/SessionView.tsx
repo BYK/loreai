@@ -937,6 +937,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * early and re-arm the older-history buttons. */
   let cancelLanding: (() => void) | null = null;
   let seenFrame: number | null = null;
+  let lastSteppedUnreadIndex = -1;
   function reportSeen() {
     if (!props.readPosition || seenFrame !== null) return;
     const seen = () => {
@@ -970,25 +971,42 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const scroller = scrollEl;
     const readPosition = props.readPosition;
     if (!scroller || !readPosition) return false;
-    const top = scroller.getBoundingClientRect().top;
-    const bottom = scroller.getBoundingClientRect().bottom;
-    const firstVisibleMessage = [
+    const viewport = scroller.getBoundingClientRect();
+    const viewportTop = viewport.top + toolbarHeight();
+    const mountedMessages = [
       ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
     ]
       .map((element) => ({
         index: Number(element.dataset.index),
         rect: element.getBoundingClientRect(),
       }))
-      .filter((row) => row.rect.bottom > top && row.rect.top < bottom)
+      .filter(
+        (row) =>
+          Number.isInteger(row.index) &&
+          row.rect.bottom > viewportTop &&
+          row.rect.top < viewport.bottom,
+      )
       .sort((a, b) => a.rect.top - b.rect.top)[0];
-    const start = firstVisibleMessage?.index ?? -1;
-    const index = rows().findIndex(
-      (row, rowIndex) =>
-        rowIndex > start &&
-        row.block?.kind === "message" &&
-        readPosition.isUnread(row.block.messageId),
+    const firstVisibleIndex = mountedMessages?.index ?? -1;
+    const start = Math.max(lastSteppedUnreadIndex, firstVisibleIndex);
+    const elementsByIndex = new Map(
+      [...scroller.querySelectorAll<HTMLElement>("[data-message-id]")].map(
+        (element) => [Number(element.dataset.index), element],
+      ),
     );
+    const index = rows().findIndex((row, rowIndex) => {
+      if (
+        rowIndex <= start ||
+        row.block?.kind !== "message" ||
+        !readPosition.isUnread(row.block.messageId)
+      ) {
+        return false;
+      }
+      const element = elementsByIndex.get(rowIndex);
+      return !element || element.getBoundingClientRect().top > viewportTop + 1;
+    });
     if (index < 0) return false;
+    lastSteppedUnreadIndex = index;
     programmaticScroll(() =>
       virtualizer.scrollToIndex(index, { align: "start" }),
     );
@@ -1001,6 +1019,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     on(
       () => props.sessionId,
       () => {
+        lastSteppedUnreadIndex = -1;
         setLanded(false);
         cancelLanding?.();
         // The old session's prepend bookkeeping is stale too: dropping it
@@ -1210,6 +1229,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       if ((userSerial() ?? -1) === suppressLoadSerial) return;
       suppressLoadSerial = -1;
     }
+    lastSteppedUnreadIndex = -1;
     if (
       shouldLoadOlder({
         ...olderGate(),

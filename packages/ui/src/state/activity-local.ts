@@ -172,24 +172,38 @@ export function createActivityLocalState(
     void tracked.then(() => pendingWrites.delete(tracked));
   }
 
+  function applyBatch(
+    transitions: readonly {
+      key: string;
+      transition: (record: ActivityStateRecord) => ActivityStateRecord;
+    }[],
+  ) {
+    if (transitions.length === 0) return;
+    const current = snapshot();
+    const records = { ...current.records };
+    const changed = new Map<string, ActivityStateRecord>();
+    for (const { key, transition } of transitions) {
+      const next = transition(changed.get(key) ?? records[key] ?? { key });
+      records[key] = next;
+      changed.set(key, next);
+      pendingRecords.set(key, next);
+    }
+    setSnapshot({ ...current, records });
+    trackWrite(
+      ready.then(async (db) => {
+        if (!db) return;
+        const tx = db.transaction("activityState", "readwrite");
+        for (const record of changed.values()) await tx.store.put(record);
+        await tx.done;
+      }),
+    );
+  }
+
   function updateRecord(
     key: string,
     transition: (record: ActivityStateRecord) => ActivityStateRecord,
   ) {
-    let next!: ActivityStateRecord;
-    setSnapshot((current) => {
-      next = transition(current.records[key] ?? { key });
-      return {
-        ...current,
-        records: { ...current.records, [key]: next },
-      };
-    });
-    pendingRecords.set(key, next);
-    trackWrite(
-      ready.then(async (db) => {
-        if (db) await db.put("activityState", next);
-      }),
-    );
+    applyBatch([{ key, transition }]);
   }
 
   function replaceFolders(next: ActivityFolderRecord[]) {
@@ -219,6 +233,7 @@ export function createActivityLocalState(
     ready,
     flush: () => Promise.all(pendingWrites).then(() => undefined),
     record: (key: string) => snapshot().records[key] ?? { key },
+    applyBatch,
     markRead: (key: string, total: number, now = Date.now()) =>
       updateRecord(key, (record) => markRead(record, total, now)),
     markReadTo: (key: string, total: number, now = Date.now()) =>

@@ -55,8 +55,16 @@ import {
 } from "~/state/activity-filter";
 import { deriveParticipants } from "~/state/activity-participants";
 import { shouldHandleSpace } from "~/state/activity-navigation";
-import { folderNameError } from "~/state/activity-local";
-import type { ActivityFolderRecord } from "~/db";
+import {
+  archive,
+  folderNameError,
+  markRead,
+  markUnread,
+  pin,
+  unarchive,
+  unpin,
+} from "~/state/activity-local";
+import type { ActivityFolderRecord, ActivityStateRecord } from "~/db";
 
 type LayoutMode = "full" | "split" | "single";
 
@@ -379,8 +387,26 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     );
   }
 
-  function applyToSelected(action: (key: string, item: ActivityItem) => void) {
-    for (const item of selectedRows()) action(activityItemKey(item), item);
+  function selectedActivitySnapshot() {
+    return selectedRows().map((item) => ({
+      item,
+      key: activityItemKey(item),
+    }));
+  }
+
+  function applyToSelected(
+    transition: (
+      item: ActivityItem,
+      record: ActivityStateRecord,
+    ) => ActivityStateRecord,
+  ) {
+    const selected = selectedActivitySnapshot();
+    ws.state.activityLocal.applyBatch(
+      selected.map(({ key, item }) => ({
+        key,
+        transition: (record) => transition(item, record),
+      })),
+    );
     clearSelection();
   }
 
@@ -400,13 +426,17 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   function saveFolder() {
     const current = folderDialog();
     if (!current || folderValidation()) return;
+    const selected = current.moveSelection ? selectedActivitySnapshot() : [];
     const id = current.folder
       ? current.folder.key
       : ws.state.activityLocal.createFolder(folderName());
     if (current.folder) {
       ws.state.activityLocal.renameFolder(id, folderName());
     } else if (current.moveSelection) {
-      ws.state.activityLocal.moveToFolder(ws.activityList.selectedKeys(), id);
+      ws.state.activityLocal.moveToFolder(
+        selected.map(({ key }) => key),
+        id,
+      );
       clearSelection();
     }
     setFolderDialog(null);
@@ -692,29 +722,30 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
               unpin={allSelectedPinned()}
               onSelectAll={toggleSelectAll}
               onRead={() =>
-                applyToSelected((key, item) =>
-                  ws.state.activityLocal.markRead(key, item.total),
+                applyToSelected((item, record) =>
+                  markRead(record, item.total, Date.now()),
                 )
               }
               onUnread={() =>
-                applyToSelected((key) => ws.state.activityLocal.markUnread(key))
-              }
-              onArchive={() =>
-                applyToSelected((key) => ws.state.activityLocal.archive(key))
-              }
-              onInbox={() =>
-                applyToSelected((key) => ws.state.activityLocal.unarchive(key))
-              }
-              onPin={() =>
-                applyToSelected((key) =>
-                  allSelectedPinned()
-                    ? ws.state.activityLocal.unpin(key)
-                    : ws.state.activityLocal.pin(key),
+                applyToSelected((_item, record) =>
+                  markUnread(record, Date.now()),
                 )
               }
+              onArchive={() =>
+                applyToSelected((_item, record) => archive(record, Date.now()))
+              }
+              onInbox={() =>
+                applyToSelected((_item, record) => unarchive(record))
+              }
+              onPin={() => {
+                const shouldUnpin = allSelectedPinned();
+                applyToSelected((_item, record) =>
+                  shouldUnpin ? unpin(record) : pin(record, Date.now()),
+                );
+              }}
               onMove={(folderId) => {
                 ws.state.activityLocal.moveToFolder(
-                  ws.activityList.selectedKeys(),
+                  selectedActivitySnapshot().map(({ key }) => key),
                   folderId,
                 );
                 clearSelection();

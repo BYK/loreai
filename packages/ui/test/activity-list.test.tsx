@@ -4,9 +4,10 @@ import { batch, createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ActivityListBody } from "~/components/shell/ActivityListBody";
-import type { ActivityPage } from "~/contracts";
+import type { ActivityItem, ActivityPage } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { WorkspaceProvider, useWorkspace } from "~/routes/workspace";
+import type { ActivityLocalState } from "~/state/activity-local";
 
 const PAGE: ActivityPage = {
   items: [
@@ -105,12 +106,18 @@ function mount(
   fetchActivity: ReturnType<typeof vi.fn>,
 ) {
   const getQuery = typeof query === "function" ? query : () => query;
+  let activityLocal: ActivityLocalState | undefined;
+  const CaptureActivityLocal = () => {
+    activityLocal = useWorkspace().state.activityLocal;
+    return null;
+  };
   const client = {
     listProjects: vi.fn(async () => []),
     fetchActivity,
   } as unknown as ApiClient;
-  return render(() => (
+  const result = render(() => (
     <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+      <CaptureActivityLocal />
       <MemoryRouter>
         <Route
           path="*"
@@ -119,6 +126,14 @@ function mount(
       </MemoryRouter>
     </WorkspaceProvider>
   ));
+  return {
+    result,
+    activityLocal: () => {
+      if (!activityLocal)
+        throw new Error("activity local state is unavailable");
+      return activityLocal;
+    },
+  };
 }
 
 describe("ActivityListBody", () => {
@@ -145,6 +160,87 @@ describe("ActivityListBody", () => {
         cursor: null,
         limit: 50,
       }),
+    );
+  });
+
+  it("reactively updates read styling and route selection on mounted rows", async () => {
+    const secondItem = {
+      ...PAGE.items[0]!,
+      id: "entry-2",
+      title: "Second workspace contract",
+    };
+    const fetchActivity = vi.fn(async () => ({
+      ...PAGE,
+      items: [...PAGE.items, secondItem],
+    }));
+    const mounted = mount("type:knowledge", fetchActivity);
+
+    const [firstRow, secondRow] = await screen.findAllByTestId("activity-item");
+    if (!firstRow || !secondRow)
+      throw new Error("activity rows did not render");
+    const title = firstRow.querySelector('[data-testid="activity-title"]');
+    const chip = firstRow.querySelector('[data-testid="activity-unread-chip"]');
+    const firstLink = firstRow.querySelector("a");
+    const secondLink = secondRow.querySelector("a");
+    if (!title || !chip || !firstLink || !secondLink) {
+      throw new Error("activity row controls did not render");
+    }
+
+    expect(title).toHaveClass("font-semibold");
+    mounted.activityLocal().markRead("knowledge:project-1:entry-1", 1, 10);
+    await waitFor(() => {
+      expect(title).toHaveClass("font-medium");
+      expect(title).not.toHaveClass("font-semibold");
+      expect(chip).toHaveClass("bg-soft", "text-muted");
+    });
+
+    firstLink.click();
+    await waitFor(() =>
+      expect(firstLink).toHaveAttribute("aria-current", "page"),
+    );
+    secondLink.click();
+    await waitFor(() => {
+      expect(firstLink).not.toHaveAttribute("aria-current", "page");
+      expect(secondLink).toHaveAttribute("aria-current", "page");
+    });
+  });
+
+  it("collapses four or more participants into an overflow avatar", async () => {
+    const item: ActivityItem = {
+      ...PAGE.items[0]!,
+      participants: Array.from({ length: 5 }, (_, index) => ({
+        id: `person-${index}`,
+        kind: "user",
+        label: `Person ${index}`,
+      })),
+    };
+    mount(
+      "type:knowledge",
+      vi.fn(async () => ({ ...PAGE, items: [item] })),
+    );
+
+    const row = await screen.findByTestId("activity-item");
+    expect(row.querySelectorAll('span[title^="Person "]')).toHaveLength(3);
+    expect(row).toHaveTextContent("+2");
+  });
+
+  it("marks contradiction activity read when opened", async () => {
+    const item: ActivityItem = {
+      ...PAGE.items[0]!,
+      kind: "contradiction",
+      id: "contradiction-1",
+      title: "Conflicting workspace rules",
+    };
+    const mounted = mount(
+      "type:contradiction",
+      vi.fn(async () => ({ ...PAGE, items: [item] })),
+    );
+    const row = await screen.findByTestId("activity-item");
+    const key = "contradiction:project-1:contradiction-1";
+
+    row.querySelector("a")?.click();
+    await waitFor(() =>
+      expect(mounted.activityLocal().record(key).read_total).toBe(1),
     );
   });
 

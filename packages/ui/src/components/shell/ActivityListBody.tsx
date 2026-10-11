@@ -76,8 +76,10 @@ export const ActivityListBody: Component<{
     overscan: 6,
   });
   props.onVirtualizedScrollRestore?.((scrollTop, index) => {
-    if (index === null) virtualizer.scrollToOffset(scrollTop);
-    else virtualizer.scrollToIndex(index, { align: "start" });
+    if (index !== null) {
+      virtualizer.scrollToIndex(index, { align: "start" });
+    }
+    virtualizer.scrollToOffset(scrollTop);
   });
   const virtualItems = createMemo(() => virtualizer.getVirtualItems());
 
@@ -237,17 +239,13 @@ export const ActivityListBody: Component<{
                     {(row) => {
                       const registry = ACTIVITY_KIND_UI[row.kind];
                       const key = activityItemKey(row);
-                      const local = ws.state.activityLocal.snapshot();
-                      const unread = unreadCount(row, local);
-                      const chip = activityUnreadChip(row, local);
-                      const href = withWorkspaceQuery(
-                        registry.href(row),
-                        props.query,
-                      );
-                      const current = registry.isCurrent(
-                        row,
-                        location.pathname,
-                      );
+                      const local = () => ws.state.activityLocal.snapshot();
+                      const unread = () => unreadCount(row, local());
+                      const chip = () => activityUnreadChip(row, local());
+                      const href = () =>
+                        withWorkspaceQuery(registry.href(row), props.query);
+                      const current = () =>
+                        registry.isCurrent(row, location.pathname);
                       const participants = row.participants.slice(0, 3);
                       const rest =
                         row.participants.length - participants.length;
@@ -260,8 +258,8 @@ export const ActivityListBody: Component<{
                           data-index={virtualItem.index}
                           ref={(element) => virtualizer.measureElement(element)}
                           class={`group absolute left-0 top-0 flex min-h-[68px] w-full items-start gap-2 border-b border-hairline px-3 py-2 ${
-                            current ? "bg-selected text-selected-text" : ""
-                          } ${unread > 0 && !current ? "bg-unread-soft" : ""}`}
+                            current() ? "bg-selected text-selected-text" : ""
+                          } ${unread() > 0 && !current() ? "bg-unread-soft" : ""}`}
                           style={{
                             transform: `translateY(${virtualItem.start}px)`,
                           }}
@@ -281,9 +279,9 @@ export const ActivityListBody: Component<{
                             }
                           />
                           <A
-                            href={href}
+                            href={href()}
                             end
-                            aria-current={current ? "page" : undefined}
+                            aria-current={current() ? "page" : undefined}
                             class="flex min-w-0 flex-1 items-center gap-2 text-left no-underline"
                             onClick={() => {
                               ws.activityList.setCurrentKey(key);
@@ -323,14 +321,17 @@ export const ActivityListBody: Component<{
                               <span class="flex min-w-0 items-center">
                                 <span
                                   class={`truncate text-sm ${
-                                    unread > 0 ? "font-semibold" : "font-medium"
-                                  } ${current ? "text-selected-text" : "text-text"}`}
+                                    unread() > 0
+                                      ? "font-semibold"
+                                      : "font-medium"
+                                  } ${current() ? "text-selected-text" : "text-text"}`}
+                                  data-testid="activity-title"
                                 >
                                   {row.title}
                                 </span>
                                 <span
                                   class={`truncate text-sm ${
-                                    current
+                                    current()
                                       ? "text-selected-text/70"
                                       : "text-muted"
                                   }`}
@@ -348,7 +349,7 @@ export const ActivityListBody: Component<{
                               </span>
                               <span
                                 class={`mt-1 flex min-w-0 items-center gap-1 text-[10px] ${
-                                  current
+                                  current()
                                     ? "text-selected-text/70"
                                     : "text-muted"
                                 }`}
@@ -366,15 +367,15 @@ export const ActivityListBody: Component<{
                                   </time>
                                   <span
                                     class={`rounded px-1.5 py-0.5 ${
-                                      current
+                                      current()
                                         ? "bg-selected text-selected-text"
-                                        : chip.unread
+                                        : chip().unread
                                           ? "bg-accent-soft text-accent-soft-text"
                                           : "bg-soft text-muted"
                                     }`}
                                     data-testid="activity-unread-chip"
                                   >
-                                    {chip.label}
+                                    {chip().label}
                                   </span>
                                 </span>
                               </span>

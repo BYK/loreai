@@ -90,19 +90,23 @@ export const ListPane: Component<{
         const element = scroller();
         if (props.visible && element) {
           props.restoreVirtualizedScroll?.(saved.scrollTop, saved.index);
-          if (restoreListScroll(element, saved)) {
-            if (snapshot === saved) snapshot = null;
-          } else {
-            restoreFrame = requestAnimationFrame(() => {
-              restoreFrame = undefined;
-              const restoredElement = scroller();
-              if (!props.visible || !restoredElement) return;
-              if (!restoreListScroll(restoredElement, saved)) {
-                restoredElement.scrollTop = saved.scrollTop;
-              }
-              if (snapshot === saved) snapshot = null;
-            });
-          }
+          element.scrollTop = saved.scrollTop;
+          let attempts = 0;
+          const settle = () => {
+            restoreFrame = undefined;
+            const restoredElement = scroller();
+            if (!props.visible || !restoredElement) return;
+            if (!restoreListScroll(restoredElement, saved)) {
+              restoredElement.scrollTop = saved.scrollTop;
+            }
+            attempts += 1;
+            if (attempts < 3) {
+              restoreFrame = requestAnimationFrame(settle);
+            } else if (snapshot === saved) {
+              snapshot = null;
+            }
+          };
+          restoreFrame = requestAnimationFrame(settle);
         }
       };
       if (typeof requestAnimationFrame === "function") {
