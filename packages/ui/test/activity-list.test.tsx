@@ -204,9 +204,9 @@ describe("ActivityListBody", () => {
     const cursorCalls = fetchActivity.mock.calls
       .map(([request]) => request)
       .filter((request) => request.cursor !== null);
-    expect(
-      cursorCalls.every((request) => request.q === "type:knowledge"),
-    ).toBe(true);
+    expect(cursorCalls.every((request) => request.q === "type:knowledge")).toBe(
+      true,
+    );
 
     if (!resolveNewPage) throw new Error("new query request did not start");
     resolveNewPage(PAGE);

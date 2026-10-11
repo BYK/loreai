@@ -143,10 +143,9 @@ test.describe("activity search navigation", () => {
     await expect(page.getByTestId("saved-search")).toHaveCount(0);
   });
 
-  test("pins an active project, persists it, and opens its search", async (
-    { page },
-    testInfo,
-  ) => {
+  test("pins an active project, persists it, and opens its search", async ({
+    page,
+  }, testInfo) => {
     test.skip(testInfo.project.name.includes("mobile"), "desktop navigation");
     const projects = await (await page.request.get("/api/v1/projects")).json();
     const lore = projects.find(
