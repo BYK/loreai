@@ -160,6 +160,12 @@ export interface SessionViewProps {
    * prompt-delta / compaction markers interleave into the transcript.
    */
   context?: SessionContext | null;
+  readPosition?: {
+    isUnread: (messageId: string) => boolean;
+    initialMessageId: string | null;
+    onSeen: (messageId: string) => void;
+    register: (nextUnread: () => boolean) => void;
+  };
   /** Knowledge-entry link builder for marker items; absent → inert text. */
   knowledgeHref?: (logicalId: string) => string;
   header?: JSX.Element;
@@ -269,6 +275,14 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     props.context ? buildMarkers(props.context) : [],
   );
   const rows = createMemo(() => buildRows(blocks(), markers()));
+  const messageId = (row: ReaderRow) => {
+    const block = row.block;
+    return block?.kind === "message" ? block.messageId : undefined;
+  };
+  const isUnreadRow = (row: ReaderRow) => {
+    const id = messageId(row);
+    return id !== undefined && props.readPosition?.isUnread(id) === true;
+  };
   const rowIndex = createMemo(() => indexRows(rows()));
   const rowIndexOf = (blockId: string) => rowIndex().get(blockId) ?? -1;
   const [listOffset, setListOffset] = createSignal(0);
@@ -922,6 +936,67 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * stale loop that could still issue scrolls or flip `landingActive` off
    * early and re-arm the older-history buttons. */
   let cancelLanding: (() => void) | null = null;
+  let seenFrame: number | null = null;
+  function reportSeen() {
+    if (!props.readPosition || seenFrame !== null) return;
+    const seen = () => {
+      seenFrame = null;
+      const scroller = scrollEl;
+      if (!scroller || !props.readPosition) return;
+      const viewport = scroller.getBoundingClientRect();
+      const candidates = [
+        ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ]
+        .map((element) => ({
+          element,
+          rect: element.getBoundingClientRect(),
+        }))
+        .filter(
+          ({ rect }) =>
+            rect.bottom > viewport.top && rect.bottom <= viewport.bottom,
+        )
+        .sort((a, b) => b.rect.bottom - a.rect.bottom);
+      const id = candidates[0]?.element.dataset.messageId;
+      if (id) props.readPosition.onSeen(id);
+    };
+    if (typeof requestAnimationFrame === "function") {
+      seenFrame = requestAnimationFrame(seen);
+    } else {
+      seen();
+    }
+  }
+
+  function scrollToNextUnread(): boolean {
+    const scroller = scrollEl;
+    const readPosition = props.readPosition;
+    if (!scroller || !readPosition) return false;
+    const top = scroller.getBoundingClientRect().top;
+    const bottom = scroller.getBoundingClientRect().bottom;
+    const firstVisibleMessage = [
+      ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ]
+      .map((element) => ({
+        index: Number(element.dataset.index),
+        rect: element.getBoundingClientRect(),
+      }))
+      .filter((row) => row.rect.bottom > top && row.rect.top < bottom)
+      .sort((a, b) => a.rect.top - b.rect.top)[0];
+    const start = firstVisibleMessage?.index ?? -1;
+    const index = rows().findIndex(
+      (row, rowIndex) =>
+        rowIndex > start &&
+        row.block?.kind === "message" &&
+        readPosition.isUnread(row.block.messageId),
+    );
+    if (index < 0) return false;
+    programmaticScroll(() =>
+      virtualizer.scrollToIndex(index, { align: "start" }),
+    );
+    return true;
+  }
+
+  createEffect(() => props.readPosition?.register(scrollToNextUnread));
+  onCleanup(() => props.readPosition?.register(() => false));
   createEffect(
     on(
       () => props.sessionId,
@@ -942,8 +1017,21 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (landed() || rows().length === 0 || !scrollEl) return;
     setLanded(true);
     if (scrollTarget !== null || props.anchorParam !== null) return;
+    const initialId = props.readPosition?.initialMessageId;
+    if (initialId) {
+      const initialIndex = rows().findIndex(
+        (row) =>
+          row.block?.kind === "message" && row.block.messageId === initialId,
+      );
+      if (initialIndex >= 0) {
+        virtualizer.scrollToIndex(initialIndex, { align: "start" });
+        reportSeen();
+        return;
+      }
+    }
     const last = () => untrack(rows).length - 1;
     virtualizer.scrollToIndex(last(), { align: "end" });
+    reportSeen();
     // Rows enter at ROW_ESTIMATE; as they measure, the landed position can
     // drift off the end. Re-issue the landing each frame until the last row
     // is actually in view, the user scrolls away, or the cap hits.
@@ -1111,6 +1199,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const el = scrollEl;
     if (!el) return;
     const top = el.scrollTop;
+    reportSeen();
     const prev = prevScrollTop;
     prevScrollTop = top;
     if (top < prev && Math.abs(top - repinIssued) < 1) {
@@ -2010,6 +2099,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                         }
                         data-index={item()?.index}
                         data-row-key={row().key}
+                        data-message-id={messageId(row())}
+                        data-unread={isUnreadRow(row()) ? "" : undefined}
                         data-search-current={
                           searchHit()?.blockId === row().key ? "" : undefined
                         }
@@ -2018,6 +2109,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                         aria-setsize={rows().length}
                         class={cn(
                           "absolute left-0 top-0 w-full px-5 pt-1 outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-7.5",
+                          isUnreadRow(row()) &&
+                            "border-l-2 border-unread bg-unread-soft",
                           selection()?.anchor.blockId === row().key &&
                             "reader-row-selected",
                         )}

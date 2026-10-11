@@ -1,6 +1,7 @@
 import {
   createRenderEffect,
   onCleanup,
+  Show,
   type Component,
   type JSX,
 } from "solid-js";
@@ -53,6 +54,9 @@ export const ListPane: Component<{
   width: number;
   header: JSX.Element;
   query: string;
+  toolbar?: JSX.Element;
+  hasSelection?: boolean;
+  selectionControl?: JSX.Element;
   onQueryInput: (value: string) => void;
   onCommitQuery?: (value: string) => void;
   restoreVirtualizedScroll?: (scrollTop: number, index: number | null) => void;
@@ -132,26 +136,34 @@ export const ListPane: Component<{
       }
     >
       {props.header}
-      <label class="mx-2 mb-2 flex h-8 items-center rounded-md border border-hairline bg-transparent px-2">
-        <span class="sr-only">Search list</span>
-        <input
-          type="search"
-          aria-label="Search list"
-          placeholder="in:inbox"
-          data-testid="nav-project-filter"
-          class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted"
-          value={props.query}
-          onInput={(event) => props.onQueryInput(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              props.onQueryInput("");
-              props.onCommitQuery?.("");
-            } else if (event.key === "Enter") {
-              props.onCommitQuery?.(event.currentTarget.value);
-            }
-          }}
-        />
-      </label>
+      <Show
+        when={props.hasSelection}
+        fallback={
+          <label class="mx-2 mb-2 flex h-8 items-center gap-2 rounded-md border border-hairline bg-transparent px-2">
+            {props.selectionControl}
+            <span class="sr-only">Search list</span>
+            <input
+              type="search"
+              aria-label="Search list"
+              placeholder="in:inbox"
+              data-testid="nav-project-filter"
+              class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted"
+              value={props.query}
+              onInput={(event) => props.onQueryInput(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  props.onQueryInput("");
+                  props.onCommitQuery?.("");
+                } else if (event.key === "Enter") {
+                  props.onCommitQuery?.(event.currentTarget.value);
+                }
+              }}
+            />
+          </label>
+        }
+      >
+        {props.toolbar}
+      </Show>
       {props.children}
     </section>
   );

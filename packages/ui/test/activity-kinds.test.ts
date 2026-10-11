@@ -28,4 +28,21 @@ describe("activity kind fan-out", () => {
       );
     }
   });
+
+  it("matches activity routes under the UI base without matching generic lists", () => {
+    const base = new URL(
+      import.meta.env.BASE_URL,
+      window.location.origin,
+    ).pathname.replace(/\/$/, "");
+    for (const item of fixtureRows) {
+      const route = new URL(
+        ACTIVITY_KIND_UI[item.kind].href(item),
+        window.location.href,
+      ).pathname;
+      expect(
+        ACTIVITY_KIND_UI[item.kind].isCurrent(item, `${base}${route}` || route),
+        item.kind,
+      ).toBe(item.kind !== "contradiction");
+    }
+  });
 });

@@ -254,7 +254,7 @@ test.describe("persistent workspace panes", () => {
     await expect(item).toBeInViewport();
     await item.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+/);
-    await expect(item).toHaveAttribute("aria-current", "page");
+    await expect(item.locator("a")).toHaveAttribute("aria-current", "page");
     await expect
       .poll(() =>
         list.evaluate(
@@ -553,4 +553,101 @@ test.describe("persistent workspace panes", () => {
       });
     }
   }
+
+  test("bulk archive and Inbox actions update activity filters", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop bulk toolbar");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const row = page.getByTestId("activity-item").first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Archive", exact: true }).click();
+
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("in:archive");
+    await search.press("Enter");
+    const archivedRow = page.locator(`[data-list-key="${key}"]`);
+    await expect(archivedRow).toBeVisible();
+    await archivedRow.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Inbox", exact: true }).click();
+
+    await page.getByRole("searchbox", { name: "Search list" }).fill("in:inbox");
+    await page.getByRole("searchbox", { name: "Search list" }).press("Enter");
+    await expect(page.locator(`[data-list-key="${key}"]`)).toBeVisible();
+  });
+
+  test("creates a folder and moves selected activity into it", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop bulk toolbar");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const row = page.getByTestId("activity-item").first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.getByRole("checkbox").check();
+    await page.getByText("Move to folder", { exact: true }).click();
+    await page.getByRole("button", { name: "New folder…" }).click();
+    await page.getByLabel("Folder name").fill("Work notes");
+    await page.getByTestId("activity-folder-save").click();
+
+    await page
+      .getByTestId("activity-folder")
+      .filter({ hasText: "Work notes" })
+      .click();
+    await expect(page.locator(`[data-list-key="${key}"]`)).toBeVisible();
+  });
+
+  test("opening knowledge activity marks it read and keeps document actions", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop document actions",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:knowledge is:unread");
+    await search.press("Enter");
+    const row = page
+      .locator('[data-testid="activity-item"][data-activity-kind="knowledge"]')
+      .first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.locator("a").click();
+    await expect(page).toHaveURL(
+      /\/ui\/(projects\/[^/]+\/knowledge|knowledge)\//,
+    );
+    await expect(page.getByTestId("workspace-next-unread")).toBeVisible();
+    await expect(page.getByTestId("workspace-next-item")).toBeEnabled();
+    await expect(page.locator(`[data-list-key="${key}"]`)).toHaveCount(0);
+  });
+
+  test("participant search commits a with query", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop participant pane",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", {
+      name: "Search participants",
+    });
+    await expect(search).toBeVisible();
+    await search.fill("You");
+    await page
+      .getByTestId("workspace-participant")
+      .filter({ hasText: "You" })
+      .click();
+    await expect(page).toHaveURL(/q=with%3Auser/);
+  });
 });

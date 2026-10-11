@@ -12,6 +12,8 @@ const STORES = [
   "drafts",
   "pendingChanges",
   "reviewDecisions",
+  "activityState",
+  "activityFolders",
 ] as const;
 
 async function deleteDatabase(page: Page) {
@@ -97,7 +99,7 @@ async function expectDatabaseVersion(page: Page, version: number) {
 }
 
 test.describe("IndexedDB cache migrations and recovery", () => {
-  test("upgrades v1 without dropping meta and creates the complete v4 schema", async ({
+  test("upgrades v1 without dropping meta and creates the complete v5 schema", async ({
     page,
   }) => {
     await page.goto("/ui");
@@ -106,7 +108,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await expectConnectionStatus(page);
     await expectDatabaseVersion(page, 4);
     const info = await openInfo(page);
-    expect(info.version).toBe(4);
+    expect(info.version).toBe(5);
     expect(info.stores.sort()).toEqual([...STORES].sort());
     for (const name of ["projects", "knowledge", "sessions", "messageBlocks"]) {
       expect(info.indexes[name]?.sort()).toEqual(
@@ -249,7 +251,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await page.evaluate(
       () =>
         new Promise<void>((resolve, reject) => {
-          const req = indexedDB.open("lore-ui", 4);
+          const req = indexedDB.open("lore-ui", 6);
           req.onupgradeneeded = () =>
             req.result.createObjectStore("meta", { keyPath: "key" });
           req.onsuccess = () => {
@@ -261,8 +263,8 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
-    expect((await openInfo(page)).version).toBe(4);
+    await expectDatabaseVersion(page, 5);
+    expect((await openInfo(page)).version).toBe(5);
   });
 
   test("survives user-cleared site data during SPA navigation", async ({
@@ -292,7 +294,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         const databases = await page.evaluate(() => indexedDB.databases());
         return databases.find((db) => db.name === "lore-ui")?.version;
       })
-      .toBe(4);
-    expect((await openInfo(page)).version).toBe(4);
+      .toBe(5);
+    expect((await openInfo(page)).version).toBe(5);
   });
 });
