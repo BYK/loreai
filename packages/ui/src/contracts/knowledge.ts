@@ -90,7 +90,6 @@ export const knowledgeVersionHistory = type({
 });
 
 export type KnowledgeVersionHistory = typeof knowledgeVersionHistory.infer;
-
 export const knowledgeEffects = type({
   scope: "'project' | 'shared'",
   project_id: "string | null",
@@ -152,3 +151,17 @@ export const knowledgeDeleteResult = type({
 });
 
 export type KnowledgeDeleteResult = typeof knowledgeDeleteResult.infer;
+
+export const knowledgeFiles = type({
+  id: nonEmptyString,
+  git_remote: "string | null",
+  commit: "string | null",
+  files: type({
+    path: "string",
+    recorded: "boolean",
+    verified: "boolean",
+  }).array(),
+  omitted: "number.integer >= 0",
+});
+
+export type KnowledgeFiles = typeof knowledgeFiles.infer;

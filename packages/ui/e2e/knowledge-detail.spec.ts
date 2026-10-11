@@ -56,6 +56,23 @@ test.describe("knowledge detail provenance and history", () => {
     );
   });
 
+  test("links recorded knowledge files to the recorded GitHub commit", async ({
+    page,
+  }) => {
+    const { project, live } = await projectAndEntry(page);
+    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
+    await expect(
+      page.getByText("packages/ui/src/contracts/url.ts"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /GitHub at 0123456/ }),
+    ).toHaveAttribute(
+      "href",
+      "https://github.com/BYK/loreai/blob/0123456789abcdef0123456789abcdef01234567/packages/ui/src/contracts/url.ts",
+    );
+  });
+
   test("shows expired evidence without redirecting to another session", async ({
     page,
   }) => {

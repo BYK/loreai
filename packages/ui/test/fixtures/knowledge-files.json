@@ -1,0 +1,13 @@
+{
+  "id": "<uuid-0>",
+  "git_remote": "github.com/test/ui-contracts",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "files": [
+    {
+      "path": "src/contracts.ts",
+      "recorded": true,
+      "verified": false
+    }
+  ],
+  "omitted": 0
+}

@@ -75,6 +75,38 @@ describe("ltm.setFileRefs / knowledgeFileRefsBatch (D2c PR-2)", () => {
     expect(got).toEqual(["src/f-0.ts", "src/f-1.ts", "src/f-2.ts"]);
   });
 
+  test("file refs and anchors accept a larger per-call limit", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "decision",
+      title: "Many files and anchors",
+      content: "...",
+    });
+    const logicalId = ltm.logicalIdOf(id);
+    const paths = Array.from({ length: 5 }, (_, i) => `src/f-${i}.ts`);
+    ltm.setFileRefs(logicalId, paths);
+    for (const path of paths) {
+      db()
+        .query(
+          `INSERT INTO knowledge_ref_anchor (logical_id, kind, anchor, updated_at)
+           VALUES (?, 'file', ?, ?)`,
+        )
+        .run(logicalId, `${path}:1`, Date.now());
+    }
+
+    expect(ltm.knowledgeFileRefsBatch([logicalId]).get(logicalId)).toHaveLength(
+      3,
+    );
+    expect(
+      ltm.knowledgeFileRefsBatch([logicalId], { limit: 20 }).get(logicalId),
+    ).toEqual(paths);
+    expect(ltm.knowledgeRefAnchors([logicalId]).get(logicalId)).toHaveLength(3);
+    expect(
+      ltm.knowledgeRefAnchors([logicalId], { limit: 20 }).get(logicalId),
+    ).toHaveLength(5);
+  });
+
   test("knowledgeFileRefsBatch: empty input → empty map (no query)", () => {
     const got = ltm.knowledgeFileRefsBatch([]);
     expect(got.size).toBe(0);

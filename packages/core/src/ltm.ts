@@ -2573,9 +2573,14 @@ export function setFileRefs(logicalId: string, paths: string[]): string[] {
  */
 export function knowledgeFileRefsBatch(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_FILES_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_FILES_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   const rows = db()
     .query(
@@ -2602,7 +2607,7 @@ export function knowledgeFileRefsBatch(
       (p): p is string => typeof p === "string" && p.length > 0,
     );
     if (paths.length === 0) continue;
-    out.set(r.logical_id, paths.slice(0, MAX_RECALL_FILES_PER_ENTRY));
+    out.set(r.logical_id, paths.slice(0, limit));
   }
   return out;
 }
@@ -2617,9 +2622,14 @@ export function knowledgeFileRefsBatch(
  */
 export function knowledgeRefAnchors(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, KnowledgeRefAnchor[]> {
   const out = new Map<string, KnowledgeRefAnchor[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_ANCHORS_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_ANCHORS_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   // 'file' < 'symbol' lexically, so ORDER BY kind puts file anchors first; a
   // stable secondary sort by anchor keeps output deterministic (cache-friendly).
@@ -2643,7 +2653,7 @@ export function knowledgeRefAnchors(
       arr = [];
       out.set(r.logical_id, arr);
     }
-    if (arr.length >= MAX_RECALL_ANCHORS_PER_ENTRY) continue;
+    if (arr.length >= limit) continue;
     arr.push({ kind: r.kind, anchor: r.anchor });
   }
   return out;

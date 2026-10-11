@@ -30,6 +30,10 @@ mkdirSync(lore, { recursive: true });
 mkdirSync(scratch, { recursive: true });
 
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
+core
+  .db()
+  .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+  .run("github.com/BYK/loreai", loreProjectId);
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
 const dedupReview = join(root, "dedup-review");
@@ -294,6 +298,7 @@ const entries = [
       ),
     confidence: 0.92,
     session: "e2e-session-sqlite",
+    metadata: { gitHead: "0123456789abcdef0123456789abcdef01234567" },
   },
   {
     category: "gotcha",
@@ -384,6 +389,7 @@ for (const entry of entries) {
   if (!firstKnowledgeId) firstKnowledgeId = id;
   knowledgeIds.push(id);
 }
+core.ltm.setFileRefs(firstKnowledgeId, ["packages/ui/src/contracts/url.ts"]);
 core.ltm.create({
   scope: "global",
   category: "decision",

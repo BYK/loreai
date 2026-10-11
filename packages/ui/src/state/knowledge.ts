@@ -5,6 +5,7 @@ import type {
   AllKnowledgeQuery,
   CrossProjectKnowledgeEntry,
   KnowledgeEntry,
+  KnowledgeFiles,
   KnowledgeVersionHistory,
 } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
@@ -232,6 +233,16 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     return { loader, status: statusOf(loader) };
   }
 
+  function files(id: Accessor<string | null>): {
+    loader: Loader<KnowledgeFiles>;
+    status: Accessor<KeyStatus>;
+  } {
+    const loader = createLoader(id, (entryId, signal) =>
+      tracked(() => client.getKnowledgeFiles(entryId, signal)),
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   return {
     list,
     page,
@@ -239,6 +250,7 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     listPaged,
     entry,
     versions,
+    files,
     /** Evict a permanently removed entry from memory and IndexedDB. */
     async remove(id: string): Promise<void> {
       store.remove(id);

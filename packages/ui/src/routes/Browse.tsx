@@ -214,6 +214,9 @@ export const Browse: Component<{
     }
     ws.projects.reload();
   };
+  const files = ws.state.knowledge.files(
+    () => knowledgeId() ?? entry.loader.data()?.id ?? null,
+  );
   const evidence = ws.state.sessions.evidence(() => {
     const sourceSession = entry.loader.data()?.source_session;
     const sourceProject = projectForEntry();
@@ -466,6 +469,7 @@ export const Browse: Component<{
                     entry={value()}
                     project={projectForEntry()}
                     versions={versions.loader}
+                    files={files.loader}
                     evidence={evidence.loader}
                     actions={
                       <KnowledgeEditor
