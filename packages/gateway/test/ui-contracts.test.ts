@@ -16,6 +16,7 @@ import {
 } from "./helpers/loopback-request";
 
 import {
+  activityPage,
   accountStatus,
   apiErrorBody,
   apiPath,
@@ -118,6 +119,22 @@ beforeAll(async () => {
       "Cursor values are server-issued tokens and should be passed back unchanged.",
     session: SEEDED.sessionId,
     scope: "project",
+  });
+  const firstLogicalId = ltm.logicalIdOf(SEEDED.knowledgeId);
+  const secondLogicalId = ltm.logicalIdOf(SEEDED.secondKnowledgeId);
+  db()
+    .query(
+      `UPDATE knowledge
+          SET promotion_status = 'promoted', promoted_at = ?, updated_at = ?
+        WHERE logical_id = ? AND is_current = 1`,
+    )
+    .run(1_700_000_003_000, 1_700_000_003_000, firstLogicalId);
+  ltm.recordContradiction({
+    logicalIdA: firstLogicalId,
+    logicalIdB: secondLogicalId,
+    projectId: SEEDED.projectId,
+    similarity: 0.9,
+    rationale: "These fixture entries disagree.",
   });
   SEEDED.dedupProjectPath = "/test/ui-contracts/dedup-preview";
   SEEDED.dedupProjectId = ensureProject(
@@ -365,6 +382,9 @@ function makeNormaliser() {
         if (!tag) uuids.set(value, (tag = `<uuid-${uuidN++}>`));
         return tag;
       }
+      const pair = /^([0-9a-f-]{36}):([0-9a-f-]{36})$/.exec(value);
+      if (pair?.[1] && pair[2])
+        return `${String(norm(pair[1]))}:${String(norm(pair[2]))}`;
       if (value === SEEDED.projectPath || value.startsWith("/test/")) {
         let tag = paths.get(value);
         if (!tag) paths.set(value, (tag = `/tmp/<project-${pathN++}>`));
@@ -375,6 +395,9 @@ function makeNormaliser() {
       // would make the fixture file itself invalid JSON.
       if ((value.startsWith("[") || value.startsWith("{")) && isJson(value)) {
         return "<json>";
+      }
+      if (value.includes(" ago)")) {
+        return value.replace(/\(\d+[smhd] ago\)/g, "(<relative-time> ago)");
       }
       return value;
     }
@@ -453,6 +476,15 @@ it("reports contract failures as API errors", () => {
 // Routes the SPA calls
 // ---------------------------------------------------------------------------
 describe("ui contracts against the real gateway", () => {
+  it("GET /activity", async () => {
+    await contractRoute(
+      "activity.json",
+      "/activity",
+      v1(["activity"], { q: "in:inbox project:ui-contracts" }),
+      activityPage,
+    );
+  });
+
   it("GET /projects", async () => {
     await contractRoute(
       "projects.json",
