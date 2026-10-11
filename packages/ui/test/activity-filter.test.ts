@@ -7,6 +7,7 @@ import {
   clientFilter,
   DEFAULT_ACTIVITY_LOCAL_STATE,
 } from "~/state/activity-filter";
+import type { ActivityLocalSnapshot } from "~/state/activity-local";
 
 const item: ActivityItem = {
   kind: "knowledge",
@@ -40,10 +41,16 @@ describe("activity client filters", () => {
 
   it("uses local read and archive state when supplied", () => {
     const key = activityItemKey(item);
-    const state = {
-      archived: new Set([key]),
-      pinned: new Set([key]),
-      read: { [key]: true },
+    const state: ActivityLocalSnapshot = {
+      records: {
+        [key]: {
+          key,
+          archived_at: item.last_activity_at,
+          pinned_at: item.last_activity_at,
+          read_total: item.total,
+        },
+      },
+      folders: [],
     };
     expect(filter("in:archive is:read is:pinned", state)).toBe(true);
     expect(filter("in:inbox", state)).toBe(false);

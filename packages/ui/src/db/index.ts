@@ -14,6 +14,8 @@ export {
   type CachedRecord,
   type CollectionState,
   type CachedStoreName,
+  type ActivityStateRecord,
+  type ActivityFolderRecord,
   type LoreUiDb,
   type LoreUiSchema,
   type MessageBlock,
