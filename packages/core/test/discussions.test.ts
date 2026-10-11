@@ -174,6 +174,46 @@ describe("discussions", () => {
     ).toEqual([3]);
   });
 
+  it("drops a response binding once no reply references it", () => {
+    const { discussion } = start();
+    const answer = message(p.id, "s1", "the answer", "assistant", {
+      agent: "codex",
+    });
+    const bindings = () =>
+      (
+        db()
+          .query(
+            `SELECT COUNT(*) AS n FROM response_bindings WHERE message_id = '${answer}'`,
+          )
+          .get() as { n: number }
+      ).n;
+    const first = addReply(p.id, discussion.id, {
+      expectedRevision: 1,
+      responseMessageId: answer,
+    });
+    const second = addReply(p.id, discussion.id, {
+      expectedRevision: first.discussion.revision,
+      responseMessageId: answer,
+    });
+    expect(bindings()).toBe(1);
+    deleteReply(p.id, discussion.id, first.reply.id, first.reply.revision);
+    expect(bindings()).toBe(1);
+    deleteReply(p.id, discussion.id, second.reply.id, second.reply.revision);
+    expect(bindings()).toBe(0);
+
+    addReply(p.id, discussion.id, {
+      expectedRevision: getDiscussion(p.id, discussion.id).revision,
+      responseMessageId: answer,
+    });
+    expect(bindings()).toBe(1);
+    deleteDiscussion(
+      p.id,
+      discussion.id,
+      getDiscussion(p.id, discussion.id).revision,
+    );
+    expect(bindings()).toBe(0);
+  });
+
   it("requires exactly one of authored text or a bound response", () => {
     const { discussion } = start();
     const answer = message(p.id, "s1", "the answer", "assistant", {

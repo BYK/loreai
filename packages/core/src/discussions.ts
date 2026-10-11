@@ -849,10 +849,18 @@ export function deleteDiscussion(
   withTransaction(() => {
     const row = discussionRow(projectId, id);
     checkRevision(row.revision, expectedRevision);
+    const bindings = sql
+      .all<{ id: string }>(
+        db(),
+        sql`SELECT DISTINCT response_binding_id AS id FROM discussion_replies
+             WHERE discussion_id = ${id} AND response_binding_id IS NOT NULL`,
+      )
+      .map((b) => b.id);
     sql.run(
       db(),
       sql`DELETE FROM discussion_replies WHERE discussion_id = ${id} AND project_id = ${projectId}`,
     );
+    pruneBindings(bindings);
     sql.run(
       db(),
       sql`DELETE FROM discussions WHERE id = ${id} AND project_id = ${projectId}`,
@@ -864,6 +872,18 @@ export function deleteDiscussion(
 // ---------------------------------------------------------------------------
 // Replies
 // ---------------------------------------------------------------------------
+
+/** Bindings are shared per response message; drop the ones no reply uses. */
+function pruneBindings(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  sql.run(
+    db(),
+    sql`DELETE FROM response_bindings
+         WHERE id ${sql.inList(ids)}
+           AND id NOT IN (SELECT response_binding_id FROM discussion_replies
+                           WHERE response_binding_id IS NOT NULL)`,
+  );
+}
 
 function insertReply(input: {
   projectId: string;
@@ -1128,6 +1148,8 @@ export function deleteReply(
            WHERE parent_reply_id = ${replyId}`,
     );
     sql.run(db(), sql`DELETE FROM discussion_replies WHERE id = ${replyId}`);
+    if (reply.content.kind === "response")
+      pruneBindings([reply.content.binding.id]);
     const t = now();
     sql.run(
       db(),
