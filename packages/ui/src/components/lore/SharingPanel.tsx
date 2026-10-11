@@ -1,5 +1,13 @@
 import type { Component } from "solid-js";
-import { createEffect, createSignal, Match, on, Show, Switch } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  Match,
+  on,
+  Show,
+  Switch,
+} from "solid-js";
 
 import type { SharingStatus } from "~/contracts";
 import { isApiError } from "~/lib/api";
@@ -55,10 +63,18 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     (projectId) => ws.tracked(() => ws.client.getProjectSharing(projectId)),
   );
   const [receipt, setReceipt] = createSignal<SharingStatus>();
-  const [confirmReview, setConfirmReview] = createSignal(false);
+  const [confirmAutoShare, setConfirmAutoShare] = createSignal(false);
+  const [nextAutoShare, setNextAutoShare] = createSignal(false);
   const [savingPolicy, setSavingPolicy] = createSignal(false);
   const [policyError, setPolicyError] =
     createSignal<PolicyMutationFailure | null>(null);
+  const [selectedTeam, setSelectedTeam] = createSignal("");
+  const [savingLink, setSavingLink] = createSignal(false);
+  const [linkError, setLinkError] = createSignal<PolicyMutationFailure | null>(
+    null,
+  );
+  const [linkSuccess, setLinkSuccess] = createSignal("");
+  const teams = () => ws.state.folk.teams.data()?.teams ?? [];
   const shownStatus = () => receipt() ?? sharing.data();
   createEffect(
     on(
@@ -66,43 +82,43 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       () => {
         setReceipt(undefined);
         setPolicyError(null);
-        setConfirmReview(false);
+        setLinkError(null);
+        setConfirmAutoShare(false);
+        setSelectedTeam("");
       },
     ),
   );
   const reload = () => {
     setReceipt(undefined);
     setPolicyError(null);
+    setLinkError(null);
     sharing.reload();
   };
-  const closeReviewDialog = (open: boolean) => {
+  const closeAutoShareDialog = (open: boolean) => {
     if (!open && savingPolicy()) return;
-    setConfirmReview(open);
+    setConfirmAutoShare(open);
   };
-  const reloadAfterPolicyError = () => {
-    setConfirmReview(false);
+  const reloadAfterSharingError = () => {
+    setConfirmAutoShare(false);
     reload();
   };
-  const requireReview = async () => {
+  const updateAutoShare = async () => {
     const current = shownStatus();
-    if (
-      !current ||
-      !current.linked ||
-      current.policy.effective !== "auto" ||
-      savingPolicy()
-    )
+    if (!current || !current.linked || savingPolicy()) {
       return;
+    }
     setSavingPolicy(true);
     setPolicyError(null);
     try {
       const updated = await ws.tracked(() =>
-        ws.client.requireProjectSharingReview(
+        ws.client.setProjectAutoShare(
           props.projectId,
+          nextAutoShare() ? "auto" : "manual",
           current.policy.project_override,
         ),
       );
       setReceipt(updated);
-      setConfirmReview(false);
+      setConfirmAutoShare(false);
     } catch (error) {
       setPolicyError({
         cause: error,
@@ -115,9 +131,41 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       setSavingPolicy(false);
     }
   };
+  const updateProjectLink = async (scopeId: string | null) => {
+    const current = shownStatus();
+    if (!current || savingLink()) return;
+    setSavingLink(true);
+    setLinkError(null);
+    setLinkSuccess("");
+    try {
+      const updated = await ws.tracked(() =>
+        ws.client.linkProjectToTeam(
+          props.projectId,
+          scopeId,
+          current.linked ? (current.team?.id ?? null) : null,
+        ),
+      );
+      setReceipt(updated);
+      setSelectedTeam("");
+      setLinkSuccess(scopeId ? "Project linked to team." : "Project unlinked.");
+      ws.state.folk.refresh();
+    } catch (error) {
+      setLinkError({
+        cause: error,
+        message:
+          error instanceof Error
+            ? error.message
+            : "The team link could not be updated.",
+      });
+    } finally {
+      setSavingLink(false);
+    }
+  };
   const errorText = () => {
     return policyError()?.message ?? "The sharing policy could not be updated.";
   };
+  const linkErrorText = () =>
+    linkError()?.message ?? "The project team link could not be updated.";
   const hidden = () => {
     const error = sharing.error();
     return isApiError(error) && error.kind === "unauthorized";
@@ -150,38 +198,47 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                 )}
               </Show>
               <div class="text-[13px] text-muted">{explanation(status())}</div>
-              <Show
-                when={status().linked && status().policy.effective === "auto"}
-              >
-                <div class="text-xs text-muted">
-                  Automatic sharing can only be selected from the CLI.
-                </div>
+              <Show when={status().linked}>
+                <p class="text-xs text-muted" data-testid="sharing-team-review">
+                  Team review:{" "}
+                  {status().review_required === true
+                    ? "required"
+                    : status().review_required === false
+                      ? "optional"
+                      : "unavailable"}
+                </p>
+                <label class="mt-2 flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    aria-label="Share automatically"
+                    data-testid="sharing-auto-share"
+                    checked={status().auto_share}
+                    disabled={savingPolicy()}
+                    onChange={(event) => {
+                      setNextAutoShare(event.currentTarget.checked);
+                      setPolicyError(null);
+                      setConfirmAutoShare(true);
+                    }}
+                  />
+                  <span>
+                    Share automatically
+                    <span class="mt-1 block text-xs text-muted">
+                      {status().review_required === false
+                        ? `New team knowledge in this project is shared with ${teamLabel(status())} on the next sync without review, because the team doesn't require review.`
+                        : `New team knowledge in this project is sent to ${teamLabel(status())} as review requests on the next sync.`}
+                    </span>
+                  </span>
+                </label>
               </Show>
-              <Show
-                when={status().linked && status().policy.effective === "auto"}
-              >
-                <Button
-                  class="mt-2"
-                  size="sm"
-                  variant="outline"
-                  data-testid="sharing-require-review"
-                  disabled={savingPolicy()}
-                  onClick={() => {
-                    setPolicyError(null);
-                    setConfirmReview(true);
-                  }}
-                >
-                  Require review
-                </Button>
-              </Show>
-              <Show when={policyError() && !confirmReview()}>
+              <Show when={policyError() && !confirmAutoShare()}>
                 <p class="mt-2 text-sm text-danger" role="alert">
                   {errorText()}
                 </p>
               </Show>
               <Show
                 when={
-                  !confirmReview() &&
+                  !confirmAutoShare() &&
                   policyError() &&
                   requiresMutationReload(policyError()?.cause)
                 }
@@ -201,6 +258,75 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                 {status().policy.project_override ?? "none"} · team default{" "}
                 {status().policy.team_default ?? "none"}
               </div>
+              <Show when={status().linked}>
+                <Button
+                  class="mt-2"
+                  size="sm"
+                  variant="outline"
+                  data-testid="sharing-unlink-team"
+                  disabled={savingLink()}
+                  onClick={() => void updateProjectLink(null)}
+                >
+                  {savingLink() ? "Unlinking…" : "Unlink"}
+                </Button>
+              </Show>
+              <Show when={!status().linked}>
+                <div class="mt-2 flex flex-wrap items-end gap-2">
+                  <label class="text-sm">
+                    Link to team
+                    <select
+                      class="mt-1 block h-9 rounded-md border border-line bg-surface px-2"
+                      aria-label="Link to team"
+                      data-testid="sharing-team-picker"
+                      value={selectedTeam()}
+                      onChange={(event) =>
+                        setSelectedTeam(event.currentTarget.value)
+                      }
+                    >
+                      <option value="">Choose a team</option>
+                      <For each={teams()}>
+                        {(team) => (
+                          <option value={team.id}>
+                            {team.name ?? team.id}
+                          </option>
+                        )}
+                      </For>
+                    </select>
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-testid="sharing-link-team"
+                    disabled={savingLink() || !selectedTeam()}
+                    onClick={() => void updateProjectLink(selectedTeam())}
+                  >
+                    {savingLink() ? "Linking…" : "Link to team"}
+                  </Button>
+                </div>
+              </Show>
+              <Show when={linkSuccess()}>
+                <p class="mt-2 text-sm text-muted" role="status">
+                  {linkSuccess()}
+                </p>
+              </Show>
+              <Show when={linkError()}>
+                <p class="mt-2 text-sm text-danger" role="alert">
+                  {linkErrorText()}
+                </p>
+              </Show>
+              <Show
+                when={linkError() && requiresMutationReload(linkError()?.cause)}
+              >
+                <Button
+                  class="mt-2"
+                  size="sm"
+                  variant="outline"
+                  data-testid="sharing-reload-link"
+                  onClick={reload}
+                >
+                  Reload status
+                </Button>
+              </Show>
             </div>
           )}
         </Match>
@@ -222,16 +348,21 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           />
         </Match>
       </Switch>
-      <Dialog open={confirmReview()} onOpenChange={closeReviewDialog}>
+      <Dialog open={confirmAutoShare()} onOpenChange={closeAutoShareDialog}>
         <DialogContent data-testid="sharing-policy-confirmation">
           <DialogHeader>
-            <DialogTitle>Require review before sharing?</DialogTitle>
+            <DialogTitle>
+              {nextAutoShare()
+                ? "Share automatically?"
+                : "Turn off automatic sharing?"}
+            </DialogTitle>
             <DialogDescription>
-              New knowledge will wait for a team admin to approve it before it
-              is shared. Automatic sharing can only be enabled from the CLI.
+              {shownStatus()?.review_required === false
+                ? `New team knowledge in this project is shared with ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} on the next sync without review, because the team doesn't require review.`
+                : `New team knowledge in this project is sent to ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} as review requests on the next sync.`}
             </DialogDescription>
           </DialogHeader>
-          <Show when={confirmReview() && policyError()}>
+          <Show when={confirmAutoShare() && policyError()}>
             <p
               class="text-sm text-danger"
               role="alert"
@@ -244,7 +375,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           </Show>
           <Show
             when={
-              confirmReview() &&
+              confirmAutoShare() &&
               policyError() &&
               requiresMutationReload(policyError()?.cause)
             }
@@ -253,7 +384,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               size="sm"
               variant="outline"
               data-testid="sharing-reload-policy"
-              onClick={reloadAfterPolicyError}
+              onClick={reloadAfterSharingError}
             >
               Reload status
             </Button>
@@ -263,7 +394,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               size="sm"
               variant="outline"
               disabled={savingPolicy()}
-              onClick={() => setConfirmReview(false)}
+              onClick={() => setConfirmAutoShare(false)}
             >
               Cancel
             </Button>
@@ -274,9 +405,13 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                 (policyError() !== null &&
                   requiresMutationReload(policyError()?.cause))
               }
-              onClick={() => void requireReview()}
+              onClick={() => void updateAutoShare()}
             >
-              {savingPolicy() ? "Saving…" : "Require review"}
+              {savingPolicy()
+                ? "Saving…"
+                : nextAutoShare()
+                  ? "Share automatically"
+                  : "Turn off automatic sharing"}
             </Button>
           </DialogFooter>
         </DialogContent>

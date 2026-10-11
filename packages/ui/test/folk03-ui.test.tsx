@@ -18,6 +18,7 @@ import type {
 } from "~/contracts";
 import { ConflictsPage } from "~/components/lore/ConflictsPage";
 import { SharingPanel } from "~/components/lore/SharingPanel";
+import { TeamParityActions } from "~/components/lore/TeamParityActions";
 import { TeamPage } from "~/components/lore/TeamPage";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { WorkspaceProvider } from "~/routes/workspace";
@@ -58,8 +59,8 @@ const memberResponse: TeamMembersResponse = {
     invite: "available",
     remove: "available",
     set_role: "available",
-    add_by_id: "cli_only",
-    offline_invite: "cli_only",
+    add_by_id: "available",
+    offline_invite: "available",
     list_invites: "unsupported",
     revoke_invite: "unsupported",
   },
@@ -73,6 +74,8 @@ const manualSharing: SharingStatus = {
     project_override: "manual",
     team_default: "auto",
   },
+  auto_share: false,
+  review_required: false,
   state: "linked",
   detail: null,
 };
@@ -82,8 +85,9 @@ const automaticSharing: SharingStatus = {
   policy: {
     ...manualSharing.policy,
     effective: "auto",
-    project_override: null,
+    project_override: "auto",
   },
+  auto_share: true,
 };
 
 const conflicts: SyncConflictList = {
@@ -123,6 +127,42 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
       state: "idle",
       pending_changes: 0,
     }),
+    runSync: async () => ({
+      pushed: 0,
+      pulled: 0,
+      conflicts: 0,
+      skipped: 0,
+    }),
+    getTeamReviewPolicy: async () => ({ policy: "required" }),
+    setTeamReviewPolicy: async (
+      _teamId: string,
+      policy: "required" | "optional",
+    ) => ({ policy }),
+    createTeam: async () => ({ team: { id: "team-2", name: "Team" } }),
+    addTeamMemberById: async (
+      _teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer",
+    ) => ({
+      member: { user_id: userId, role, wrapped: true },
+    }),
+    acceptTeamInvite: async () => ({
+      joined: { scope_id: "team-1", role: "editor" },
+    }),
+    getOrganizations: async () => ({ organizations: [] }),
+    discoverTeamContributors: async () => ({ repos: [] }),
+    getDomainJoinRequests: async () => ({ requests: [] }),
+    claimOrganizationDomain: async () => ({ claimed: "example.test" }),
+    requestOrganizationJoin: async () => ({ request_id: "request-1" }),
+    decideDomainJoinRequest: async (
+      _orgId: string,
+      requestId: string,
+      decision: "approve" | "reject",
+    ) => ({
+      request_id: requestId,
+      status: decision === "approve" ? "approved" : "rejected",
+    }),
+    linkProjectToTeam: async () => automaticSharing,
     getTeamMembers: async () => memberResponse,
     inviteTeamMember: async () => ({
       invite: {
@@ -145,7 +185,7 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
       unlinked_projects: 0,
     }),
     getProjectSharing: async () => automaticSharing,
-    requireProjectSharingReview: async () => manualSharing,
+    setProjectAutoShare: async () => manualSharing,
     listSyncConflicts: async () => conflicts,
     keepSyncConflictLocal: async () => ({
       kept: "local",
@@ -219,6 +259,97 @@ describe("TeamPage", () => {
       "editor",
       "viewer",
     );
+  });
+
+  it("lets admins change the team review policy using the current revision", async () => {
+    const setTeamReviewPolicy = vi.fn<ApiClient["setTeamReviewPolicy"]>(
+      async (_teamId, policy) => ({ policy }),
+    );
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamReviewPolicy: async () => ({ policy: "required" }),
+        setTeamReviewPolicy,
+      }),
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Require review",
+    });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(setTeamReviewPolicy).toHaveBeenCalledWith(
+        "team-1",
+        "optional",
+        "required",
+      ),
+    );
+  });
+
+  it("reloads the server policy after a stale review-policy response", async () => {
+    let reads = 0;
+    const getTeamReviewPolicy = vi.fn<ApiClient["getTeamReviewPolicy"]>(
+      async () => ({
+        policy: reads++ === 0 ? "required" : "optional",
+      }),
+    );
+    const setTeamReviewPolicy = vi.fn<ApiClient["setTeamReviewPolicy"]>(
+      async () => {
+        throw new ApiError(
+          "http",
+          "/teams/team-1/review-policy",
+          "Team review policy changed; reload and try again.",
+          409,
+          "stale_policy",
+        );
+      },
+    );
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamReviewPolicy,
+        setTeamReviewPolicy,
+      }),
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Require review",
+    });
+    fireEvent.click(toggle);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Team review policy changed",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reload review policy" }),
+    );
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(getTeamReviewPolicy).toHaveBeenCalledTimes(2);
+    expect(setTeamReviewPolicy).toHaveBeenCalledWith(
+      "team-1",
+      "optional",
+      "required",
+    );
+  });
+
+  it("disables team review policy for non-admins with an explanation", async () => {
+    const memberOnly: TeamMembersResponse = {
+      ...memberResponse,
+      can_manage: false,
+      my_role: "viewer",
+    };
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamMembers: async () => memberOnly,
+        getTeamReviewPolicy: async () => ({ policy: "required" }),
+      }),
+    );
+    expect(
+      await screen.findByRole("switch", { name: "Require review" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Only team admins can change the review policy."),
+    ).toBeVisible();
   });
 
   it("uses Former member when the server has no member label", async () => {
@@ -379,7 +510,7 @@ describe("TeamPage", () => {
     expect(confirm).toBeEnabled();
   });
 
-  it("confirms removal and keeps the invite token only inside its receipt dialog", async () => {
+  it("confirms removal, supports offline invites, and keeps the token in its receipt", async () => {
     const inviteTeamMember = vi.fn<ApiClient["inviteTeamMember"]>(async () => ({
       invite: {
         team_id: "team-1",
@@ -425,6 +556,7 @@ describe("TeamPage", () => {
       "viewer",
     );
 
+    fireEvent.click(screen.getByTestId("team-offline-invite"));
     fireEvent.click(screen.getByRole("button", { name: "Create invite" }));
     const inviteDialog = await screen.findByTestId("team-invite-receipt");
     expect(inviteDialog).toHaveTextContent("invite-secret-token");
@@ -433,6 +565,7 @@ describe("TeamPage", () => {
     );
     expect(inviteTeamMember).toHaveBeenCalledWith("team-1", {
       role: "viewer",
+      offline: true,
     });
     fireEvent.click(within(inviteDialog).getByRole("button", { name: "Done" }));
     await waitFor(() =>
@@ -758,61 +891,369 @@ describe("ConflictsPage", () => {
   });
 });
 
-describe("SharingPanel review action", () => {
-  it("confirms the change and replaces policy data from the receipt", async () => {
-    const requireProjectSharingReview = vi.fn<
-      ApiClient["requireProjectSharingReview"]
-    >(async () => manualSharing);
+describe("TeamParityActions", () => {
+  it("keeps New team errors in its dialog", async () => {
+    const createTeam = vi.fn<ApiClient["createTeam"]>(async () => {
+      throw new ApiError(
+        "http",
+        "/teams",
+        "Team name is already in use.",
+        409,
+        "conflict",
+      );
+    });
     mount(
-      () => <SharingPanel projectId="project-1" />,
-      clientWith({ requireProjectSharingReview }),
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ createTeam }),
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "New team" }));
+    const dialog = await screen.findByTestId("team-create-dialog");
+    fireEvent.input(screen.getByTestId("team-create-name"), {
+      target: { value: "Acme" },
+    });
     fireEvent.click(
-      await screen.findByRole("button", { name: "Require review" }),
+      within(dialog).getByRole("button", { name: "Create team" }),
     );
-    expect(
-      await screen.findByTestId("sharing-policy-confirmation"),
-    ).toHaveTextContent("only be enabled from the CLI");
-    fireEvent.click(
-      within(screen.getByTestId("sharing-policy-confirmation")).getByRole(
-        "button",
-        { name: "Require review" },
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Team name is already in use.",
+    );
+  });
+
+  it("shows an inline team-creation form when no teams exist", async () => {
+    const emptyTeamCreate = vi.fn<ApiClient["createTeam"]>(async (name) => ({
+      team: { id: "team-2", name },
+    }));
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage={false}
+          hasTeams={false}
+          onChanged={() => undefined}
+        />
       ),
+      clientWith({ createTeam: emptyTeamCreate }),
+    );
+    fireEvent.input(screen.getByLabelText("Team name"), {
+      target: { value: "First team" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create team" }));
+    await waitFor(() =>
+      expect(emptyTeamCreate).toHaveBeenCalledWith("First team"),
+    );
+  });
+
+  it("sends a pasted invite link as a token body and keeps failures in the dialog", async () => {
+    const acceptTeamInvite = vi.fn<ApiClient["acceptTeamInvite"]>(async () => {
+      throw new ApiError(
+        "http",
+        "/teams/accept",
+        "Invitation expired.",
+        404,
+        "not_found",
+      );
+    });
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ acceptTeamInvite }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const dialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: {
+        value: "https://lore.example/accept?token=secret-body-token",
+      },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Join team" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Invitation expired.",
+    );
+    expect(acceptTeamInvite).toHaveBeenCalledWith("secret-body-token");
+  });
+
+  it("keeps Add by account ID errors in its open admin dialog", async () => {
+    const addTeamMemberById = vi.fn<ApiClient["addTeamMemberById"]>(
+      async () => {
+        throw new ApiError(
+          "forbidden",
+          "/teams/team-1/members",
+          "Only team admins can add members.",
+          403,
+          "forbidden",
+        );
+      },
+    );
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ addTeamMemberById }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add by account ID" }));
+    const dialog = await screen.findByTestId("team-add-by-id-dialog");
+    fireEvent.input(screen.getByTestId("team-account-id"), {
+      target: { value: "user-2" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add member" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "You don't have permission to perform this action.",
+    );
+    expect(addTeamMemberById).toHaveBeenCalledWith(
+      "team-1",
+      "user-2",
+      "editor",
+    );
+  });
+
+  it("only calls GitHub discovery after the explicit click", async () => {
+    const discoverTeamContributors = vi.fn<
+      ApiClient["discoverTeamContributors"]
+    >(async () => ({
+      repos: [
+        {
+          repo: "acme/app",
+          contributors: [{ login: "ada", githubId: 17, onLore: false }],
+        },
+      ],
+    }));
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ discoverTeamContributors }),
+    );
+    await screen.findByTestId("organization-domains");
+    expect(discoverTeamContributors).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Find contributors" }));
+    const contributor = await screen.findByLabelText("@ada");
+    fireEvent.click(contributor);
+    fireEvent.click(screen.getByRole("button", { name: "Invite selected" }));
+    await waitFor(() =>
+      expect(discoverTeamContributors).toHaveBeenCalledTimes(2),
+    );
+    expect(discoverTeamContributors).toHaveBeenLastCalledWith("team-1", {
+      invite_role: "editor",
+      invite_logins: ["ada"],
+    });
+  });
+
+  it("shows organization requests and surfaces forbidden domain claims", async () => {
+    const decideDomainJoinRequest = vi.fn<ApiClient["decideDomainJoinRequest"]>(
+      async (_orgId, requestId, decision) => ({
+        request_id: requestId,
+        status: decision === "approve" ? "approved" : "rejected",
+      }),
+    );
+    const claimOrganizationDomain = vi.fn<ApiClient["claimOrganizationDomain"]>(
+      async () => {
+        throw new ApiError(
+          "forbidden",
+          "/orgs/org-1/domains/claim",
+          "Only organization admins can claim domains.",
+          403,
+          "forbidden",
+        );
+      },
+    );
+    const getDomainJoinRequests = vi.fn<ApiClient["getDomainJoinRequests"]>(
+      async () => ({
+        requests: [
+          {
+            id: "request-1",
+            domain: "example.test",
+            user_id: "user-2",
+            status: "pending",
+            requested_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    );
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({
+        getOrganizations: async () => ({
+          organizations: [{ id: "org-1", name: "Acme", role: "admin" }],
+        }),
+        getDomainJoinRequests,
+        decideDomainJoinRequest,
+        claimOrganizationDomain,
+      }),
+    );
+
+    await screen.findByTestId("organization-domains");
+    fireEvent.click(screen.getByRole("button", { name: "Load join requests" }));
+    expect(await screen.findByTestId("domain-join-request")).toHaveTextContent(
+      "example.test",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(decideDomainJoinRequest).toHaveBeenCalledWith(
+        "org-1",
+        "request-1",
+        "approve",
+      ),
+    );
+
+    fireEvent.input(screen.getByLabelText("Verified email domain"), {
+      target: { value: "example.test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Claim domain" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You don't have permission to perform this action.",
+    );
+    expect(claimOrganizationDomain).toHaveBeenCalledWith(
+      "org-1",
+      "example.test",
+      "member",
+    );
+  });
+});
+
+describe("SharingPanel auto-share control", () => {
+  it("shows team review policy and confirms disabling automatic sharing", async () => {
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
+      async () => manualSharing,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ setProjectAutoShare }),
+    );
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Share automatically",
+    });
+    expect(toggle).toBeChecked();
+    expect(screen.getByTestId("sharing-team-review")).toHaveTextContent(
+      "Team review: optional",
+    );
+    expect(screen.getByTestId("sharing-panel")).toHaveTextContent(
+      "New team knowledge in this project is shared with Acme on the next sync without review, because the team doesn't require review.",
+    );
+    fireEvent.click(toggle);
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
+    expect(dialog).toHaveTextContent("Turn off automatic sharing?");
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Turn off automatic sharing",
+      }),
     );
     await waitFor(() =>
       expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
         "policy: manual",
       ),
     );
-    expect(requireProjectSharingReview).toHaveBeenCalledWith("project-1", null);
-    expect(
-      screen.queryByRole("button", { name: "Require review" }),
-    ).not.toBeInTheDocument();
+    expect(setProjectAutoShare).toHaveBeenCalledWith(
+      "project-1",
+      "manual",
+      "auto",
+    );
   });
 
-  it("keeps the review dialog open while the policy update is saving", async () => {
+  it("confirms enabling automatic sharing for a review-required team", async () => {
+    const reviewRequired: SharingStatus = {
+      ...manualSharing,
+      policy: { ...manualSharing.policy, team_default: "manual" },
+      review_required: true,
+    };
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
+      async () => automaticSharing,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => reviewRequired,
+        setProjectAutoShare,
+      }),
+    );
+    const toggle = await screen.findByRole("switch", {
+      name: "Share automatically",
+    });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByTestId("sharing-team-review")).toHaveTextContent(
+      "Team review: required",
+    );
+    fireEvent.click(toggle);
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
+    expect(dialog).toHaveTextContent(
+      "New team knowledge in this project is sent to Acme as review requests on the next sync.",
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Share automatically" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
+        "policy: auto",
+      ),
+    );
+    expect(setProjectAutoShare).toHaveBeenCalledWith(
+      "project-1",
+      "auto",
+      "manual",
+    );
+  });
+
+  it("keeps the confirmation open while the policy update is saving", async () => {
     let resolvePolicy!: (status: SharingStatus) => void;
     const pendingPolicy = new Promise<SharingStatus>((resolve) => {
       resolvePolicy = resolve;
     });
-    const requireProjectSharingReview = vi.fn<
-      ApiClient["requireProjectSharingReview"]
-    >(() => pendingPolicy);
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
+      () => pendingPolicy,
+    );
     mount(
       () => <SharingPanel projectId="project-1" />,
-      clientWith({ requireProjectSharingReview }),
+      clientWith({ setProjectAutoShare }),
     );
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Require review" }),
+      await screen.findByRole("switch", { name: "Share automatically" }),
     );
     const dialog = await screen.findByTestId("sharing-policy-confirmation");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Require review" }),
+      within(dialog).getByRole("button", {
+        name: "Turn off automatic sharing",
+      }),
     );
 
-    expect(requireProjectSharingReview).toHaveBeenCalledWith("project-1", null);
+    expect(setProjectAutoShare).toHaveBeenCalledWith(
+      "project-1",
+      "manual",
+      "auto",
+    );
     expect(
       within(dialog).getByRole("button", { name: "Saving…" }),
     ).toBeDisabled();
@@ -820,20 +1261,12 @@ describe("SharingPanel review action", () => {
     expect(
       screen.getByTestId("sharing-policy-confirmation"),
     ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("button", { name: "Saving…" }),
-    ).toBeVisible();
 
     resolvePolicy(manualSharing);
     await waitFor(() =>
       expect(
         screen.queryByTestId("sharing-policy-confirmation"),
       ).not.toBeInTheDocument(),
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
-        "policy: manual",
-      ),
     );
   });
 
@@ -842,40 +1275,39 @@ describe("SharingPanel review action", () => {
       .fn<ApiClient["getProjectSharing"]>()
       .mockResolvedValueOnce(automaticSharing)
       .mockResolvedValueOnce(manualSharing);
-    const requireProjectSharingReview = vi.fn<
-      ApiClient["requireProjectSharingReview"]
-    >(async () => {
-      throw new ApiError(
-        "http",
-        "/projects/project-1/sharing/policy",
-        "Project sharing policy changed; reload the project.",
-        409,
-        "stale_policy",
-      );
-    });
-    const client = clientWith({
-      getProjectSharing,
-      requireProjectSharingReview,
-    });
-    mount(() => <SharingPanel projectId="project-1" />, client);
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
+      async () => {
+        throw new ApiError(
+          "http",
+          "/projects/project-1/sharing/policy",
+          "Project sharing policy changed; reload the project.",
+          409,
+          "stale_policy",
+        );
+      },
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ getProjectSharing, setProjectAutoShare }),
+    );
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Require review" }),
+      await screen.findByRole("switch", { name: "Share automatically" }),
     );
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
     fireEvent.click(
-      within(screen.getByTestId("sharing-policy-confirmation")).getByRole(
-        "button",
-        { name: "Require review" },
-      ),
+      within(dialog).getByRole("button", {
+        name: "Turn off automatic sharing",
+      }),
     );
-    const dialog = screen.getByTestId("sharing-policy-confirmation");
     const alert = await within(dialog).findByRole("alert");
     expect(alert).toHaveTextContent("Project sharing policy changed");
     expect(alert).toHaveFocus();
     expect(
-      within(dialog).getByRole("button", { name: "Require review" }),
+      within(dialog).getByRole("button", {
+        name: "Turn off automatic sharing",
+      }),
     ).toBeDisabled();
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Reload status" }),
     );
@@ -888,6 +1320,59 @@ describe("SharingPanel review action", () => {
       ),
     );
     expect(getProjectSharing).toHaveBeenCalledTimes(2);
-    expect(requireProjectSharingReview).toHaveBeenCalledTimes(1);
+    expect(setProjectAutoShare).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SharingPanel team link control", () => {
+  it("links and unlinks with the expected current team revision", async () => {
+    const unlinked: SharingStatus = {
+      ...manualSharing,
+      linked: false,
+      team: null,
+      policy: {
+        effective: "manual",
+        project_override: null,
+        team_default: null,
+      },
+      auto_share: false,
+      review_required: null,
+      state: "not_linked",
+    };
+    const linkProjectToTeam = vi
+      .fn<ApiClient["linkProjectToTeam"]>()
+      .mockResolvedValueOnce(automaticSharing)
+      .mockResolvedValueOnce(unlinked);
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => unlinked,
+        linkProjectToTeam,
+      }),
+    );
+
+    const picker = await screen.findByRole("combobox", {
+      name: "Link to team",
+    });
+    fireEvent.change(picker, { target: { value: "team-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
+    await waitFor(() =>
+      expect(linkProjectToTeam).toHaveBeenNthCalledWith(
+        1,
+        "project-1",
+        "team-1",
+        null,
+      ),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unlink" }));
+    await waitFor(() =>
+      expect(linkProjectToTeam).toHaveBeenNthCalledWith(
+        2,
+        "project-1",
+        null,
+        "team-1",
+      ),
+    );
   });
 });

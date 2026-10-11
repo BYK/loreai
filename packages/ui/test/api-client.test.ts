@@ -617,6 +617,8 @@ describe("api client: error classification", () => {
           project_override: null,
           team_default: null,
         },
+        auto_share: false,
+        review_required: null,
         state: "not_linked",
         detail: null,
       });
@@ -890,8 +892,8 @@ describe("FOLK-03 API client", () => {
           invite: "available",
           remove: "available",
           set_role: "available",
-          add_by_id: "cli_only",
-          offline_invite: "cli_only",
+          add_by_id: "available",
+          offline_invite: "available",
           list_invites: "unsupported",
           revoke_invite: "unsupported",
         },
@@ -922,6 +924,8 @@ describe("FOLK-03 API client", () => {
           project_override: "manual",
           team_default: "auto",
         },
+        auto_share: false,
+        review_required: false,
         state: "linked",
         detail: null,
       },
@@ -970,10 +974,10 @@ describe("FOLK-03 API client", () => {
     });
 
     await client.getTeamMembers("team-1");
-    await client.inviteTeamMember("team-1", { role: "viewer" });
+    await client.inviteTeamMember("team-1", { role: "viewer", offline: true });
     await client.setTeamMemberRole("team-1", "user-2", "editor", "viewer");
     await client.removeTeamMember("team-1", "user-2", "editor");
-    await client.requireProjectSharingReview("project-1", null);
+    await client.setProjectAutoShare("project-1", "manual", null);
     await client.listSyncConflicts();
     await client.keepSyncConflictLocal(7, "version-2");
     await client.discardSyncConflict(7);
@@ -999,6 +1003,7 @@ describe("FOLK-03 API client", () => {
     ]);
     expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
       role: "viewer",
+      offline: true,
     });
     expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
       role: "editor",
@@ -1015,6 +1020,111 @@ describe("FOLK-03 API client", () => {
       expected_version_id: "version-2",
     });
     expect(JSON.parse(calls[7]?.init?.body as string)).toEqual({});
+  });
+
+  it("keeps parity actions on their body-based management routes", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        if (url === "/api/v1/teams") {
+          return json({ team: { id: "team-2", name: "Acme" } });
+        }
+        if (url.endsWith("/members")) {
+          return json({
+            member: { user_id: "user-2", role: "editor", wrapped: true },
+          });
+        }
+        if (url === "/api/v1/teams/accept") {
+          return json({ joined: { scope_id: "team-1", role: "editor" } });
+        }
+        if (url === "/api/v1/teams/team-1/discover") {
+          return json({ repos: [] });
+        }
+        if (url === "/api/v1/orgs") {
+          return json({
+            organizations: [{ id: "org-1", name: "Acme", role: "admin" }],
+          });
+        }
+        if (url.endsWith("/domains/requests")) {
+          return json({ requests: [] });
+        }
+        if (url.endsWith("/domains/claim")) {
+          return json({ claimed: "example.test" });
+        }
+        if (url.endsWith("/domains/request")) {
+          return json({ request_id: "request-1" });
+        }
+        if (url.endsWith("/requests/request-1/approve")) {
+          return json({ request_id: "request-1", status: "approved" });
+        }
+        if (url.endsWith("/review-policy")) {
+          return json({ policy: "optional" });
+        }
+        if (url.endsWith("/sharing/link")) {
+          return json({
+            linked: true,
+            team: { id: "team-1", name: "Acme" },
+            policy: {
+              effective: "manual",
+              project_override: null,
+              team_default: "manual",
+            },
+            auto_share: false,
+            review_required: true,
+            state: "linked",
+            detail: null,
+          });
+        }
+        if (url === "/api/v1/sync/run") {
+          return json({ pushed: 1, pulled: 2, conflicts: 0, skipped: 0 });
+        }
+        throw new Error(`unexpected API request: ${url}`);
+      },
+    });
+
+    await client.createTeam("Acme");
+    await client.addTeamMemberById("team-1", "user-2", "editor");
+    await client.acceptTeamInvite("secret-token");
+    await client.discoverTeamContributors("team-1", { repos: ["acme/app"] });
+    await client.getOrganizations();
+    await client.getDomainJoinRequests("org-1");
+    await client.claimOrganizationDomain("org-1", "example.test", "member");
+    await client.requestOrganizationJoin("org-1", "example.test");
+    await client.decideDomainJoinRequest("org-1", "request-1", "approve");
+    await client.getTeamReviewPolicy("team-1");
+    await client.setTeamReviewPolicy("team-1", "required", "optional");
+    await client.linkProjectToTeam("project-1", "team-1", null);
+    await client.runSync();
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "/api/v1/teams",
+      "/api/v1/teams/team-1/members",
+      "/api/v1/teams/accept",
+      "/api/v1/teams/team-1/discover",
+      "/api/v1/orgs",
+      "/api/v1/orgs/org-1/domains/requests",
+      "/api/v1/orgs/org-1/domains/claim",
+      "/api/v1/orgs/org-1/domains/request",
+      "/api/v1/orgs/org-1/domains/requests/request-1/approve",
+      "/api/v1/teams/team-1/review-policy",
+      "/api/v1/teams/team-1/review-policy",
+      "/api/v1/projects/project-1/sharing/link",
+      "/api/v1/sync/run",
+    ]);
+    expect(calls[2]?.url).not.toContain("secret-token");
+    expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
+      token: "secret-token",
+    });
+    expect(JSON.parse(calls[10]?.init?.body as string)).toEqual({
+      policy: "required",
+      expected: "optional",
+    });
+    expect(JSON.parse(calls[11]?.init?.body as string)).toEqual({
+      scope_id: "team-1",
+      expected_scope_id: null,
+    });
+    expect(JSON.parse(calls[12]?.init?.body as string)).toEqual({});
   });
 });
 
@@ -1059,7 +1169,7 @@ describe("api client: error envelopes", () => {
       errorType: "stale_policy",
       extra: { current_override: "manual" },
       mutate: (client: ReturnType<typeof createApiClient>) =>
-        client.requireProjectSharingReview("project-1", null),
+        client.setProjectAutoShare("project-1", "manual", null),
     },
   ])(
     "preserves $errorType and the message when error envelopes include extra fields",

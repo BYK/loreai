@@ -102,6 +102,8 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
         project_override: null,
         team_default: null,
       },
+      auto_share: false,
+      review_required: null,
       state: "not_linked",
       detail: null,
     }),

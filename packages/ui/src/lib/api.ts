@@ -15,7 +15,7 @@
  *   - `invalid`      2xx whose body failed validation (`ContractError`)
  *   - `http`         any other non-2xx
  */
-import { type Type } from "arktype";
+import { type as schema, type Type } from "arktype";
 
 import {
   accountStatus,
@@ -66,6 +66,13 @@ import {
   teamInviteReceipt,
   teamRoleReceipt,
   teamRemovalReceipt,
+  teamCreateReceipt,
+  teamAddReceipt,
+  teamAcceptReceipt,
+  teamDiscoveryResult,
+  organizationList,
+  domainJoinRequestList,
+  teamReviewPolicy,
   syncConflictList,
   syncConflictKeepReceipt,
   syncConflictDiscardReceipt,
@@ -80,6 +87,7 @@ import {
   sessionPage,
   sessionSearchPage,
   sharingStatus,
+  syncRunReceipt,
   syncStatus,
   teamList,
   warmingSettingsResult,
@@ -120,9 +128,17 @@ import {
   type TeamInviteReceipt,
   type TeamRoleReceipt,
   type TeamRemovalReceipt,
+  type TeamCreateReceipt,
+  type TeamAddReceipt,
+  type TeamAcceptReceipt,
+  type TeamDiscoveryResult,
+  type OrganizationList,
+  type DomainJoinRequestList,
+  type TeamReviewPolicy,
   type SyncConflictList,
   type SyncConflictKeepReceipt,
   type SyncConflictDiscardReceipt,
+  type SyncRunReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -750,7 +766,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
     inviteTeamMember(
       teamId: string,
-      input: { role: "editor" | "viewer"; email?: string },
+      input: {
+        role: "editor" | "viewer";
+        email?: string;
+        offline?: boolean;
+      },
       signal?: AbortSignal,
     ): Promise<TeamInviteReceipt> {
       return mutateJson(
@@ -758,6 +778,130 @@ export function createApiClient(options: ApiClientOptions = {}) {
         apiPath(["teams", teamId, "invites"]),
         input,
         teamInviteReceipt,
+        signal,
+      );
+    },
+    createTeam(name: string, signal?: AbortSignal): Promise<TeamCreateReceipt> {
+      return mutateJson("POST", "/teams", { name }, teamCreateReceipt, signal);
+    },
+    addTeamMemberById(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer" = "editor",
+      signal?: AbortSignal,
+    ): Promise<TeamAddReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members"]),
+        { user_id: userId, role },
+        teamAddReceipt,
+        signal,
+      );
+    },
+    acceptTeamInvite(
+      token: string,
+      signal?: AbortSignal,
+    ): Promise<TeamAcceptReceipt> {
+      return mutateJson(
+        "POST",
+        "/teams/accept",
+        { token },
+        teamAcceptReceipt,
+        signal,
+      );
+    },
+    getOrganizations(signal?: AbortSignal): Promise<OrganizationList> {
+      return getJson("/orgs", organizationList, signal);
+    },
+    discoverTeamContributors(
+      teamId: string,
+      input: {
+        repos?: string[];
+        invite_role?: "editor" | "viewer";
+        invite_logins?: string[];
+      },
+      signal?: AbortSignal,
+    ): Promise<TeamDiscoveryResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "discover"]),
+        input,
+        teamDiscoveryResult,
+        signal,
+      );
+    },
+    getDomainJoinRequests(
+      orgId: string,
+      signal?: AbortSignal,
+    ): Promise<DomainJoinRequestList> {
+      return getJson(
+        apiPath(["orgs", orgId, "domains", "requests"]),
+        domainJoinRequestList,
+        signal,
+      );
+    },
+    claimOrganizationDomain(
+      orgId: string,
+      domain: string,
+      role: "manager" | "billing" | "member" = "member",
+      signal?: AbortSignal,
+    ): Promise<{ claimed: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "claim"]),
+        { domain, role },
+        schema({ claimed: "string" }),
+        signal,
+      );
+    },
+    requestOrganizationJoin(
+      orgId: string,
+      domain: string,
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "request"]),
+        { domain },
+        schema({ request_id: "string" }),
+        signal,
+      );
+    },
+    decideDomainJoinRequest(
+      orgId: string,
+      requestId: string,
+      decision: "approve" | "reject",
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string; status: "approved" | "rejected" }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "requests", requestId, decision]),
+        {},
+        schema({ request_id: "string", status: "'approved' | 'rejected'" }),
+        signal,
+      );
+    },
+    getTeamReviewPolicy(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return getJson(
+        apiPath(["teams", teamId, "review-policy"]),
+        teamReviewPolicy,
+        signal,
+      );
+    },
+    setTeamReviewPolicy(
+      teamId: string,
+      policy: "required" | "optional",
+      expected: "required" | "optional",
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return mutateJson(
+        "PUT",
+        apiPath(["teams", teamId, "review-policy"]),
+        { policy, expected },
+        teamReviewPolicy,
         signal,
       );
     },
@@ -793,6 +937,9 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getSyncStatus(signal?: AbortSignal): Promise<SyncStatus> {
       return getJson("/sync/status", syncStatus, signal);
     },
+    runSync(signal?: AbortSignal): Promise<SyncRunReceipt> {
+      return mutateJson("POST", "/sync/run", {}, syncRunReceipt, signal);
+    },
     getProjectSharing(
       projectId: string,
       signal?: AbortSignal,
@@ -803,15 +950,30 @@ export function createApiClient(options: ApiClientOptions = {}) {
         signal,
       );
     },
-    requireProjectSharingReview(
+    setProjectAutoShare(
       projectId: string,
+      policy: "manual" | "auto",
       expectedOverride: "manual" | "auto" | null,
       signal?: AbortSignal,
     ): Promise<SharingStatus> {
       return mutateJson(
         "POST",
         apiPath(["projects", projectId, "sharing", "policy"]),
-        { policy: "manual", expected_override: expectedOverride },
+        { policy, expected_override: expectedOverride },
+        sharingStatus,
+        signal,
+      );
+    },
+    linkProjectToTeam(
+      projectId: string,
+      scopeId: string | null,
+      expectedScopeId: string | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "link"]),
+        { scope_id: scopeId, expected_scope_id: expectedScopeId },
         sharingStatus,
         signal,
       );

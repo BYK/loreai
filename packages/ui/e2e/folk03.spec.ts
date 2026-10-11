@@ -64,8 +64,8 @@ async function installSignedInTeamRoutes(page: Page) {
           invite: "available",
           remove: "available",
           set_role: "available",
-          add_by_id: "cli_only",
-          offline_invite: "cli_only",
+          add_by_id: "available",
+          offline_invite: "available",
           list_invites: "unsupported",
           revoke_invite: "unsupported",
         },
@@ -326,11 +326,11 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(card.getByRole("button", { name: "Keep mine" })).toBeEnabled();
   });
 
-  test("linked project can require review from the sharing panel", async ({
+  test("project auto-share toggle uses team review policy and keyboard input", async ({
     page,
   }) => {
-    const scratch = await projectByName(page, "scratch");
-    const sharingUrl = `**/api/v1/projects/${scratch.id}/sharing`;
+    const project = await projectByName(page, "sharing-e2e");
+    const sharingUrl = `**/api/v1/projects/${project.id}/sharing`;
     await page.route(sharingUrl, (route) =>
       route.fulfill({
         json: {
@@ -338,16 +338,26 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
           team: { id: "e2e-team-acme", name: "Acme e2e" },
           policy: {
             effective: "auto",
-            project_override: null,
+            project_override: "auto",
             team_default: "auto",
           },
+          auto_share: true,
+          review_required: false,
           state: "linked",
           detail: null,
         },
       }),
     );
-    await page.route(`${sharingUrl}/policy`, (route) =>
-      route.fulfill({
+    await page.route(`${sharingUrl}/policy`, async (route) => {
+      const request = route.request().postDataJSON() as {
+        policy: "manual" | "auto";
+        expected_override: "manual" | "auto" | null;
+      };
+      expect(request).toEqual({
+        policy: "manual",
+        expected_override: "auto",
+      });
+      return route.fulfill({
         json: {
           linked: true,
           team: { id: "e2e-team-acme", name: "Acme e2e" },
@@ -356,20 +366,345 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
             project_override: "manual",
             team_default: "auto",
           },
+          auto_share: false,
+          review_required: false,
           state: "linked",
           detail: null,
         },
-      }),
-    );
-    await page.goto(`/ui/projects/${encodeURIComponent(scratch.id)}`);
+      });
+    });
+    await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
 
-    await page.getByTestId("sharing-require-review").click();
+    const toggle = page.getByRole("switch", { name: "Share automatically" });
+    await expect(toggle).toBeChecked();
+    await expect(page.getByTestId("sharing-team-review")).toHaveText(
+      "Team review: optional",
+    );
+    await toggle.focus();
+    await page.keyboard.press("Space");
     const dialog = page.getByTestId("sharing-policy-confirmation");
-    await expect(dialog).toContainText("Automatic sharing can only be enabled");
-    await dialog.getByRole("button", { name: "Require review" }).click();
+    await expect(dialog).toContainText(
+      "New team knowledge in this project is shared with Acme e2e on the next sync without review, because the team doesn't require review.",
+    );
+    await dialog
+      .getByRole("button", { name: "Turn off automatic sharing" })
+      .click();
     await expect(page.getByTestId("sharing-summary")).toContainText(
       "policy: manual",
     );
-    await expect(page.getByTestId("sharing-require-review")).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+  });
+
+  test("team page exposes parity actions and sends invite tokens only in bodies", async ({
+    page,
+  }) => {
+    await installSignedInTeamRoutes(page);
+    await page.route("**/api/v1/teams", async (route) => {
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({ name: "New Acme" });
+        return route.fulfill({
+          status: 201,
+          json: { team: { id: "team-new", name: "New Acme" } },
+        });
+      }
+      return route.fallback();
+    });
+    await page.route("**/api/v1/orgs", (route) =>
+      route.fulfill({
+        json: {
+          organizations: [{ id: "org-1", name: "Acme Org", role: "admin" }],
+        },
+      }),
+    );
+    await page.route("**/api/v1/teams/team-1/review-policy", async (route) => {
+      if (route.request().method() === "PUT") {
+        expect(route.request().postDataJSON()).toEqual({
+          policy: "optional",
+          expected: "required",
+        });
+        return route.fulfill({ json: { policy: "optional" } });
+      }
+      return route.fulfill({ json: { policy: "required" } });
+    });
+    await page.route("**/api/v1/orgs/org-1/domains/requests", (route) =>
+      route.fulfill({
+        json: {
+          requests: [
+            {
+              id: "domain-request-1",
+              domain: "example.test",
+              user_id: "user-2",
+              status: "pending",
+              requested_at: "2026-09-20T12:00:00.000Z",
+            },
+            {
+              id: "domain-request-2",
+              domain: "other.example.test",
+              user_id: "user-3",
+              status: "pending",
+              requested_at: "2026-09-20T12:00:00.000Z",
+            },
+          ],
+        },
+      }),
+    );
+    await page.route("**/api/v1/teams/team-1/invites", async (route) => {
+      expect(route.request().postDataJSON()).toMatchObject({
+        role: "viewer",
+        offline: true,
+      });
+      return route.fulfill({
+        json: {
+          invite: {
+            team_id: "team-1",
+            role: "viewer",
+            expires_in_days: 14,
+            token: "offline-invite-token",
+            accept_command: "lore team accept offline-invite-token",
+            emailed: false,
+          },
+        },
+      });
+    });
+    await page.route("**/api/v1/teams/accept", async (route) => {
+      expect(route.request().url()).not.toContain("join-token");
+      expect(route.request().postDataJSON()).toEqual({ token: "join-token" });
+      return route.fulfill({
+        json: { joined: { scope_id: "team-1", role: "editor" } },
+      });
+    });
+    await page.route("**/api/v1/teams/team-1/members", async (route) => {
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({
+          user_id: "user-by-id",
+          role: "editor",
+        });
+        return route.fulfill({
+          json: {
+            member: { user_id: "user-by-id", role: "editor", wrapped: true },
+          },
+        });
+      }
+      return route.fallback();
+    });
+    let discoveries = 0;
+    await page.route("**/api/v1/teams/team-1/discover", async (route) => {
+      discoveries += 1;
+      if (discoveries === 1) {
+        expect(route.request().postDataJSON()).toEqual({});
+        return route.fulfill({
+          json: {
+            repos: [
+              {
+                repo: "acme/app",
+                contributors: [{ login: "ada", githubId: 17, onLore: false }],
+              },
+            ],
+          },
+        });
+      }
+      expect(route.request().postDataJSON()).toEqual({
+        invite_role: "editor",
+        invite_logins: ["ada"],
+      });
+      return route.fulfill({
+        json: {
+          repos: [
+            {
+              repo: "acme/app",
+              contributors: [{ login: "ada", githubId: 17, onLore: false }],
+            },
+          ],
+          invited: {
+            scopeId: "team-1",
+            role: "editor",
+            total: 1,
+            emailed: 1,
+            noEmail: 0,
+            overCap: 0,
+            results: [],
+          },
+        },
+      });
+    });
+    await page.route("**/api/v1/orgs/org-1/domains/request", (route) =>
+      route.fulfill({ json: { request_id: "domain-request-2" } }),
+    );
+    await page.route("**/api/v1/orgs/org-1/domains/claim", (route) =>
+      route.fulfill({ json: { claimed: "example.test" } }),
+    );
+    await page.route(
+      "**/api/v1/orgs/org-1/domains/requests/domain-request-1/approve",
+      (route) =>
+        route.fulfill({
+          json: { request_id: "domain-request-1", status: "approved" },
+        }),
+    );
+    await page.route(
+      "**/api/v1/orgs/org-1/domains/requests/domain-request-2/reject",
+      (route) =>
+        route.fulfill({
+          json: { request_id: "domain-request-2", status: "rejected" },
+        }),
+    );
+    await page.goto("/ui/team");
+
+    await page.getByRole("button", { name: "New team" }).click();
+    await page.getByTestId("team-create-name").fill("New Acme");
+    await page.getByRole("button", { name: "Create team" }).click();
+    await expect(page.getByTestId("team-require-review")).toBeChecked();
+    await page.getByTestId("team-require-review").uncheck();
+    await expect(page.getByTestId("team-require-review")).not.toBeChecked();
+    await page.getByTestId("team-offline-invite").check();
+    await page.getByRole("button", { name: "Create invite" }).click();
+    await expect(page.getByTestId("team-invite-receipt")).toContainText(
+      "offline-invite-token",
+    );
+    await page.getByRole("button", { name: "Done" }).click();
+
+    await page.getByRole("button", { name: "Join a team" }).click();
+    await page.getByTestId("team-invite-token").fill("join-token");
+    await page.getByRole("button", { name: "Join team" }).click();
+
+    await page.getByRole("button", { name: "Add by account ID" }).click();
+    await page.getByTestId("team-account-id").fill("user-by-id");
+    await page.getByRole("button", { name: "Add member" }).click();
+
+    expect(discoveries).toBe(0);
+    await page.getByRole("button", { name: "Find contributors" }).click();
+    await page.getByRole("checkbox", { name: /@ada/ }).check();
+    await page.getByRole("button", { name: "Invite selected" }).click();
+    await expect(page.getByRole("status")).toContainText(
+      "Invitation attempted for 1 selected contributor",
+    );
+    expect(discoveries).toBe(2);
+
+    await page.getByRole("button", { name: "Load join requests" }).click();
+    await expect(page.getByTestId("domain-join-request")).toContainText(
+      "example.test",
+    );
+    await page.getByRole("button", { name: "Approve" }).click();
+    const otherRequest = page
+      .getByTestId("domain-join-request")
+      .filter({ hasText: "other.example.test" });
+    await otherRequest.getByRole("button", { name: "Reject" }).click();
+    await page.getByLabel("Verified email domain").fill("example.test");
+    await page.getByRole("button", { name: "Request to join" }).click();
+    await page.getByLabel("Verified email domain").fill("example.test");
+    await page.getByRole("button", { name: "Claim domain" }).click();
+  });
+
+  test("team page shows an inline create form when the account has no teams", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/account", (route) =>
+      route.fulfill({
+        json: {
+          signed_in: true,
+          user: { id: "user-admin", email: null, display_name: "Admin" },
+          provider: "github",
+          expires_at: null,
+          state: "signed_in",
+        },
+      }),
+    );
+    await page.route("**/api/v1/teams", async (route) => {
+      if (route.request().method() === "POST") {
+        expect(route.request().postDataJSON()).toEqual({ name: "First team" });
+        return route.fulfill({
+          status: 201,
+          json: { team: { id: "team-first", name: "First team" } },
+        });
+      }
+      return route.fulfill({ json: { hosted: false, teams: [] } });
+    });
+    await page.route("**/api/v1/sync/status", (route) =>
+      route.fulfill({
+        json: { enabled: true, state: "idle", pending_changes: 0 },
+      }),
+    );
+    await page.route("**/api/v1/orgs", (route) =>
+      route.fulfill({ json: { organizations: [] } }),
+    );
+    await page.goto("/ui/team");
+
+    const form = page.getByTestId("team-create-form");
+    await expect(form).toBeVisible();
+    await form.getByLabel("Team name").fill("First team");
+    await form.getByRole("button", { name: "Create team" }).click();
+  });
+
+  test("links and unlinks a seeded project and offers Sync now", async ({
+    page,
+  }) => {
+    await installSignedInTeamRoutes(page);
+    const project = await projectByName(page, "sharing-e2e");
+    const unlinked = {
+      linked: false,
+      team: null,
+      policy: {
+        effective: "manual",
+        project_override: null,
+        team_default: null,
+      },
+      auto_share: false,
+      review_required: null,
+      state: "not_linked",
+      detail: null,
+    };
+    const linked = {
+      linked: true,
+      team: { id: "team-1", name: "Acme e2e" },
+      policy: {
+        effective: "manual",
+        project_override: null,
+        team_default: "manual",
+      },
+      auto_share: false,
+      review_required: true,
+      state: "linked",
+      detail: null,
+    };
+    await page.route(`**/api/v1/projects/${project.id}/sharing`, (route) =>
+      route.fulfill({ json: unlinked }),
+    );
+    const linkCalls: Array<Record<string, unknown>> = [];
+    await page.route(
+      `**/api/v1/projects/${project.id}/sharing/link`,
+      async (route) => {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        linkCalls.push(body);
+        return route.fulfill({
+          json: body.scope_id === null ? unlinked : linked,
+        });
+      },
+    );
+    await page.route("**/api/v1/sync/run", async (route) => {
+      expect(route.request().postDataJSON()).toEqual({});
+      return route.fulfill({
+        json: { pushed: 1, pulled: 2, conflicts: 0, skipped: 0 },
+      });
+    });
+    await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
+    await expect(page.getByTestId("sharing-team-picker")).toBeVisible();
+    await page
+      .getByRole("combobox", { name: "Link to team" })
+      .selectOption("team-1");
+    await page.getByRole("button", { name: "Link to team" }).click();
+    await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
+    await page.getByRole("button", { name: "Unlink" }).click();
+    await expect(page.getByTestId("sharing-summary")).toContainText(
+      "Not linked",
+    );
+    expect(linkCalls).toEqual([
+      { scope_id: "team-1", expected_scope_id: null },
+      { scope_id: null, expected_scope_id: "team-1" },
+    ]);
+
+    await page.getByTestId("folk-status").click();
+    await page.getByTestId("sync-now").click();
+    await expect(page.getByRole("status")).toContainText(
+      "Sync complete: pushed 1, pulled 2.",
+    );
   });
 });

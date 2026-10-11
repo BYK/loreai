@@ -31,6 +31,16 @@ mkdirSync(scratch, { recursive: true });
 
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
+const sharingProject = join(root, "sharing-e2e");
+mkdirSync(sharingProject, { recursive: true });
+core.ensureProject(sharingProject, "sharing-e2e", null);
+core.ltm.create({
+  projectPath: sharingProject,
+  scope: "project",
+  category: "pattern",
+  title: "Sharing controls use project-local policy",
+  content: "The team review policy controls approval after a project shares.",
+});
 
 const dedupReview = join(root, "dedup-review");
 mkdirSync(dedupReview, { recursive: true });

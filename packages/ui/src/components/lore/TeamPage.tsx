@@ -16,6 +16,7 @@ import {
 } from "@tanstack/solid-table";
 
 import type {
+  TeamReviewPolicy,
   TeamInviteReceipt,
   TeamMembersResponse,
   TeamRemovalReceipt,
@@ -35,6 +36,7 @@ import {
 } from "~/components/ui/dialog";
 import { StateCard } from "./StateCard";
 import { PromotionIdentity } from "./PromotionIdentity";
+import { TeamParityActions } from "./TeamParityActions";
 
 type PageState =
   | "loading"
@@ -93,6 +95,7 @@ export const TeamPage: Component = () => {
     "viewer",
   );
   const [inviteEmail, setInviteEmail] = createSignal("");
+  const [offlineInvite, setOfflineInvite] = createSignal(false);
   const [inviteReceipt, setInviteReceipt] =
     createSignal<TeamInviteReceipt | null>(null);
   const [inviteError, setInviteError] = createSignal("");
@@ -108,6 +111,10 @@ export const TeamPage: Component = () => {
   );
   const [leftTeam, setLeftTeam] = createSignal(false);
   const [removing, setRemoving] = createSignal(false);
+  const [reviewPolicy, setReviewPolicy] =
+    createSignal<TeamReviewPolicy["policy"]>();
+  const [reviewPolicyError, setReviewPolicyError] = createSignal("");
+  const [savingReviewPolicy, setSavingReviewPolicy] = createSignal(false);
 
   const teams = () => folk.teams.data()?.teams ?? [];
   const columns = helper.columns([
@@ -145,6 +152,18 @@ export const TeamPage: Component = () => {
         ws.client.getTeamMembers(selectedTeam),
       );
       setMembers(response);
+      setReviewPolicy(undefined);
+      setReviewPolicyError("");
+      if (response.remote === "ok") {
+        try {
+          const policy = await ws.tracked(() =>
+            ws.client.getTeamReviewPolicy(selectedTeam),
+          );
+          setReviewPolicy(policy.policy);
+        } catch (error) {
+          setReviewPolicyError(actionMessage(error));
+        }
+      }
       if (response.remote === "anonymous") setPageState("anonymous");
       else if (response.remote === "hosted") setPageState("hosted");
       else if (response.remote === "unreachable") setPageState("unreachable");
@@ -273,16 +292,55 @@ export const TeamPage: Component = () => {
       const receipt = await ws.tracked(() =>
         ws.client.inviteTeamMember(current.team?.id ?? teamId(), {
           role: inviteRole(),
+          offline: offlineInvite(),
           ...(inviteEmail().trim() ? { email: inviteEmail().trim() } : {}),
         }),
       );
       setStaleMemberId(null);
       setInviteReceipt(receipt);
       setInviteEmail("");
+      setOfflineInvite(false);
     } catch (error) {
       setInviteError(actionMessage(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const changeReviewPolicy = async (required: boolean) => {
+    const current = reviewPolicy();
+    const team = members()?.team?.id ?? teamId();
+    if (!current || !members()?.can_manage || !team || savingReviewPolicy())
+      return;
+    setSavingReviewPolicy(true);
+    setReviewPolicyError("");
+    try {
+      const updated = await ws.tracked(() =>
+        ws.client.setTeamReviewPolicy(
+          team,
+          required ? "required" : "optional",
+          current,
+        ),
+      );
+      setReviewPolicy(updated.policy);
+    } catch (error) {
+      setReviewPolicyError(actionMessage(error));
+    } finally {
+      setSavingReviewPolicy(false);
+    }
+  };
+
+  const reloadReviewPolicy = async () => {
+    const team = members()?.team?.id ?? teamId();
+    if (!team) return;
+    setReviewPolicyError("");
+    try {
+      const current = await ws.tracked(() =>
+        ws.client.getTeamReviewPolicy(team),
+      );
+      setReviewPolicy(current.policy);
+    } catch (error) {
+      setReviewPolicyError(actionMessage(error));
     }
   };
 
@@ -500,9 +558,17 @@ export const TeamPage: Component = () => {
           </StateCard>
         </Match>
         <Match when={pageState() === "no_team"}>
-          <StateCard kind="empty" title="No team memberships">
-            Join a team with `lore team join` before managing team members.
-          </StateCard>
+          <>
+            <StateCard kind="empty" title="No team memberships">
+              Create a team or join one with an invitation.
+            </StateCard>
+            <TeamParityActions
+              selectedTeamId=""
+              canManage={false}
+              hasTeams={false}
+              onChanged={() => folk.refresh()}
+            />
+          </>
         </Match>
         <Match when={pageState() === "ready"}>
           <Show when={members()}>
@@ -525,6 +591,60 @@ export const TeamPage: Component = () => {
                     first.
                   </p>
                 </Show>
+                <section class="mb-4 rounded-md border border-line bg-bg p-3">
+                  <label class="flex items-center gap-3 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label="Require review"
+                      data-testid="team-require-review"
+                      checked={reviewPolicy() === "required"}
+                      disabled={
+                        savingReviewPolicy() ||
+                        reviewPolicy() === undefined ||
+                        !current().can_manage
+                      }
+                      onChange={(event) =>
+                        void changeReviewPolicy(event.currentTarget.checked)
+                      }
+                    />
+                    Require review
+                    <span class="text-xs font-normal text-muted">
+                      {reviewPolicy() === "required"
+                        ? "New proposals need approval."
+                        : reviewPolicy() === "optional"
+                          ? "Proposals are approved automatically."
+                          : "Loading team review policy…"}
+                    </span>
+                  </label>
+                  <Show when={!current().can_manage}>
+                    <p class="mt-2 text-xs text-muted">
+                      Only team admins can change the review policy.
+                    </p>
+                  </Show>
+                  <Show when={reviewPolicyError()}>
+                    <p class="mt-2 text-sm text-danger" role="alert">
+                      {reviewPolicyError()}
+                    </p>
+                    <Button
+                      class="mt-2"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void reloadReviewPolicy()}
+                    >
+                      Reload review policy
+                    </Button>
+                  </Show>
+                </section>
+                <TeamParityActions
+                  selectedTeamId={current().team?.id ?? teamId()}
+                  canManage={current().can_manage}
+                  hasTeams={teams().length > 0}
+                  onChanged={() => {
+                    folk.refresh();
+                    if (teamId()) void loadMembers(teamId());
+                  }}
+                />
                 <Show when={roleReceipt()}>
                   {(receipt) => (
                     <p class="mb-4 text-sm text-muted" role="status">
@@ -703,6 +823,17 @@ export const TeamPage: Component = () => {
                         }
                       />
                     </label>
+                    <label class="flex items-center gap-2 text-xs text-muted">
+                      <input
+                        type="checkbox"
+                        checked={offlineInvite()}
+                        onChange={(event) =>
+                          setOfflineInvite(event.currentTarget.checked)
+                        }
+                        data-testid="team-offline-invite"
+                      />
+                      Offline invite
+                    </label>
                     <Button
                       type="submit"
                       size="sm"
@@ -723,7 +854,7 @@ export const TeamPage: Component = () => {
                       Pending invites list/revoke: not supported by the sync
                       service.
                     </p>
-                    <p>Add by user id, offline invite: CLI only.</p>
+                    <p>Invite creation works online or offline.</p>
                   </div>
                 </section>
                 <Show when={loadingMembers()}>
