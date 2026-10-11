@@ -8366,6 +8366,7 @@ async function forwardToUpstream(
           upstreamURL: effectiveUpstreamBase,
           credential: routingAuth,
           responseHeaders: response.headers,
+          requestHeaders: req.rawHeaders,
         }),
       );
     } catch {
@@ -16713,6 +16714,7 @@ function accountConversationUsage(
   sessionID: string,
   resolvedConversationTTL: "5m" | "1h" | undefined,
   upstream?: CostAttributionUpstream,
+  requestHeaders?: Record<string, string>,
 ): AnthropicUsage {
   const usageForSentry: AnthropicUsage = {
     input_tokens: usage.inputTokens,
@@ -16734,6 +16736,7 @@ function accountConversationUsage(
     providerID: source?.providerID,
     upstreamURL: source?.url,
     credential: resolveAuth(sessionID, source?.providerID),
+    requestHeaders,
   });
   recordConversationCost(
     sessionID,
@@ -16787,6 +16790,7 @@ function postResponseForTenant(
       sessionID,
       sessionState.resolvedConversationTTL,
       upstream,
+      req.rawHeaders,
     );
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -17072,6 +17076,7 @@ function accountUnsuccessfulResponse(
   endSpan: () => void,
   markDirty?: () => void,
   upstream?: CostAttributionUpstream,
+  requestHeaders?: Record<string, string>,
 ): void {
   const usage = resp.usage ?? ZERO_USAGE;
   const hasUsage = Object.values(usage).some(
@@ -17086,6 +17091,7 @@ function accountUnsuccessfulResponse(
         sessionID,
         resolvedConversationTTL,
         upstream,
+        requestHeaders,
       );
       if (genAiSpan) {
         setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -19694,6 +19700,7 @@ async function handleProvisionalConversationTurn(
             if (state) state._dirty = true;
           },
           routeAttributionUpstream(requestUpstream.route),
+          req.rawHeaders,
         );
       },
       () => {},
@@ -19962,6 +19969,7 @@ async function handleProvisionalConversationTurn(
           () => {},
           undefined,
           routeAttributionUpstream(requestUpstream.route),
+          req.rawHeaders,
         );
         return;
       }
@@ -19982,6 +19990,7 @@ async function handleProvisionalConversationTurn(
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
         routeAttributionUpstream(requestUpstream.route),
+        req.rawHeaders,
       );
       const state = sessions.get(identified.sessionID);
       if (state) state._dirty = true;
@@ -22677,6 +22686,7 @@ async function handleConversationTurnPrepared(
           sessionID,
           sessionState.lastUpstream?.providerID,
         ),
+        requestHeaders: req.rawHeaders,
       });
       providerPressure =
         attribution.provider === "unknown"
@@ -23548,6 +23558,7 @@ async function handleConversationTurnPrepared(
               sessionState._dirty = true;
             },
             routeAttributionUpstream(requestUpstreamRoute),
+            req.rawHeaders,
           );
           return;
         }
@@ -23620,6 +23631,7 @@ async function handleConversationTurnPrepared(
             sessionState._dirty = true;
           },
           routeAttributionUpstream(requestUpstreamRoute),
+          req.rawHeaders,
         );
       },
       dropStreamingFinalizer,

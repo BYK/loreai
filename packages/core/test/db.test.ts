@@ -350,6 +350,34 @@ describe("db", () => {
     ).toBe(MIGRATIONS.length);
   });
 
+  test("v101 clears subscription quota snapshots without changing the cost ledger", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT INTO provider_quotas
+        (provider, auth_kind, account, window, source, observed_at)
+      VALUES
+        ('openai', 'subscription', 'rotating-old', '5h', 'codex', 1),
+        ('openai', 'api_key', 'stable-key', 'requests', 'openai-ratelimit', 2);
+      INSERT INTO provider_costs
+        (day, provider, auth_kind, account, bucket, cost, updated_at)
+      VALUES ('2099-01-01', 'openai', 'subscription', 'rotating-old', 'conversation', 1.25, 3);
+      UPDATE schema_version SET version = 100;
+    `);
+    close();
+
+    const migrated = db();
+    expect(
+      migrated.query("SELECT auth_kind, account FROM provider_quotas").all(),
+    ).toEqual([{ auth_kind: "api_key", account: "stable-key" }]);
+    expect(
+      migrated
+        .query("SELECT auth_kind, account, cost FROM provider_costs")
+        .all(),
+    ).toEqual([
+      { auth_kind: "subscription", account: "rotating-old", cost: 1.25 },
+    ]);
+  });
+
   test("upgrades legacy pending embeddings in place without dropping their work", () => {
     const connection = db();
     const project = ensureProject("/test/legacy-temporal-queue-upgrade");

@@ -174,6 +174,7 @@ it("attributes quota headers to the Codex session account on the provisional pat
         "x-ratelimit-limit-requests": "200",
         "x-ratelimit-remaining-requests": "150",
         "x-ratelimit-reset-requests": "30m",
+        "x-codex-secondary-window-minutes": "0",
       },
     });
   });
@@ -229,6 +230,7 @@ it("attributes quota headers to the Codex session account on the provisional pat
   expect(quotas.length).toBeGreaterThan(0);
   for (const q of quotas) {
     expect(q.authKind).toBe("subscription");
+    expect(q.window).not.toBe("0m");
   }
 });
 

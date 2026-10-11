@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { resolveCostAttribution } from "../src/cost-attribution";
 import { authFingerprint } from "../src/auth";
 import {
@@ -104,6 +105,70 @@ describe("resolveCostAttribution", () => {
     ).toBe("subscription");
   });
 
+  test("openai subscription tokens for one JWT account share an account key", () => {
+    const jwt = (nonce: string) => {
+      const payload = Buffer.from(
+        JSON.stringify({
+          nonce,
+          "https://api.openai.com/auth": {
+            chatgpt_account_id: "acct-shared",
+          },
+        }),
+      ).toString("base64url");
+      return `header.${payload}.signature-${nonce}`;
+    };
+    const first = resolveCostAttribution({
+      sessionID: "openai-jwt-session-one",
+      providerID: "openai-codex",
+      credential: { scheme: "bearer", value: jwt("first") },
+    });
+    const refreshed = resolveCostAttribution({
+      sessionID: "openai-jwt-session-two",
+      providerID: "openai-codex",
+      credential: { scheme: "bearer", value: jwt("refreshed") },
+    });
+
+    expect(first.account).toBe(refreshed.account);
+    expect(first.account).toBe(
+      createHash("sha256").update("acct-shared").digest("hex").slice(0, 12),
+    );
+  });
+
+  test("openai request account header takes priority over snapshot and JWT", () => {
+    _resetForTest();
+    captureSessionHeaders("header-priority-session", {
+      "chatgpt-account-id": "snapshot-account",
+    });
+    const jwtPayload = Buffer.from(
+      JSON.stringify({
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: "jwt-account",
+        },
+      }),
+    ).toString("base64url");
+    const attribution = resolveCostAttribution({
+      sessionID: "header-priority-session",
+      providerID: "openai",
+      credential: {
+        scheme: "bearer",
+        value: `header.${jwtPayload}.signature`,
+      },
+      requestHeaders: new Headers({ "chatgpt-account-id": "header-account" }),
+    });
+    const refreshed = resolveCostAttribution({
+      providerID: "openai",
+      credential: { scheme: "bearer", value: "refreshed-header-token" },
+      requestHeaders: { "ChatGPT-Account-Id": "header-account" },
+    });
+
+    expect(attribution.authKind).toBe("subscription");
+    expect(refreshed.account).toBe(attribution.account);
+    expect(attribution.account).toBe(
+      createHash("sha256").update("header-account").digest("hex").slice(0, 12),
+    );
+    _resetForTest();
+  });
+
   test("openai subscription via chatgpt-account-id session snapshot", () => {
     _resetForTest();
     const sessionID = "codex-session";
@@ -111,12 +176,76 @@ describe("resolveCostAttribution", () => {
     const attribution = resolveCostAttribution({
       sessionID,
       providerID: "openai",
+      credential: { scheme: "bearer", value: "initial-session-token" },
     });
     expect(attribution.authKind).toBe("subscription");
     // Account is sha256-derived, never the raw account id.
     expect(attribution.account).toMatch(/^[0-9a-f]{12}$/);
     expect(attribution.account).not.toContain("acct_123");
+    const refreshed = resolveCostAttribution({
+      sessionID,
+      providerID: "openai",
+      credential: { scheme: "bearer", value: "refreshed-session-token" },
+    });
+    expect(refreshed.account).toBe(attribution.account);
     _resetForTest();
+  });
+
+  test("unknown openai subscription uses default, not its bearer token", () => {
+    const first = resolveCostAttribution({
+      providerID: "openai-codex",
+      credential: { scheme: "bearer", value: "opaque-token-one" },
+    });
+    const refreshed = resolveCostAttribution({
+      providerID: "openai-codex",
+      credential: { scheme: "bearer", value: "opaque-token-two" },
+    });
+    const malformedJWT = resolveCostAttribution({
+      providerID: "openai-codex",
+      credential: { scheme: "bearer", value: "header.!.signature" },
+    });
+
+    expect(first).toMatchObject({
+      authKind: "subscription",
+      account: "default",
+    });
+    expect(refreshed.account).toBe("default");
+    expect(malformedJWT.account).toBe("default");
+  });
+
+  test("openai API-key credentials remain fingerprinted", () => {
+    const credential = { scheme: "api-key" as const, value: "key-not-a-token" };
+    const attribution = resolveCostAttribution({
+      providerID: "openai",
+      credential,
+    });
+
+    expect(attribution.authKind).toBe("api_key");
+    expect(attribution.account).toBe(authFingerprint(credential).slice(0, 12));
+  });
+
+  test("anthropic OAuth tokens share a stable organization key", () => {
+    const first = resolveCostAttribution({
+      providerID: "anthropic",
+      credential: { scheme: "bearer", value: "sk-ant-oat01-first" },
+      responseHeaders: new Headers({ "anthropic-organization-id": "org-123" }),
+    });
+    const refreshed = resolveCostAttribution({
+      providerID: "anthropic",
+      credential: { scheme: "bearer", value: "sk-ant-oat01-refreshed" },
+      responseHeaders: new Headers({ "anthropic-organization-id": "org-123" }),
+    });
+    const withoutOrganization = resolveCostAttribution({
+      providerID: "anthropic",
+      credential: { scheme: "bearer", value: "sk-ant-oat01-other" },
+    });
+
+    expect(first).toMatchObject({ authKind: "subscription" });
+    expect(first.account).toBe(refreshed.account);
+    expect(first.account).toBe(
+      createHash("sha256").update("org-123").digest("hex").slice(0, 12),
+    );
+    expect(withoutOrganization.account).toBe("default");
   });
 
   test("openai subscription via x-codex-* response headers", () => {
@@ -137,6 +266,7 @@ describe("resolveCostAttribution", () => {
       providerID: "anthropic",
       credential,
     });
+    expect(attribution.authKind).toBe("api_key");
     expect(attribution.account).toBe(authFingerprint(credential).slice(0, 12));
     expect(attribution.account).not.toContain("super-secret");
   });

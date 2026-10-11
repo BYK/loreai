@@ -2555,6 +2555,7 @@ export async function executeWarmup(
           state.sessionID,
           state.lastUpstream?.providerID,
         ),
+        requestHeaders: headers,
       }),
     );
 
