@@ -249,3 +249,18 @@ export type ProviderBudgetInput = {
 export const providerBudgetsResult = type({
   provider_budgets: providerBudgetStatus.array(),
 });
+
+/**
+ * `GET /api/v1/model-usage` — the model-tides daily document (#2026). Each
+ * day's `models` maps `provider/model` to distinct sessions that day.
+ */
+export const modelUsageDocument = type({
+  format: "'model-tides-daily'",
+  version: "2",
+  source: "'lore'",
+  days: type({
+    day: "string.date.iso",
+    models: "Record<string, number.integer >= 1>",
+  }).array(),
+});
+export type ModelUsageDocument = typeof modelUsageDocument.infer;

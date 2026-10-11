@@ -93,6 +93,14 @@ export const routes: RouteDefinition[] = [
     ),
   },
   {
+    path: "/model-usage",
+    component: lazy(() =>
+      import("./routes/Operations").then((m) => ({
+        default: m.ModelUsageRoute,
+      })),
+    ),
+  },
+  {
     path: "/contradictions",
     component: lazy(() =>
       import("./routes/Contradictions").then((m) => ({

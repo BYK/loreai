@@ -29,6 +29,7 @@ import {
   providerBudgetsResult,
   type ProviderBudgetInput,
   dedupApplyReceipt,
+  modelUsageDocument,
   dedupPreviewResponse,
   contradictionDecisionResult,
   contradictionListResponse,
@@ -75,6 +76,7 @@ import {
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
+  type ModelUsageDocument,
   type ContradictionDecision,
   type ContradictionDecisionResult,
   type ContradictionListResponse,
@@ -864,6 +866,21 @@ export function createApiClient(options: ApiClientOptions = {}) {
         "/costs/budgets",
         { provider_budgets: budgets },
         providerBudgetsResult,
+        signal,
+      );
+    },
+    /**
+     * `GET /api/v1/model-usage` — the whole model-tides daily document for a
+     * project (or all projects when `project` is omitted). Date-range
+     * filtering happens client-side (#2026).
+     */
+    getModelUsage(
+      opts: { project?: string } = {},
+      signal?: AbortSignal,
+    ): Promise<ModelUsageDocument> {
+      return getJson(
+        apiPath(["model-usage"], { project: opts.project }),
+        modelUsageDocument,
         signal,
       );
     },

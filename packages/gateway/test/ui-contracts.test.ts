@@ -46,6 +46,7 @@ import {
   teamList,
   costsSnapshot,
   dedupApplyReceipt,
+  modelUsageDocument,
   dedupPreviewResponse,
   projectClearResult,
   projectRenameResult,
@@ -254,6 +255,34 @@ beforeAll(async () => {
       0,
       1_700_000_500_000,
     );
+
+  // Model-usage fixture rows (#2026): assistant turns that carry provider and
+  // model metadata across two sessions and two days. They sit in their own
+  // project so the session fixtures above stay untouched; projects.json is
+  // regenerated to include it.
+  const usageMeta = JSON.stringify({
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4",
+  });
+  const usageProjectId = ensureProject(
+    "/test/ui-contracts/model-usage",
+    "ui-contracts-model-usage",
+  );
+  for (const [id, sessionId, createdAt] of [
+    ["mu-ui-contracts-1", "ui-contracts-mu-session-1", 1_700_000_000_000],
+    [
+      "mu-ui-contracts-2",
+      "ui-contracts-mu-session-2",
+      1_700_000_000_000 + 86_400_000,
+    ],
+  ] as const) {
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'assistant', 'assistant reply', 10, 0, ?, ?)`,
+      )
+      .run(id, usageProjectId, sessionId, createdAt, usageMeta);
+  }
 
   const config = loadConfig();
   config.remoteGateway = false;
@@ -851,6 +880,15 @@ describe("ui contracts against the real gateway", () => {
       historical: { session_count: expect.any(Number) },
       daily: { entries: expect.any(Array) },
     });
+  });
+
+  it("GET /model-usage", async () => {
+    await contractRoute(
+      "model-usage.json",
+      "/model-usage",
+      "/api/v1/model-usage",
+      modelUsageDocument,
+    );
   });
 
   it("404 error envelope", async () => {

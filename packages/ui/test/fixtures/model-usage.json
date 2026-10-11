@@ -1,0 +1,19 @@
+{
+  "format": "model-tides-daily",
+  "version": 2,
+  "source": "lore",
+  "days": [
+    {
+      "day": "2023-11-14",
+      "models": {
+        "anthropic/claude-sonnet-4": 1
+      }
+    },
+    {
+      "day": "2023-11-15",
+      "models": {
+        "anthropic/claude-sonnet-4": 1
+      }
+    }
+  ]
+}

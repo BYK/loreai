@@ -1,0 +1,12 @@
+/* Maps the vendored flow-svg.css custom properties onto Lore's theme tokens
+   (the vendored file itself is byte-identical to model-tides). */
+.flow-svg {
+  --chart-grid: color-mix(in srgb, var(--text) 8%, transparent);
+  --chart-axis: color-mix(in srgb, var(--text) 35%, transparent);
+  --node-outline: color-mix(in srgb, var(--text) 24%, transparent);
+  color: var(--muted);
+}
+
+.chart-tooltip {
+  border-left: 3px solid var(--hover-color, var(--accent));
+}

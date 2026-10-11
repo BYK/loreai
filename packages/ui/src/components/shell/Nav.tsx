@@ -163,6 +163,7 @@ export const Nav: Component<NavProps> = (props) => {
   const promotionsPath = useResolvedPath(() => "/promotions/*");
   const warmingPath = useResolvedPath(() => "/warming/*");
   const costsPath = useResolvedPath(() => "/costs/*");
+  const modelUsagePath = useResolvedPath(() => "/model-usage/*");
   const atHome = useMatch(() => homePath() ?? "");
   const atAllKnowledge = useMatch(() => allKnowledgePath() ?? "");
   const atDuplicates = useMatch(() => duplicatesPath() ?? "");
@@ -171,6 +172,7 @@ export const Nav: Component<NavProps> = (props) => {
   const atPromotions = useMatch(() => promotionsPath() ?? "");
   const atWarming = useMatch(() => warmingPath() ?? "");
   const atCosts = useMatch(() => costsPath() ?? "");
+  const atModelUsage = useMatch(() => modelUsagePath() ?? "");
   return (
     <nav
       aria-label="Workspace"
@@ -399,6 +401,13 @@ export const Nav: Component<NavProps> = (props) => {
       </NavItem>
       <NavItem href="/costs" active={!!atCosts()} testId="nav-costs">
         Cost intelligence
+      </NavItem>
+      <NavItem
+        href="/model-usage"
+        active={!!atModelUsage()}
+        testId="nav-model-usage"
+      >
+        Model usage
       </NavItem>
 
       <Show when={props.footer}>{(footer) => footer()}</Show>
