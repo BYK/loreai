@@ -1,7 +1,6 @@
 import { expect, test } from "@playwright/test";
 
 const FUTURE_ACTIONS = [
-  "Save note",
   "Ask agent",
   "Explore separately",
   "Start with selected context",
