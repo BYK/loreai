@@ -523,8 +523,10 @@ describe("discussions", () => {
     expect(listReplies(to, discussion.id).replies).toHaveLength(1);
     const kept = listReplies(p.id, k.discussion.id).replies;
     expect(kept.map((r) => r.id)).toEqual([text.reply.id]);
-    expect(getDiscussion(p.id, k.discussion.id).revision).toBeGreaterThan(
-      text.discussion.revision,
+    const behind = getDiscussion(p.id, k.discussion.id);
+    expect(behind.revision).toBeGreaterThan(text.discussion.revision);
+    expect(behind.lastActivityAt).toBeGreaterThan(
+      text.discussion.lastActivityAt,
     );
     const orphans = db()
       .query(
@@ -692,10 +694,9 @@ describe("discussions", () => {
       "revision_conflict",
     );
     deleteThread(p.id, thread.id, 1);
-    expect(getDiscussion(p.id, discussion.id)).toMatchObject({
-      threadId: null,
-      revision: 3,
-    });
+    const unlinked = getDiscussion(p.id, discussion.id);
+    expect(unlinked).toMatchObject({ threadId: null, revision: 3 });
+    expect(unlinked.lastActivityAt).toBeGreaterThan(linked.lastActivityAt);
   });
 
   it("deletes a project's discussions with the project", () => {

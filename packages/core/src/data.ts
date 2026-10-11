@@ -1734,7 +1734,7 @@ export function moveSessions(
       ];
       database
         .query(
-          `UPDATE discussions SET revision = revision + 1, updated_at = ? WHERE id IN (SELECT discussion_id FROM discussion_replies WHERE ${strandedReplies})`,
+          `UPDATE discussions SET revision = revision + 1, updated_at = ?1, last_activity_at = MAX(?1, last_activity_at + 1) WHERE id IN (SELECT discussion_id FROM discussion_replies WHERE ${strandedReplies})`,
         )
         .run(Date.now(), ...strandedArgs);
       database

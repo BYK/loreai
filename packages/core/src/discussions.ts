@@ -1296,9 +1296,10 @@ export function deleteThread(
   withTransaction(() => {
     const row = threadRow(projectId, id);
     checkRevision(row.revision, expectedRevision);
+    const t = now();
     sql.run(
       db(),
-      sql`UPDATE discussions SET thread_id = NULL, revision = revision + 1, updated_at = ${now()}
+      sql`UPDATE discussions SET thread_id = NULL, revision = revision + 1, updated_at = ${t}, last_activity_at = ${t}
            WHERE thread_id = ${id} AND project_id = ${projectId}`,
     );
     sql.run(db(), sql`DELETE FROM threads WHERE id = ${id}`);
