@@ -157,9 +157,11 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(role).toHaveValue("viewer");
     await role.selectOption("editor");
     await expect(role).toHaveValue("viewer");
-    await expect(page.getByRole("alert")).toContainText(
-      "Only team admins can change or remove members.",
-    );
+    await expect(
+      page.getByText("Only team admins can change or remove members.", {
+        exact: true,
+      }),
+    ).toBeVisible();
   });
 
   test("stale conflict errors stay in the dialog and reload the list", async ({
@@ -574,16 +576,19 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.getByRole("button", { name: "Find contributors" }).click();
     await page.getByRole("checkbox", { name: /@ada/ }).check();
     await page.getByRole("button", { name: "Invite selected" }).click();
-    await expect(page.getByRole("status")).toContainText(
-      "Invitation attempted for 1 selected contributor",
-    );
+    await expect(
+      page.getByText("Invitation attempted for 1 selected contributor(s).", {
+        exact: true,
+      }),
+    ).toBeVisible();
     expect(discoveries).toBe(2);
 
     await page.getByRole("button", { name: "Load join requests" }).click();
-    await expect(page.getByTestId("domain-join-request")).toContainText(
-      "example.test",
-    );
-    await page.getByRole("button", { name: "Approve" }).click();
+    const firstRequest = page
+      .getByTestId("domain-join-request")
+      .filter({ hasText: "example.test · user-2" });
+    await expect(firstRequest).toContainText("example.test");
+    await firstRequest.getByRole("button", { name: "Approve" }).click();
     const otherRequest = page
       .getByTestId("domain-join-request")
       .filter({ hasText: "other.example.test" });
@@ -703,8 +708,8 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
 
     await page.getByTestId("folk-status").click();
     await page.getByTestId("sync-now").click();
-    await expect(page.getByRole("status")).toContainText(
-      "Sync complete: pushed 1, pulled 2.",
-    );
+    await expect(
+      page.getByText("Sync complete: pushed 1, pulled 2.", { exact: true }),
+    ).toBeVisible();
   });
 });
