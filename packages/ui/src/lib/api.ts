@@ -18,6 +18,8 @@
 import { type Type } from "arktype";
 
 import {
+  modelTidesMutationResult,
+  modelUsageUploadState,
   accountStatus,
   crossProjectKnowledgeEntry,
   ApiError,
@@ -76,7 +78,9 @@ import {
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
+  type ModelTidesMutationResult,
   type ModelUsageDocument,
+  type ModelUsageUploadState,
   type ContradictionDecision,
   type ContradictionDecisionResult,
   type ContradictionListResponse,
@@ -881,6 +885,59 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["model-usage"], { project: opts.project }),
         modelUsageDocument,
+        signal,
+      );
+    },
+    /**
+     * Consented Model Tides upload (#2026 PR3). Nothing is uploaded
+     * automatically — every mutation carries `{ confirm: "YES" }` plus the
+     * hash/revision the user just reviewed.
+     */
+    getModelUsageUpload(signal?: AbortSignal): Promise<ModelUsageUploadState> {
+      return getJson(
+        apiPath(["model-usage", "upload"]),
+        modelUsageUploadState,
+        signal,
+      );
+    },
+    postModelUsageUpload(
+      body: {
+        confirm: "YES";
+        snapshot_sha256: string;
+        reviewed_revision?: number;
+      },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    postModelUsageUploadAction(
+      action: "share" | "unshare" | "contribute" | "withdraw" | "rotate",
+      body: { confirm: "YES"; reviewed_revision?: number },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload", action]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    deleteModelUsageUpload(
+      body: { confirm: "YES" },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
         signal,
       );
     },

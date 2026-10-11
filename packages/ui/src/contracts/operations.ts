@@ -264,3 +264,49 @@ export const modelUsageDocument = type({
   }).array(),
 });
 export type ModelUsageDocument = typeof modelUsageDocument.infer;
+
+/**
+ * `GET /api/v1/model-usage/upload` (#2026 PR3): the weekly snapshot the user
+ * reviews before a consented upload, its sha256, the uploading OS tag, and
+ * the stored report (or null / report_error).
+ */
+export const weeklyUsageSnapshot = type({
+  format: "'model-tides-weekly'",
+  version: "1|2",
+  weeks: type({
+    week: "string.date.iso",
+    models: "Record<string, number.integer >= 1>",
+  }).array(),
+});
+export type WeeklyUsageSnapshot = typeof weeklyUsageSnapshot.infer;
+
+export const modelTidesReport = type({
+  id: "string",
+  "url?": "string",
+  published: "boolean",
+  inAggregate: "boolean | null",
+  revision: "number.integer >= 0",
+  metricVersion: "1|2",
+  snapshot: [weeklyUsageSnapshot, "|", "null"],
+});
+export type ModelTidesReport = typeof modelTidesReport.infer;
+
+export const modelUsageUploadState = type({
+  snapshot: weeklyUsageSnapshot,
+  snapshot_sha256: "string.hex",
+  upload_os: "'linux' | 'macos' | 'windows' | 'other'",
+  report: [modelTidesReport, "|", "null"],
+  "report_error?": "string",
+});
+export type ModelUsageUploadState = typeof modelUsageUploadState.infer;
+
+/** Mutations return the stored-report shape (never the token). */
+export const modelTidesMutationResult = type({
+  id: "string",
+  "url?": "string",
+  "published?": "boolean",
+  "inAggregate?": "boolean | null",
+  "revision?": "number.integer >= 0",
+  "metricVersion?": "1|2",
+});
+export type ModelTidesMutationResult = typeof modelTidesMutationResult.infer;

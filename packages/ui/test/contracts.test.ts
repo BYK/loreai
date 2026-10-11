@@ -30,6 +30,7 @@ import {
   knowledgeSearchResponse,
   knowledgeVersionHistory,
   modelUsageDocument,
+  modelUsageUploadState,
   parseContract,
   projectClearResult,
   projectList,
@@ -106,6 +107,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "model-usage.json": {
     route: "/model-usage",
     schema: modelUsageDocument,
+  },
+  "model-usage-upload.json": {
+    route: "/model-usage/upload",
+    schema: modelUsageUploadState,
   },
   "project-imports.json": {
     route: "/projects/p/imports",

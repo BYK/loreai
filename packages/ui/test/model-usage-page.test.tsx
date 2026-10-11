@@ -13,6 +13,7 @@ import { ModelUsagePage } from "~/components/lore/ModelUsagePage";
 import { Nav } from "~/components/shell/Nav";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type { ApiClient } from "~/lib/api";
+import { ApiError } from "~/contracts";
 import { WorkspaceProvider } from "~/routes/workspace";
 
 beforeAll(() => {
@@ -51,8 +52,19 @@ const emptyDoc: ModelUsageDocument = {
   days: [],
 };
 
+const emptyUpload = {
+  snapshot: { format: "model-tides-weekly", version: 2, weeks: [] },
+  snapshot_sha256: "0".repeat(64),
+  upload_os: "linux",
+  report: null,
+} as const;
+
 function clientWith(partial: Partial<ApiClient>): ApiClient {
-  return { listProjects: async () => [], ...partial } as unknown as ApiClient;
+  return {
+    listProjects: async () => [],
+    getModelUsageUpload: async () => emptyUpload,
+    ...partial,
+  } as unknown as ApiClient;
 }
 
 function mountPage(
@@ -326,5 +338,192 @@ describe("ModelUsagePage", () => {
         screen.getByTestId("nav-model-usage").getAttribute("aria-current"),
       ).toBe("page"),
     );
+  });
+});
+
+const uploadState = (overrides: Record<string, unknown> = {}) => ({
+  snapshot: {
+    format: "model-tides-weekly" as const,
+    version: 2 as const,
+    weeks: [
+      {
+        week: "2026-09-01",
+        models: { "anthropic/claude-sonnet-4": 4, "openai/gpt-5": 1 },
+      },
+    ],
+  },
+  snapshot_sha256: "a".repeat(64),
+  upload_os: "linux" as const,
+  report: null,
+  ...overrides,
+});
+
+const storedReport = {
+  id: "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b",
+  url: "https://modeltides.dev/u/7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b",
+  published: true,
+  inAggregate: false,
+  revision: 7,
+  metricVersion: 2,
+  snapshot: {
+    format: "model-tides-weekly" as const,
+    version: 2 as const,
+    weeks: [{ week: "2026-09-01", models: { "openai/gpt-5": 3 } }],
+  },
+};
+
+describe("ModelTidesUpload", () => {
+  it("review dialog lists every cell + privacy text and gates on YES", async () => {
+    const posted: Record<string, unknown>[] = [];
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () => uploadState(),
+        postModelUsageUpload: async (body) => {
+          posted.push(body);
+          return { id: "id" };
+        },
+      }),
+    );
+    const btn = await screen.findByRole("button", { name: "Review upload…" });
+    expect(screen.getByText(/Nothing is uploaded automatically/)).toBeTruthy();
+    fireEvent.click(btn);
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Review upload",
+    });
+    expect(within(dialog).getByText("Week of 2026-09-01")).toBeTruthy();
+    expect(within(dialog).getByText("anthropic/claude-sonnet-4")).toBeTruthy();
+    expect(within(dialog).getByText("openai/gpt-5")).toBeTruthy();
+    expect(within(dialog).getByText("4")).toBeTruthy();
+    expect(within(dialog).getByText(/No prompts, replies, paths/)).toBeTruthy();
+    expect(
+      within(dialog).getByText(/uploading OS \(linux\) are sent/),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText(/viewable by anyone with its link/),
+    ).toBeTruthy();
+    const confirm = within(dialog).getByRole("button", { name: "Confirm" });
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(within(dialog).getByLabelText("Type YES to confirm"), {
+      target: { value: "yes" },
+    });
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.input(within(dialog).getByLabelText("Type YES to confirm"), {
+      target: { value: "YES" },
+    });
+    expect((confirm as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toEqual({
+      confirm: "YES",
+      snapshot_sha256: "a".repeat(64),
+    });
+  });
+
+  it("409 stale_review shows the changed-counts message and reloads", async () => {
+    let fetches = 0;
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () => {
+          fetches += 1;
+          return uploadState({
+            snapshot_sha256: `${fetches}`.padStart(64, "0"),
+          });
+        },
+        postModelUsageUpload: async () => {
+          throw new ApiError(
+            "http",
+            "/model-usage/upload",
+            "Counts changed since you reviewed them",
+            409,
+            "stale_review",
+          );
+        },
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Review upload…" }),
+    );
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Review upload",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Type YES to confirm"), {
+      target: { value: "YES" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText("Counts changed since you reviewed them"),
+      ).toBeTruthy(),
+    );
+    expect(fetches).toBe(2);
+  });
+
+  it("post-upload controls: link + share/contribute/delete/rotate with reviewed_revision", async () => {
+    const calls: { action?: string; body: unknown }[] = [];
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () => uploadState({ report: storedReport }),
+        postModelUsageUploadAction: async (action, body) => {
+          calls.push({ action, body });
+          return { id: storedReport.id };
+        },
+      }),
+    );
+    const link = await screen.findByRole("link", {
+      name: "Your public report",
+    });
+    expect(link.getAttribute("href")).toBe(storedReport.url);
+    fireEvent.click(screen.getByRole("button", { name: "Contribute" }));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Contribute to the community aggregate",
+    });
+    // Reviews the stored report's cells, not the local snapshot.
+    expect(within(dialog).getByText("openai/gpt-5")).toBeTruthy();
+    fireEvent.input(within(dialog).getByLabelText("Type YES to confirm"), {
+      target: { value: "YES" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({
+      action: "contribute",
+      body: { confirm: "YES", reviewed_revision: 7 },
+    });
+  });
+
+  it("report_error shows the error and disables mutation buttons except delete/rotate", async () => {
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () =>
+          uploadState({
+            report: storedReport,
+            report_error: "Could not confirm personal report",
+          }),
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Could not confirm your stored report/),
+      ).toBeTruthy(),
+    );
+    const review = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Review upload…",
+    });
+    const contribute = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Contribute",
+    });
+    expect(review.disabled).toBe(true);
+    expect(contribute.disabled).toBe(true);
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Rotate key" })
+        .disabled,
+    ).toBe(false);
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Delete report" })
+        .disabled,
+    ).toBe(false);
   });
 });
