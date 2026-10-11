@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { padActivitySecondPage } from "./helpers";
+
 test.describe("activity search navigation", () => {
   test("updates the header range when infinite scroll loads another page", async ({
     page,
@@ -14,6 +16,7 @@ test.describe("activity search navigation", () => {
         });
       }
     });
+    await padActivitySecondPage(page);
     await page.goto("/ui");
 
     const scroller = page.getByTestId("activity-list-body");
@@ -28,7 +31,8 @@ test.describe("activity search navigation", () => {
       .poll(() => scroller.evaluate((element) => element.scrollHeight))
       .toBeGreaterThan(4000);
     await expect.poll(() => loadedActivityCount).toBeGreaterThan(50);
-    await expect(header).toContainText(`Inbox 1 – ${loadedActivityCount}`);
+    expect(loadedActivityCount).toBe(100);
+    await expect(header).toContainText("Inbox 1 – 100");
   });
 
   test("searches with grammar and highlights the active built-in search", async ({

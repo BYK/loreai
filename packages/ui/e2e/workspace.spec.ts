@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { padActivitySecondPage } from "./helpers";
+
 const LIST = '[data-pane="list"]';
 
 async function firstVisibleRow(scroller: Locator) {
@@ -95,6 +97,7 @@ async function expectPagedActivityScrollAfterReturn(
   loadSecondPage: boolean,
 ) {
   await page.setViewportSize({ width: 400, height: 800 });
+  if (loadSecondPage) await padActivitySecondPage(page);
   let activityResponses = 0;
   let loadedActivityCount = 0;
   page.on("response", (response) => {
@@ -123,14 +126,11 @@ async function expectPagedActivityScrollAfterReturn(
     await expect.poll(() => activityResponses).toBe(2);
     await expect
       .poll(() => scroller.evaluate((element) => element.scrollHeight))
-      .toBeGreaterThan(4000);
+      .toBeGreaterThan(5000);
     await expect.poll(() => loadedActivityCount).toBeGreaterThan(50);
   }
 
-  const maxScrollTop = await scroller.evaluate(
-    (element) => element.scrollHeight - element.clientHeight,
-  );
-  const expectedScrollTop = loadSecondPage ? Math.min(4832, maxScrollTop) : 450;
+  const expectedScrollTop = loadSecondPage ? 4832 : 450;
   await scroller.evaluate((element, top) => {
     element.scrollTop = top;
   }, expectedScrollTop);
