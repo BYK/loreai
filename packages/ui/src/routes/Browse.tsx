@@ -19,7 +19,6 @@ import {
   workspaceSearchHref,
 } from "~/lib/href";
 import { isApiError } from "~/lib/api";
-import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
