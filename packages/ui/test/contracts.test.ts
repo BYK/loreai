@@ -16,6 +16,8 @@ import {
   cursorPage,
   crossProjectKnowledgeEntry,
   dedupPreviewResponse,
+  discussionPage,
+  discussionReplyPage,
   distillationDetail,
   distillationList,
   entityDetail,
@@ -131,6 +133,14 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "dedup-preview.json": {
     route: "/projects/p/dedup",
     schema: dedupPreviewResponse,
+  },
+  "discussions-page.json": {
+    route: "/discussions",
+    schema: discussionPage,
+  },
+  "discussion-replies.json": {
+    route: "/discussions/d/replies",
+    schema: discussionReplyPage,
   },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {

@@ -88,4 +88,31 @@ describe("discussion state", () => {
       "new",
     ]);
   });
+
+  it("refreshing the first page keeps the pages already loaded below it", async () => {
+    const pages = [
+      { discussions: [{ id: "d3" }, { id: "d2" }], next_cursor: "c1" },
+      { discussions: [{ id: "d1" }], next_cursor: null },
+      { discussions: [{ id: "d4" }, { id: "d3" }], next_cursor: "c2" },
+    ];
+    const client = {
+      listDiscussions: () => Promise.resolve(pages.shift()),
+    } as never;
+    const state = createDiscussionsState({
+      client,
+      tracked: (read) => read(),
+      db: () => Promise.resolve(null),
+    });
+    await state.loadProject("p1");
+    await state.loadProject("p1", true);
+    await state.loadProject("p1");
+
+    expect(state.forProject("p1").map((d) => d.id)).toEqual([
+      "d4",
+      "d3",
+      "d2",
+      "d1",
+    ]);
+    expect(state.projectState("p1").next).toBeNull();
+  });
 });

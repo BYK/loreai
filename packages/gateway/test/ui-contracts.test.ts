@@ -46,6 +46,8 @@ import {
   teamList,
   costsSnapshot,
   dedupPreviewResponse,
+  discussionPage,
+  discussionReplyPage,
   projectClearResult,
   projectRenameResult,
   projectsMergeResult,
@@ -803,6 +805,77 @@ describe("ui contracts against the real gateway", () => {
       historical: { session_count: expect.any(Number) },
       daily: { entries: expect.any(Array) },
     });
+  });
+
+  it("GET /discussions and /discussions/:id/replies (text + response)", async () => {
+    const { db, discussions } = await import("@loreai/core");
+    const content = "The agent's verified answer";
+    const messageId = "ui-contracts-response-message";
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at, metadata) VALUES (?, ?, ?, 'assistant', ?, ?, ?)",
+      )
+      .run(
+        messageId,
+        SEEDED.projectId,
+        SEEDED.sessionId,
+        content,
+        Date.now(),
+        '{"agent":"claude"}',
+      );
+    const json = { "content-type": "application/json" };
+    const created = await api(v1(["discussions"]), {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({
+        project_id: SEEDED.projectId,
+        source: { kind: "session", id: SEEDED.sessionId },
+        anchors: [
+          {
+            block_id: `m.${messageId}`,
+            part_index: 0,
+            start: 4,
+            end: 9,
+            content_hash: discussions.messagePartHashes(content)[0],
+          },
+        ],
+        quote: "agent",
+        body: "Is this still true?",
+      }),
+    });
+    expect(created.status).toBe(201);
+    const { discussion } = (await created.json()) as {
+      discussion: { id: string };
+    };
+    const replied = await api(
+      v1(["discussions", discussion.id, "replies"], {
+        project: SEEDED.projectId,
+      }),
+      {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({
+          expected_revision: 1,
+          response_message_id: messageId,
+        }),
+      },
+    );
+    expect(replied.status).toBe(201);
+
+    await contractRoute(
+      "discussions-page.json",
+      "/discussions",
+      v1(["discussions"], { project: SEEDED.projectId }),
+      discussionPage,
+    );
+    await contractRoute(
+      "discussion-replies.json",
+      `/discussions/${discussion.id}/replies`,
+      v1(["discussions", discussion.id, "replies"], {
+        project: SEEDED.projectId,
+      }),
+      discussionReplyPage,
+    );
   });
 
   it("404 error envelope", async () => {

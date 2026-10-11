@@ -146,7 +146,9 @@ export function createDiscussionsState(deps: {
     const current = store.projects[projectId] ?? EMPTY_LIST;
     if (current.loading) return;
     if (more && !current.next) return;
-    const known = new Set(current.ids);
+    const before = [...current.ids];
+    const known = new Set(before);
+    const { loaded: wasLoaded, next: nextBefore } = current;
     setStore("projects", projectId, {
       ...current,
       loading: true,
@@ -160,18 +162,25 @@ export function createDiscussionsState(deps: {
         }),
       );
       for (const d of result.discussions) upsert(d);
-      // Keep discussions created while this page was in flight.
+      // Keep discussions created while this page was in flight. A refresh
+      // of the first page also keeps the pages already loaded below it:
+      // activity only moves a discussion up, so the old tail and its
+      // keyset cursor stay valid.
       const live = store.projects[projectId]?.ids ?? [];
       const ids = more ? [...live] : live.filter((id) => !known.has(id));
-      for (const d of result.discussions) {
-        if (!ids.includes(d.id)) ids.push(d.id);
+      const refresh = !more && wasLoaded;
+      for (const id of [
+        ...result.discussions.map((d) => d.id),
+        ...(refresh ? before : []),
+      ]) {
+        if (!ids.includes(id)) ids.push(id);
       }
       setStore("projects", projectId, {
         ids,
         loaded: true,
         loading: false,
         error: undefined,
-        next: result.next_cursor,
+        next: refresh ? nextBefore : result.next_cursor,
       });
     } catch (error) {
       setStore("projects", projectId, (s) => ({

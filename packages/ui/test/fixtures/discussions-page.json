@@ -1,0 +1,38 @@
+{
+  "discussions": [
+    {
+      "id": "<uuid-0>",
+      "project_id": "<uuid-1>",
+      "thread_id": null,
+      "kind": "discussion",
+      "source": {
+        "kind": "session",
+        "id": "ui-contracts-session"
+      },
+      "anchors": [
+        {
+          "block_id": "m.ui-contracts-response-message",
+          "part_index": 0,
+          "start": 4,
+          "end": 9,
+          "content_hash": "wq5k7ijue4"
+        }
+      ],
+      "quote": "agent",
+      "source_hash": "et6hehef3v",
+      "state": "open",
+      "anchor_status": "current",
+      "revision": 2,
+      "created_by": "user",
+      "created_at": 1700000000000,
+      "updated_at": 1700000001000,
+      "last_activity_at": 1700000002000,
+      "reply_count": 2,
+      "participants": [
+        "user",
+        "agent:claude"
+      ]
+    }
+  ],
+  "next_cursor": null
+}

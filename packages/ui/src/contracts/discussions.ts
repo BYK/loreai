@@ -49,16 +49,18 @@ export const discussionReply = type({
   seq: nonNegInt,
   parent_reply_id: "string | null",
   author: nonEmptyString,
-  content: type({ kind: "'text'", body: "string" }).or({
-    kind: "'response'",
-    binding: {
-      id: nonEmptyString,
-      session_id: nonEmptyString,
-      message_id: nonEmptyString,
-      agent: "string",
-      verified_at: epochMs,
-    },
-  }),
+  content: type({ kind: "'text'", body: "string" }).or(
+    type({
+      kind: "'response'",
+      binding: type({
+        id: nonEmptyString,
+        session_id: nonEmptyString,
+        message_id: nonEmptyString,
+        agent: "string",
+        verified_at: epochMs,
+      }),
+    }),
+  ),
   revision: nonNegInt,
   created_at: epochMs,
   updated_at: epochMs,
