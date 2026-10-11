@@ -424,7 +424,13 @@ export async function removeTeamMember(
       p_expected_epoch: expectedEpoch,
       p_wraps: wraps,
     });
-    if (error?.code === "40001" && attempt === 0) continue;
+    if (error?.code === "40001") {
+      if (attempt === 0) continue;
+      throw new TeamRpcError(
+        "remove_scope_member_rotating: team key changed concurrently; retry",
+        "40001",
+      );
+    }
     if (error)
       throw new TeamRpcError(
         `remove_scope_member_rotating: ${error.message}`,

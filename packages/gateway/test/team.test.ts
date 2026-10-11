@@ -49,6 +49,7 @@ import {
   setTeamRole,
   teamMembers,
   teamMemberProfiles,
+  TeamRpcError,
 } from "../src/team";
 
 interface ClientOpts {
@@ -400,6 +401,48 @@ describe("removeTeamMember", () => {
       { member: SELF, epoch: 0 },
       { member: SELF, epoch: 2 },
     ]);
+  });
+
+  it("returns a friendly rotation conflict after the retry also serializes", async () => {
+    let attempts = 0;
+    const c = makeClient({
+      scopeId: "s-retry-exhausted",
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: "other", role: "editor" },
+      ],
+      pubFor: (uid) => (uid === "other" ? selfPubB64 : null),
+      rpc: (name) => {
+        if (name !== "remove_scope_member_rotating") return null;
+        attempts++;
+        return {
+          data: null,
+          error: {
+            message: "could not serialize access due to concurrent update",
+            code: "40001",
+          },
+        };
+      },
+    });
+    await createTeam(c, "T");
+
+    let caught: unknown;
+    try {
+      await removeTeamMember(c, "s-retry-exhausted", MEMBER);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TeamRpcError);
+    expect(caught).toMatchObject({
+      message:
+        "remove_scope_member_rotating: team key changed concurrently; retry",
+      code: "40001",
+    });
+    expect(attempts).toBe(2);
+    expect(
+      c.rpcCalls.filter((call) => call.name === "remove_scope_member_rotating"),
+    ).toHaveLength(2);
   });
 
   it("recovers the committed wrap through applyRemoteScopeKey after a local crash", async () => {
