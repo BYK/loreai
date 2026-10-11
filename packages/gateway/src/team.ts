@@ -90,6 +90,7 @@ export async function discoverGitHubContributors(
   providerToken: string | null | undefined,
   repos?: string[],
   invite?: { scopeId: string; role: "editor" | "viewer" },
+  inviteLogins?: string[],
 ): Promise<{ repos: DiscoveredRepo[]; invited?: DiscoverInviteReport } | null> {
   if (!providerToken) return null; // no read:org/repo grant (older session / non-github login)
   const body: Record<string, unknown> = {
@@ -98,6 +99,7 @@ export async function discoverGitHubContributors(
   };
   if (invite) body.invite_to_scope = invite.scopeId;
   if (invite) body.invite_role = invite.role;
+  if (inviteLogins) body.invite_logins = inviteLogins;
   const { data, error } = await client.functions.invoke("github-discover", {
     body,
   });
@@ -309,7 +311,8 @@ export async function createTeam(
   name: string,
 ): Promise<string> {
   const { data, error } = await client.rpc("create_team", { p_name: name });
-  if (error) throw new Error(`create_team: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`create_team: ${error.message}`, error.code);
   const scopeId = data as string;
   // Mint the team DEK (epoch 0), wrapped to the creator's own identity key.
   await keystore.getScopeKey(scopeId, await selfUserId());
@@ -333,7 +336,8 @@ export async function addTeamMember(
     p_user: userId,
     p_role: role,
   });
-  if (error) throw new Error(`add_scope_member: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`add_scope_member: ${error.message}`, error.code);
   const pub = await memberPubKey(client, userId);
   if (!pub) return { wrapped: false };
   await keystore.wrapScopeKeyForMember(
@@ -592,7 +596,8 @@ export async function acceptTeamInvite(
   const { data, error } = await client.rpc("accept_scope_invite", {
     p_token: capability,
   });
-  if (error) throw new Error(`accept_scope_invite: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`accept_scope_invite: ${error.message}`, error.code);
   // The RPC returns a single-row set: [{ out_scope_id, out_role, out_eph_pub }] (OUT columns are
   // prefixed to avoid a name collision with the table columns inside the function body).
   const row = Array.isArray(data) ? data[0] : data;
@@ -663,7 +668,8 @@ export async function claimOrgDomain(
     p_domain: domain,
     p_join_role: joinRole,
   });
-  if (error) throw new Error(`claim_org_domain: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`claim_org_domain: ${error.message}`, error.code);
 }
 
 /** Request to join an org whose claimed domain matches the caller's verified email. Returns the
@@ -677,7 +683,8 @@ export async function requestDomainJoin(
     p_org: orgId,
     p_domain: domain,
   });
-  if (error) throw new Error(`request_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`request_domain_join: ${error.message}`, error.code);
   return data as string;
 }
 
@@ -692,7 +699,11 @@ export async function listDomainJoinRequests(
     .eq("org_id", orgId)
     .eq("status", "pending")
     .order("requested_at", { ascending: true });
-  if (error) throw new Error(`domain_join_requests: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(
+      `domain_join_requests: ${error.message}`,
+      error.code,
+    );
   return (data ?? []).map((r) => ({
     id: r.id as string,
     domain: r.domain as string,
@@ -710,7 +721,8 @@ export async function approveDomainJoin(
   const { error } = await client.rpc("approve_domain_join", {
     p_request_id: requestId,
   });
-  if (error) throw new Error(`approve_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`approve_domain_join: ${error.message}`, error.code);
 }
 
 /** Reject a pending join request (admin/manager). */
@@ -721,7 +733,8 @@ export async function rejectDomainJoin(
   const { error } = await client.rpc("reject_domain_join", {
     p_request_id: requestId,
   });
-  if (error) throw new Error(`reject_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`reject_domain_join: ${error.message}`, error.code);
 }
 
 /**

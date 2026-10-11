@@ -16,7 +16,11 @@ import {
   setKV,
   syncData,
 } from "@loreai/core";
-import { clearSession, persistSession } from "../src/supabase";
+import {
+  clearSession,
+  persistProviderTokenCache,
+  persistSession,
+} from "../src/supabase";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { handleTeamActionRequest } from "../src/team-actions";
 import { TeamRpcError } from "../src/team";
@@ -50,6 +54,16 @@ const teamMocks = vi.hoisted(() => {
       null,
     teamMembers: vi.fn(),
     teamMemberProfiles: vi.fn(),
+    listTeams: vi.fn(),
+    createTeam: vi.fn(),
+    addTeamMember: vi.fn(),
+    acceptTeamInvite: vi.fn(),
+    discoverGitHubContributors: vi.fn(),
+    claimOrgDomain: vi.fn(),
+    requestDomainJoin: vi.fn(),
+    listDomainJoinRequests: vi.fn(),
+    approveDomainJoin: vi.fn(),
+    rejectDomainJoin: vi.fn(),
     setTeamRole: vi.fn(),
     removeTeamMember: vi.fn(),
     createTeamInvite: vi.fn(),
@@ -198,6 +212,29 @@ beforeEach(() => {
     { userId: OTHER, role: "editor" },
   ]);
   teamMocks.teamMemberProfiles.mockResolvedValue([]);
+  teamMocks.listTeams.mockResolvedValue([
+    { scopeId: TEAM, role: "admin", name: "Acme" },
+  ]);
+  teamMocks.createTeam.mockResolvedValue(TEAM);
+  teamMocks.addTeamMember.mockResolvedValue({ wrapped: true });
+  teamMocks.acceptTeamInvite.mockResolvedValue({
+    scopeId: TEAM,
+    role: "editor",
+  });
+  teamMocks.discoverGitHubContributors.mockResolvedValue({ repos: [] });
+  teamMocks.claimOrgDomain.mockResolvedValue(undefined);
+  teamMocks.requestDomainJoin.mockResolvedValue("domain-request-1");
+  teamMocks.listDomainJoinRequests.mockResolvedValue([
+    {
+      id: "domain-request-1",
+      domain: "example.test",
+      userId: OTHER,
+      status: "pending",
+      requestedAt: "2025-01-01T00:00:00.000Z",
+    },
+  ]);
+  teamMocks.approveDomainJoin.mockResolvedValue(undefined);
+  teamMocks.rejectDomainJoin.mockResolvedValue(undefined);
   teamMocks.setTeamRole.mockResolvedValue(undefined);
   teamMocks.removeTeamMember.mockResolvedValue({
     newEpoch: 3,
@@ -251,8 +288,8 @@ describe("team action routes", () => {
         invite: "available",
         remove: "available",
         set_role: "available",
-        add_by_id: "cli_only",
-        offline_invite: "cli_only",
+        add_by_id: "available",
+        offline_invite: "available",
         list_invites: "unsupported",
         revoke_invite: "unsupported",
       },
@@ -316,6 +353,235 @@ describe("team action routes", () => {
     ).toBe(400);
   });
 
+  it("creates teams and adds members by account id through team services", async () => {
+    enableWrites();
+    const created = await request(
+      "/api/v1/teams",
+      "POST",
+      JSON.stringify({ name: "  New Team " }),
+    );
+    expect(created.status).toBe(201);
+    expect(await created.json()).toEqual({
+      team: { id: TEAM, name: "New Team" },
+    });
+    expect(teamMocks.createTeam).toHaveBeenCalledWith(
+      expect.anything(),
+      "New Team",
+    );
+
+    const malformedCreate = await request(
+      "/api/v1/teams",
+      "POST",
+      JSON.stringify({ name: " " }),
+    );
+    expect(malformedCreate.status).toBe(400);
+
+    const added = await request(
+      `/api/v1/teams/${TEAM}/members`,
+      "POST",
+      JSON.stringify({ user_id: OTHER, role: "viewer" }),
+    );
+    expect(added.status).toBe(201);
+    expect(await added.json()).toEqual({
+      member: { user_id: OTHER, role: "viewer", wrapped: true },
+    });
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      OTHER,
+      "viewer",
+    );
+
+    const malformedAdd = await request(
+      `/api/v1/teams/${TEAM}/members`,
+      "POST",
+      JSON.stringify({ user_id: "not-a-uuid" }),
+    );
+    expect(malformedAdd.status).toBe(400);
+    teamMocks.addTeamMember.mockRejectedValueOnce(
+      new TeamRpcError("membership denied", "42501"),
+    );
+    const forbidden = await request(
+      `/api/v1/teams/${TEAM}/members`,
+      "POST",
+      JSON.stringify({ user_id: OTHER }),
+    );
+    expect(forbidden.status).toBe(403);
+    expect(await forbidden.json()).toMatchObject({
+      error: { type: "forbidden", message: "membership denied" },
+    });
+  });
+
+  it("accepts invite tokens only from the request body", async () => {
+    enableWrites();
+    const token = "private-invite-token";
+    const accepted = await request(
+      "/api/v1/teams/accept",
+      "POST",
+      JSON.stringify({ token }),
+    );
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({
+      joined: { scope_id: TEAM, role: "editor" },
+    });
+    expect(teamMocks.acceptTeamInvite).toHaveBeenCalledWith(
+      expect.anything(),
+      token,
+    );
+    expect(JSON.stringify(accepted)).not.toContain(token);
+    expect(
+      (
+        await request(
+          "/api/v1/teams/accept",
+          "POST",
+          JSON.stringify({ token, extra: "not-allowed" }),
+        )
+      ).status,
+    ).toBe(400);
+  });
+
+  it("runs GitHub discovery only via the explicit admin route and filters selected invites", async () => {
+    enableWrites();
+    persistProviderTokenCache("cached-github-token", 300);
+    teamMocks.discoverGitHubContributors.mockResolvedValue({
+      repos: [
+        {
+          repo: "owner/repo",
+          contributors: [{ login: "contributor", githubId: 7, onLore: false }],
+        },
+      ],
+    });
+    const searched = await request(
+      `/api/v1/teams/${TEAM}/discover`,
+      "POST",
+      JSON.stringify({ repos: ["owner/repo"] }),
+    );
+    expect(searched.status).toBe(200);
+    expect(teamMocks.discoverGitHubContributors).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "cached-github-token",
+      ["owner/repo"],
+      undefined,
+      undefined,
+    );
+    const invited = await request(
+      `/api/v1/teams/${TEAM}/discover`,
+      "POST",
+      JSON.stringify({
+        repos: ["owner/repo"],
+        invite_role: "viewer",
+        invite_logins: ["contributor"],
+      }),
+    );
+    expect(invited.status).toBe(200);
+    expect(teamMocks.discoverGitHubContributors).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "cached-github-token",
+      ["owner/repo"],
+      { scopeId: TEAM, role: "viewer" },
+      ["contributor"],
+    );
+    expect(
+      (
+        await request(
+          `/api/v1/teams/${TEAM}/discover`,
+          "POST",
+          JSON.stringify({ invite_logins: ["invalid login"] }),
+        )
+      ).status,
+    ).toBe(400);
+  });
+
+  it("supports organization domain claim, request, list, and decisions", async () => {
+    signIn();
+    const claimed = await request(
+      `/api/v1/orgs/${TEAM}/domains/claim`,
+      "POST",
+      JSON.stringify({ domain: "example.test", role: "manager" }),
+    );
+    expect(claimed.status).toBe(200);
+    expect(teamMocks.claimOrgDomain).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      "example.test",
+      "manager",
+    );
+    const requested = await request(
+      `/api/v1/orgs/${TEAM}/domains/request`,
+      "POST",
+      JSON.stringify({ domain: "example.test" }),
+    );
+    expect(requested.status).toBe(201);
+    expect(await requested.json()).toEqual({ request_id: "domain-request-1" });
+    const listed = await request(`/api/v1/orgs/${TEAM}/domains/requests`);
+    expect(await listed.json()).toMatchObject({
+      requests: [{ id: "domain-request-1", user_id: OTHER }],
+    });
+    const approved = await request(
+      `/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/approve`,
+      "POST",
+      "{}",
+    );
+    expect(approved.status).toBe(200);
+    expect(teamMocks.approveDomainJoin).toHaveBeenCalledWith(
+      expect.anything(),
+      OTHER,
+    );
+    const rejected = await request(
+      `/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/reject`,
+      "POST",
+      "{}",
+    );
+    expect(rejected.status).toBe(200);
+
+    const malformed = await request(
+      `/api/v1/orgs/${TEAM}/domains/claim`,
+      "POST",
+      JSON.stringify({ domain: "gmail.com" }),
+    );
+    expect(malformed.status).toBe(400);
+    teamMocks.claimOrgDomain.mockRejectedValueOnce(
+      new TeamRpcError("org ownership required", "42501"),
+    );
+    const forbidden = await request(
+      `/api/v1/orgs/${TEAM}/domains/claim`,
+      "POST",
+      JSON.stringify({ domain: "example.test" }),
+    );
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("links and unlinks projects with an expected-scope revision", async () => {
+    signIn();
+    const projectId = makeProject(false);
+    const linked = await request(
+      `/api/v1/projects/${projectId}/sharing/link`,
+      "POST",
+      JSON.stringify({ scope_id: TEAM, expected_scope_id: null }),
+    );
+    expect(linked.status).toBe(200);
+    expect(await linked.json()).toMatchObject({
+      linked: true,
+      team: { id: TEAM },
+    });
+    const stale = await request(
+      `/api/v1/projects/${projectId}/sharing/link`,
+      "POST",
+      JSON.stringify({ scope_id: null, expected_scope_id: null }),
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: { type: "stale_link", current_scope_id: TEAM },
+    });
+    const unlinked = await request(
+      `/api/v1/projects/${projectId}/sharing/link`,
+      "POST",
+      JSON.stringify({ scope_id: null, expected_scope_id: TEAM }),
+    );
+    expect(unlinked.status).toBe(200);
+    expect(await unlinked.json()).toMatchObject({ linked: false });
+  });
+
   it("refuses every team POST in hosted mode before parsing the body", async () => {
     const hosted = makeConfig({ hostedMode: true, remoteGateway: true });
     const paths = [
@@ -323,6 +589,15 @@ describe("team action routes", () => {
       `/api/v1/teams/${TEAM}/members/${OTHER}/role`,
       `/api/v1/teams/${TEAM}/members/${OTHER}/remove`,
       `/api/v1/projects/${TEAM}/sharing/policy`,
+      "/api/v1/teams",
+      "/api/v1/teams/accept",
+      `/api/v1/teams/${TEAM}/members`,
+      `/api/v1/teams/${TEAM}/discover`,
+      `/api/v1/projects/${TEAM}/sharing/link`,
+      `/api/v1/orgs/${TEAM}/domains/claim`,
+      `/api/v1/orgs/${TEAM}/domains/request`,
+      `/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/approve`,
+      `/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/reject`,
     ];
     for (const path of paths) {
       const response = await request(path, "POST", "{", hosted);
@@ -379,6 +654,21 @@ describe("team action routes", () => {
     });
     expect(teamMocks.sendInviteEmail).not.toHaveBeenCalled();
 
+    const offlineInvite = await request(
+      `/api/v1/teams/${TEAM}/invites`,
+      "POST",
+      JSON.stringify({ role: "viewer", offline: true }),
+    );
+    expect(offlineInvite.status).toBe(201);
+    expect(teamMocks.createTeamInvite).toHaveBeenLastCalledWith(
+      expect.anything(),
+      TEAM,
+      "viewer",
+      undefined,
+      { offline: true },
+    );
+    expect(teamMocks.sendInviteEmail).not.toHaveBeenCalled();
+
     const withEmail = await request(
       `/api/v1/teams/${TEAM}/invites`,
       "POST",
@@ -399,7 +689,12 @@ describe("team action routes", () => {
 
   it("rejects malformed invite bodies, email addresses, and non-admin invitations", async () => {
     enableWrites();
-    for (const body of ["{", "[]", JSON.stringify({ role: "admin" })]) {
+    for (const body of [
+      "{",
+      "[]",
+      JSON.stringify({ role: "admin" }),
+      JSON.stringify({ role: "viewer", offline: "true" }),
+    ]) {
       expect(
         (await request(`/api/v1/teams/${TEAM}/invites`, "POST", body)).status,
       ).toBe(400);
@@ -567,6 +862,17 @@ describe("team action routes", () => {
       [`/api/v1/teams/${TEAM}/members/${OTHER}/role`, "POST"],
       [`/api/v1/teams/${TEAM}/members/${OTHER}/remove`, "POST"],
       [`/api/v1/projects/${TEAM}/sharing/policy`, "POST"],
+      ["/api/v1/teams", "POST"],
+      ["/api/v1/teams/accept", "POST"],
+      [`/api/v1/teams/${TEAM}/members`, "POST"],
+      [`/api/v1/teams/${TEAM}/discover`, "POST"],
+      ["/api/v1/orgs", "GET"],
+      [`/api/v1/orgs/${TEAM}/domains/requests`, "GET"],
+      [`/api/v1/orgs/${TEAM}/domains/claim`, "POST"],
+      [`/api/v1/orgs/${TEAM}/domains/request`, "POST"],
+      [`/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/approve`, "POST"],
+      [`/api/v1/orgs/${TEAM}/domains/requests/${OTHER}/reject`, "POST"],
+      [`/api/v1/projects/${TEAM}/sharing/link`, "POST"],
     ] as const;
     for (const [path, method] of paths) {
       const response = await loopbackRequest(
@@ -617,22 +923,27 @@ describe("team action routes", () => {
     });
   });
 
-  it("refuses auto policy and writes manual overrides locally without sync preconditions", async () => {
+  it("sets automatic and manual project overrides locally without sync preconditions", async () => {
     const projectId = makeProject();
-    const unsupported = await request(
+    const automatic = await request(
       `/api/v1/projects/${projectId}/sharing/policy`,
       "POST",
       JSON.stringify({ policy: "auto", expected_override: null }),
     );
-    expect(unsupported.status).toBe(400);
-    expect(await unsupported.json()).toMatchObject({
-      error: { type: "unsupported_policy" },
+    expect(automatic.status).toBe(200);
+    expect(await automatic.json()).toMatchObject({
+      linked: true,
+      policy: {
+        effective: "auto",
+        project_override: "auto",
+      },
+      auto_share: true,
     });
 
     const response = await request(
       `/api/v1/projects/${projectId}/sharing/policy`,
       "POST",
-      JSON.stringify({ policy: "manual", expected_override: null }),
+      JSON.stringify({ policy: "manual", expected_override: "auto" }),
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -641,6 +952,7 @@ describe("team action routes", () => {
         effective: "manual",
         project_override: "manual",
       },
+      auto_share: false,
     });
     expect(syncData.isSyncEnabled()).toBe(false);
   });
