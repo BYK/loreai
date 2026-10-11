@@ -156,6 +156,26 @@ test.describe("persistent workspace panes", () => {
     await expect(page.getByTestId("pane-chip-nav")).toHaveCount(0);
   });
 
+  test("restores minimized navigation over a maximized document", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop pane controls",
+    );
+    await page.goto("/ui");
+    await page.getByTestId("pane-min-nav").click();
+    await page.getByTestId("pane-max-document").click();
+    await expect(page.getByTestId("pane-chip-nav")).toBeVisible();
+    await page.getByTestId("pane-chip-nav").click();
+
+    await page.getByRole("button", { name: "Restore", exact: true }).click();
+
+    await expect(page.getByTestId("pane-min-nav")).toBeVisible();
+    await expect(page.getByTestId("pane-chip-nav")).toHaveCount(0);
+    await expect(page.getByTestId("document-pane")).toBeVisible();
+  });
+
   test("maximizes and restores the document pane", async ({
     page,
   }, testInfo) => {

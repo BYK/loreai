@@ -334,12 +334,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
                 type="button"
                 data-testid="pane-chip-list"
                 class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft"
-                onClick={() => {
-                  dispatch({ type: "restore", pane: "list" });
-                  const maximized = layoutState().maximized;
-                  if (maximized !== null && maximized !== "list")
-                    dispatch({ type: "toggle-maximize", pane: maximized });
-                }}
+                onClick={() => dispatch({ type: "restore", pane: "list" })}
               >
                 List ▾
               </button>

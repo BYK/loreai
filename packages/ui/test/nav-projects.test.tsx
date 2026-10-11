@@ -39,9 +39,12 @@ function project(
 
 function renderProjectList(
   projects: ProjectSummary[] | undefined,
-  activeProjectId: string | null = null,
+  initialActiveProjectId: string | null = null,
 ) {
   const [currentProjects, setProjects] = createSignal(projects);
+  const [activeProjectId, setActiveProjectId] = createSignal(
+    initialActiveProjectId,
+  );
   const rendered = render(() => (
     <MemoryRouter>
       <Route
@@ -64,7 +67,7 @@ function renderProjectList(
               </label>
               <ProjectListBody
                 projects={currentProjects()}
-                activeProjectId={activeProjectId}
+                activeProjectId={activeProjectId()}
                 query={query()}
               />
             </>
@@ -73,7 +76,7 @@ function renderProjectList(
       />
     </MemoryRouter>
   ));
-  return { ...rendered, setProjects };
+  return { ...rendered, setProjects, setActiveProjectId };
 }
 
 /** Labels of all project rows under a given data-section. */
@@ -253,6 +256,24 @@ describe("project list sections", () => {
 
     expect(all).toHaveAttribute("aria-expanded", "false");
     expect(document.querySelector('[data-section="all"]')).toBeNull();
+  });
+
+  it("keeps All collapsed across project refreshes until the active id changes", async () => {
+    const { setProjects, setActiveProjectId } = renderProjectList(
+      SEVEN,
+      "delta",
+    );
+    const all = screen.getByTestId("nav-all-projects");
+
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(all);
+    expect(all).toHaveAttribute("aria-expanded", "false");
+
+    setProjects([...SEVEN]);
+    expect(all).toHaveAttribute("aria-expanded", "false");
+
+    setActiveProjectId("golf");
+    expect(all).toHaveAttribute("aria-expanded", "true");
   });
 
   it("expands All when an active project loads after activation", async () => {

@@ -36,21 +36,16 @@ export const ProjectListBody: Component<{
       props.activeProjectId,
     ),
   );
+  const autoExpandId = createMemo(() =>
+    props.activeProjectId &&
+    sections().rest.some((project) => project.id === props.activeProjectId)
+      ? props.activeProjectId
+      : null,
+  );
   createEffect(
-    on(
-      () =>
-        [
-          props.activeProjectId,
-          sections().rest.some(
-            (project) => project.id === props.activeProjectId,
-          ),
-        ] as const,
-      ([activeProjectId, activeProjectInAll]) => {
-        if (activeProjectId && activeProjectInAll) {
-          setShowAll(true);
-        }
-      },
-    ),
+    on(autoExpandId, (activeProjectId) => {
+      if (activeProjectId) setShowAll(true);
+    }),
   );
   const row = (
     project: ProjectSummary,

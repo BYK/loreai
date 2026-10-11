@@ -47,7 +47,14 @@ export function reducePaneLayout(
         maximized: state.maximized === action.pane ? null : state.maximized,
       };
     case "restore":
-      return { ...state, [action.pane]: "open" };
+      return {
+        ...state,
+        [action.pane]: "open",
+        maximized:
+          state.maximized !== null && state.maximized !== action.pane
+            ? null
+            : state.maximized,
+      };
     case "toggle-maximize":
       return {
         ...state,

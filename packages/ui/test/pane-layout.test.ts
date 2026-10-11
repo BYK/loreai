@@ -73,6 +73,42 @@ describe("pane layout reducer", () => {
     expect(minimized.maximized).toBeNull();
   });
 
+  it("restores navigation while another pane is maximized", () => {
+    const navMinimized = reducePaneLayout(DEFAULT_PANE_LAYOUT, {
+      type: "minimize",
+      pane: "nav",
+    });
+    const maximized = reducePaneLayout(navMinimized, {
+      type: "toggle-maximize",
+      pane: "document",
+    });
+    const restored = reducePaneLayout(maximized, {
+      type: "restore",
+      pane: "nav",
+    });
+
+    expect(restored.nav).toBe("open");
+    expect(restored.maximized).toBeNull();
+  });
+
+  it("restores the list while navigation is maximized", () => {
+    const listMinimized = reducePaneLayout(DEFAULT_PANE_LAYOUT, {
+      type: "minimize",
+      pane: "list",
+    });
+    const maximized = reducePaneLayout(listMinimized, {
+      type: "toggle-maximize",
+      pane: "nav",
+    });
+    const restored = reducePaneLayout(maximized, {
+      type: "restore",
+      pane: "list",
+    });
+
+    expect(restored.list).toBe("open");
+    expect(restored.maximized).toBeNull();
+  });
+
   it("clamps list width to the supported bounds", () => {
     expect(
       reducePaneLayout(DEFAULT_PANE_LAYOUT, {
