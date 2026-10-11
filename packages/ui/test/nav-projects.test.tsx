@@ -225,15 +225,18 @@ describe("project list sections", () => {
     expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
   });
 
-  it("keeps the active project visible while All projects is collapsed", async () => {
+  it("keeps an active All project in place and expands its section", async () => {
     renderProjectList(SEVEN, "delta");
 
     const active = screen.getByRole("link", { name: /delta/ });
     expect(active).toHaveAttribute("aria-current", "page");
-    expect(active.closest('[data-section="recent"]')).not.toBeNull();
+    expect(active).toHaveAttribute("data-section", "all");
+    expect(active).toHaveAttribute("data-list-key", "all:delta");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
+    expect(screen.getAllByTestId("nav-project")).toHaveLength(7);
     expect(screen.getByTestId("nav-all-projects")).toHaveAttribute(
       "aria-expanded",
-      "false",
+      "true",
     );
   });
 
@@ -268,21 +271,23 @@ describe("sectionProjects / byRecency", () => {
     expect(sections.pinned.map((p) => p.id)).toEqual(["b", "a"]);
   });
 
-  it("surfaces an active unpinned project without dropping recent entries", () => {
+  it("keeps the active unpinned project in its recency-derived section", () => {
     const list = Array.from({ length: 7 }, (_, index) =>
       project(`p${index}`, { last_activity: 7 - index }),
     );
 
     const active = sectionProjects(list, [], "", "p6");
     expect(active.recent.map((p) => p.id)).toEqual([
-      "p6",
       "p0",
       "p1",
       "p2",
       "p3",
       "p4",
     ]);
-    expect(active.rest.map((p) => p.id)).toEqual(["p5"]);
+    expect(active.rest.map((p) => p.id)).toEqual(["p5", "p6"]);
+    expect(
+      [...active.recent, ...active.rest].filter((p) => p.id === "p6"),
+    ).toHaveLength(1);
 
     const pinned = sectionProjects(list, ["p6"], "", "p6");
     expect(pinned.pinned.map((p) => p.id)).toEqual(["p6"]);

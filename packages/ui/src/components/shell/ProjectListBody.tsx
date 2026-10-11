@@ -29,6 +29,11 @@ export const ProjectListBody: Component<{
       props.activeProjectId,
     ),
   );
+  const allExpanded = createMemo(
+    () =>
+      showAll() ||
+      sections().rest.some((project) => project.id === props.activeProjectId),
+  );
   const row = (
     project: ProjectSummary,
     section: "pinned" | "recent" | "all" | "matches",
@@ -145,14 +150,14 @@ export const ProjectListBody: Component<{
             <Show when={sections().rest.length > 0}>
               <button
                 type="button"
-                aria-expanded={showAll()}
+                aria-expanded={allExpanded()}
                 data-testid="nav-all-projects"
                 class="mx-1 my-1 rounded-md px-2 py-1 text-left text-xs text-muted hover:bg-soft"
                 onClick={() => setShowAll((value) => !value)}
               >
                 All projects ({sections().rest.length})
               </button>
-              <Show when={showAll()}>
+              <Show when={allExpanded()}>
                 <For each={sections().rest}>
                   {(project) => row(project, "all")}
                 </For>

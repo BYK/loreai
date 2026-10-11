@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const LIST = '[data-pane="list"]';
 
@@ -14,6 +14,72 @@ async function firstVisibleRow(scroller: Locator) {
       offset: row.getBoundingClientRect().top - top,
     };
   });
+}
+
+async function expectFiller60AnchorAfterReturn(
+  page: Page,
+  useBrowserBack: boolean,
+) {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await page.goto("/ui");
+
+  const scroller = page.getByTestId("project-list-body");
+  await expect(scroller).toBeVisible();
+  await page.locator(LIST).getByTestId("nav-all-projects").click();
+  const target = page
+    .locator(`${LIST} [data-testid="nav-project"]`)
+    .filter({ hasText: "filler-60" });
+  await expect(target).toHaveCount(1);
+  await expect(target).toHaveAttribute("data-section", "all");
+  const targetKey = await target.getAttribute("data-list-key");
+  if (!targetKey?.startsWith("all:")) {
+    throw new Error(
+      `Expected filler-60 to have an All key, received ${targetKey}`,
+    );
+  }
+  await scroller.evaluate((el) => {
+    el.scrollTop = 394;
+  });
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBe(394);
+
+  const before = await firstVisibleRow(scroller);
+  if (!before) throw new Error("list has no visible row at scrollTop 394");
+  expect(before.key).toMatch(/^all:/);
+  const targetBounds = await target.boundingBox();
+  const scrollerBounds = await scroller.boundingBox();
+  if (!targetBounds || !scrollerBounds) {
+    throw new Error("filler-60 row or list scroller has no bounding box");
+  }
+  expect(targetBounds.y).toBeGreaterThanOrEqual(scrollerBounds.y);
+  expect(targetBounds.y + targetBounds.height).toBeLessThanOrEqual(
+    scrollerBounds.y + scrollerBounds.height,
+  );
+
+  await page.mouse.click(
+    targetBounds.x + targetBounds.width / 2,
+    targetBounds.y + targetBounds.height / 2,
+  );
+  await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
+  await expect(scroller).toBeHidden();
+  await expect(target).toHaveAttribute("data-list-key", targetKey);
+  if (useBrowserBack) {
+    await page.goBack();
+  } else {
+    await page.getByTestId("mobile-back").click();
+  }
+  await expect(page).toHaveURL(/\/ui\/?$/);
+  await expect(scroller).toBeVisible();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+
+  const after = await firstVisibleRow(scroller);
+  if (!after) throw new Error("list has no visible row after returning");
+  expect(after.key).toBe(before.key);
+  expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(1);
 }
 
 test.describe("persistent workspace panes", () => {
@@ -160,106 +226,15 @@ test.describe("persistent workspace panes", () => {
     );
   });
 
-  test("keeps the visible project rows anchored when returning to the list", async ({
+  test("preserves filler-60's anchor through the mobile Back link", async ({
     page,
   }) => {
-    await page.setViewportSize({ width: 400, height: 800 });
-    await page.goto("/ui");
+    await expectFiller60AnchorAfterReturn(page, false);
+  });
 
-    const scroller = page.getByTestId("project-list-body");
-    await expect(scroller).toBeVisible();
-    await page.locator(LIST).getByTestId("nav-all-projects").click();
-
-    const allProjects = page.locator(
-      `${LIST} [data-section="all"][data-testid="nav-project"]`,
-    );
-    await scroller.evaluate((el) => {
-      el.scrollTop = 394;
-    });
-    const targetIndex = await allProjects.evaluateAll((rows) => {
-      const list = rows[0]?.closest<HTMLElement>(
-        '[data-testid="project-list-body"]',
-      );
-      if (!list) throw new Error("project list scroller is missing");
-      const listRect = list.getBoundingClientRect();
-      const midpoint = listRect.top + listRect.height / 2;
-      return rows.reduce(
-        (closestIndex, candidate, index) => {
-          const distance = Math.abs(
-            candidate.getBoundingClientRect().top +
-              candidate.getBoundingClientRect().height / 2 -
-              midpoint,
-          );
-          return distance < closestIndex.distance
-            ? { index, distance }
-            : closestIndex;
-        },
-        { index: 0, distance: Number.POSITIVE_INFINITY },
-      ).index;
-    });
-    const target = allProjects.nth(targetIndex);
-    const targetKey = await target.getAttribute("data-list-key");
-    if (!targetKey?.startsWith("all:")) {
-      throw new Error(`Expected an All project key, received ${targetKey}`);
-    }
-    const targetId = targetKey.slice("all:".length);
-
-    const targetPosition = await target.evaluate((row) => {
-      const list = row.closest<HTMLElement>(
-        '[data-testid="project-list-body"]',
-      );
-      if (!list) throw new Error("project list scroller is missing");
-      const listRect = list.getBoundingClientRect();
-      const rowRect = row.getBoundingClientRect();
-      const desiredOffset = Math.min(
-        320,
-        listRect.height - rowRect.height - 20,
-      );
-      list.scrollTop += rowRect.top - listRect.top - desiredOffset;
-      const positionedRow = row.getBoundingClientRect();
-      return {
-        top: positionedRow.top - listRect.top,
-        bottom: positionedRow.bottom - listRect.top,
-        height: listRect.height,
-      };
-    });
-    expect(targetPosition.top).toBeGreaterThan(0);
-    expect(targetPosition.bottom).toBeLessThan(targetPosition.height);
-
-    const before = await firstVisibleRow(scroller);
-    expect(before?.key).toMatch(/^all:/);
-    expect(before?.key).not.toBe(targetKey);
-
-    const bounds = await target.boundingBox();
-    if (!bounds) throw new Error("target project row has no bounding box");
-    await page.mouse.click(
-      bounds.x + bounds.width / 2,
-      bounds.y + bounds.height / 2,
-    );
-    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
-    await expect(scroller).toBeHidden();
-    await expect(
-      scroller.locator(`[data-list-key="recent:${targetId}"]`),
-    ).toHaveCount(1);
-    await expect(
-      scroller.locator(`[data-list-key="all:${targetId}"]`),
-    ).toHaveCount(0);
-    await page.getByTestId("mobile-back").click();
-    await expect(scroller).toBeVisible();
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) => {
-          requestAnimationFrame(() => resolve());
-        }),
-    );
-    const after = await firstVisibleRow(scroller);
-    if (!before || !after) {
-      throw new Error(
-        "Expected a visible list row before and after navigation",
-      );
-    }
-    expect(after.key).toBe(before.key);
-    expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(1);
-    await expect(scroller).toHaveCSS("overflow-anchor", "none");
+  test("preserves filler-60's anchor through browser Back", async ({
+    page,
+  }) => {
+    await expectFiller60AnchorAfterReturn(page, true);
   });
 });
