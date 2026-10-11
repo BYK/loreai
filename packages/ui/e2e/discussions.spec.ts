@@ -88,10 +88,24 @@ test.describe("reply to selection", () => {
       1,
     );
     await thread(page, id).getByRole("textbox").fill("A reply on 229");
+    // While the reply is in flight the box is read-only, so nothing typed
+    // then can be left behind as a draft.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(
+      /\/api\/v1\/discussions\/[^/]+\/replies/,
+      async (route) => {
+        await held;
+        await route.continue();
+      },
+    );
     await thread(page, id).getByTestId("composer-submit").click();
+    await expect(thread(page, id).getByRole("textbox")).not.toBeEditable();
+    release();
     await expect(thread(page, id).getByTestId("discussion-reply")).toHaveCount(
       2,
     );
+    await page.unrouteAll();
 
     await page.reload();
     await expect(page.getByTestId("session-view")).toBeVisible();

@@ -88,6 +88,7 @@ export const Composer: Component<{
       await flush();
       const { key } = draft;
       await props.onSubmit(value);
+      clearTimeout(saveTimer);
       pending = null;
       await drafts.delete(key);
       setText("");
@@ -114,6 +115,8 @@ export const Composer: Component<{
         placeholder={props.placeholder ?? "Reply…"}
         aria-label={props.placeholder ?? "Reply"}
         value={text()}
+        readOnly={busy()}
+        aria-busy={busy()}
         onInput={(e) => edit(e.currentTarget.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
