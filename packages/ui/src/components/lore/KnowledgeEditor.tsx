@@ -96,6 +96,7 @@ export const KnowledgeEditor: Component<{
   versions: Loader<KnowledgeVersionHistory>;
   reloadEntry: () => void;
   onSaved?: (entry: KnowledgeEntry) => void;
+  onSaveError?: (message: string) => void;
   onDeleted?: () => void;
 }> = (props) => {
   const ws = useWorkspace();
@@ -232,6 +233,7 @@ export const KnowledgeEditor: Component<{
     setBaseRevision(revision());
     setDirty(false);
     setSaveError("");
+    props.onSaveError?.("");
     setTitleConflict("");
     setConflict("");
     setSuccess("");
@@ -265,6 +267,7 @@ export const KnowledgeEditor: Component<{
     setBaseRevision(draftRevision);
     setDirty(false);
     setSaveError("");
+    props.onSaveError?.("");
     setTitleConflict("");
     setConflict(
       latestRevision !== undefined && draftRevision !== latestRevision
@@ -326,6 +329,7 @@ export const KnowledgeEditor: Component<{
     }
     setSaving(true);
     setSaveError("");
+    props.onSaveError?.("");
     setTitleConflict("");
     setConflictingEntry(undefined);
     setConflict("");
@@ -389,9 +393,10 @@ export const KnowledgeEditor: Component<{
       if (isApiError(error) && error.errorType === "deleted") {
         await persistDraft();
         setEditing(false);
-        setSaveError(
-          "This entry was deleted. Your draft is kept on this device; restore the entry from History to continue.",
-        );
+        const message =
+          "This entry was deleted. Your draft is kept on this device; restore the entry from History to continue.";
+        setSaveError(message);
+        props.onSaveError?.(message);
         props.reloadEntry();
       } else if (isApiError(error) && error.errorType === "stale_revision") {
         await persistDraft();
@@ -580,6 +585,11 @@ export const KnowledgeEditor: Component<{
         <StateCard kind="locked" title="Editing unavailable">
           Writes are refused in hosted mode.
         </StateCard>
+      </Show>
+      <Show when={saveError()}>
+        <p class="m-0 text-sm text-danger" role="alert">
+          {saveError()}
+        </p>
       </Show>
       <div class="flex flex-wrap gap-2">
         <Button
@@ -818,11 +828,6 @@ export const KnowledgeEditor: Component<{
                 Discard draft
               </Button>
             </div>
-          </Show>
-          <Show when={saveError()}>
-            <p class="m-0 text-sm text-danger" role="alert">
-              {saveError()}
-            </p>
           </Show>
           <div class="flex flex-wrap items-center gap-2">
             <Button type="submit" disabled={saving() || !baseRevision()}>

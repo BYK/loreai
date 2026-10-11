@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createMemo, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type {
@@ -130,6 +130,10 @@ export const Browse: Component<{
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const ws = useWorkspace();
+  const [deletedSaveError, setDeletedSaveError] = createSignal<{
+    entryId: string;
+    message: string;
+  }>();
   const projectId = () => decodeParam(raw.projectId);
   const knowledgeId = () => decodeParam(raw.knowledgeId);
   const project = createMemo(() => ws.projectById(projectId()));
@@ -415,11 +419,17 @@ export const Browse: Component<{
               <DeletedKnowledgeDocument
                 history={deletedHistory}
                 projectId={projectId()}
+                saveError={
+                  deletedSaveError()?.entryId === knowledgeId()
+                    ? deletedSaveError()?.message
+                    : undefined
+                }
                 restoreAction={
                   <RestoreKnowledgeAction
                     id={knowledgeId()!}
                     history={deletedHistory}
                     onRestored={() => {
+                      setDeletedSaveError(undefined);
                       refreshAfterKnowledgeWrite();
                     }}
                   />
@@ -430,6 +440,7 @@ export const Browse: Component<{
                     history={deletedHistory}
                     versionId={version.version_id}
                     onRestored={() => {
+                      setDeletedSaveError(undefined);
                       refreshAfterKnowledgeWrite();
                     }}
                   />
@@ -450,33 +461,43 @@ export const Browse: Component<{
             </Match>
             <Match when={entry.loader.data()}>
               {(value) => (
-                <KnowledgeDocument
-                  entry={value()}
-                  project={projectForEntry()}
-                  versions={versions.loader}
-                  evidence={evidence.loader}
-                  actions={
-                    <KnowledgeEditor
-                      entry={value()}
-                      versions={versions.loader}
-                      reloadEntry={entry.loader.reload}
-                      onSaved={() => refreshAfterKnowledgeWrite()}
-                      onDeleted={() => refreshAfterKnowledgeWrite()}
-                    />
-                  }
-                  renderRestore={(version: KnowledgeVersion) => (
-                    <RestoreKnowledgeAction
-                      id={value().logical_id ?? value().id}
-                      history={versions.loader}
-                      versionId={version.version_id}
-                      onRestored={() => refreshAfterKnowledgeWrite()}
-                    />
-                  )}
-                  loadDistillation={(id) =>
-                    ws.tracked(() => ws.client.getDistillation(id))
-                  }
-                />
-                <PromotionPanel knowledgeId={value().id} client={ws.client} />
+                <>
+                  <KnowledgeDocument
+                    entry={value()}
+                    project={projectForEntry()}
+                    versions={versions.loader}
+                    evidence={evidence.loader}
+                    actions={
+                      <KnowledgeEditor
+                        entry={value()}
+                        versions={versions.loader}
+                        reloadEntry={entry.loader.reload}
+                        onSaved={() => refreshAfterKnowledgeWrite()}
+                        onSaveError={(message) => {
+                          const entryId = knowledgeId();
+                          setDeletedSaveError(
+                            message && entryId
+                              ? { entryId, message }
+                              : undefined,
+                          );
+                        }}
+                        onDeleted={() => refreshAfterKnowledgeWrite()}
+                      />
+                    }
+                    renderRestore={(version: KnowledgeVersion) => (
+                      <RestoreKnowledgeAction
+                        id={value().logical_id ?? value().id}
+                        history={versions.loader}
+                        versionId={version.version_id}
+                        onRestored={() => refreshAfterKnowledgeWrite()}
+                      />
+                    )}
+                    loadDistillation={(id) =>
+                      ws.tracked(() => ws.client.getDistillation(id))
+                    }
+                  />
+                  <PromotionPanel knowledgeId={value().id} client={ws.client} />
+                </>
               )}
             </Match>
           </Switch>

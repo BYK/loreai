@@ -14,6 +14,7 @@ import { VersionHistory } from "./VersionHistory";
 export const DeletedKnowledgeDocument: Component<{
   history: Loader<KnowledgeVersionHistory>;
   projectId?: string;
+  saveError?: string;
   restoreAction?: JSX.Element;
   renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
@@ -50,6 +51,11 @@ export const DeletedKnowledgeDocument: Component<{
             }
           />
           <div class="mx-auto max-w-[940px] px-5 py-6 sm:px-7.5">
+            <Show when={props.saveError}>
+              <p class="mb-4 text-sm text-danger" role="alert">
+                {props.saveError}
+              </p>
+            </Show>
             <StateCard kind="empty" title="This entry was merged or deleted">
               The entry is no longer live. Its version history is preserved
               below.

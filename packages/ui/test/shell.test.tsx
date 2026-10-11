@@ -1384,6 +1384,95 @@ describe("shell: empty, error, not-found and locked states", () => {
     );
   });
 
+  it("shows a deleted-save error after reloading into deleted history", async () => {
+    const target = entryAt(0);
+    const deletedAt = Date.UTC(2026, 8, 3, 12);
+    const makeVersion = (
+      version: number,
+      is_current: boolean,
+      is_deleted: boolean,
+    ): KnowledgeVersionHistory["versions"][number] => ({
+      version_id: `${target.id}-v${version}`,
+      version,
+      created_at: deletedAt + version,
+      superseded_at: is_current ? null : deletedAt,
+      is_current,
+      is_deleted,
+      title: target.title,
+      content: target.content,
+      category: target.category,
+      confidence: target.confidence,
+      scope: "project",
+      cross_project: false,
+      source_refs: {
+        session_id: null,
+        entry_id: target.id,
+        user_id: null,
+        created_by: null,
+        updated_by: null,
+        worker_provider_id: null,
+        worker_model_id: null,
+      },
+    });
+    const liveHistory: KnowledgeVersionHistory = {
+      id: target.id,
+      current_version_id: `${target.id}-v1`,
+      versions: [makeVersion(1, true, false)],
+    };
+    const deletedHistory: KnowledgeVersionHistory = {
+      id: target.id,
+      current_version_id: `${target.id}-v2`,
+      versions: [makeVersion(2, true, true), makeVersion(1, false, false)],
+    };
+    let deleted = false;
+    const client = fakeClient({
+      async getKnowledge(id) {
+        if (deleted) {
+          throw new ApiError(
+            "not_found",
+            `/knowledge/${id}`,
+            "Knowledge entry not found",
+            404,
+          );
+        }
+        return target;
+      },
+      async listKnowledgeVersions(id, options) {
+        return options?.includeDeleted ? deletedHistory : liveHistory;
+      },
+      async editKnowledge() {
+        deleted = true;
+        throw new ApiError(
+          "http",
+          `/api/v1/knowledge/${target.id}`,
+          "Entry is deleted",
+          409,
+          "deleted",
+        );
+      },
+    });
+    mount(
+      `/projects/p-lore/knowledge/${target.id}`,
+      client,
+      Promise.resolve(null),
+    );
+
+    await screen.findByTestId("knowledge-document");
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Draft after deletion" },
+    });
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    const deletedDocument = await screen.findByTestId(
+      "deleted-knowledge-document",
+    );
+    expect(within(deletedDocument).getByRole("alert")).toHaveTextContent(
+      "This entry was deleted. Your draft is kept on this device; restore the entry from History to continue.",
+    );
+    expect(screen.queryByTestId("knowledge-editor")).not.toBeInTheDocument();
+  });
+
   it("shows deleted-entry recovery when history has a deleted head", async () => {
     const deletedAt = Date.UTC(2026, 8, 3, 12);
     const deletedHistory: KnowledgeVersionHistory = {

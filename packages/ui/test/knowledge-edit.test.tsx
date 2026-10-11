@@ -188,6 +188,7 @@ function mountEditor(
     currentEntry?: KnowledgeEntry;
     currentHistory?: KnowledgeVersionHistory;
     onReload?: () => void;
+    onSaveError?: (message: string) => void;
     onWorkspace?: (workspace: ReturnType<typeof useWorkspace>) => void;
   } = {},
 ) {
@@ -208,6 +209,7 @@ function mountEditor(
         entry={currentEntry()}
         versions={versions.loader}
         reloadEntry={options.onReload ?? vi.fn()}
+        onSaveError={options.onSaveError}
       />
     );
   };
@@ -828,6 +830,7 @@ describe("KnowledgeEditor", () => {
     const db = await openLoreDb({ factory: new IDBFactory() });
     if (!db) throw new Error("fake IndexedDB did not open");
     const reloadEntry = vi.fn();
+    const onSaveError = vi.fn();
     const client = makeClient({
       editKnowledge: async () => {
         throw new ApiError(
@@ -839,7 +842,12 @@ describe("KnowledgeEditor", () => {
         );
       },
     });
-    mountEditor({ client, db: Promise.resolve(db), onReload: reloadEntry });
+    mountEditor({
+      client,
+      db: Promise.resolve(db),
+      onReload: reloadEntry,
+      onSaveError,
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     fireEvent.input(screen.getByLabelText("Title"), {
@@ -855,6 +863,15 @@ describe("KnowledgeEditor", () => {
       baseRevision: 1,
     });
     expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+    const message =
+      "This entry was deleted. Your draft is kept on this device; restore the entry from History to continue.";
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(onSaveError).toHaveBeenCalledWith(message);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByTestId("knowledge-editor")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(onSaveError).toHaveBeenLastCalledWith("");
   });
 
   it("treats a deleted refusal as a completed deletion", async () => {
@@ -1016,6 +1033,9 @@ describe("KnowledgeEditor", () => {
       expect(screen.getByText("Editing unavailable")).toBeVisible(),
     );
     expect(screen.getByRole("button", { name: /^Edit$/ })).toBeDisabled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Editing is unavailable in hosted mode.",
+    );
   });
 
   it("persists the current draft before locking after a hosted refusal", async () => {
