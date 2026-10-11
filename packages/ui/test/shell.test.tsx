@@ -1003,6 +1003,11 @@ describe("shell: project navigation and real-data path", () => {
   });
 
   it("refreshes the sidebar and project counts after delete and restore", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
     const target = entryAt(0);
     const targetProjectId = target.project_id;
     if (!targetProjectId) throw new Error("fixture must belong to a project");
