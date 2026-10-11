@@ -656,12 +656,14 @@ export function describeProviderBudget(status: ProviderBudgetStatus): string {
 export function sessionBudgetMatch(
   sessionID: string,
   upstream?: { providerID?: string; url?: string },
+  requestHeaders?: Headers | Record<string, string> | null,
 ): BudgetMatch | null {
   const attribution = resolveCostAttribution({
     sessionID,
     providerID: upstream?.providerID,
     upstreamURL: upstream?.url,
     credential: resolveAuth(sessionID, upstream?.providerID),
+    requestHeaders,
   });
   if (attribution.provider === "unknown") return null;
   return {

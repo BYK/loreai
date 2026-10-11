@@ -22671,7 +22671,7 @@ async function handleConversationTurnPrepared(
   };
   try {
     budgetPressure = providerBudgetPressure(
-      sessionBudgetMatch(sessionID, sessionState.lastUpstream),
+      sessionBudgetMatch(sessionID, sessionState.lastUpstream, req.rawHeaders),
       "cap",
     );
   } catch (err) {
