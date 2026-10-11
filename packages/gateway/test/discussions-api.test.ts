@@ -174,6 +174,23 @@ describe("discussions API", () => {
       { state: "resolved" },
     );
     expect(missingRevision.status).toBe(400);
+    for (const content_hash of ["", "a".repeat(12), "ABC"]) {
+      const badHash = await send("POST", "/api/v1/discussions", {
+        project_id: s.projectId,
+        source: { kind: "session", id: "sess" },
+        anchors: [
+          {
+            block_id: `m.${s.messageId}`,
+            part_index: 0,
+            start: 0,
+            end: 5,
+            content_hash,
+          },
+        ],
+        quote: "First",
+      });
+      expect(badHash.status).toBe(400);
+    }
   });
 
   it("returns 409 with the current revision on a stale expected_revision", async () => {

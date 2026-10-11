@@ -52,7 +52,8 @@ const anchorBody = type({
   "part_index?": "number.integer >= 0",
   start: "number.integer >= 0",
   end: "number.integer >= 0",
-  content_hash: "0 < string <= 16",
+  // contentHash(): cyrb53 in base36, at most 11 characters.
+  content_hash: /^[0-9a-z]{1,11}$/,
 });
 
 const createDiscussionBody = type({
