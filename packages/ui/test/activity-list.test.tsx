@@ -202,7 +202,7 @@ describe("ActivityListBody", () => {
     );
     expect(screen.queryByText("Workspace contract")).toBeNull();
     const cursorCalls = fetchActivity.mock.calls
-      .map(([request]) => request as { q: string; cursor: string | null })
+      .map(([request]) => request)
       .filter((request) => request.cursor !== null);
     expect(
       cursorCalls.every((request) => request.q === "type:knowledge"),
