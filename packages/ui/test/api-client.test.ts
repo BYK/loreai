@@ -634,7 +634,7 @@ describe("warming and costs API client", () => {
           disabled: false,
           force_keep_warm: true,
         });
-      return json({ amount: 0, disabled: true });
+      throw new Error(`unexpected ${url}`);
     });
 
     expect(await client.setWarmingEnabled(false)).toEqual({
@@ -650,15 +650,10 @@ describe("warming and costs API client", () => {
       mode: "keep",
       force_keep_warm: true,
     });
-    expect(await client.setDailyBudget(0)).toEqual({
-      amount: 0,
-      disabled: true,
-    });
     expect(calls).toEqual([
       "/api/v1/warming/settings",
       "/api/v1/warming/circuit-breaker/reset",
       "/api/v1/warming/sessions/a%2Fb/mode",
-      "/api/v1/costs/budget",
     ]);
   });
 });

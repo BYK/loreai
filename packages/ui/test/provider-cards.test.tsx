@@ -54,13 +54,19 @@ function budgetRow(overrides: Partial<Budgets[number]> = {}): Budgets[number] {
     provider: "anthropic",
     auth_kind: "subscription",
     account: "a1b2c3d4e5f6",
+    mode: "cap",
     unit: "percent",
     window: "7d",
     amount: 80,
     used: 41,
+    target: null,
+    ahead: null,
     fraction: 41 / 80,
+    pressure: 0,
     resets_at: NOW + 3 * 24 * 3600_000,
     stale: false,
+    implicit: false,
+    status: "ok",
     ...overrides,
   };
 }
@@ -218,18 +224,41 @@ describe("ProviderCards", () => {
         budgetRow(),
         budgetRow({
           unit: "usd",
-          window: "daily",
+          window: "day",
           amount: 10,
           used: 12.5,
           fraction: 1.25,
+          pressure: 1,
         }),
         budgetRow({
           unit: "tokens",
-          window: "daily",
+          window: "week",
           amount: 100_000,
           used: null,
           fraction: null,
           stale: true,
+          status: "stale",
+        }),
+        budgetRow({
+          mode: "pace",
+          unit: undefined,
+          amount: undefined,
+          headroom: 10,
+          window: "5h",
+          used: 30,
+          target: 52,
+          ahead: -22,
+          fraction: null,
+          implicit: true,
+        }),
+        budgetRow({
+          mode: "off",
+          unit: undefined,
+          amount: undefined,
+          window: "7d",
+          used: null,
+          fraction: null,
+          status: "off",
         }),
         // wrong auth_kind and wrong provider — filtered out
         budgetRow({ auth_kind: "api_key" }),
@@ -238,11 +267,14 @@ describe("ProviderCards", () => {
     );
     const card = screen.getByTestId("provider-card");
     expect(card.textContent).toContain("Budgets");
-    expect(card.textContent).toContain("Quota · 7d");
+    expect(card.textContent).toContain("Quota cap · 7d");
     expect(card.textContent).toContain("41% / 80%");
-    expect(card.textContent).toContain("USD · daily");
+    expect(card.textContent).toContain("USD cap · day");
     expect(card.textContent).toContain("$12.5000 / $10.0000");
-    expect(card.textContent).toContain("Tokens · daily");
+    expect(card.textContent).toContain("Tokens cap · week");
+    expect(card.textContent).toContain("Pace · 5h");
+    expect(card.textContent).toContain("30% / 52% pace");
+    expect(card.textContent).toContain("Pace off · 7d");
     expect(card.textContent).toContain("—");
     expect(card.textContent).toContain("(stale)");
   });
@@ -251,7 +283,7 @@ describe("ProviderCards", () => {
     renderCards(
       [providerRow()],
       [],
-      [budgetRow({ used: 90, fraction: 90 / 80 })],
+      [budgetRow({ used: 90, fraction: 90 / 80, pressure: 1 })],
     );
     const danger = screen
       .getByTestId("provider-card")

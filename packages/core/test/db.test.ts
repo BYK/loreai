@@ -390,13 +390,17 @@ describe("db", () => {
     const migrated = db();
     expect(
       migrated
-        .query("SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')")
+        .query(
+          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')",
+        )
         .all(),
     ).toEqual([{ key: "provider_budgets" }]);
     expect(
-      (migrated.query("SELECT version FROM schema_version").get() as {
-        version: number;
-      }).version,
+      (
+        migrated.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
     ).toBe(MIGRATIONS.length);
   });
 

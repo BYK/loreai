@@ -19,6 +19,7 @@ import {
   describeProviderBudget,
   isSessionBudgetPaused,
   providerBudgetPressure,
+  sessionBudgetMatch,
 } from "./provider-budgets";
 import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
@@ -108,7 +109,6 @@ import {
   importDedupDecisions,
   calibrate,
   getLastTransformedCount,
-  getLastTransformEstimate,
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
@@ -22669,24 +22669,8 @@ async function handleConversationTurnPrepared(
     budget: null,
   };
   try {
-    const attribution = resolveCostAttribution({
-      sessionID,
-      providerID: sessionState.lastUpstream?.providerID,
-      upstreamURL: sessionState.lastUpstream?.url,
-      credential: resolveAuth(
-        sessionID,
-        sessionState.lastUpstream?.providerID,
-      ),
-      requestHeaders: req.rawHeaders,
-    });
     budgetPressure = providerBudgetPressure(
-      attribution.provider === "unknown"
-        ? null
-        : {
-            provider: attribution.provider,
-            auth_kind: attribution.authKind,
-            account: attribution.account,
-          },
+      sessionBudgetMatch(sessionID, sessionState.lastUpstream),
     );
   } catch (err) {
     log.info(`provider-budget: evaluation failed: ${String(err)}`);

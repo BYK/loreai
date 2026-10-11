@@ -78,7 +78,7 @@ function only(
     ),
   );
   expect(hits).toHaveLength(1);
-  return hits[0]!;
+  return hits[0];
 }
 
 describe("parseProviderBudgets", () => {

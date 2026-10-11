@@ -169,28 +169,32 @@ describe("budgetsForCard", () => {
     o: Partial<Parameters<typeof budgetsForCard>[0][number]> = {},
   ) => ({
     provider: "anthropic",
-    auth_kind: null,
+    auth_kind: "subscription" as const,
     account: null,
+    mode: "cap" as const,
     unit: "usd" as const,
-    window: "daily" as const,
+    window: "day" as const,
     amount: 10,
     used: null,
+    target: null,
+    ahead: null,
     fraction: null,
+    pressure: 0,
     resets_at: null,
     stale: false,
+    implicit: false,
+    status: "ok" as const,
     ...o,
   });
 
-  it("matches wildcards and exact tuples, filters the rest", () => {
+  it("matches the account wildcard and exact tuples, filters the rest", () => {
     const budgets = [
       budget(),
-      budget({ auth_kind: "subscription" }),
       budget({ account: "a1" }),
-      budget({ auth_kind: "subscription", account: "a1" }),
       budget({ auth_kind: "api_key" }),
       budget({ account: "other" }),
       budget({ provider: "openai" }),
     ];
-    expect(budgetsForCard(budgets, card)).toHaveLength(4);
+    expect(budgetsForCard(budgets, card)).toHaveLength(2);
   });
 });

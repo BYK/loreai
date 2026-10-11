@@ -16,8 +16,11 @@ test.describe("provider cost cards", () => {
     await expect(bars.nth(0)).toHaveAttribute("aria-valuenow", "23");
     await expect(bars.nth(1)).toHaveAttribute("aria-valuenow", "41");
     await expect(anthropic.getByText(/resets in/)).toHaveCount(2);
-    await expect(anthropic.getByText("Quota · 7d")).toBeVisible();
+    await expect(anthropic.getByText("Quota cap · 7d")).toBeVisible();
     await expect(anthropic.getByText("41% / 80%")).toBeVisible();
+    await expect(anthropic.getByText("Pace · 5h")).toBeVisible();
+    await expect(anthropic.getByText("Pace · 7d")).toBeVisible();
+    await expect(page.getByText("Daily budget")).toHaveCount(0);
 
     const openai = cards.filter({ hasText: "OpenAI" });
     await expect(openai.getByText("API key")).toBeVisible();

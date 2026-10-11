@@ -4,10 +4,7 @@ import { connect } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { db } from "@loreai/core";
 import { MockAgent } from "undici";
-import {
-  getAllSessionCosts,
-  resetDailyCostsCache,
-} from "../src/cost-tracker";
+import { getAllSessionCosts, resetDailyCostsCache } from "../src/cost-tracker";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import {
   getActiveSessions,
@@ -543,7 +540,9 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
       expect(dispatcherCalls).toBe(0);
       expect(getActiveSessions().size).toBe(0);
       expect(getAllSessionCosts().size).toBe(0);
-      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(initialSpend);
+      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(
+        initialSpend,
+      );
       expect(storageSnapshot()).toEqual(initialStorage);
     },
   );
@@ -568,7 +567,9 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
       expect(dispatcherCalls).toBe(0);
       expect(getActiveSessions().size).toBe(0);
       expect(getAllSessionCosts().size).toBe(0);
-      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(initialSpend);
+      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(
+        initialSpend,
+      );
       expect(storageSnapshot()).toEqual(initialStorage);
     },
   );

@@ -583,13 +583,13 @@ function statusOf(
       ...UNKNOWN,
       status: "off",
       implicit,
-    } as ProviderBudgetStatus;
+    };
   }
   return {
     ...budget,
     ...measure(budget, rows, now, onlyAccount),
     implicit,
-  } as ProviderBudgetStatus;
+  };
 }
 
 /** Statuses for every explicit (including off) and implicit budget. */

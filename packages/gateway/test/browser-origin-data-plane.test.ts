@@ -5,10 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { MockAgent } from "undici";
 import { db } from "@loreai/core";
 import type { GatewayConfig } from "../src/config";
-import {
-  getAllSessionCosts,
-  resetDailyCostsCache,
-} from "../src/cost-tracker";
+import { getAllSessionCosts, resetDailyCostsCache } from "../src/cost-tracker";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import { getActiveSessions, setUpstreamInterceptor } from "../src/pipeline";
 import type { Harness } from "./helpers/harness";
@@ -413,7 +410,9 @@ describe("browser-origin data-plane isolation", () => {
         expect(dispatcherCalls).toBe(0);
         expect(getActiveSessions().size).toBe(0);
         expect(getAllSessionCosts().size).toBe(0);
-        expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(initialSpend);
+        expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(
+          initialSpend,
+        );
         expect(storageSnapshot()).toEqual(initialStorage);
       },
     );
