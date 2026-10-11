@@ -25,6 +25,11 @@ import {
   resolveProjectByRemoteOrPath,
   projectPath as getProjectPathById,
   isHostedMode,
+  ACTIVITY_KINDS,
+  DEFAULT_ACTIVITY_QUERY,
+  listActivity,
+  parseActivityQuery,
+  type ActivityCursor,
   type RecallScope,
   type LLMClient,
 } from "@loreai/core";
@@ -49,6 +54,12 @@ import {
 import { parseBooleanParam } from "./query-bool";
 import { handleSessionContext } from "./session-context-api";
 import { handleCheckedDeleteKnowledge } from "./knowledge-edit-api";
+import {
+  assertCursorBinding,
+  CURSOR_VERSION,
+  decodeCursorObject,
+  encodeCursor,
+} from "./cursor";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -86,8 +97,93 @@ function errorResponse(
   status: number,
   type: string,
   message: string,
+  details?: unknown,
 ): Response {
-  return jsonResponse({ type: "error", error: { type, message } }, status);
+  return jsonResponse(
+    {
+      type: "error",
+      error: { type, message, ...(details === undefined ? {} : { details }) },
+    },
+    status,
+  );
+}
+
+function handleListActivity(url: URL): Response {
+  const rawQuery = url.searchParams.get("q");
+  const q = rawQuery === null ? DEFAULT_ACTIVITY_QUERY : rawQuery;
+  const rawLimit = url.searchParams.get("limit");
+  const limit =
+    rawLimit === null
+      ? 50
+      : /^\d+$/.test(rawLimit)
+        ? Number(rawLimit)
+        : Number.NaN;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    return errorResponse(
+      400,
+      "invalid_limit",
+      "limit must be an integer from 1 to 200",
+      { value: rawLimit, min: 1, max: 200 },
+    );
+  }
+
+  const parsed = parseActivityQuery(q);
+  if (parsed.errors.length > 0) {
+    return errorResponse(
+      400,
+      "invalid_query",
+      "Activity query is invalid",
+      parsed.errors,
+    );
+  }
+
+  let cursor: ActivityCursor | null = null;
+  const token = url.searchParams.get("cursor");
+  if (token !== null) {
+    try {
+      const value = decodeCursorObject(token);
+      if (
+        typeof value.q !== "string" ||
+        typeof value.t !== "number" ||
+        !Number.isFinite(value.t) ||
+        typeof value.k !== "string" ||
+        !ACTIVITY_KINDS.includes(value.k as (typeof ACTIVITY_KINDS)[number]) ||
+        typeof value.id !== "string" ||
+        value.id.length === 0
+      ) {
+        throw new Error("Malformed activity cursor");
+      }
+      assertCursorBinding(value.q, q.trim(), "query");
+      cursor = {
+        t: value.t,
+        k: value.k as ActivityCursor["k"],
+        id: value.id,
+      };
+    } catch (error) {
+      if (error instanceof BadRequest) {
+        return errorResponse(400, error.errorType, error.message);
+      }
+      return errorResponse(400, "invalid_cursor", "Malformed cursor");
+    }
+  }
+
+  const page = listActivity({
+    parsed,
+    cursor,
+    limit,
+  });
+  return jsonResponse({
+    items: page.items,
+    next_cursor: page.next
+      ? encodeCursor({
+          v: CURSOR_VERSION,
+          q: q.trim(),
+          t: page.next.t,
+          k: page.next.k,
+          id: page.next.id,
+        })
+      : null,
+  });
 }
 
 /**
@@ -945,6 +1041,11 @@ export async function handleAPIRequest(
     // GET /api/v1/projects
     if (pathname === "/api/v1/projects") {
       return handleListProjects();
+    }
+
+    // GET /api/v1/activity
+    if (pathname === "/api/v1/activity") {
+      return handleListActivity(url);
     }
 
     // GET /api/v1/stats

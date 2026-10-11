@@ -553,6 +553,7 @@ function applyGroup(
         ltm.update(keepRow.logical_id, {
           title: source.title,
           content: source.content,
+          origin: "curator",
         });
         const after = currentRow(keepRow.logical_id);
         if (!after)

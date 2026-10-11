@@ -14,8 +14,9 @@
   "created_by": null,
   "updated_by": null,
   "sensitivity": "normal",
-  "promotion_status": null,
-  "promoted_at": null,
+  "promotion_status": "promoted",
+  "origin": "curator",
+  "promoted_at": 1700000002000,
   "approval_status": "auto",
   "approved_by": null,
   "approved_at": null,
@@ -24,6 +25,6 @@
   "last_accessed_at": null,
   "worker_provider_id": null,
   "worker_model_id": null,
-  "last_reinforced_at": 1700000002000,
+  "last_reinforced_at": 1700000003000,
   "logical_id": "<uuid-0>"
 }

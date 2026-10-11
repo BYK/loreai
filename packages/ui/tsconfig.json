@@ -10,7 +10,9 @@
     "isolatedModules": true,
     "noUncheckedIndexedAccess": true,
     "paths": {
-      "~/*": ["./src/*"]
+      "~/*": ["./src/*"],
+      "@loreai/core/activity-query": ["../core/src/activity-query.ts"],
+      "@loreai/core/activity": ["../core/src/activity.ts"]
     }
   },
   "include": [

@@ -3,13 +3,23 @@ import { defineConfig } from "vitest/config";
 import solid from "vite-plugin-solid";
 
 const srcDir = fileURLToPath(new URL("./src", import.meta.url));
+const activityQuery = fileURLToPath(
+  new URL("../core/src/activity-query.ts", import.meta.url),
+);
+const activity = fileURLToPath(
+  new URL("../core/src/activity.ts", import.meta.url),
+);
 
 // Browser-side unit tests (Solid components, router, copied UI primitives,
 // API client). Runs under jsdom; no gateway, no database.
 export default defineConfig({
   plugins: [solid()],
   resolve: {
-    alias: { "~": srcDir },
+    alias: {
+      "~": srcDir,
+      "@loreai/core/activity-query": activityQuery,
+      "@loreai/core/activity": activity,
+    },
     conditions: ["development", "browser"],
   },
   test: {

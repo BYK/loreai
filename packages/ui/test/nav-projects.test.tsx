@@ -1,471 +1,152 @@
-/**
- * Sidebar project sections (#1918): pinned, recent, filter and "All
- * projects" — plus pure tests for `sectionProjects`/`byRecency` and the
- * `pins` localStorage store.
- */
 import { MemoryRouter, Route } from "@solidjs/router";
-import { fireEvent, render, screen } from "@solidjs/testing-library";
-import { createSignal } from "solid-js";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ProjectListBody } from "~/components/shell/ProjectListBody";
-import { byRecency, sectionProjects } from "~/components/shell/nav-projects";
+import { Nav } from "~/components/shell/Nav";
 import type { ProjectSummary } from "~/contracts";
-import { closeLoreDb, resetCache } from "~/db";
+import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import {
   pins,
   PINNED_PROJECTS_STORAGE_KEY,
   resetPinsStoreForTests,
 } from "~/state/pins";
+import {
+  resetSavedSearchesForTests,
+  savedSearches,
+} from "~/state/saved-searches";
 
-function project(
-  id: string,
-  overrides: Partial<ProjectSummary> = {},
-): ProjectSummary {
-  return {
-    id,
-    path: `/home/me/${id}`,
-    name: id,
-    git_remote: null,
-    created_at: 1_000,
-    knowledge_count: 0,
-    session_count: 0,
-    message_count: 0,
-    distillation_count: 0,
-    last_activity: null,
-    ...overrides,
-  };
-}
+const PROJECT: ProjectSummary = {
+  id: "p-lore",
+  path: "/home/me/lore",
+  name: "lore",
+  git_remote: "github.com/BYK/loreai",
+  created_at: 1_700_000_000_000,
+  knowledge_count: 1,
+  session_count: 1,
+  message_count: 1,
+  distillation_count: 0,
+  last_activity: 1_700_000_000_000,
+};
 
-function renderProjectList(
-  projects: ProjectSummary[] | undefined,
-  initialActiveProjectId: string | null = null,
-) {
-  const [currentProjects, setProjects] = createSignal(projects);
-  const [activeProjectId, setActiveProjectId] = createSignal(
-    initialActiveProjectId,
-  );
-  const rendered = render(() => (
+function mount(query = "in:inbox", activeProjectId: string | null = null) {
+  return render(() => (
     <MemoryRouter>
       <Route
         path="*"
-        component={() => {
-          const [query, setQuery] = createSignal("");
-          return (
-            <>
-              <label>
-                <span class="sr-only">Search list</span>
-                <input
-                  aria-label="Search list"
-                  data-testid="nav-project-filter"
-                  value={query()}
-                  onInput={(event) => setQuery(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") setQuery("");
-                  }}
-                />
-              </label>
-              <ProjectListBody
-                projects={currentProjects()}
-                activeProjectId={activeProjectId()}
-                query={query()}
-              />
-            </>
-          );
-        }}
+        component={() => (
+          <ConnectionContext.Provider value={createConnectionStore()}>
+            <Nav
+              activeProjectId={activeProjectId}
+              query={query}
+              projects={[PROJECT]}
+            />
+          </ConnectionContext.Provider>
+        )}
       />
     </MemoryRouter>
   ));
-  return { ...rendered, setProjects, setActiveProjectId };
 }
 
-/** Labels of all project rows under a given data-section. */
-function sectionLabels(section: string): string[] {
-  return [
-    ...document.querySelectorAll<HTMLElement>(`[data-section="${section}"]`),
-  ].map((el) => el.textContent ?? "");
-}
-
-beforeEach(async () => {
-  localStorage.clear();
-  resetPinsStoreForTests();
-  await closeLoreDb();
-});
-
-describe("project list sections", () => {
-  const SEVEN: ProjectSummary[] = [
-    // Shuffled created_at; order must come from last_activity.
-    project("bravo", { created_at: 5_000, last_activity: 5_000 }),
-    project("delta", { created_at: 3_000, last_activity: null }),
-    project("alpha", { created_at: 6_000, last_activity: 6_000 }),
-    project("golf", { created_at: 1_000, last_activity: null }),
-    project("echo", { created_at: 4_000, last_activity: 4_000 }),
-    project("foxtrot", { created_at: 2_000, last_activity: 3_000 }),
-    project("charlie", { created_at: 7_000, last_activity: 7_000 }),
-  ];
-
-  it("shows the 5 most recent under Recent and the rest behind All", async () => {
-    renderProjectList(SEVEN);
-    await screen.findByTestId("nav-project-filter");
-
-    expect(sectionLabels("recent")).toEqual([
-      "charlie0",
-      "alpha0",
-      "bravo0",
-      "echo0",
-      "foxtrot0",
-    ]);
-    // Null-activity projects land in All, by created_at desc.
-    const all = screen.getByTestId("nav-all-projects");
-    expect(all).toHaveTextContent("All projects (2)");
-    expect(all).toHaveAttribute("aria-expanded", "false");
-    expect(document.querySelector('[data-section="all"]')).toBeNull();
-
-    fireEvent.click(all);
-    expect(all).toHaveAttribute("aria-expanded", "true");
-    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
-  });
-
-  it("pin moves a project out of Recent into Pinned and persists", async () => {
-    renderProjectList(SEVEN);
-    await screen.findByTestId("nav-project-filter");
-
-    const pin = screen.getByRole("button", { name: "Pin echo" });
-    expect(pin).toHaveAttribute("aria-pressed", "false");
-    // Hidden only on hover-capable devices; touch users must see the control.
-    expect(pin.className).not.toMatch(/(^|\s)opacity-0(\s|$)/);
-    expect(pin.className).toContain("[@media(hover:hover)]:opacity-0");
-    fireEvent.click(pin);
-
-    expect(sectionLabels("pinned")).toEqual(["echo0"]);
-    expect(sectionLabels("recent")).toEqual([
-      "charlie0",
-      "alpha0",
-      "bravo0",
-      "foxtrot0",
-      "delta0",
-    ]);
-    expect(
-      JSON.parse(localStorage.getItem(PINNED_PROJECTS_STORAGE_KEY)!),
-    ).toEqual(["echo"]);
-
-    const unpin = screen.getByRole("button", { name: "Unpin echo" });
-    expect(unpin).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(unpin);
-    expect(sectionLabels("pinned")).toEqual([]);
-    expect(pins().pinned()).toEqual([]);
-    expect(localStorage.getItem(PINNED_PROJECTS_STORAGE_KEY)).toBe("[]");
-  });
-
-  it("pins survive an IndexedDB cache reset", async () => {
-    const { IDBFactory } = await import("./idb-globals");
-    pins().toggle("echo");
-    await resetCache({ factory: new IDBFactory() });
+describe("workspace activity navigation", () => {
+  beforeEach(() => {
+    localStorage.clear();
     resetPinsStoreForTests();
-    expect(pins().pinned()).toEqual(["echo"]);
-
-    renderProjectList(SEVEN);
-    await screen.findByTestId("nav-project-filter");
-    expect(sectionLabels("pinned")).toEqual(["echo0"]);
+    resetSavedSearchesForTests();
   });
 
-  it("filter shows matches (pinned included), Escape clears", async () => {
-    pins().toggle("delta");
-    renderProjectList(SEVEN);
-    const input = await screen.findByTestId("nav-project-filter");
+  it("highlights built-in activity searches and encodes their query in the URL", () => {
+    mount("type:session");
 
-    fireEvent.input(input, { target: { value: "a" } });
-    // 'a' matches alpha, bravo, delta, charlie — pinned delta included.
-    const matched = sectionLabels("matches");
-    expect(matched).toContain("alpha0");
-    expect(matched).toContain("delta0");
-    expect(document.querySelector('[data-section="recent"]')).toBeNull();
-    expect(screen.queryByTestId("nav-all-projects")).toBeNull();
-
-    fireEvent.input(input, { target: { value: "zzzzz" } });
-    expect(screen.getByText("No projects match")).toBeInTheDocument();
-
-    fireEvent.keyDown(input, { key: "Escape" });
-    expect(sectionLabels("recent").length).toBe(5);
+    const sessions = screen.getByRole("link", { name: "Sessions" });
+    expect(sessions).toHaveAttribute("href", "/?q=type%3Asession");
+    expect(sessions).toHaveClass("bg-selected");
+    expect(screen.getByTestId("nav-projects")).not.toHaveClass("bg-selected");
   });
 
-  it("does not duplicate pinned projects in filtered matches", async () => {
-    pins().toggle("delta");
-    renderProjectList(SEVEN);
-    const input = await screen.findByTestId("nav-project-filter");
+  it("pins the active project and links to a project-filtered activity search", async () => {
+    mount("in:inbox", PROJECT.id);
 
-    fireEvent.input(input, { target: { value: "del" } });
-
-    expect(screen.queryByRole("heading", { name: "Pinned" })).toBeNull();
-    expect(sectionLabels("matches")).toEqual(["delta0"]);
-    expect(
-      screen
-        .getAllByTestId("nav-project")
-        .filter((row) => row.textContent?.startsWith("delta")),
-    ).toHaveLength(1);
-  });
-
-  it("does not render an empty Recent section", async () => {
-    const projects = SEVEN.slice(0, 3);
-    for (const item of projects) pins().toggle(item.id);
-
-    renderProjectList(projects);
-    await screen.findAllByTestId("nav-project");
-
-    expect(screen.queryByRole("heading", { name: "Recent" })).toBeNull();
-  });
-
-  it("keeps the workspace query usable while all projects become pinned", async () => {
-    renderProjectList(SEVEN);
-    const input = await screen.findByTestId("nav-project-filter");
-
-    fireEvent.input(input, { target: { value: "a" } });
-    for (const item of SEVEN) pins().toggle(item.id);
-
-    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
-    fireEvent.keyDown(input, { key: "Escape" });
-
-    expect(screen.queryByRole("heading", { name: "Matches" })).toBeNull();
-    expect(screen.getByRole("heading", { name: "Pinned" })).toBeInTheDocument();
-    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
-  });
-
-  it("keeps an active All project in place and expands its section", async () => {
-    renderProjectList(SEVEN, "delta");
-
-    const active = screen.getByRole("link", { name: /delta/ });
-    expect(active).toHaveAttribute("aria-current", "page");
-    expect(active).toHaveAttribute("data-section", "all");
-    expect(active).toHaveAttribute("data-list-key", "all:delta");
-    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
-    expect(screen.getAllByTestId("nav-project")).toHaveLength(7);
-    expect(screen.getByTestId("nav-all-projects")).toHaveAttribute(
-      "aria-expanded",
-      "true",
+    fireEvent.click(screen.getByTestId("toggle-active-project-pin"));
+    const pinned = await screen.findByTestId("pinned-project-search");
+    expect(pinned).toHaveTextContent("lore");
+    expect(pinned).toHaveAttribute("href", "/?q=project%3Ap-lore");
+    expect(pins().pinned()).toEqual(["p-lore"]);
+    expect(localStorage.getItem(PINNED_PROJECTS_STORAGE_KEY)).toBe(
+      '["p-lore"]',
     );
   });
 
-  it("lets All collapse after expanding for an active project", async () => {
-    renderProjectList(SEVEN, "delta");
+  it("saves, edits, and deletes a validated search", async () => {
+    mount("type:session");
+    fireEvent.click(screen.getByTestId("save-search-open"));
+    const title = await screen.findByTestId("saved-search-title");
+    fireEvent.input(title, { target: { value: "Sessions" } });
+    fireEvent.click(screen.getByTestId("saved-search-submit"));
 
-    const all = screen.getByTestId("nav-all-projects");
-    expect(all).toHaveAttribute("aria-expanded", "true");
-    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
-
-    fireEvent.click(all);
-
-    expect(all).toHaveAttribute("aria-expanded", "false");
-    expect(document.querySelector('[data-section="all"]')).toBeNull();
-  });
-
-  it("keeps All collapsed across project refreshes until the active id changes", async () => {
-    const { setProjects, setActiveProjectId } = renderProjectList(
-      SEVEN,
-      "delta",
+    expect(await screen.findByTestId("saved-search")).toHaveTextContent(
+      "Sessions",
     );
-    const all = screen.getByTestId("nav-all-projects");
+    expect(savedSearches().list()).toHaveLength(1);
 
-    expect(all).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(all);
-    expect(all).toHaveAttribute("aria-expanded", "false");
-
-    setProjects([...SEVEN]);
-    expect(all).toHaveAttribute("aria-expanded", "false");
-
-    setActiveProjectId("golf");
-    expect(all).toHaveAttribute("aria-expanded", "true");
-  });
-
-  it("expands All when an active project loads after activation", async () => {
-    const { setProjects } = renderProjectList(undefined, "delta");
-
-    expect(screen.queryByTestId("nav-all-projects")).toBeNull();
-    setProjects(SEVEN);
-
-    const all = await screen.findByTestId("nav-all-projects");
-    expect(all).toHaveAttribute("aria-expanded", "true");
-    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
-  });
-
-  it("keeps search available without an All button for ≤5 projects", async () => {
-    renderProjectList(SEVEN.slice(0, 3));
-    await screen.findAllByTestId("nav-project");
-    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-all-projects")).toBeNull();
-    expect(sectionLabels("recent")).toEqual(["alpha0", "bravo0", "delta0"]);
-  });
-});
-
-describe("sectionProjects / byRecency", () => {
-  it("partitions input into pinned ∪ recent ∪ rest", () => {
-    const list = [
-      project("a", { last_activity: 3 }),
-      project("b", { last_activity: 1 }),
-      project("c", { last_activity: 2 }),
-    ];
-    const sections = sectionProjects(list, ["b"], "");
-    expect(sections.pinned.map((p) => p.id)).toEqual(["b"]);
-    expect(
-      [...sections.pinned, ...sections.recent, ...sections.rest]
-        .map((p) => p.id)
-        .sort(),
-    ).toEqual(["a", "b", "c"]);
-  });
-
-  it("keeps pin order and ignores unknown pinned ids", () => {
-    const list = [project("a"), project("b")];
-    const sections = sectionProjects(list, ["b", "ghost", "a"], "");
-    expect(sections.pinned.map((p) => p.id)).toEqual(["b", "a"]);
-  });
-
-  it("keeps the active unpinned project in its recency-derived section", () => {
-    const list = Array.from({ length: 7 }, (_, index) =>
-      project(`p${index}`, { last_activity: 7 - index }),
+    fireEvent.click(screen.getByTestId("saved-search-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("saved-search-title")).toHaveValue("Sessions"),
     );
+    fireEvent.input(screen.getByTestId("saved-search-title"), {
+      target: { value: "Recent sessions" },
+    });
+    fireEvent.input(screen.getByTestId("saved-search-query"), {
+      target: { value: "type:session with:codex" },
+    });
+    fireEvent.click(screen.getByTestId("saved-search-submit"));
+    expect(await screen.findByTestId("saved-search")).toHaveTextContent(
+      "Recent sessions",
+    );
+    expect(savedSearches().list()[0]?.query).toBe("type:session with:codex");
 
-    const active = sectionProjects(list, [], "", "p6");
-    expect(active.recent.map((p) => p.id)).toEqual([
-      "p0",
-      "p1",
-      "p2",
-      "p3",
-      "p4",
-    ]);
-    expect(active.rest.map((p) => p.id)).toEqual(["p5", "p6"]);
-    expect(
-      [...active.recent, ...active.rest].filter((p) => p.id === "p6"),
-    ).toHaveLength(1);
-
-    const pinned = sectionProjects(list, ["p6"], "", "p6");
-    expect(pinned.pinned.map((p) => p.id)).toEqual(["p6"]);
-    expect(pinned.recent.map((p) => p.id)).toEqual([
-      "p0",
-      "p1",
-      "p2",
-      "p3",
-      "p4",
-    ]);
-    expect(pinned.rest.map((p) => p.id)).toEqual(["p5"]);
-
-    const withoutActive = sectionProjects(list, [], "", null);
-    expect(withoutActive.recent.map((p) => p.id)).toEqual([
-      "p0",
-      "p1",
-      "p2",
-      "p3",
-      "p4",
-    ]);
-    expect(withoutActive.rest.map((p) => p.id)).toEqual(["p5", "p6"]);
+    vi.stubGlobal("confirm", () => true);
+    fireEvent.click(screen.getByTestId("saved-search-delete"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("saved-search")).toBeNull(),
+    );
+    expect(savedSearches().list()).toEqual([]);
+    vi.unstubAllGlobals();
   });
 
-  it("byRecency breaks activity ties by created_at desc", () => {
-    const a = project("a", { last_activity: 5, created_at: 1 });
-    const b = project("b", { last_activity: 5, created_at: 2 });
-    expect(byRecency(a, b)).toBeGreaterThan(0);
-    const noActivity = project("c", { last_activity: null, created_at: 9 });
-    expect(byRecency(noActivity, a)).toBeGreaterThan(0);
+  it("disables saving invalid search grammar", async () => {
+    mount();
+    fireEvent.click(screen.getByTestId("save-search-open"));
+    fireEvent.input(await screen.findByTestId("saved-search-title"), {
+      target: { value: "Bad query" },
+    });
+    fireEvent.input(screen.getByTestId("saved-search-query"), {
+      target: { value: "unknown:value" },
+    });
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByTestId("saved-search-submit")).toBeDisabled();
   });
 
-  it("matches is null for empty and whitespace filters", () => {
-    const list = [project("a")];
-    expect(sectionProjects(list, [], "").matches).toBeNull();
-    expect(sectionProjects(list, [], "   ").matches).toBeNull();
-  });
-
-  it("matches on name or path, case-insensitive", () => {
-    const list = [
-      project("alpha", { name: "ALPHA", last_activity: 2 }),
-      project("beta", { path: "/x/ALPHA-path", last_activity: 1 }),
-      project("gamma", { last_activity: 3 }),
-    ];
-    expect(
-      sectionProjects(list, [], "alpha").matches?.map((p) => p.id),
-    ).toEqual(["alpha", "beta"]);
-  });
-
-  it("fuzzy match: typo finds the project and flags approximate", () => {
-    const list = [
-      project("loreai", { last_activity: 2 }),
-      project("other-thing", { last_activity: 1 }),
-    ];
-    const sections = sectionProjects(list, [], "loreia");
-    expect(sections.matches?.map((p) => p.id)).toEqual(["loreai"]);
-    expect(sections.approximate).toBe(true);
-  });
-
-  it("exact substring ranks above a fuzzy hit; approximate stays false", () => {
-    const list = [
-      // More recent but only a fuzzy hit for "loreai".
-      project("loreia", { last_activity: 5 }),
-      project("loreai", { last_activity: 1 }),
-    ];
-    const sections = sectionProjects(list, [], "loreai");
-    expect(sections.matches?.map((p) => p.id)).toEqual(["loreai", "loreia"]);
-    expect(sections.approximate).toBe(false);
-  });
-
-  it("approximate hint renders only when no hit is exact", async () => {
-    const list = [
-      project("loreai", { last_activity: 6 }),
-      project("alpha", { last_activity: 5 }),
-      project("bravo", { last_activity: 4 }),
-      project("charlie", { last_activity: 3 }),
-      project("delta", { last_activity: 2 }),
-      project("echo", { last_activity: 1 }),
-    ];
-    renderProjectList(list);
-    const input = await screen.findByTestId("nav-project-filter");
-
-    fireEvent.input(input, { target: { value: "loreia" } });
-    expect(sectionLabels("matches")).toEqual(["loreai0"]);
-    expect(
-      screen.getByTestId("nav-project-filter-approximate"),
-    ).toBeInTheDocument();
-
-    fireEvent.input(input, { target: { value: "loreai" } });
-    expect(sectionLabels("matches")).toEqual(["loreai0"]);
-    expect(screen.queryByTestId("nav-project-filter-approximate")).toBeNull();
-
-    fireEvent.input(input, { target: { value: "zzzzz" } });
-    expect(screen.getByText("No projects match")).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-project-filter-approximate")).toBeNull();
-  });
-
-  it("keeps the active project in filtered matches without duplicating it", () => {
-    const list = [
-      project("active", { name: "Pinned project", last_activity: 3 }),
-      project("other", { name: "Other project", last_activity: 2 }),
-    ];
-
-    const unmatched = sectionProjects(list, ["active"], "no match", "active");
-    expect(unmatched.matches?.map((p) => p.id)).toEqual(["active"]);
-
-    const matched = sectionProjects(list, ["active"], "pinned", "active");
-    expect(matched.matches?.map((p) => p.id)).toEqual(["active"]);
-  });
-});
-
-describe("pins store", () => {
-  it("malformed JSON in storage reads as []", () => {
-    localStorage.setItem(PINNED_PROJECTS_STORAGE_KEY, "{not json");
-    resetPinsStoreForTests();
-    expect(pins().pinned()).toEqual([]);
-  });
-
-  it("storage failures are swallowed; in-memory toggle still works", () => {
-    const spy = vi
-      .spyOn(Storage.prototype, "setItem")
-      .mockImplementation(() => {
-        throw new Error("quota");
+  it.each(["", "   "])(
+    "requires a non-empty query before saving (%j)",
+    async (query) => {
+      mount();
+      fireEvent.click(screen.getByTestId("save-search-open"));
+      fireEvent.input(await screen.findByTestId("saved-search-title"), {
+        target: { value: "Empty search" },
       });
-    try {
-      pins().toggle("a");
-      expect(pins().isPinned("a")).toBe(true);
-      expect(pins().pinned()).toEqual(["a"]);
-      pins().toggle("a");
-      expect(pins().isPinned("a")).toBe(false);
-    } finally {
-      spy.mockRestore();
-    }
-  });
+      fireEvent.input(screen.getByTestId("saved-search-query"), {
+        target: { value: query },
+      });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Query is required",
+      );
+      const save = screen.getByTestId("saved-search-submit");
+      expect(save).toBeDisabled();
+      const form = save.closest("form");
+      if (!form) throw new Error("Save search form is missing");
+      fireEvent.submit(form);
+      expect(savedSearches().list()).toEqual([]);
+    },
+  );
 });

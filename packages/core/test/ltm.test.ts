@@ -59,6 +59,38 @@ describe("ltm", () => {
     expect(entry?.confidence).toBe(1.0);
   });
 
+  test("preserves writer origin across creates and appended versions", () => {
+    const patternId = ltm.create({
+      projectPath: PROJECT,
+      category: "pattern",
+      title: "Pattern origin",
+      content: "Created by pattern extraction.",
+      scope: "project",
+      origin: "pattern",
+    });
+    expect(ltm.get(patternId)?.origin).toBe("pattern");
+
+    const userId = ltm.create({
+      projectPath: PROJECT,
+      category: "preference",
+      title: "User origin",
+      content: "Created by a user.",
+      scope: "project",
+      createdBy: "user-1",
+      origin: "pattern",
+    });
+    expect(ltm.get(userId)?.origin).toBe("user");
+
+    ltm.update(userId, {
+      content: "Updated from an import.",
+      origin: "import",
+    });
+    expect(ltm.getByLogical(userId)?.origin).toBe("import");
+
+    ltm.appendVersion(userId, { content: "Version without an override." });
+    expect(ltm.getByLogical(userId)?.origin).toBe("import");
+  });
+
   test("create global knowledge entry", () => {
     const id = ltm.create({
       category: "preference",

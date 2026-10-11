@@ -21,6 +21,7 @@ import {
   modelTidesMutationResult,
   modelUsageUploadState,
   accountStatus,
+  activityPage,
   crossProjectKnowledgeEntry,
   ApiError,
   apiErrorBody,
@@ -81,6 +82,7 @@ import {
   warmingSnapshot,
   type AccountStatus,
   type ConflictingEntry,
+  type ActivityPage,
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
@@ -380,6 +382,24 @@ export function createApiClient(options: ApiClientOptions = {}) {
   }
 
   return {
+    fetchActivity(
+      options: {
+        q: string;
+        cursor?: string | null;
+        limit?: number;
+      },
+      signal?: AbortSignal,
+    ): Promise<ActivityPage> {
+      return getJson(
+        apiPath(["activity"], {
+          q: options.q,
+          cursor: options.cursor,
+          limit: options.limit,
+        }),
+        activityPage,
+        signal,
+      );
+    },
     listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
       return getJson("/projects", projectList, signal);
     },

@@ -691,6 +691,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
             content: entry.content,
             metadata,
             replaceMetadata: true,
+            origin: "import",
           });
         }
       } else if (ltm.isTombstoned(entry.id)) {
@@ -720,6 +721,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
               content: entry.content,
               metadata,
               replaceMetadata: true,
+              origin: "import",
             });
           }
         } else {
@@ -732,6 +734,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
             content: entry.content,
             scope: "project",
             crossProject: false,
+            origin: "import",
             id: entry.id,
             ...(entry.enforce !== undefined
               ? { metadata: { enforce: entry.enforce } }
@@ -756,6 +759,7 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
           content: entry.content,
           scope: "project",
           crossProject: false,
+          origin: "import",
           ...(entry.enforce !== undefined
             ? { metadata: { enforce: entry.enforce } }
             : {}),

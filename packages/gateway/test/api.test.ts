@@ -176,6 +176,94 @@ describe("GET /api/v1/stats", () => {
   });
 });
 
+describe("GET /api/v1/activity", () => {
+  it("returns the default inbox activity page", async () => {
+    await seedProject();
+    const page = await apiJSON<{
+      items: Array<{
+        kind: string;
+        id: string;
+        project_id: string;
+        project_name: string;
+        title: string;
+        snippet: string;
+        participants: Array<{ id: string; kind: string; label: string }>;
+        last_activity_at: number;
+        total: number;
+        match: "exact" | "fuzzy";
+      }>;
+      next_cursor: string | null;
+    }>("/api/v1/activity");
+    expect(page.items.length).toBeGreaterThan(0);
+    expect(page.items[0]).toMatchObject({
+      kind: "knowledge",
+      project_name: "test-project",
+      match: "exact",
+    });
+    expect(page.items[0]?.id).toBeTruthy();
+    expect(page.items[0]?.participants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "curator", kind: "lore" }),
+      ]),
+    );
+  });
+
+  it("returns detailed errors for invalid limits and queries", async () => {
+    const badLimit = await api("/api/v1/activity?limit=201");
+    expect(badLimit.status).toBe(400);
+    expect(await badLimit.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_limit",
+        details: { min: 1, max: 200 },
+      },
+    });
+
+    const badQuery = await api("/api/v1/activity?q=unknown%3Avalue");
+    expect(badQuery.status).toBe(400);
+    expect(await badQuery.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "invalid_query",
+        details: [
+          expect.objectContaining({ token: "unknown:value", start: 0 }),
+        ],
+      },
+    });
+  });
+
+  it("rejects malformed cursors and cursors bound to a different query", async () => {
+    const { projectPath } = await seedProject();
+    const { ltm } = await import("@loreai/core");
+    ltm.create({
+      projectPath,
+      category: "decision",
+      title: "Second activity entry",
+      content: "A second entry for cursor paging.",
+      scope: "project",
+    });
+
+    const first = await apiJSON<{
+      next_cursor: string | null;
+    }>("/api/v1/activity?q=type%3Aknowledge&limit=1");
+    expect(first.next_cursor).not.toBeNull();
+
+    const mismatched = await api(
+      `/api/v1/activity?q=type%3Asession&cursor=${encodeURIComponent(first.next_cursor!)}`,
+    );
+    expect(mismatched.status).toBe(400);
+    expect(await mismatched.json()).toMatchObject({
+      error: { type: "invalid_cursor" },
+    });
+
+    const malformed = await api("/api/v1/activity?cursor=%3F%3F");
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({
+      error: { type: "invalid_cursor" },
+    });
+  });
+});
+
 describe("GET /api/v1/projects/:id/knowledge", () => {
   it("returns knowledge entries for a project", async () => {
     const { projectId } = await seedProject();
@@ -234,7 +322,7 @@ describe("GET /api/v1/knowledge/:id", () => {
 
   it("supports prefix resolution", async () => {
     const { knowledgeId } = await seedProject();
-    const prefix = knowledgeId.slice(0, 8);
+    const prefix = knowledgeId.slice(0, 20);
     const entry = await apiJSON<{ id: string }>(`/api/v1/knowledge/${prefix}`);
     expect(entry.id).toBe(knowledgeId);
   });
@@ -2116,6 +2204,7 @@ describe("GET /api/v1/projects/:id/knowledge — legacy shape is unchanged", () 
         "last_reinforced_at",
         "logical_id",
         "metadata",
+        "origin",
         "project_id",
         "promoted_at",
         "promotion_status",

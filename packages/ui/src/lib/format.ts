@@ -1,4 +1,4 @@
-import { formatRelative } from "date-fns";
+import { format, formatRelative } from "date-fns";
 
 /** Core timestamps are epoch milliseconds; `0`/null mean "unknown". */
 function parseDate(value: number | null | undefined): Date | null {
@@ -20,6 +20,35 @@ export function formatWhen(
   const date = parseDate(value);
   if (!date) return "—";
   return formatRelative(date, now);
+}
+
+export function formatActivityTime(
+  value: number | null | undefined,
+  now = Date.now(),
+): string {
+  const date = parseDate(value);
+  if (!date) return "—";
+  const delta = date.getTime() - now;
+  const elapsed = Math.abs(delta);
+  if (elapsed < 60_000) return "just now";
+  const relative = new Intl.RelativeTimeFormat(undefined, {
+    numeric: "always",
+  });
+  if (elapsed < 60 * 60_000) {
+    return relative.format(Math.trunc(delta / 60_000), "minute");
+  }
+  if (elapsed < 24 * 60 * 60_000) {
+    return relative.format(Math.trunc(delta / (60 * 60_000)), "hour");
+  }
+  if (elapsed < 7 * 24 * 60 * 60_000) {
+    return relative.format(Math.trunc(delta / (24 * 60 * 60_000)), "day");
+  }
+  return format(
+    date,
+    date.getFullYear() === new Date(now).getFullYear()
+      ? "MMM d"
+      : "MMM d, yyyy",
+  );
 }
 
 export function formatFullDate(value: number | null | undefined): string {

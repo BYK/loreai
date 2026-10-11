@@ -1178,7 +1178,7 @@ describe("keep content from a merged entry", () => {
   function rowOf(id: string) {
     return db()
       .query(
-        "SELECT id, version, project_id, cross_project, is_deleted, title, content FROM knowledge WHERE logical_id = ? AND is_current = 1",
+        "SELECT id, version, project_id, cross_project, is_deleted, title, content, origin FROM knowledge WHERE logical_id = ? AND is_current = 1",
       )
       .get(ltm.logicalIdOf(id)) as {
       id: string;
@@ -1188,6 +1188,7 @@ describe("keep content from a merged entry", () => {
       is_deleted: number;
       title: string;
       content: string;
+      origin: string | null;
     };
   }
 
@@ -1423,6 +1424,7 @@ describe("keep content from a merged entry", () => {
   test("private survivor takes a private source's content in the project pool", () => {
     const p1 = createEntry("CF Private Keep Title");
     const p2 = createEntry("CF Private Drop Title");
+    ltm.update(p1, { origin: "import" });
     const receipt = apply(
       request([{ ...decision(p1, p2), contentFromId: p2 }], { projectId }),
     );
@@ -1432,6 +1434,7 @@ describe("keep content from a merged entry", () => {
     expect(after.content).toBe("Content for CF Private Drop Title");
     expect(after.project_id).toBe(projectId);
     expect(after.cross_project).toBe(0);
+    expect(after.origin).toBe("curator");
     expect(isLive(p2)).toBe(false);
   });
 });

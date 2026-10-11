@@ -264,6 +264,7 @@ export type KnowledgeEntry = {
   updated_by: string | null;
   sensitivity: Sensitivity;
   promotion_status: PromotionStatus | null;
+  origin: KnowledgeOrigin | null;
   promoted_at: number | null;
   approval_status: ApprovalStatus;
   approved_by: string | null;
@@ -307,7 +308,7 @@ export class TitleConflictError extends Error {
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, tenant_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
+  "id, tenant_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, origin, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
 
 /** Same columns with table alias prefix for use in JOIN queries. `confidence` and
  *  `last_reinforced_at` live on the metric register (alias `m`), not the immutable
@@ -315,7 +316,9 @@ const KNOWLEDGE_COLS =
  *  `LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id` (LEFT + COALESCE
  *  default mirrors the knowledge_current view, so a meta-less row never vanishes). */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.tenant_id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, COALESCE(m.confidence, 1.0) AS confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, m.last_reinforced_at, k.logical_id";
+  "k.id, k.tenant_id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, COALESCE(m.confidence, 1.0) AS confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.origin, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, m.last_reinforced_at, k.logical_id";
+
+export type KnowledgeOrigin = "curator" | "pattern" | "import" | "user";
 
 /**
  * Upsert the metric-register row for a logical entry (A2 sub-PR 3b, #823).
@@ -433,6 +436,8 @@ export function create(input: {
   confidence?: number;
   /** User ID who created this entry. Null for system-created entries. */
   createdBy?: string;
+  /** Writer provenance. createdBy, when provided, takes precedence as user. */
+  origin?: KnowledgeOrigin;
   /** Sensitivity classification — guides auto-promotion decisions. Default 'normal'. */
   sensitivity?: Sensitivity;
   /** Worker model providerID that produced this entry (curator / pattern-extract). */
@@ -454,6 +459,8 @@ export function create(input: {
   // IF-2: Global entries (pid=null) must be cross-project to avoid a data hole
   // where forSession() can't find them in either the project or cross-project pool.
   const crossProject = pid === null ? true : (input.crossProject ?? false);
+  const origin =
+    input.createdBy !== undefined ? "user" : (input.origin ?? "curator");
 
   // Build the update payload — forward confidence when the caller provided one
   // so the curator's scoring intent isn't silently dropped on dedup.
@@ -555,8 +562,8 @@ export function create(input: {
   }
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, tenant_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata, approval_status, approved_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, tenant_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata, approval_status, approved_at, origin)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -577,6 +584,7 @@ export function create(input: {
       stringifyMetadata(input.metadata),
       approvalStatus,
       null,
+      origin,
     );
   // The mutable metrics live on the register, keyed by logical_id (A2 3b). A fresh
   // entry starts its decay clock now (last_reinforced_at = now).
@@ -613,6 +621,7 @@ export function appendVersion(
     category?: string;
     crossProject?: boolean;
     isDeleted?: boolean;
+    origin?: KnowledgeOrigin;
     /**
      * Per-version metadata. Omit the property to forward-copy the current
      * value; pass `null` or `{}` to clear it deliberately.
@@ -658,14 +667,15 @@ export function appendVersion(
         `INSERT INTO knowledge (
            id, tenant_id, project_id, category, title, content, source_session, cross_project,
            created_at, updated_at, metadata, ${embCol}created_by,
-           updated_by, sensitivity, promotion_status, promoted_at, approval_status,
+           updated_by, sensitivity, promotion_status, origin, promoted_at, approval_status,
            approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
            worker_provider_id, worker_model_id,
            logical_id, version, is_deleted, is_current)
          SELECT
             ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
            source_session, COALESCE(?, cross_project), created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
-           updated_by, sensitivity, promotion_status, promoted_at,
+           updated_by, sensitivity, promotion_status,
+           CASE WHEN ? THEN ? ELSE origin END, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
            logical_id, version + 1, ?, 1
@@ -688,6 +698,10 @@ export function appendVersion(
           ? 1
           : 0,
         stringifyMetadata(overrides.metadata),
+        Object.hasOwn(overrides, "origin") && overrides.origin !== undefined
+          ? 1
+          : 0,
+        overrides.origin ?? null,
         overrides.isDeleted ? 1 : 0,
         cur.id,
         currentTenantId(),
@@ -1111,6 +1125,7 @@ export function update(
     content?: string;
     confidence?: number;
     updatedBy?: string;
+    origin?: KnowledgeOrigin;
     sensitivity?: Sensitivity;
     /**
      * #627 Phase 2: provenance for the edit. Applied ONLY when a content change
@@ -1163,6 +1178,7 @@ export function update(
     input.replaceMetadata === true &&
     Object.hasOwn(input, "metadata") &&
     JSON.stringify(cur.metadata) !== JSON.stringify(input.metadata ?? null);
+  const origin = input.origin;
   if (contentChanged || titleChanged || metadataChanged) {
     // Before `replaceMetadata`, an empty metadata object has always meant
     // "no fresh provenance" and therefore forward-copies the current value.
@@ -1178,6 +1194,7 @@ export function update(
     appendVersion(logicalId, {
       ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
       ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(origin !== undefined ? { origin } : {}),
       ...metadataOverride,
     });
     appended = true;
@@ -1192,6 +1209,9 @@ export function update(
   }
   if (input.sensitivity !== undefined) {
     sets.push(sql`sensitivity = ${input.sensitivity}`);
+  }
+  if (origin !== undefined) {
+    sets.push(sql`origin = ${origin}`);
   }
   // Target the CURRENT version (the freshly-appended one if content changed).
   sql.run(
@@ -3491,6 +3511,7 @@ export async function forSession(
         category: "lat.md",
         title: `[${section.file}] ${section.heading}`,
         content: display,
+        origin: "import",
         source_session: null,
         cross_project: 0,
         confidence: 1.0,
@@ -3668,6 +3689,7 @@ async function loadContextSourceCandidates(
     updated_by: null,
     sensitivity: "normal",
     promotion_status: null,
+    origin: null,
     promoted_at: null,
     approval_status: "auto",
     approved_by: null,

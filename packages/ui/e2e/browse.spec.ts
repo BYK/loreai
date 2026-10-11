@@ -13,17 +13,12 @@ test.describe("real data browsing", () => {
   test("projects → knowledge → document, with stable ids in the URL", async ({
     page,
   }) => {
-    await page.goto("/ui");
+    const projects = await (await page.request.get("/api/v1/projects")).json();
+    const lore = projects.find(
+      (project: { name: string }) => project.name === "lore",
+    );
+    await page.goto(`/ui/projects/${lore.id}`);
     await expectConnectionStatus(page);
-
-    // The workspace list stays mounted as project routes render in the document pane.
-    const project = page
-      .locator('[data-pane="list"]')
-      .getByTestId("nav-project")
-      .filter({ hasText: "lore" });
-    await expect(project).toBeVisible();
-    await project.click();
-    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
 
     await page.getByRole("link", { name: /Browse knowledge/ }).click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/knowledge$/);

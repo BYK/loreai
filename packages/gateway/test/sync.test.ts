@@ -98,6 +98,7 @@ const REMOTE_COLUMNS: Record<string, Set<string>> = {
     "updated_by",
     "sensitivity",
     "promotion_status",
+    "origin",
     "created_at",
     "updated_at",
     ...SYNC_COLS,

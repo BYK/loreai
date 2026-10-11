@@ -4,6 +4,12 @@ import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
 
 const srcDir = fileURLToPath(new URL("./src", import.meta.url));
+const activityQuery = fileURLToPath(
+  new URL("../core/src/activity-query.ts", import.meta.url),
+);
+const activity = fileURLToPath(
+  new URL("../core/src/activity.ts", import.meta.url),
+);
 
 // The gateway serves the built SPA under /ui and /ui/*; the dev server
 // mirrors that prefix so client-side routes and asset URLs are identical in
@@ -15,7 +21,11 @@ export default defineConfig({
   base: "/ui/",
   plugins: [solid(), tailwindcss()],
   resolve: {
-    alias: { "~": srcDir },
+    alias: {
+      "~": srcDir,
+      "@loreai/core/activity-query": activityQuery,
+      "@loreai/core/activity": activity,
+    },
   },
   build: {
     outDir: "dist",

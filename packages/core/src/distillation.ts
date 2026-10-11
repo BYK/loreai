@@ -1334,6 +1334,7 @@ async function distillSegment(input: {
           content: pat.content,
           session: input.sessionID,
           scope: "project",
+          origin: "pattern",
           workerProviderID: input.model?.providerID,
           workerModelID: input.model?.modelID,
           // #627 Phase 1: stamp gitHead from the session-start probe.
@@ -1414,6 +1415,7 @@ async function distillSegment(input: {
               content: `Behavioral pattern detected across ${sessionCount} sessions (action: ${tag}). The user consistently demonstrates this behavior.`,
               session: input.sessionID,
               scope: "project",
+              origin: "pattern",
               confidence: 0.8,
               workerProviderID: input.model?.providerID,
               workerModelID: input.model?.modelID,
@@ -1473,6 +1475,7 @@ async function distillSegment(input: {
               content: toolTrace.toolGotchaContent(stat),
               session: input.sessionID,
               scope: "project",
+              origin: "pattern",
               confidence: 0.75,
               workerProviderID: input.model?.providerID,
               workerModelID: input.model?.modelID,
@@ -1667,6 +1670,7 @@ async function metaDistillInner(input: {
           content: pat.content,
           session: input.sessionID,
           scope: "project",
+          origin: "pattern",
           workerProviderID: input.model?.providerID,
           workerModelID: input.model?.modelID,
           // #627 Phase 1: stamp gitHead from the session-start probe.

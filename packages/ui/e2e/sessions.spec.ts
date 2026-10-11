@@ -50,10 +50,14 @@ test.describe("session titles and search", () => {
     );
     await expect(page.getByText("Sessions matching “outbox”")).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Refactor the sync outbox pruning/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Refactor the sync outbox pruning/ }),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Investigate FTS tokenizer/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Investigate FTS tokenizer/ }),
     ).toBeHidden();
 
     // Clearing the box and submitting again restores the unfiltered list.
@@ -63,7 +67,9 @@ test.describe("session titles and search", () => {
       new RegExp(`/projects/${projectId}/sessions$`),
     );
     await expect(
-      page.getByRole("link", { name: /Investigate FTS tokenizer diacritics/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Investigate FTS tokenizer diacritics/ }),
     ).toBeVisible();
   });
 
@@ -80,10 +86,14 @@ test.describe("session titles and search", () => {
   test("deep link with q renders the filtered list", async ({ page }) => {
     const projectId = await openSessions(page, "?q=diacritics");
     await expect(
-      page.getByRole("link", { name: /Investigate FTS tokenizer diacritics/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Investigate FTS tokenizer diacritics/ }),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Refactor the sync outbox/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Refactor the sync outbox/ }),
     ).toBeHidden();
     void projectId;
   });
@@ -96,7 +106,9 @@ test.describe("session titles and search", () => {
     await openSessions(page, "?q=outbxo");
     await expect(page.getByTestId("session-list-approximate")).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Refactor the sync outbox pruning/ }),
+      page
+        .getByTestId("document-pane")
+        .getByRole("link", { name: /Refactor the sync outbox pruning/ }),
     ).toBeVisible();
     await expect(page.getByTestId("session-match-fuzzy")).toHaveCount(1);
 

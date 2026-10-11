@@ -14,7 +14,8 @@ function focusName(page: import("@playwright/test").Page) {
     if (closestTestId?.startsWith("theme-")) return closestTestId;
     if (closestTestId?.startsWith("pane-")) return closestTestId;
     if (active.matches('[data-testid="nav-projects"]')) return "nav-projects";
-    if (active.matches('[data-testid="nav-project"]')) return "nav-project";
+    if (active.matches('[data-testid="pinned-project-search"]'))
+      return "pinned-project-search";
     return active.getAttribute("aria-label") ?? active.tagName.toLowerCase();
   });
 }
@@ -50,9 +51,6 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     const lore = projects.find(
       (item: { name: string }) => item.name === "lore",
     );
-    const scratch = projects.find(
-      (item: { name: string }) => item.name === "scratch",
-    );
     await page.goto(`/ui/projects/${lore.id}/knowledge`);
     test.skip(
       !(await page.getByTestId("open-nav").isVisible()),
@@ -73,12 +71,10 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     await drawer.getByTestId("nav-projects").click();
     await expect(drawer).toHaveCount(0);
     await expect(opener).toBeFocused();
-    await page
-      .locator('[data-pane="list"]')
-      .getByTestId("nav-project")
-      .filter({ hasText: "scratch" })
-      .click();
-    await expect(page).toHaveURL(`/ui/projects/${scratch.id}`);
+    await page.getByTestId("activity-item").first().click();
+    await expect(page).toHaveURL(
+      /\/ui\/(projects\/[^/]+\/(sessions|knowledge)\/[^/?]+|contradictions(?:\/[^/?]+)?|promotions(?:\/[^/?]+)?)$/,
+    );
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({
@@ -115,11 +111,12 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       await page.goto(path);
       await expect(page.getByTestId(marker)).toBeVisible();
       await page.getByTestId("theme-dark").click();
+      await page.getByTestId("pane-min-list").click();
       const nav = page.getByTestId(navId);
       await nav.focus();
       await expect(nav).toBeFocused();
       let reachedMain = false;
-      for (let i = 0; i < 32; i++) {
+      for (let i = 0; i < 64; i++) {
         await page.keyboard.press("Tab");
         reachedMain = await page.evaluate(
           () => document.activeElement?.closest("main") !== null,

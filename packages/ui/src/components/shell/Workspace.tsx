@@ -1,5 +1,13 @@
 import type { Component, JSX } from "solid-js";
-import { children, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import {
+  children,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  Show,
+} from "solid-js";
 import {
   A,
   type RouteSectionProps,
@@ -11,14 +19,12 @@ import * as DialogPrimitive from "@kobalte/core/dialog";
 import * as PopoverPrimitive from "@kobalte/core/popover";
 
 import { useWorkspace } from "~/routes/workspace";
-import { ProjectListBody } from "~/components/shell/ProjectListBody";
+import { ActivityListBody } from "~/components/shell/ActivityListBody";
 import { ParticipantsPane } from "~/components/shell/ParticipantsPane";
 import { ListPane } from "~/components/shell/ListPane";
 import { Nav } from "~/components/shell/Nav";
 import { AppBar } from "~/components/shell/AppBar";
 import { cn } from "~/lib/utils";
-import { sectionProjects } from "~/components/shell/nav-projects";
-import { pins } from "~/state/pins";
 import {
   DEFAULT_LIST_WIDTH,
   loadPaneLayout,
@@ -30,6 +36,9 @@ import {
   type PaneLayout,
 } from "~/state/pane-layout";
 import { withWorkspaceQuery } from "~/lib/href";
+import { savedSearches } from "~/state/saved-searches";
+import { DEFAULT_ACTIVITY_QUERY } from "@loreai/core/activity-query";
+import { activitySearchTitle } from "~/lib/activity-search";
 
 type LayoutMode = "full" | "split" | "single";
 
@@ -56,7 +65,10 @@ const PaneHeader: Component<{
       ? props.pane
       : props.title;
   return (
-    <header class="flex h-9 flex-none items-center gap-2 px-3 text-xs">
+    <header
+      class="flex h-9 flex-none items-center gap-2 px-3 text-xs"
+      data-testid={props.pane === "list" ? "activity-list-header" : undefined}
+    >
       <span class="min-w-0 flex-1 truncate font-medium text-muted">
         {props.title}
         <Show when={props.count !== undefined}>
@@ -135,6 +147,10 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const ws = useWorkspace();
   const outlet = children(() => props.children);
   const [search, setSearch] = useSearchParams<{ q?: string }>();
+  const [searchDraft, setSearchDraft] = createSignal(
+    typeof search.q === "string" ? search.q : "",
+  );
+  const [activityCount, setActivityCount] = createSignal(0);
   const [layoutState, setLayoutState] = createSignal(loadPaneLayout());
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());
   const [navOpen, setNavOpen] = createSignal(false);
@@ -169,7 +185,12 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     }
   };
   const query = () => (typeof search.q === "string" ? search.q : "in:inbox");
-  const queryInput = () => (typeof search.q === "string" ? search.q : "");
+  const queryInput = searchDraft;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(
+    on(() => (typeof search.q === "string" ? search.q : ""), setSearchDraft),
+  );
+  onCleanup(() => clearTimeout(searchTimer));
   const rootPath = useResolvedPath(() => "/");
   const projectPattern = useResolvedPath(() => "/projects/:projectId/*");
   const projectExactPattern = useResolvedPath(() => "/projects/:projectId");
@@ -199,17 +220,6 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       ? (ws.state.knowledge.store.select(entryId)?.project_id ?? null)
       : null;
   });
-  const projectCount = () => {
-    const projects = ws.projects.data() ?? [];
-    const filter = query() === "in:inbox" ? "" : query();
-    const result = sectionProjects(
-      projects,
-      pins().pinned(),
-      filter,
-      activeProjectId(),
-    );
-    return result.matches?.length ?? projects.length;
-  };
   const itemSelected = () => !rootMatch();
   const full = () => mode() === "full";
   const narrow = () => mode() !== "full";
@@ -249,16 +259,39 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     <Nav
       activeProjectId={activeProjectId()}
       stale={ws.state.projects.status()}
+      projects={ws.projects.data()}
+      query={query()}
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
+  let restoreActivityScroll:
+    | ((scrollTop: number, index: number | null) => void)
+    | undefined;
   const backHref = () => withWorkspaceQuery("/", query());
-  function setSearchQuery(value: string) {
+  function commitSearchQuery(value: string) {
+    if (searchTimer !== undefined) clearTimeout(searchTimer);
     setSearch(
-      { q: value === "" || value === "in:inbox" ? undefined : value },
+      {
+        q:
+          value.trim() === "" || value.trim() === DEFAULT_ACTIVITY_QUERY
+            ? undefined
+            : value.trim(),
+      },
       { replace: true },
     );
   }
+  function setSearchQuery(value: string) {
+    setSearchDraft(value);
+    if (searchTimer !== undefined) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => commitSearchQuery(value), 250);
+  }
+  const activityHeaderTitle = () => {
+    const current = query();
+    const saved = savedSearches()
+      .list()
+      .find((entry) => entry.query === current);
+    return activitySearchTitle(current, activityCount(), saved?.title);
+  };
 
   function resizeFromKeyboard(event: KeyboardEvent) {
     if (!showDivider()) return;
@@ -404,13 +437,8 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           width={layoutState().listWidth}
           header={
             <PaneHeader
-              title={
-                query() === "in:inbox" || query() === ""
-                  ? "Inbox"
-                  : `Search "${query()}"`
-              }
+              title={activityHeaderTitle()}
               pane="list"
-              count={projectCount()}
               layout={layoutState()}
               setLayout={dispatch}
               controls={full()}
@@ -418,16 +446,17 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           }
           query={queryInput()}
           onQueryInput={setSearchQuery}
+          onCommitQuery={commitSearchQuery}
+          restoreVirtualizedScroll={(scrollTop, index) =>
+            restoreActivityScroll?.(scrollTop, index)
+          }
         >
-          <ProjectListBody
-            projects={ws.projects.data()}
-            activeProjectId={activeProjectId()}
+          <ActivityListBody
             query={query()}
-            loading={ws.projects.loading()}
-            error={ws.projects.error()}
-            onRetry={ws.projects.reload}
-            connectionUnauthorized={ws.connection.state() === "unauthorized"}
-            connectionDetail={ws.connection.detail()}
+            onCountChange={setActivityCount}
+            onVirtualizedScrollRestore={(restore) =>
+              (restoreActivityScroll = restore)
+            }
           />
         </ListPane>
         <Show when={showDivider()}>

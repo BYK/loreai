@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { Type } from "arktype";
 
 import {
+  activityPage,
   accountStatus,
   apiErrorBody,
   contradictionListResponse,
@@ -61,6 +62,7 @@ function readFixture(name: string): unknown {
 
 const ROUTES: Record<string, { route: string; schema: Type }> = {
   "projects.json": { route: "/projects", schema: projectList },
+  "activity.json": { route: "/activity", schema: activityPage },
   "knowledge-list.json": {
     route: "/projects/p/knowledge",
     schema: knowledgeList,

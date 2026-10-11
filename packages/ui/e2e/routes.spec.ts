@@ -57,7 +57,7 @@ test.describe("production route deep links", () => {
       const target =
         kind === "welcome"
           ? mobile
-            ? page.getByTestId("project-list-body")
+            ? page.getByTestId("activity-list-body")
             : page.getByTestId("connection-status")
           : kind === "health"
             ? page
@@ -86,9 +86,13 @@ test.describe("production route deep links", () => {
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);
       } else {
-        await expect(target).toContainText(
-          kind === "welcome" && mobile ? "lore" : text,
-        );
+        if (kind === "welcome" && mobile) {
+          await expect(
+            target.getByTestId("activity-item").first(),
+          ).toBeVisible();
+        } else {
+          await expect(target).toContainText(text);
+        }
       }
       const before = page.url();
       await page.reload();

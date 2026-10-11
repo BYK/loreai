@@ -317,6 +317,92 @@ describe("db", () => {
     expect(cols.some((c) => c.name === "created_at")).toBe(true);
   });
 
+  test("v103: knowledge.origin and tenant/logical index exist on a fresh DB", () => {
+    const cols = db().query("PRAGMA table_info(knowledge)").all() as Array<{
+      name: string;
+    }>;
+    expect(cols.some((c) => c.name === "origin")).toBe(true);
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_knowledge_tenant_logical'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("v103 upgrade backfills knowledge origins from legacy writer columns", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT INTO knowledge
+        (id, category, title, content, created_at, updated_at, created_by)
+      VALUES ('origin-upgrade-user', 'pattern', 'User', 'body', 1, 1, 'alice');
+      INSERT INTO knowledge
+        (id, category, title, content, created_at, updated_at, worker_model_id)
+      VALUES ('origin-upgrade-import', 'pattern', 'Import', 'body', 1, 1, NULL);
+      INSERT INTO knowledge
+        (id, category, title, content, created_at, updated_at, source_session)
+      VALUES ('origin-upgrade-curator', 'pattern', 'Curator', 'body', 1, 1, 'session');
+      ALTER TABLE knowledge DROP COLUMN origin;
+      UPDATE schema_version SET version = 102;
+    `);
+    close();
+
+    const upgraded = db();
+    const rows = upgraded
+      .query(
+        "SELECT id, origin FROM knowledge WHERE id LIKE 'origin-upgrade-%' ORDER BY id",
+      )
+      .all();
+    expect(rows).toEqual([
+      { id: "origin-upgrade-curator", origin: "curator" },
+      { id: "origin-upgrade-import", origin: "import" },
+      { id: "origin-upgrade-user", origin: "user" },
+    ]);
+    expect(
+      (
+        upgraded.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
+  test("recoverMissingObjects restores knowledge.origin and the v103 indexes", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT INTO knowledge
+        (id, category, title, content, created_at, updated_at, created_by)
+      VALUES ('origin-recovery-user', 'pattern', 'User', 'body', 1, 1, 'alice');
+      ALTER TABLE knowledge DROP COLUMN origin;
+      DROP INDEX IF EXISTS idx_temporal_project_session_created;
+      DROP INDEX IF EXISTS idx_knowledge_tenant_logical;
+      UPDATE schema_version SET version = ${MIGRATIONS.length};
+    `);
+    close();
+
+    const recovered = db();
+    expect(
+      recovered
+        .query("SELECT origin FROM knowledge WHERE id = 'origin-recovery-user'")
+        .get(),
+    ).toEqual({ origin: "user" });
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_temporal_project_session_created'",
+        )
+        .get(),
+    ).not.toBeNull();
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_knowledge_tenant_logical'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
   test("v100 upgrade: recovering a pre-v100 DB adds created_at as NULLs", () => {
     const connection = db();
     // Simulate a pre-v100 table: drop the column, pretend the user_version

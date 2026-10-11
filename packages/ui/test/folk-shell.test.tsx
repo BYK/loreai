@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import type { AccountStatus, SyncStatus, TeamList } from "~/contracts";
+import { activityPage, parseContract } from "~/contracts";
 import { ApiError, type ApiClient } from "~/lib/api";
+import activityFixture from "./fixtures/activity.json";
 
 const ANONYMOUS: AccountStatus = {
   signed_in: false,
@@ -21,6 +23,7 @@ const IDLE: SyncStatus = {
 };
 
 const NO_TEAMS: TeamList = { teams: [] };
+const ACTIVITY_PAGE = parseContract("/activity", activityPage, activityFixture);
 
 type ClientOverrides = Partial<ApiClient>;
 
@@ -28,6 +31,9 @@ function client(overrides: ClientOverrides = {}): ApiClient {
   return {
     async listProjects() {
       return [];
+    },
+    async fetchActivity() {
+      return ACTIVITY_PAGE;
     },
     async getAccount() {
       return ANONYMOUS;

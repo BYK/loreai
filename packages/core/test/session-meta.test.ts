@@ -212,7 +212,10 @@ describe("listSessions titles", () => {
       title: "Deploy pipeline work",
       title_source: "distillation",
     });
-    expect(metaRow(project, "s-text")?.title).toBe("plain text");
+    expect(metaRow(project, "s-text")).toMatchObject({
+      title: "plain text",
+      message_count: 2,
+    });
   });
 
   test("editing a user message's content invalidates the cached title", () => {

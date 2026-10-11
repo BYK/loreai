@@ -305,6 +305,7 @@ async function _detect(input: {
       content: pattern.content,
       session: input.sessionID,
       scope: "project",
+      origin: "pattern",
       confidence: 0.8, // moderate — auto-extracted, not user-stated
       workerProviderID: model?.providerID,
       workerModelID: model?.modelID,

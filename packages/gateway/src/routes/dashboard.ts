@@ -66,6 +66,17 @@ export const dashboardRoutes: RouteModule = {
       ),
     );
     app.get(
+      "/api/v1/activity",
+      ctx.declaredMethodsOnly(["GET"], async (c: GatewayContext) => {
+        const { handleAPIRequest } = await import("../api");
+        const req = c.var.request;
+        return withManagementCors(
+          await handleAPIRequest(req, new URL(req.url), ctx.config),
+          c.var.allowedManagementOrigin,
+        );
+      }),
+    );
+    app.get(
       "/api/v1/contradictions",
       ctx.declaredMethodsOnly(
         ["GET"],
