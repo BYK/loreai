@@ -107,7 +107,6 @@ function broadcast(documentId: string, row: ReplyRow): void {
 export const spikeNocrdtRoutes: RouteModule = {
   name: "comparison-spike",
   plane: "management",
-  patterns: [/^\/api\/v1\/spike(?:\/|$)/],
   register(app, ctx) {
     app.post("/api/v1/spike/:variant/token", async (c) => {
       const variant = c.req.param("variant");

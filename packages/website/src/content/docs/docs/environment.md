@@ -87,6 +87,13 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_RUNTIME_ACL_KIND` | _no description in source_ |
 | `LORE_RUNTIME_ACL_PATH` | _no description in source_ |
 
+## server
+
+| Variable | Description |
+|---|---|
+| `LORE_FLUID_SPIKE` | _no description in source_ |
+| `LORE_SPIKE_VARIANT` | _no description in source_ |
+
 ## shutdown-deadline
 
 | Variable | Description |
