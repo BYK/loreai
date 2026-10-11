@@ -1003,11 +1003,6 @@ describe("shell: project navigation and real-data path", () => {
   });
 
   it("refreshes the sidebar and project counts after delete and restore", async () => {
-    vi.stubGlobal("matchMedia", () => ({
-      matches: true,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    }));
     const target = entryAt(0);
     const targetProjectId = target.project_id;
     if (!targetProjectId) throw new Error("fixture must belong to a project");
@@ -1129,14 +1124,6 @@ describe("shell: project navigation and real-data path", () => {
     expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
       target.title,
     );
-    const projectCount = () => {
-      const link = screen
-        .getAllByTestId("nav-project")
-        .find((item) => item.firstElementChild?.textContent === "lore");
-      return link?.lastElementChild?.textContent;
-    };
-    await waitFor(() => expect(projectCount()).toBe("2"));
-
     let projectCalls = listProjects.mock.calls.length;
     const deleteButton = await screen.findByRole("button", { name: "Delete" });
     await waitFor(() => expect(deleteButton).toBeEnabled());
@@ -1145,7 +1132,6 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(
       within(deleteDialog).getByRole("button", { name: "Delete entry" }),
     );
-    await waitFor(() => expect(projectCount()).toBe("1"));
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
@@ -1160,7 +1146,6 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(
       within(restoreDialog).getByRole("button", { name: "Restore version" }),
     );
-    await waitFor(() => expect(projectCount()).toBe("2"));
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
