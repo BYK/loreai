@@ -18,14 +18,16 @@ test.describe("provider cost cards", () => {
     await expect(anthropic.getByText(/resets in/)).toHaveCount(2);
     await expect(page.getByText("Daily budget")).toHaveCount(0);
     await expect(page.getByTestId("budget-editor")).toHaveCount(0);
-    // Seeded 5h: 3h of 5h elapsed at 23% → current 7.7 pts/h vs sustainable
-    // 38.5 pts/h; 7d: 4d of 7d at 41% → both under, so no delay.
+    // Seeded 5h: 3h of 5h elapsed at 23% → current ≈7.7 pts/h vs sustainable
+    // ≈38.5 pts/h; 7d: 4d of 7d at 41% → both under, so no delay.
     await expect(anthropic.getByTestId("pacing-rates")).toHaveCount(2);
+    // Both rates drift with the time between seeding and this assertion
+    // (slow CI), so match the band rather than one rounded value.
     await expect(anthropic.getByTestId("pacing-rates").first()).toContainText(
-      "sustainable 39 pts/h",
+      /sustainable (39|4\d) pts\/h/,
     );
     await expect(anthropic.getByTestId("pacing-rates").first()).toContainText(
-      "current 7.7 pts/h (window avg)",
+      /current 7\.\d pts\/h \(window avg\)/,
     );
     await expect(anthropic.getByTestId("pacing-state")).toHaveText([
       "on pace",
