@@ -112,6 +112,14 @@ test.describe("reply to selection", () => {
     await expect(thread(page, id)).toHaveCount(0);
     await expect(indicator(page, id)).toBeFocused();
     await expect(indicator(page, id)).toHaveAttribute("aria-expanded", "false");
+
+    // The posted first reply is not left behind as a draft at its anchor.
+    await selectInRow(page, "needle-229 ", "discusses needle-229");
+    await page.getByTestId("start-thread").click();
+    await expect(
+      page.getByTestId("start-thread-composer").getByRole("textbox"),
+    ).toHaveValue("");
+    await expect(page.getByTestId("draft-restored")).toHaveCount(0);
   });
 
   test("overlapping selections start independent threads", async ({ page }) => {
@@ -198,6 +206,9 @@ test.describe("reply to selection", () => {
     await openReader(page);
     await selectInRow(page, "needle-226 ", "discusses needle-226");
     const id = await startThread(page, "Mobile thread");
+    // An overlapping second discussion grows the selection panel on return.
+    await selectInRow(page, "needle-226 ", "needle-226 and");
+    await startThread(page, "Overlapping mobile thread");
     await indicator(page, id).click();
 
     await expect(page).toHaveURL(new RegExp(`/discussions/${id}$`));
