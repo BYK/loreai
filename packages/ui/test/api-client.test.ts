@@ -203,6 +203,36 @@ describe("api client: happy path", () => {
     expect(projects[0]?.knowledge_count).toBe(3);
   });
 
+  it("fetches a validated activity page with q, cursor, and limit", async () => {
+    const page = {
+      items: [
+        {
+          kind: "knowledge",
+          id: "entry-1",
+          project_id: "p1",
+          project_name: "Project",
+          title: "A title",
+          snippet: "A snippet",
+          participants: [{ id: "curator", kind: "lore", label: "Curator" }],
+          last_activity_at: Date.UTC(2026, 8, 1),
+          total: 2,
+          match: "exact",
+        },
+      ],
+      next_cursor: "cursor-1",
+    };
+    const { client, calls } = clientFor(() => json(page));
+    const result = await client.fetchActivity({
+      q: "type:knowledge SQLite",
+      cursor: "cursor 1",
+      limit: 25,
+    });
+    expect(calls).toEqual([
+      "/api/v1/activity?q=type%3Aknowledge+SQLite&cursor=cursor+1&limit=25",
+    ]);
+    expect(result).toEqual(page);
+  });
+
   it("URL-encodes ids and keeps unknown fields (core stays authoritative)", async () => {
     const { client, calls } = clientFor(() =>
       json({ ...ENTRY, some_future_field: "kept" }),

@@ -1,0 +1,100 @@
+{
+  "items": [
+    {
+      "kind": "contradiction",
+      "id": "<uuid-0>:<uuid-1>",
+      "project_id": "<uuid-2>",
+      "project_name": "ui-contracts",
+      "title": "Contracts are validated at the edge ↔ Cursor pages are opaque tokens",
+      "snippet": "These fixture entries disagree.",
+      "participants": [
+        {
+          "id": "lore",
+          "kind": "lore",
+          "label": "Lore"
+        }
+      ],
+      "last_activity_at": 1700000000000,
+      "total": 1,
+      "match": "exact"
+    },
+    {
+      "kind": "knowledge",
+      "id": "<uuid-1>",
+      "project_id": "<uuid-2>",
+      "project_name": "ui-contracts",
+      "title": "Cursor pages are opaque tokens",
+      "snippet": "Cursor values are server-issued tokens and should be passed back unchanged.",
+      "participants": [
+        {
+          "id": "curator",
+          "kind": "lore",
+          "label": "Curator"
+        }
+      ],
+      "last_activity_at": 1700000001000,
+      "total": 1,
+      "match": "exact"
+    },
+    {
+      "kind": "knowledge",
+      "id": "<uuid-0>",
+      "project_id": "<uuid-2>",
+      "project_name": "ui-contracts",
+      "title": "Contracts are validated at the edge",
+      "snippet": "Every /api/v1 response is parsed by the UI contracts before it reaches a view.",
+      "participants": [
+        {
+          "id": "curator",
+          "kind": "lore",
+          "label": "Curator"
+        }
+      ],
+      "last_activity_at": 1700000002000,
+      "total": 1,
+      "match": "exact"
+    },
+    {
+      "kind": "promotion",
+      "id": "<uuid-0>",
+      "project_id": "<uuid-2>",
+      "project_name": "ui-contracts",
+      "title": "Contracts are validated at the edge",
+      "snippet": "Every /api/v1 response is parsed by the UI contracts before it reaches a view.",
+      "participants": [
+        {
+          "id": "lore",
+          "kind": "lore",
+          "label": "Lore"
+        }
+      ],
+      "last_activity_at": 1700000003000,
+      "total": 1,
+      "match": "exact"
+    },
+    {
+      "kind": "session",
+      "id": "ui-contracts-session",
+      "project_id": "<uuid-2>",
+      "project_name": "ui-contracts",
+      "title": "message 0 body",
+      "snippet": "message 1 body",
+      "participants": [
+        {
+          "id": "user",
+          "kind": "user",
+          "label": "You"
+        },
+        {
+          "id": "lore",
+          "kind": "lore",
+          "label": "Lore"
+        }
+      ],
+      "last_activity_at": 1700000004000,
+      "total": 2,
+      "match": "exact"
+    }
+  ],
+  "next_cursor": null
+}

@@ -16,39 +16,52 @@ async function firstVisibleRow(scroller: Locator) {
   });
 }
 
-async function expectFiller60AnchorAfterReturn(
+async function expectActivityAnchorAfterReturn(
   page: Page,
   useBrowserBack: boolean,
 ) {
   await page.setViewportSize({ width: 400, height: 800 });
   await page.goto("/ui");
 
-  const scroller = page.getByTestId("project-list-body");
+  const scroller = page.getByTestId("activity-list-body");
   await expect(scroller).toBeVisible();
-  await page.locator(LIST).getByTestId("nav-all-projects").click();
-  const target = page
-    .locator(`${LIST} [data-testid="nav-project"]`)
-    .filter({ hasText: "filler-60" });
-  await expect(target).toHaveCount(1);
-  await expect(target).toHaveAttribute("data-section", "all");
-  const targetKey = await target.getAttribute("data-list-key");
-  if (!targetKey?.startsWith("all:")) {
-    throw new Error(
-      `Expected filler-60 to have an All key, received ${targetKey}`,
-    );
-  }
+  await expect
+    .poll(() => scroller.locator("[data-list-key]").count())
+    .toBeGreaterThan(0);
   await scroller.evaluate((el) => {
     el.scrollTop = 394;
   });
   expect(await scroller.evaluate((el) => el.scrollTop)).toBe(394);
-
   const before = await firstVisibleRow(scroller);
   if (!before) throw new Error("list has no visible row at scrollTop 394");
-  expect(before.key).toMatch(/^all:/);
-  const targetBounds = await target.boundingBox();
+  const targetInfo = await scroller.evaluate((el) => {
+    const bounds = el.getBoundingClientRect();
+    const target = [
+      ...el.querySelectorAll<HTMLElement>("[data-list-key]"),
+    ].find((candidate) => {
+      const rowBounds = candidate.getBoundingClientRect();
+      return (
+        ["knowledge", "session"].includes(
+          candidate.dataset.activityKind ?? "",
+        ) &&
+        rowBounds.top >= bounds.top &&
+        rowBounds.bottom <= bounds.bottom
+      );
+    });
+    return target
+      ? {
+          key: target.dataset.listKey ?? "",
+        }
+      : null;
+  });
+  if (!targetInfo) throw new Error("list has no fully visible row");
+  const row = scroller.locator(`[data-list-key="${targetInfo.key}"]`);
+  await expect(row).toBeVisible();
+  const targetKey = targetInfo.key;
+  const targetBounds = await row.boundingBox();
   const scrollerBounds = await scroller.boundingBox();
   if (!targetBounds || !scrollerBounds) {
-    throw new Error("filler-60 row or list scroller has no bounding box");
+    throw new Error("activity row or list scroller has no bounding box");
   }
   expect(targetBounds.y).toBeGreaterThanOrEqual(scrollerBounds.y);
   expect(targetBounds.y + targetBounds.height).toBeLessThanOrEqual(
@@ -59,15 +72,12 @@ async function expectFiller60AnchorAfterReturn(
     targetBounds.x + targetBounds.width / 2,
     targetBounds.y + targetBounds.height / 2,
   );
-  await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
+  await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/(sessions|knowledge)\//);
   await expect(scroller).toBeHidden();
-  await expect(target).toHaveAttribute("data-list-key", targetKey);
-  if (useBrowserBack) {
-    await page.goBack();
-  } else {
-    await page.getByTestId("mobile-back").click();
-  }
-  await expect(page).toHaveURL(/\/ui\/?$/);
+  await expect(row).toHaveAttribute("data-list-key", targetKey);
+  if (useBrowserBack) await page.goBack();
+  else await page.getByTestId("mobile-back").click();
+  await expect(page).toHaveURL(/\/ui\/?(\?q=[^#]*)?$/);
   await expect(scroller).toBeVisible();
   await page.evaluate(
     () =>
@@ -75,7 +85,6 @@ async function expectFiller60AnchorAfterReturn(
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       }),
   );
-
   const after = await firstVisibleRow(scroller);
   if (!after) throw new Error("list has no visible row after returning");
   expect(after.key).toBe(before.key);
@@ -124,48 +133,28 @@ test.describe("persistent workspace panes", () => {
     }
   });
 
-  test("keeps the same list and selection while opening project and session routes", async ({
+  test("keeps the same activity list and selection while opening a session route", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name.includes("mobile"), "desktop list scroll");
     await page.goto("/ui");
-    const list = page.getByTestId("project-list-body");
+    const list = page.getByTestId("activity-list-body");
     await expect(list).toBeVisible();
-    const all = page.locator(LIST).getByTestId("nav-all-projects");
-    if (await all.isVisible()) await all.click();
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:session");
+    await search.press("Enter");
+    const item = page
+      .locator('[data-testid="activity-item"][data-activity-kind="session"]')
+      .first();
+    await expect(item).toBeVisible();
     await list.evaluate((el) => {
       el.dataset.workspaceIdentity = "persistent";
       el.scrollTop = 128;
     });
-    const lore = page.locator(LIST).getByTestId("nav-project").filter({
-      hasText: "lore",
-    });
-    await lore.scrollIntoViewIfNeeded();
     const scrollTop = await list.evaluate((el) => el.scrollTop);
-    await lore.click();
-    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
-    await expect(lore).toHaveAttribute("aria-current", "page");
-    await expect
-      .poll(() =>
-        list.evaluate(
-          (el, expected) =>
-            el.dataset.workspaceIdentity === "persistent" &&
-            el.scrollTop === expected,
-          scrollTop,
-        ),
-      )
-      .toBe(true);
-
-    const projectId = new URL(page.url()).pathname.split("/").at(-1);
-    const sessions = await (
-      await page.request.get(`/api/v1/projects/${projectId}/sessions`)
-    ).json();
-    const sessionId = sessions[0]?.session_id;
-    if (!sessionId)
-      throw new Error("the seeded project must contain a session");
-    await page.locator("main").getByRole("link", { name: sessionId }).click();
-    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+$/);
-    await expect(lore).toHaveAttribute("aria-current", "page");
+    await item.click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+/);
+    await expect(item).toHaveAttribute("aria-current", "page");
     await expect
       .poll(() =>
         list.evaluate(
@@ -227,8 +216,6 @@ test.describe("persistent workspace panes", () => {
     await page.goto("/ui");
     const list = page.locator(LIST);
     await expect(list).toBeVisible();
-    const all = list.getByTestId("nav-all-projects");
-    if (await all.isVisible()) await all.click();
     const maximize = page.getByTestId("pane-max-document");
     await maximize.click();
     await expect(list).toBeHidden();
@@ -406,11 +393,11 @@ test.describe("persistent workspace panes", () => {
     await page.goto("/ui");
     const list = page.locator(LIST);
     await expect(list).toBeVisible();
-    await page.getByTestId("project-list-body").evaluate((el) => {
+    await page.getByTestId("activity-list-body").evaluate((el) => {
       el.dataset.workspaceIdentity = "mobile-persistent";
     });
-    const lore = list.getByTestId("nav-project").filter({ hasText: "lore" });
-    await lore.click();
+    const row = page.getByTestId("activity-item").first();
+    await row.click();
     await expect(page.getByTestId("document-pane")).toBeVisible();
     await expect(list).toBeHidden();
     await expect(page.getByTestId("mobile-back")).toHaveAttribute(
@@ -419,21 +406,21 @@ test.describe("persistent workspace panes", () => {
     );
     await page.getByTestId("mobile-back").click();
     await expect(list).toBeVisible();
-    await expect(page.getByTestId("project-list-body")).toHaveAttribute(
+    await expect(page.getByTestId("activity-list-body")).toHaveAttribute(
       "data-workspace-identity",
       "mobile-persistent",
     );
   });
 
-  test("preserves filler-60's anchor through the mobile Back link", async ({
+  test("preserves an activity anchor through the mobile Back link", async ({
     page,
   }) => {
-    await expectFiller60AnchorAfterReturn(page, false);
+    await expectActivityAnchorAfterReturn(page, false);
   });
 
-  test("preserves filler-60's anchor through browser Back", async ({
+  test("preserves an activity anchor through browser Back", async ({
     page,
   }) => {
-    await expectFiller60AnchorAfterReturn(page, true);
+    await expectActivityAnchorAfterReturn(page, true);
   });
 });

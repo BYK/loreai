@@ -51,6 +51,8 @@ export const ListPane: Component<{
   header: JSX.Element;
   query: string;
   onQueryInput: (value: string) => void;
+  onCommitQuery?: (value: string) => void;
+  restoreVirtualizedScroll?: (scrollTop: number) => void;
   children: JSX.Element;
 }> = (props) => {
   let section: HTMLElement | undefined;
@@ -80,6 +82,7 @@ export const ListPane: Component<{
         restoreFrame = undefined;
         const element = scroller();
         if (props.visible && element) {
+          props.restoreVirtualizedScroll?.(saved.scrollTop);
           restoreListScroll(element, saved);
           if (snapshot === saved) snapshot = null;
         }
@@ -126,7 +129,12 @@ export const ListPane: Component<{
           value={props.query}
           onInput={(event) => props.onQueryInput(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.key === "Escape") props.onQueryInput("");
+            if (event.key === "Escape") {
+              props.onQueryInput("");
+              props.onCommitQuery?.("");
+            } else if (event.key === "Enter") {
+              props.onCommitQuery?.(event.currentTarget.value);
+            }
           }}
         />
       </label>

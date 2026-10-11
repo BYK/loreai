@@ -162,6 +162,26 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
       calls.push("projects");
       return PROJECTS;
     },
+    async fetchActivity(opts: { q: string }) {
+      void opts;
+      return {
+        items: [
+          {
+            kind: "session" as const,
+            id: "s-42",
+            project_id: "p-lore",
+            project_name: "lore",
+            title: "Session s-42",
+            snippet: "A fixture activity item.",
+            participants: [{ id: "user", kind: "user" as const, label: "You" }],
+            last_activity_at: 1_700_000_000_000,
+            total: 1,
+            match: "exact" as const,
+          },
+        ],
+        next_cursor: null,
+      };
+    },
     async listProjectKnowledge(projectId: string) {
       calls.push(`knowledge:${projectId}`);
       if (projectId === "p-lore") return ENTRIES;
@@ -643,14 +663,12 @@ describe("shell: project navigation and real-data path", () => {
     expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
   });
 
-  it("loads projects into the list and shows a concise empty document", async () => {
+  it("loads activity into the list and shows a concise empty document", async () => {
     const client = fakeClient();
     mount("/", client);
-    const rows = await screen.findAllByTestId("nav-project");
-    expect(rows.map((r) => r.textContent)).toEqual([
-      "lore2",
-      "/home/me/empty0", // nameless project falls back to its path
-    ]);
+    const rows = await screen.findAllByTestId("activity-item");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Session s-42");
     expect(
       screen.getByRole("heading", { name: "Select an item" }),
     ).toBeVisible();
@@ -673,7 +691,7 @@ describe("shell: project navigation and real-data path", () => {
     ).toBeNull();
   });
 
-  it("keeps the project list node and query across project and session routes", async () => {
+  it("keeps the activity list node and query across session routes", async () => {
     const session = {
       session_id: "s-42",
       message_count: 1,
@@ -709,34 +727,29 @@ describe("shell: project navigation and real-data path", () => {
         undefined,
         base,
       );
-      const list = await screen.findByTestId("project-list-body");
+      const list = await screen.findByTestId("activity-list-body");
       list.dataset.listIdentity = "persistent";
-      list.scrollTop = 192;
-      const project = await screen.findByRole("link", { name: "lore" });
-      expect(project).toHaveAttribute(
+      list.scrollTop = 0;
+      const session = await screen.findByRole("link", { name: /Session s-42/ });
+      expect(session).toHaveAttribute(
         "href",
-        `${prefix}/projects/p-lore?q=lore`,
+        `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
       );
-      fireEvent.click(project);
-      await waitFor(() =>
-        expect(history.get()).toBe(`${prefix}/projects/p-lore?q=lore`),
-      );
-      expect(screen.getByTestId("project-list-body")).toBe(list);
-      expect(list.scrollTop).toBe(192);
-
-      fireEvent.click(await screen.findByRole("link", { name: /s-42/ }));
+      fireEvent.click(session);
       await waitFor(() =>
         expect(history.get()).toBe(
           `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
         ),
       );
-      expect(screen.getByTestId("project-list-body")).toBe(list);
+      expect(screen.getByTestId("activity-list-body")).toBe(list);
+      expect(list.scrollTop).toBe(0);
+
+      expect(screen.getByTestId("activity-list-body")).toBe(list);
       expect(list).toHaveAttribute("data-list-identity", "persistent");
-      expect(list.scrollTop).toBe(192);
-      expect(screen.getByRole("link", { name: "lore" })).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
+      expect(list.scrollTop).toBe(0);
+      expect(
+        screen.getByRole("link", { name: /Session s-42/ }),
+      ).toHaveAttribute("aria-current", "page");
       unmount();
     }
   });
@@ -800,11 +813,7 @@ describe("shell: project navigation and real-data path", () => {
 
   it("navigates project → knowledge list → entry document with stable ids in the URL", async () => {
     const client = fakeClient();
-    const { history } = mount("/", client);
-    const [lore] = await screen.findAllByTestId("nav-project");
-    fireEvent.click(lore!);
-
-    await waitFor(() => expect(history.get()).toBe("/projects/p-lore"));
+    const { history } = mount("/projects/p-lore", client);
     fireEvent.click(
       await screen.findByRole("link", { name: /Browse knowledge/ }),
     );
@@ -832,12 +841,11 @@ describe("shell: project navigation and real-data path", () => {
       within(doc).getByText("No source session recorded."),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
-    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
-      (row) => row.getAttribute("aria-current") === "page",
+    expect(screen.getByTestId("nav-projects")).toHaveAttribute(
+      "aria-current",
+      "page",
     );
-    expect(selectedProject).toBeDefined();
-    expect(selectedProject).toHaveAttribute("aria-current", "page");
-    expect(selectedProject).toHaveClass("bg-selected");
+    expect(screen.getByTestId("nav-projects")).toHaveClass("bg-selected");
     expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
     expect(client.calls[0]).toBe("projects");
     expect(client.calls).toContain("entry:k-wal");
@@ -873,8 +881,10 @@ describe("shell: project navigation and real-data path", () => {
       within(doc).getAllByText(/Portability|No remote cache/),
     ).toHaveLength(2);
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
-    const [lore] = await screen.findAllByTestId("nav-project");
-    expect(lore).toHaveAttribute("aria-current", "page");
+    expect(screen.getByTestId("nav-projects")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("resolves /knowledge/:id deep links to the entry's project", async () => {
@@ -882,16 +892,9 @@ describe("shell: project navigation and real-data path", () => {
     mount("/knowledge/k-wal", client);
     await screen.findByTestId("knowledge-document");
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
-    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
-      (row) => row.getAttribute("aria-current") === "page",
-    );
-    expect(selectedProject).toBeDefined();
     expect(pane("list")).toHaveTextContent("lore");
-    expect(client.calls).toEqual([
-      "projects",
-      "entry:k-wal",
-      "knowledge:p-lore",
-    ]);
+    expect(client.calls).toContain("entry:k-wal");
+    expect(client.calls).toContain("knowledge:p-lore");
     expect(client.pageOpts).toContainEqual({
       projectId: "p-lore",
       opts: {
@@ -956,7 +959,7 @@ describe("shell: project navigation and real-data path", () => {
     });
     expect(pane("list")).toHaveTextContent("lore");
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
-    expect(await screen.findByTestId("nav-project")).toHaveAttribute(
+    expect(await screen.findByTestId("nav-projects")).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -1276,7 +1279,9 @@ describe("shell: workspace knowledge and search", () => {
     expect(allKnowledge).toHaveAttribute("aria-current", "page");
     expect(projects).not.toHaveAttribute("aria-current");
     expect(nav.querySelector('[data-testid="nav-project"]')).toBeNull();
-    expect(pane("list")).toHaveTextContent("No projects match");
+    expect(
+      await within(pane("list")).findByTestId("activity-item"),
+    ).toHaveTextContent("Session s-42");
     expect(within(pane("list")).queryByTestId("nav-project")).toBeNull();
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
@@ -1863,19 +1868,19 @@ describe("shell: empty, error, not-found and locked states", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows an empty project list when the gateway has nothing yet", async () => {
+  it("shows an empty activity list when the gateway has nothing yet", async () => {
     mount(
       "/",
       fakeClient({
         async listProjects() {
           return [];
         },
+        async fetchActivity() {
+          return { items: [], next_cursor: null };
+        },
       }),
     );
-    expect(await screen.findAllByText("No projects yet")).toHaveLength(1);
-    expect(screen.getByTestId("document-pane")).not.toHaveTextContent(
-      "No projects yet",
-    );
+    expect(await screen.findAllByText("No activity")).toHaveLength(1);
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
@@ -1893,7 +1898,7 @@ describe("shell: empty, error, not-found and locked states", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client);
-    await screen.findAllByTestId("nav-project");
+    await screen.findByTestId("nav-projects");
     await waitFor(() => expect(attempts).toBe(1));
     const status = screen.getByTestId("connection-status");
     expect(status).toHaveAttribute("data-connection", "reachable");
@@ -1920,7 +1925,7 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(screen.getByText("Projects unavailable")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findAllByTestId("nav-project");
+    await screen.findByTestId("nav-projects");
     expect(status).toHaveAttribute("data-connection", "reachable");
   });
 
@@ -2321,8 +2326,7 @@ describe("shell: IndexedDB cache behavior", () => {
       },
     });
     mount("/projects/p-lore", client, Promise.resolve(db));
-    const rows = await screen.findAllByTestId("nav-project");
-    expect(rows.map((r) => r.textContent)).toContain("lore2");
+    await screen.findByTestId("nav-projects");
     const badges = await screen.findAllByTestId("stale-indicator");
     expect(badges.map((b) => b.textContent)).toContain(
       "Cached · gateway unavailable",

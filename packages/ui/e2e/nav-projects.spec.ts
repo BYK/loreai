@@ -1,92 +1,137 @@
 import { expect, test } from "@playwright/test";
-import { fuzzyRank } from "../src/lib/fuzzy";
 
-/**
- * #1918 project list: pinned projects survive reloads (localStorage), the filter
- * narrows the list, and "All projects" expands beyond the Recent limit.
- * The seed gives 14 core projects — lore, scratch, dedup-review, six
- * disposable apply projects and five empty archive-* projects — so `rest`
- * is non-empty.
- */
-
-const LIST = '[data-pane="list"]';
-
-test.describe("sidebar pinned / recent / filter", () => {
-  test("pin persists across reload; unpin removes it", async ({ page }) => {
+test.describe("activity search navigation", () => {
+  test("searches with grammar and highlights the active built-in search", async ({
+    page,
+  }) => {
     await page.goto("/ui");
-    const list = page.locator(LIST);
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:session");
+    await search.press("Enter");
 
-    const pin = list.getByRole("button", { name: "Pin lore" });
-    await pin.click();
-    await expect(
-      list.getByRole("button", { name: "Unpin lore" }),
-    ).toHaveAttribute("aria-pressed", "true");
-    await expect(list.locator('[data-section="pinned"]')).toContainText("lore");
+    await expect(page).toHaveURL(/\/ui\/?\?q=type%3Asession$/);
+    await expect(page.getByTestId("activity-search-type")).toHaveClass(
+      /bg-selected/,
+    );
+    const rows = page.getByTestId("activity-item");
+    await expect(rows).not.toHaveCount(0);
+    await expect
+      .poll(() =>
+        rows.evaluateAll((items) =>
+          items.every(
+            (item) => item.getAttribute("data-activity-kind") === "session",
+          ),
+        ),
+      )
+      .toBe(true);
+    await expect(page.getByTestId("activity-list-header")).toContainText(
+      "Sessions",
+    );
+  });
 
+  test("shows a parse error without requesting invalid queries", async ({
+    page,
+  }) => {
+    let activityRequests = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.endsWith("/api/v1/activity")) {
+        activityRequests++;
+      }
+    });
+    await page.goto("/ui");
+    await expect(page.getByTestId("activity-item").first()).toBeVisible();
+    const before = activityRequests;
+
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("unknown:value");
+    await search.press("Enter");
+    await expect(page.getByTestId("activity-query-error")).toBeVisible();
+    await expect(page.getByTestId("activity-query-error")).toContainText(
+      "unknown:value",
+    );
+    await expect.poll(() => activityRequests).toBe(before);
+  });
+
+  test("resets the query to the inbox when Escape is pressed", async ({
+    page,
+  }) => {
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:session");
+    await search.press("Enter");
+    await expect(page).toHaveURL(/\/ui\/?\?q=type%3Asession$/);
+
+    await search.fill("type:knowledge");
+    await search.press("Escape");
+    await expect(page).toHaveURL(/\/ui\/?$/);
+    await expect(search).toHaveValue("in:inbox");
+    await expect(page.getByTestId("activity-list-header")).toContainText(
+      "Inbox",
+    );
+  });
+
+  test("saves, edits, reloads, and deletes a search", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop navigation");
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:session with:codex");
+    await search.press("Enter");
+    await page.getByTestId("save-search-open").click();
+
+    await page.getByTestId("saved-search-title").fill("Codex sessions");
+    await page.getByTestId("saved-search-submit").click();
+    const saved = page.getByTestId("saved-search");
+    await expect(saved).toContainText("Codex sessions");
+    await expect(saved).toHaveAttribute(
+      "href",
+      /q=type%3Asession(?:%20|\+)with%3Acodex/,
+    );
+
+    await page.getByTestId("saved-search-edit").click();
+    await page.getByTestId("saved-search-title").fill("Recent Codex");
+    await page
+      .getByTestId("saved-search-query")
+      .fill("type:session with:codex after:2024-01-01");
+    await page.getByTestId("saved-search-submit").click();
+    await expect(saved).toContainText("Recent Codex");
     await page.reload();
-    await expect(
-      list.getByRole("button", { name: "Unpin lore" }),
-    ).toBeVisible();
-    await expect(list.locator('[data-section="pinned"]')).toContainText("lore");
+    await expect(page.getByTestId("saved-search")).toContainText(
+      "Recent Codex",
+    );
 
-    await list.getByRole("button", { name: "Unpin lore" }).click();
-    await expect(list.locator('[data-section="pinned"]')).toHaveCount(0);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("saved-search-delete").click();
+    await expect(page.getByTestId("saved-search")).toHaveCount(0);
   });
 
-  test("filter narrows to matches and All projects expands", async ({
-    page,
-  }) => {
-    // Derive expectations from the API — the gateway may register an extra
-    // project for its cwd depending on where it was launched from.
-    const projects: Array<{ name: string | null; path: string }> = await (
-      await page.request.get("/api/v1/projects")
-    ).json();
-    const recent = Math.min(projects.length, 5);
-    const rest = projects.length - recent;
-    // #1948: the filter ranks fuzzy hits too — "arch" also catches "scratch"
-    // — so derive the expected count with the same helper the UI uses.
-    const matches = fuzzyRank("arch", projects, (p) => [
-      p.name ?? "",
-      p.path,
-    ]).length;
+  test("pins an active project, persists it, and opens its search", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop navigation");
+    const projects = await (await page.request.get("/api/v1/projects")).json();
+    const lore = projects.find(
+      (project: { name: string }) => project.name === "lore",
+    );
+    await page.goto(`/ui/projects/${lore.id}`);
+    const pin = page.getByTestId("toggle-active-project-pin");
+    await expect(pin).toBeVisible();
+    await pin.click();
+    await expect(pin).toHaveAttribute("aria-pressed", "true");
+    const pinned = page.getByTestId("pinned-project-search");
+    await expect(pinned).toBeVisible();
+    await pinned.click();
+    await expect(page).toHaveURL(/\/ui\/?\?q=project%3A/);
+    await expect(page.getByTestId("activity-item").first()).toBeVisible();
+    await page.reload();
+    await expect(page.getByTestId("pinned-project-search")).toBeVisible();
 
-    await page.goto("/ui");
-    const list = page.locator(LIST);
-
-    const filter = list.getByTestId("nav-project-filter");
-    await expect(filter).toHaveAccessibleName("Search list");
-    await filter.fill("arch");
-    await expect(list.locator('[data-section="matches"]')).toHaveCount(matches);
-    expect(matches).toBeGreaterThanOrEqual(5);
-    await expect(list.locator('[data-section="recent"]')).toHaveCount(0);
-
-    await filter.press("Escape");
-    await expect(list.locator('[data-section="recent"]')).toHaveCount(recent);
-
-    const all = list.getByTestId("nav-all-projects");
-    await expect(all).toHaveText(`All projects (${rest})`);
-    await all.click();
-    await expect(list.locator('[data-section="all"]')).toHaveCount(rest);
-  });
-
-  test("filter typo finds projects and shows the approximate hint", async ({
-    page,
-  }) => {
-    await page.goto("/ui");
-    const list = page.locator(LIST);
-
-    const filter = list.getByTestId("nav-project-filter");
-    await filter.fill("archve");
-    await expect(list.getByRole("link", { name: "archive-0" })).toBeVisible();
-    await expect(
-      list.getByTestId("nav-project-filter-approximate"),
-    ).toBeVisible();
-
-    // An exact query still matches without the hint.
-    await filter.fill("archive-0");
-    await expect(list.getByRole("link", { name: "archive-0" })).toBeVisible();
-    await expect(
-      list.getByTestId("nav-project-filter-approximate"),
-    ).toHaveCount(0);
+    await page.goto(`/ui/projects/${lore.id}`);
+    const unpin = page.getByTestId("toggle-active-project-pin");
+    await expect(unpin).toHaveAttribute("aria-pressed", "true");
+    await unpin.click();
+    await expect(page.getByTestId("pinned-project-search")).toHaveCount(0);
   });
 });

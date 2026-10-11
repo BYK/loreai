@@ -277,20 +277,11 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         req.onerror = () => reject(req.error);
       });
     });
-    const navProject = page
-      .getByTestId("nav-project")
-      .filter({ hasText: "lore" });
-    if (await navProject.isVisible()) {
-      await navProject.click();
-    } else {
-      await page.getByTestId("open-nav").click();
-      await page.getByTestId("nav-drawer").getByTestId("nav-projects").click();
-      await page
-        .locator('[data-pane="list"]')
-        .getByTestId("nav-project")
-        .filter({ hasText: "lore" })
-        .click();
-    }
+    const projects = await (await page.request.get("/api/v1/projects")).json();
+    const lore = projects.find(
+      (project: { name: string }) => project.name === "lore",
+    );
+    await page.goto(`/ui/projects/${lore.id}`);
     await expect(page.getByTestId("health")).toContainText("knowledge");
     await expect(
       page.getByText(/Project not found or inaccessible|Something went wrong/),

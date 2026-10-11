@@ -4,6 +4,7 @@ export * from "./error";
 export * from "./project";
 export * from "./knowledge";
 export * from "./all-knowledge";
+export * from "./activity";
 export * from "./session";
 export * from "./distillation";
 export * from "./page";
