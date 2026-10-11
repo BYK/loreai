@@ -37,7 +37,10 @@ import {
 } from "~/db";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
 import { resetThemeStoreForTests, THEME_STORAGE_KEY, theme } from "~/lib/theme";
-import { PANE_LAYOUT_STORAGE_KEY } from "~/state/pane-layout";
+import {
+  DEFAULT_PANE_LAYOUT,
+  PANE_LAYOUT_STORAGE_KEY,
+} from "~/state/pane-layout";
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -502,6 +505,30 @@ describe("shell: list divider persistence", () => {
       expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(360);
     },
   );
+});
+
+it("hides the left column when split mode has no visible left pane", async () => {
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: media === "(min-width: 760px)",
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  localStorage.setItem(
+    PANE_LAYOUT_STORAGE_KEY,
+    JSON.stringify({
+      ...DEFAULT_PANE_LAYOUT,
+      nav: "min",
+      participants: "open",
+    }),
+  );
+
+  mount("/", fakeClient());
+  await screen.findByTestId("pane-chip-nav");
+
+  expect(pane("nav")).toHaveAttribute("aria-hidden", "true");
+  expect(pane("nav")).toHaveClass("hidden");
+  expect(screen.getByTestId("pane-chip-nav")).toBeInTheDocument();
 });
 
 describe("shell: project navigation and real-data path", () => {

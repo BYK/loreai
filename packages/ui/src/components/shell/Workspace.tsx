@@ -215,14 +215,16 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     const maximized = activeMaximized();
     return maximized !== null && maximized !== pane;
   };
-  const leftOpen = () =>
-    layoutState().nav === "open" || layoutState().participants === "open";
-  const showLeft = () =>
-    leftOpen() &&
-    (activeMaximized() === null ||
-      activeMaximized() === "nav" ||
-      activeMaximized() === "participants") &&
+  const navVisibleOutsidePopover = () =>
+    layoutState().nav === "open" &&
+    !hiddenByMaximize("nav") &&
     (full() || mode() === "split");
+  const participantsVisibleOutsidePopover = () =>
+    full() &&
+    layoutState().participants === "open" &&
+    !hiddenByMaximize("participants");
+  const showLeft = () =>
+    navVisibleOutsidePopover() || participantsVisibleOutsidePopover();
   const showList = () =>
     layoutState().list === "open" &&
     !hiddenByMaximize("list") &&
@@ -247,14 +249,6 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
-  const navVisibleOutsidePopover = () =>
-    layoutState().nav === "open" &&
-    !hiddenByMaximize("nav") &&
-    (full() || mode() === "split");
-  const participantsVisibleOutsidePopover = () =>
-    full() &&
-    layoutState().participants === "open" &&
-    !hiddenByMaximize("participants");
   const backHref = () => withWorkspaceQuery("/", query());
   function setSearchQuery(value: string) {
     setSearch(
