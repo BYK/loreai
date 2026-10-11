@@ -44,6 +44,7 @@ export const ProjectListBody: Component<{
           )}
           aria-label={label}
           data-section={section}
+          data-list-key={`${section}:${project.id}`}
           data-testid="nav-project"
           aria-current={
             project.id === props.activeProjectId ? "page" : undefined
@@ -80,6 +81,8 @@ export const ProjectListBody: Component<{
     <div
       class="min-h-0 flex-1 overflow-y-auto px-2 py-2"
       data-testid="project-list-body"
+      data-list-scroller
+      style={{ "overflow-anchor": "none" }}
     >
       <Show when={props.loading && !props.projects}>
         <div class="px-3 py-2 text-xs text-muted" role="status">
