@@ -454,6 +454,72 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     );
   };
 
+  /** Frames the reveal keeps watching a passage mark after its scroll. */
+  const REVEAL_HOLD_FRAMES = 24;
+
+  /**
+   * Scroll a passage mark to the centre of the scroller and keep it on screen
+   * while the view settles. A one-shot `scrollIntoView` does not survive the
+   * frames that follow it: the rows around the mark enter at the estimate and
+   * their first measures adjust the scroll against the offset the virtualizer
+   * last learned (a frame behind a native scroll), and the in-flow selection
+   * panel a deep link opens shrinks the scroller — on a phone by almost half.
+   * Whenever something moves the mark out of the band the sticky toolbar
+   * leaves visible, it is re-centred through the virtualizer's own scroll,
+   * offset handed over, so a reconcile cannot drag it back; a mark that only
+   * drifts within the band stays put, and the first user gesture ends the
+   * hold. The hold only reacts to a change in where the mark sits, so an
+   * environment that reports no layout never gets a correction.
+   */
+  function revealMark(mark: HTMLElement) {
+    mark.scrollIntoView?.({ block: "center" });
+    const el = scrollEl;
+    if (!el || typeof requestAnimationFrame !== "function") return;
+    /** The mark's distances to the visible band's edges. */
+    const place = () => {
+      const m = mark.getBoundingClientRect();
+      const s = el.getBoundingClientRect();
+      const top = s.top + toolbarHeight();
+      return {
+        above: m.top - top,
+        below: s.bottom - m.bottom,
+        height: m.height,
+      };
+    };
+    const recentre = (p: ReturnType<typeof place>) => {
+      const band = el.clientHeight - toolbarHeight();
+      if (band <= 0) return;
+      // Centre the mark in the band: shift by its offset from the band's centre.
+      const drift = p.above + p.height / 2 - band / 2;
+      const next = Math.max(
+        0,
+        Math.min(el.scrollTop + drift, el.scrollHeight - el.clientHeight),
+      );
+      if (Math.abs(next - el.scrollTop) < 1) return;
+      virtualizer.scrollToOffset(next);
+      virtualizer.scrollOffset = next;
+    };
+    let last = place();
+    const serial0 = userSerial() ?? -1;
+    let frames = 0;
+    const hold = () => {
+      if (++frames > REVEAL_HOLD_FRAMES || !mark.isConnected) return;
+      if (serial0 >= 0 && userSerial() !== serial0) return;
+      const now = place();
+      const moved =
+        Math.abs(now.above - last.above) >= 1 ||
+        Math.abs(now.below - last.below) >= 1;
+      if (moved && (now.above < 0 || now.below < 0)) {
+        recentre(now);
+        last = place();
+      } else {
+        last = now;
+      }
+      requestAnimationFrame(hold);
+    };
+    requestAnimationFrame(hold);
+  }
+
   const resolveLink = (decoded: DecodedAnchor) => {
     const block = blocks().byId.get(decoded.anchor.blockId);
     const text =
@@ -1617,9 +1683,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           // exists; a selection mark on the same block must not consume it.
           if (pendingMark && samePassage(h, pendingMark)) {
             pendingMark = null;
-            programmaticScroll(() =>
-              mark.scrollIntoView?.({ block: "center" }),
-            );
+            programmaticScroll(() => revealMark(mark));
           }
         },
       }}
