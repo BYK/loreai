@@ -1834,13 +1834,22 @@ export function reassignKnowledge(
   // across projects (reviewer NIT).
   // When moving from cross_project to a project, clear the flag.
   const clearCrossProject = oldProjectId === null || oldProjectId === "";
+  const nextCrossProject = clearCrossProject ? 0 : 1;
   database.query("BEGIN IMMEDIATE").run();
   try {
+    if (nextCrossProject === 1) {
+      const conflict = ltm.findSharedTitleConflict(
+        entry.logical_id,
+        entry.title,
+      );
+      if (conflict) throw new ltm.TitleConflictError(entry.title, conflict);
+    }
+
     database
       .query(
         "UPDATE knowledge SET project_id = ?, cross_project = ? WHERE logical_id = ?",
       )
-      .run(toId, clearCrossProject ? 0 : 1, entry.logical_id);
+      .run(toId, nextCrossProject, entry.logical_id);
 
     // Clean up knowledge_transfers that became self-referential after the move.
     if (clearCrossProject) {

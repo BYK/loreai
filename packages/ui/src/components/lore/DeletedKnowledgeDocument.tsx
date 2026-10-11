@@ -1,7 +1,7 @@
-import type { Component } from "solid-js";
+import type { Component, JSX } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 
-import type { KnowledgeVersionHistory } from "~/contracts";
+import type { KnowledgeVersion, KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import { formatFullDate } from "~/lib/format";
 import { isApiError } from "~/lib/api";
@@ -14,6 +14,9 @@ import { VersionHistory } from "./VersionHistory";
 export const DeletedKnowledgeDocument: Component<{
   history: Loader<KnowledgeVersionHistory>;
   projectId?: string;
+  saveError?: string;
+  restoreAction?: JSX.Element;
+  renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
   const head = () => {
     const history = props.history.data();
@@ -48,6 +51,11 @@ export const DeletedKnowledgeDocument: Component<{
             }
           />
           <div class="mx-auto max-w-[940px] px-5 py-6 sm:px-7.5">
+            <Show when={props.saveError}>
+              <p class="mb-4 text-sm text-danger" role="alert">
+                {props.saveError}
+              </p>
+            </Show>
             <StateCard kind="empty" title="This entry was merged or deleted">
               The entry is no longer live. Its version history is preserved
               below.
@@ -80,12 +88,13 @@ export const DeletedKnowledgeDocument: Component<{
                 Deleted {formatFullDate(head()?.created_at)}
               </p>
             </section>
-            <p class="mt-4 text-sm text-muted">
-              Restoring arrives with knowledge editing (#1805)
-            </p>
+            <Show when={props.restoreAction}>
+              <div class="mt-4">{props.restoreAction}</div>
+            </Show>
             <VersionHistory
               loader={props.history}
               projectId={props.projectId}
+              renderRestore={props.renderRestore}
             />
           </div>
         </article>

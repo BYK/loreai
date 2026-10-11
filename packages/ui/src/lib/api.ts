@@ -22,6 +22,7 @@ import {
   crossProjectKnowledgeEntry,
   ApiError,
   apiErrorBody,
+  conflictingEntry,
   apiPath,
   cursorPage,
   circuitBreakerResetResult,
@@ -43,8 +44,12 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  knowledgeDeleteResult,
+  knowledgeEditResult,
+  knowledgeEffects,
   knowledgeList,
   formatKnowledgeSort,
+  knowledgeRestoreResult,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
   sessionWarmingModeResult,
@@ -73,6 +78,7 @@ import {
   warmingSettingsResult,
   warmingSnapshot,
   type AccountStatus,
+  type ConflictingEntry,
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
@@ -91,8 +97,12 @@ import {
   type EntityRebuildStatus,
   type ImportListPage,
   type KnowledgeEntry,
+  type KnowledgeDeleteResult,
+  type KnowledgeEditResult,
+  type KnowledgeEffects,
   type KnowledgeSearchResponse,
   type KnowledgeVersionHistory,
+  type KnowledgeRestoreResult,
   type ProjectClearResult,
   type ProjectDeleteResult,
   type ProjectRenameResult,
@@ -156,16 +166,34 @@ async function readErrorDetails(res: Response): Promise<{
   message: string | null;
   isErrorEnvelope: boolean;
   code: string | null;
+  conflictingEntry?: ConflictingEntry;
 }> {
   const text = await res.text().catch(() => "");
   if (!text) return { message: null, isErrorEnvelope: false, code: null };
   try {
-    const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
+    const body: unknown = JSON.parse(text);
+    const parsed = safeParseContract("<error>", apiErrorBody, body);
     if (parsed.ok) {
+      const errorBody =
+        body !== null && typeof body === "object" && "error" in body
+          ? body.error
+          : undefined;
+      const conflictValue =
+        errorBody !== null &&
+        typeof errorBody === "object" &&
+        "conflicting_entry" in errorBody
+          ? errorBody.conflicting_entry
+          : undefined;
+      const conflict = safeParseContract(
+        "<conflicting_entry>",
+        conflictingEntry,
+        conflictValue,
+      );
       return {
         message: parsed.value.error.message,
         isErrorEnvelope: true,
         code: parsed.value.error.type,
+        ...(conflict.ok ? { conflictingEntry: conflict.value } : {}),
       };
     }
   } catch {
@@ -231,6 +259,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           details.message ?? "Gateway refused this operation",
           res.status,
           details.code,
+          details.conflictingEntry,
         );
       }
       if (details.message === null) {
@@ -264,6 +293,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (!res.ok) {
       const details = await readErrorDetails(res);
+      const message = details.message;
       if (res.status === 404) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
@@ -279,9 +309,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
         throw new ApiError(
           "not_found",
           path,
-          details.message,
+          message ?? `Gateway responded ${res.status}`,
           404,
           details.code,
+          details.conflictingEntry,
         );
       }
       throw new ApiError(
@@ -290,6 +321,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         details.message ?? `Gateway responded ${res.status}`,
         res.status,
         details.code,
+        details.conflictingEntry,
       );
     }
 
@@ -473,6 +505,64 @@ export function createApiClient(options: ApiClientOptions = {}) {
         }),
         knowledgeVersionHistory,
         opts.signal,
+      );
+    },
+    getKnowledgeEffects(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEffects> {
+      return getJson(
+        apiPath(["knowledge", id, "effects"]),
+        knowledgeEffects,
+        signal,
+      );
+    },
+    editKnowledge(
+      id: string,
+      body: {
+        expected_revision: number;
+        title?: string;
+        content?: string;
+        category?: KnowledgeEntry["category"];
+        confidence?: number;
+        scope?: KnowledgeScope;
+      },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEditResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["knowledge", id]),
+        body,
+        knowledgeEditResult,
+        signal,
+      );
+    },
+    restoreKnowledge(
+      id: string,
+      body: { expected_revision: number; version_id?: string },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeRestoreResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["knowledge", id, "restore"]),
+        body,
+        knowledgeRestoreResult,
+        signal,
+      );
+    },
+    deleteKnowledge(
+      id: string,
+      expectedRevision: number,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeDeleteResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["knowledge", id], {
+          expected_revision: expectedRevision,
+        }),
+        undefined,
+        knowledgeDeleteResult,
+        signal,
       );
     },
     listProjectSessions(

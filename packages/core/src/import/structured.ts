@@ -18,6 +18,7 @@
 import * as ltm from "../ltm";
 import { db, ensureProject } from "../db";
 import { parseImportDoc, type LoreImportDoc } from "./schema";
+import { currentTenantId } from "../tenant";
 
 export type StructuredImportOptions = {
   /** Fallback project path for entries without an explicit `project`. */
@@ -64,25 +65,41 @@ function clampConfidence(v: number | undefined): number {
  * project pool then the cross-project pool. Returns the resolved current-row id.
  */
 function findExactTitle(title: string, pid: string | null): string | null {
+  const tenantId = currentTenantId();
   const inProject =
     pid !== null
       ? (db()
           .query(
-            "SELECT id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            `SELECT id FROM knowledge_current
+             WHERE tenant_id = ? AND project_id = ?
+               AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
+               AND confidence > 0
+             ORDER BY logical_id
+             LIMIT 1`,
           )
-          .get(pid, title) as { id: string } | null)
+          .get(tenantId, pid, title) as { id: string } | null)
       : (db()
           .query(
-            "SELECT id FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+            `SELECT id FROM knowledge_current
+             WHERE tenant_id = ? AND project_id IS NULL
+               AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
+               AND confidence > 0
+             ORDER BY logical_id
+             LIMIT 1`,
           )
-          .get(title) as { id: string } | null);
+          .get(tenantId, title) as { id: string } | null);
   if (inProject) return inProject.id;
 
   const crossProject = db()
     .query(
-      "SELECT id FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+      `SELECT id FROM knowledge_current
+       WHERE tenant_id = ? AND cross_project = 1
+         AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
+         AND confidence > 0
+       ORDER BY logical_id
+       LIMIT 1`,
     )
-    .get(title) as { id: string } | null;
+    .get(tenantId, title) as { id: string } | null;
   return crossProject?.id ?? null;
 }
 

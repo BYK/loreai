@@ -37,12 +37,23 @@ const dedupResult = type({
   totalRemoved: nonNegInt,
 });
 
+const sharedTitleConflictGroup = type({
+  title_key: nonEmptyString,
+  entries: type({
+    id: nonEmptyString,
+    title: "string",
+    project_id: "string | null",
+    scope: "'project' | 'shared'",
+  }).array(),
+});
+
 export const dedupPreviewResponse = type({
   dry_run: "true",
   groups: dedupPreviewGroup.array(),
   project: dedupResult,
   global: dedupResult,
   project_shared: dedupResult,
+  "shared_title_conflicts?": sharedTitleConflictGroup.array(),
 });
 
 export type DedupPreviewResponse = typeof dedupPreviewResponse.infer;
