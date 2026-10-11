@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { close, db, ensureProject, mergeProjectInternal } from "../src/db";
+import {
+  close,
+  db,
+  ensureProject,
+  mergeProjectInternal,
+  withTransaction,
+} from "../src/db";
 import { deleteProject, moveSessions } from "../src/data";
 import {
   DiscussionError,
@@ -744,6 +750,19 @@ describe("discussions", () => {
       .query("SELECT project_id FROM response_bindings WHERE message_id = ?")
       .all(answer) as Array<{ project_id: string }>;
     expect(rows).toEqual([{ project_id: other.id }]);
+  });
+
+  it("reads discussions in one snapshot, inside or outside a transaction", () => {
+    const { discussion } = start("hi");
+    const outside = getDiscussion(p.id, discussion.id);
+    expect(outside.replyCount).toBe(1);
+    expect(db().isTransaction).toBe(false);
+    const inside = withTransaction(() => ({
+      one: getDiscussion(p.id, discussion.id),
+      list: listDiscussions({ projectId: p.id, limit: 10 }).discussions,
+    }));
+    expect(inside.one).toEqual(outside);
+    expect(inside.list.map((d) => d.id)).toContain(discussion.id);
   });
 
   it("links discussions to threads and unlinks on thread delete", () => {

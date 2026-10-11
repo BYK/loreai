@@ -18,7 +18,7 @@
  */
 import { uuidv7 } from "uuidv7";
 import { contentHash } from "./content-hash";
-import { db, withTransaction } from "./db";
+import { databaseInTransaction, db, withTransaction } from "./db";
 import { sql, type SqlFragment } from "./sql";
 import { CHUNK_TERMINATOR } from "./temporal";
 import { currentTenantId } from "./tenant";
@@ -715,8 +715,17 @@ export function createDiscussion(input: CreateDiscussionInput): {
   return { discussion, reply };
 }
 
+/**
+ * Read rows and hydrate them in one transaction, so another process's commit
+ * cannot land between the row read and the reply counts. `hydrate` may persist
+ * an anchor transition, so this takes the write lock up front.
+ */
+function snapshot<T>(fn: () => T): T {
+  return databaseInTransaction(db()) ? fn() : withTransaction(fn);
+}
+
 export function getDiscussion(projectId: string, id: string): Discussion {
-  return hydrate([discussionRow(projectId, id)])[0];
+  return snapshot(() => hydrate([discussionRow(projectId, id)])[0]);
 }
 
 export interface ActivityKey {
@@ -769,15 +778,17 @@ export function listDiscussions(input: ListDiscussionsInput): {
   const threadFilter = input.threadId
     ? sql`AND d.thread_id = ${input.threadId}`
     : sql``;
-  const rows = sql.all<DiscussionRow>(
-    db(),
-    sql`SELECT ${DISCUSSION_COLS} FROM discussions d
-         WHERE d.project_id = ${input.projectId}
-           ${sourceFilter} ${stateFilter} ${threadFilter} ${afterKey(input.after)}
-         ORDER BY d.last_activity_at DESC, d.id DESC
-         LIMIT ${input.limit + 1}`,
-  );
-  return page(rows, input.limit);
+  return snapshot(() => {
+    const rows = sql.all<DiscussionRow>(
+      db(),
+      sql`SELECT ${DISCUSSION_COLS} FROM discussions d
+           WHERE d.project_id = ${input.projectId}
+             ${sourceFilter} ${stateFilter} ${threadFilter} ${afterKey(input.after)}
+           ORDER BY d.last_activity_at DESC, d.id DESC
+           LIMIT ${input.limit + 1}`,
+    );
+    return page(rows, input.limit);
+  });
 }
 
 /**
@@ -793,16 +804,18 @@ export function listDiscussionsByActivity(input: {
   const projectFilter = input.projectId
     ? sql`AND d.project_id = ${input.projectId}`
     : sql``;
-  const rows = sql.all<DiscussionRow>(
-    db(),
-    sql`SELECT ${DISCUSSION_COLS} FROM discussions d
-          JOIN projects p ON p.id = d.project_id
-         WHERE p.tenant_id = ${currentTenantId()}
-           ${projectFilter} ${afterKey(input.after)}
-         ORDER BY d.last_activity_at DESC, d.id DESC
-         LIMIT ${input.limit + 1}`,
-  );
-  return page(rows, input.limit);
+  return snapshot(() => {
+    const rows = sql.all<DiscussionRow>(
+      db(),
+      sql`SELECT ${DISCUSSION_COLS} FROM discussions d
+            JOIN projects p ON p.id = d.project_id
+           WHERE p.tenant_id = ${currentTenantId()}
+             ${projectFilter} ${afterKey(input.after)}
+           ORDER BY d.last_activity_at DESC, d.id DESC
+           LIMIT ${input.limit + 1}`,
+    );
+    return page(rows, input.limit);
+  });
 }
 
 export interface UpdateDiscussionInput {
