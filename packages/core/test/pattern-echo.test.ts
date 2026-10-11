@@ -98,11 +98,12 @@ describe("pattern-echo cooldown", () => {
     vi.spyOn(ltm, "findSemanticDuplicate").mockResolvedValue(null);
 
     const llm: LLMClient = {
-      prompt: vi
-        .fn()
-        .mockResolvedValue(
-          JSON.stringify({ title: "Echo preference", content: "Repeated" }),
-        ),
+      prompt: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          title: "Echo preference",
+          content: "Repeated behavior remains stable",
+        }),
+      ),
     };
     await detectPatternEchoes({
       distillId: "echo-current",
@@ -112,9 +113,11 @@ describe("pattern-echo cooldown", () => {
       llm,
     });
 
-    const entry = ltm
-      .forProject(PROJECT, false)
-      .find((candidate) => candidate.title === "Echo preference");
+    const entry = db()
+      .query(
+        "SELECT origin FROM knowledge_current WHERE title = ? AND project_id = ?",
+      )
+      .get("Echo preference", pid) as { origin: string | null } | null;
     expect(entry?.origin).toBe("pattern");
   });
 

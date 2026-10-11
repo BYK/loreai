@@ -60,7 +60,7 @@ function tokenize(query: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   while (index < query.length) {
-    while (index < query.length && /\s/.test(query[index])) index++;
+    while (index < query.length && /\s/.test(query.charAt(index))) index++;
     if (index >= query.length) break;
 
     const start = index;
@@ -68,7 +68,7 @@ function tokenize(query: string): Token[] {
     let quoted = false;
     let inQuote = false;
     while (index < query.length) {
-      const char = query[index];
+      const char = query.charAt(index);
       if (char === '"') {
         quoted = true;
         inQuote = !inQuote;

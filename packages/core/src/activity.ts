@@ -538,7 +538,16 @@ function refreshSessionTitles(projectIds: string[] | null): void {
 
 export function toSnippet(text: string): string {
   const cleaned = sanitizeSurrogates(text)
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
+    .split("")
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x08 ||
+        (code >= 0x0b && code <= 0x1f) ||
+        (code >= 0x7f && code <= 0x9f)
+        ? " "
+        : char;
+    })
+    .join("")
     .replace(/<[^>]*>/g, " ")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/^[ \t]{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)/gm, "")
