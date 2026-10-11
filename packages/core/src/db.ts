@@ -2479,6 +2479,19 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- a damaged database (it is recreated later by recovery).
   SELECT 1;
   `,
+  `
+  -- Version 103: knowledge provenance (#2028).
+  ALTER TABLE knowledge ADD COLUMN origin TEXT;
+  UPDATE knowledge
+     SET origin = CASE
+       WHEN created_by IS NOT NULL THEN 'user'
+       WHEN worker_model_id IS NULL AND source_session IS NULL THEN 'import'
+       ELSE 'curator'
+     END
+   WHERE origin IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_session_created
+    ON temporal_messages(project_id, session_id, created_at);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4607,6 +4620,25 @@ function recoverMissingObjects(database: Database) {
     database.exec(
       "UPDATE knowledge SET logical_id = id WHERE logical_id IS NULL;",
     );
+  }
+  {
+    const kcols = database
+      .query("PRAGMA table_info(knowledge)")
+      .all() as Array<{ name: string }>;
+    if (kcols.length && !kcols.some((c) => c.name === "origin")) {
+      database.exec("ALTER TABLE knowledge ADD COLUMN origin TEXT;");
+    }
+    if (kcols.length) {
+      database.exec(`
+        UPDATE knowledge
+           SET origin = CASE
+             WHEN created_by IS NOT NULL THEN 'user'
+             WHEN worker_model_id IS NULL AND source_session IS NULL THEN 'import'
+             ELSE 'curator'
+           END
+         WHERE origin IS NULL;
+      `);
+    }
   }
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);

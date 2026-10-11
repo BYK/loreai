@@ -50,6 +50,7 @@ describe("importStructuredEntries", () => {
     const titles = rows.map((r) => r.title).sort();
     expect(titles).toContain("Use SQLite WAL mode");
     expect(titles).toContain("Prefer zod for validation");
+    expect(rows.every((row) => row.origin === "import")).toBe(true);
   });
 
   test("is idempotent — re-running skips duplicates", () => {
@@ -79,6 +80,7 @@ describe("importStructuredEntries", () => {
     const rows = entriesForProject(PROJECT);
     const entry = rows.find((r) => r.title === "Auth flow decision");
     expect(entry?.content).toBe("new content v2");
+    expect(entry?.origin).toBe("import");
   });
 
   test("preserves complete imported content, even when it exceeds a prompt budget", () => {

@@ -377,6 +377,7 @@ export function applyOps(
         content: op.content,
         session: input.sessionID,
         scope: op.scope,
+        origin: "curator",
         // Default to project-scoped. Cross-project sharing must be an explicit,
         // deliberate choice by the curator — defaulting to true caused
         // project-specific engineering directives to leak into every project's
@@ -466,6 +467,7 @@ export function applyOps(
           title,
           content,
           confidence: op.confidence,
+          origin: "curator",
           metadata: input.metadata,
         });
         // Re-read so we report — and sync — the EFFECTIVE state: a colliding

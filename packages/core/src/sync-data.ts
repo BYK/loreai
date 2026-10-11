@@ -331,6 +331,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
         "updated_by",
         "sensitivity",
         "promotion_status",
+        "origin",
         "created_at",
         "updated_at",
       ],

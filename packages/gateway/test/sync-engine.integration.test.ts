@@ -188,14 +188,19 @@ function ensureProject(path: string, name?: string): string {
   return id;
 }
 
-function insertKnowledge(id: string, content: string): void {
+function insertKnowledge(
+  id: string,
+  content: string,
+  origin: string | null = null,
+): void {
   const pid = ensureProject("/tmp/lore-engine-it");
   db()
     .query(
-      `INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, promoted_at)
-       VALUES (?, ?, 'pattern', 'T', ?, ?, ?, ?)`,
+      `INSERT INTO knowledge
+         (id, project_id, category, title, content, created_at, updated_at, promoted_at, origin)
+       VALUES (?, ?, 'pattern', 'T', ?, ?, ?, ?, ?)`,
     )
-    .run(id, pid, content, Date.now(), Date.now(), 999); // promoted_at is local-only
+    .run(id, pid, content, Date.now(), Date.now(), 999, origin); // promoted_at is local-only
 }
 
 describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
@@ -284,13 +289,23 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
 
   it("round-trips push → pull with a stable content hash (no ping-pong)", async () => {
     syncData.enableSync("basic");
-    insertKnowledge("k1", "round-trip");
+    insertKnowledge("k1", "round-trip", "pattern");
     const client = clientFor(uid);
     await pushOnce(client);
+    const remote = await h.asUser(uid, (c) =>
+      c
+        .query("select origin from public.knowledge where id='k1'")
+        .then((x) => x.rows),
+    );
+    expect(remote).toEqual([{ origin: "pattern" }]);
     // Pull back our own row: it must hash-equal (skip), not re-apply.
     const r = await pullOnce(client);
     expect(r.pulled).toBe(0); // echo is a no-op
     expect(syncData.getRowById("knowledge", "k1")?.content).toBe("round-trip");
+    expect(
+      (syncData.getRowById("knowledge", "k1") as { origin?: string | null })
+        ?.origin,
+    ).toBe("pattern");
   });
 
   it("round-trips the confidence register (knowledge_meta + knowledge_meta_crdt) through the real engine", async () => {

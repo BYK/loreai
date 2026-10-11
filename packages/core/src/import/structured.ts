@@ -159,7 +159,8 @@ export function importStructuredEntries(
     if (existingId) {
       const existing = ltm.get(existingId);
       if (existing && existing.content !== content) {
-        if (!opts.dryRun) ltm.update(existing.id, { content });
+        if (!opts.dryRun)
+          ltm.update(existing.id, { content, origin: "import" });
         result.updated++;
         result.entries.push({ title, category, action: "updated" });
       } else {
@@ -209,6 +210,7 @@ export function importStructuredEntries(
       scope: crossProject ? "global" : "project",
       crossProject,
       confidence,
+      origin: "import",
       // Intentionally NO workerProviderID/workerModelID — user-authored import.
     });
     result.created++;

@@ -585,6 +585,7 @@ describe("importFromFile — known ID tracking", () => {
     expect(entry).not.toBeNull();
     expect(entry?.id).toBe(remoteId);
     expect(entry?.title).toBe("Auth strategy");
+    expect(entry?.origin).toBe("import");
   });
 
   test("does not duplicate an existing entry on re-import of same file", () => {
@@ -630,6 +631,7 @@ describe("importFromFile — known ID tracking", () => {
 
     const entry = ltm.getByLogical(id); // import edit appended a new version
     expect(entry?.content).toContain("API keys");
+    expect(entry?.origin).toBe("import");
   });
 
   test("import does not overwrite another project's private entry (foreign marker)", () => {
@@ -1401,6 +1403,7 @@ describe("importLoreFile", () => {
 
     const entry = ltm.getByLogical(id); // import edit appended a new version
     expect(entry?.content).toContain("API keys");
+    expect(entry?.origin).toBe("import");
   });
 
   test("imports and removes an enforcement marker without dropping other metadata", () => {

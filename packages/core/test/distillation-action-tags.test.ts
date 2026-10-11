@@ -151,6 +151,11 @@ describe("action-tag minting batches per-tag session counts (#1023)", () => {
     expect(
       prefExists("Follow the established git workflow (branch, PR, review)"),
     ).toBe(false);
+    const origins = db()
+      .query("SELECT origin FROM knowledge_current WHERE project_id = ?")
+      .all(ensureProject(PROJECT)) as Array<{ origin: string | null }>;
+    expect(origins.length).toBeGreaterThan(0);
+    expect(origins.every((row) => row.origin === "pattern")).toBe(true);
   });
 
   test("a tag below the 3-session threshold is not minted", async () => {

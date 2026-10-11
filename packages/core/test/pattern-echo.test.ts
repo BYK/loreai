@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
+import * as ltm from "../src/ltm";
+import { storeEmbedding } from "../src/db/vec-store";
 import * as embedding from "../src/embedding";
 import {
   _resetPatternEchoCooldownForTest,
@@ -69,6 +71,51 @@ describe("pattern-echo cooldown", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("stamps echo-extracted preferences with pattern origin", async () => {
+    const pid = ensureProject(PROJECT);
+    insertDistill("echo-current", pid, "s-current");
+    insertDistill("echo-a", pid, "s-a");
+    insertDistill("echo-b", pid, "s-b");
+    storeEmbedding(
+      db(),
+      "distillations",
+      "echo-a",
+      new Float32Array([1, 0, 0]),
+    );
+    storeEmbedding(
+      db(),
+      "distillations",
+      "echo-b",
+      new Float32Array([1, 0, 0]),
+    );
+    embedSpy.mockResolvedValue([new Float32Array([1, 0, 0])]);
+    searchSpy.mockResolvedValue([
+      { id: "echo-a", session_id: "s-a", similarity: 1 },
+      { id: "echo-b", session_id: "s-b", similarity: 1 },
+    ]);
+    vi.spyOn(ltm, "findSemanticDuplicate").mockResolvedValue(null);
+
+    const llm: LLMClient = {
+      prompt: vi
+        .fn()
+        .mockResolvedValue(
+          JSON.stringify({ title: "Echo preference", content: "Repeated" }),
+        ),
+    };
+    await detectPatternEchoes({
+      distillId: "echo-current",
+      observations: "current observations",
+      projectPath: PROJECT,
+      sessionID: "s-current",
+      llm,
+    });
+
+    const entry = ltm
+      .forProject(PROJECT, false)
+      .find((candidate) => candidate.title === "Echo preference");
+    expect(entry?.origin).toBe("pattern");
   });
 
   it("rate-limits the pattern search to once per session per cooldown, yet always stores the embedding", async () => {

@@ -37,6 +37,28 @@ export * as data from "./data";
 export * as sql from "./sql";
 export * as dedupApply from "./dedup-apply";
 export * as listQuery from "./list-query";
+export * as activityQuery from "./activity-query";
+export * as activity from "./activity";
+export {
+  ACTIVITY_KINDS,
+  PARTICIPANTS,
+  DEFAULT_ACTIVITY_QUERY,
+  parseActivityQuery,
+  type ActivityKind,
+  type ActivityParticipant,
+  type ParsedActivityQuery,
+} from "./activity-query";
+export {
+  ACTIVITY_LEGS,
+  listActivity,
+  toSnippet,
+  type ActivityLeg,
+  type ActivityCursor,
+  type ActivityMatch,
+  type ActivityItem,
+  type ActivityPage,
+} from "./activity";
+export type { KnowledgeOrigin } from "./ltm";
 export type {
   KnowledgeKeyset,
   KnowledgeListOptions,

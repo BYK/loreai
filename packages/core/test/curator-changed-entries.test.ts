@@ -33,6 +33,9 @@ describe("curator applyOps changedEntries", () => {
       content: "Use durable prompt deltas for new knowledge.",
     });
     expect(result.changedEntries[0]?.id).toBeTruthy();
+    expect(ltm.getByLogical(result.changedEntries[0].id)?.origin).toBe(
+      "curator",
+    );
   });
 
   test("reports dedup-merged creates as updated entries", () => {
@@ -70,6 +73,7 @@ describe("curator applyOps changedEntries", () => {
       }),
     ]);
     expect(ltm.getByLogical(id)?.content).toBe("updated by dedup");
+    expect(ltm.getByLogical(id)?.origin).toBe("curator");
   });
 
   test("returns updatedEntries with previous and new content", () => {
@@ -97,6 +101,7 @@ describe("curator applyOps changedEntries", () => {
         prevContent: "old content",
       }),
     ]);
+    expect(ltm.getByLogical(id)?.origin).toBe("curator");
   });
 
   test("returns deletedEntries with pre-delete content", () => {
