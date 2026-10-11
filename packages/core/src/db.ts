@@ -2475,7 +2475,7 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- Version 102: the global daily budget is retired in favour of
   -- per-provider budgets (#1927). No-op marker: the delete of the
   -- 'daily_budget' kv_meta row runs in migrate() by
-  -- DAILY_BUDGET_RETIRE_MIGRATION_INDEX, because kv_meta can be missing on
+  -- RETIRED_KV_KEY_BY_MIGRATION_INDEX, because kv_meta can be missing on
   -- a damaged database (it is recreated later by recovery).
   SELECT 1;
   `,
@@ -2484,6 +2484,13 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- and ID prefix. A tenant/project index cannot bound a prefix scan across
   -- projects, including historical versions.
   CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
+  `,
+  `
+  -- Version 104: provider budgets are replaced by automatic subscription
+  -- pacing with a per-account switch (#2045). No-op marker: the delete of the
+  -- 'provider_budgets' kv_meta row runs in migrate() by
+  -- RETIRED_KV_KEY_BY_MIGRATION_INDEX, like the earlier retired budget keys.
+  SELECT 1;
   `,
 ]);
 
@@ -2515,7 +2522,13 @@ const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
 const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
 const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
-const DAILY_BUDGET_RETIRE_MIGRATION_INDEX = 101; // 0-based index of version-102
+// Retired kv_meta rows deleted by version 102 (daily budget, #1927) and
+// version 104 (provider budgets, #2045). kv_meta can be missing on a damaged
+// database, so the delete is guarded rather than plain migration SQL.
+const RETIRED_KV_KEY_BY_MIGRATION_INDEX = new Map<number, string>([
+  [101, "daily_budget"], // 0-based index of version-102
+  [103, "provider_budgets"], // 0-based index of version-104
+]);
 
 /**
  * Add durable tenant ownership without re-keying or deleting historical local
@@ -4197,7 +4210,7 @@ function migrate(database: Database) {
       applySyncTenantIsolation(database);
     } else if (i === TEMPORAL_IDENTITY_MIGRATION_INDEX) {
       applyTemporalIdentity(database);
-    } else if (i === DAILY_BUDGET_RETIRE_MIGRATION_INDEX) {
+    } else if (RETIRED_KV_KEY_BY_MIGRATION_INDEX.has(i)) {
       if (
         database
           .query(
@@ -4205,7 +4218,9 @@ function migrate(database: Database) {
           )
           .get() !== null
       ) {
-        database.exec("DELETE FROM kv_meta WHERE key = 'daily_budget'");
+        database
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run(RETIRED_KV_KEY_BY_MIGRATION_INDEX.get(i) ?? "");
       }
     } else {
       // Pre-strip any column-side ALTERs that are already satisfied by the

@@ -16,9 +16,9 @@ import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
 import { resolveCostAttribution } from "./cost-attribution";
 import {
-  describeProviderBudget,
-  isBackgroundBudgetPaused,
-  providerBudgetPressure,
+  isSessionCurationPacingPaused,
+  pacingDelayMs,
+  recordForegroundRequest,
   sessionBudgetMatch,
 } from "./provider-budgets";
 import { observeProviderQuotaHeaders } from "./provider-quota-headers";
@@ -457,7 +457,6 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
-  throttleDelayForPressure,
   getSessionCosts,
 } from "./cost-tracker";
 import { isQuotaPaused } from "./quota";
@@ -17424,11 +17423,8 @@ function scheduleBackgroundWorkForTenant(
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
   // Urgent distillation is exempt (it unblocks the next user turn).
-  // Provider budgets pause the same work when quota usage runs ahead of
-  // pace or a cap is exhausted (isBackgroundBudgetPaused).
-  const quotaPaused =
-    isQuotaPaused(resolveAuth(sessionID)) ||
-    isBackgroundBudgetPaused(sessionID, sessionState.lastUpstream);
+  // Subscription pacing never pauses distillation; it gates curation only.
+  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
 
   // Worker circuit breaker: when background workers have been failing for a
   // sustained period, stop hammering the upstream every turn — allow only a
@@ -17546,8 +17542,14 @@ function scheduleBackgroundWorkForTenant(
   // that exceeds the diff pinning threshold invalidates tools + messages.
   // Also gated by circuit breaker — curation is never urgent.
   // Quota-paused accounts skip curation too (non-urgent background work).
-  // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+  // Worker-throttled sessions (sustained worker failure) skip it as well, and
+  // so do accounts whose subscription pacing is throttling (#2045).
+  if (
+    isBackgroundPaused(workerProviderID) ||
+    quotaPaused ||
+    workerThrottled ||
+    isSessionCurationPacingPaused(sessionID, sessionState.lastUpstream)
+  )
     return;
 
   const modelInputCost =
@@ -22902,64 +22904,56 @@ async function handleConversationTurnPrepared(
   preparation.dispose();
   modifiedReq.signal = foregroundAbort.signal;
 
-  // --- Provider budget throttle (#1927) ---
-  // Apply an invisible proxy-level sleep to slow the agent when a user cap
-  // covering this request's attribution is filling up too fast. Only caps:
-  // pace budgets never delay the user's own requests, they only throttle
-  // Lore's background work. The sleep is capped
+  // --- Subscription pacing (#2045) ---
+  // Apply an invisible proxy-level sleep when this account's quota usage runs
+  // faster than its windows can sustain (pacingDelayMs). The sleep is capped
   // to avoid causing cache busts (which would be self-defeating — costing
   // more than the throttle saved). A DB failure must never break the request.
-  let budgetPressure: ReturnType<typeof providerBudgetPressure> = {
-    pressure: 0,
-    budget: null,
-  };
+  let pacingDelay = 0;
   try {
-    budgetPressure = providerBudgetPressure(
-      sessionBudgetMatch(sessionID, sessionState.lastUpstream, req.rawHeaders),
-      "cap",
+    const match = sessionBudgetMatch(
+      sessionID,
+      sessionState.lastUpstream,
+      req.rawHeaders,
     );
+    const now = Date.now();
+    recordForegroundRequest(match, now);
+    pacingDelay = pacingDelayMs(match, now) / 1000;
   } catch (err) {
-    log.info(`provider-budget: evaluation failed: ${String(err)}`);
+    log.info(`provider-pacing: evaluation failed: ${String(err)}`);
   }
-  if (budgetPressure.pressure > 0 && budgetPressure.budget) {
-    const trippedBudget = budgetPressure.budget;
-    const delay = throttleDelayForPressure(budgetPressure.pressure);
+  if (pacingDelay > 0) {
+    // Cap delay to avoid pushing the next request past the cache TTL boundary.
+    // Use prevRequestTime (the request before this one) to compute how much
+    // of the cache TTL window has already been consumed.
+    const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+    const elapsed = sessionState.prevRequestTime
+      ? Date.now() - sessionState.prevRequestTime
+      : 0; // first request — no prior timing, full TTL available
+    const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
+    const actualDelay = Math.min(pacingDelay, maxSafe);
 
-    if (delay > 0) {
-      // Cap delay to avoid pushing the next request past the cache TTL boundary.
-      // Use prevRequestTime (the request before this one) to compute how much
-      // of the cache TTL window has already been consumed.
-      const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-      const elapsed = sessionState.prevRequestTime
-        ? Date.now() - sessionState.prevRequestTime
-        : 0; // first request — no prior timing, full TTL available
-      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
-      const actualDelay = Math.min(delay, maxSafe);
-
-      if (actualDelay > 0.5) {
-        // don't bother sleeping < 500ms
-        log.info(
-          `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
-            `session=${sessionID.slice(0, 16)} ` +
-            `pressure=${budgetPressure.pressure.toFixed(2)} ` +
-            `budget=${describeProviderBudget(trippedBudget)}`,
+    if (actualDelay > 0.5) {
+      // don't bother sleeping < 500ms
+      log.info(
+        `pacing-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
+          `session=${sessionID.slice(0, 16)}`,
+      );
+      try {
+        await completeBudgetThrottleDelay(
+          actualDelay * 1000,
+          foregroundAbort.signal,
+          () => {
+            const costs = getSessionCosts(sessionID);
+            if (costs) {
+              costs.throttle.events++;
+              costs.throttle.totalDelayMs += actualDelay * 1000;
+            }
+          },
         );
-        try {
-          await completeBudgetThrottleDelay(
-            actualDelay * 1000,
-            foregroundAbort.signal,
-            () => {
-              const costs = getSessionCosts(sessionID);
-              if (costs) {
-                costs.throttle.events++;
-                costs.throttle.totalDelayMs += actualDelay * 1000;
-              }
-            },
-          );
-        } catch (error) {
-          foregroundAbort.dispose();
-          throw error;
-        }
+      } catch (error) {
+        foregroundAbort.dispose();
+        throw error;
       }
     }
   }

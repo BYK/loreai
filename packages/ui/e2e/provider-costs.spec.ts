@@ -16,72 +16,70 @@ test.describe("provider cost cards", () => {
     await expect(bars.nth(0)).toHaveAttribute("aria-valuenow", "23");
     await expect(bars.nth(1)).toHaveAttribute("aria-valuenow", "41");
     await expect(anthropic.getByText(/resets in/)).toHaveCount(2);
-    await expect(anthropic.getByText("Quota cap · 7d")).toBeVisible();
-    await expect(anthropic.getByText("41% / 80%")).toBeVisible();
-    await expect(anthropic.getByText("Pace · 5h")).toBeVisible();
-    await expect(anthropic.getByText("Pace · 7d")).toBeVisible();
     await expect(page.getByText("Daily budget")).toHaveCount(0);
-    // Seeded 5h: 3h of 5h elapsed, used 23 → even pace 60; 7d: 4d of 7d, used 41.
-    await expect(anthropic.getByTestId("pace-tick")).toHaveCount(2);
-    // The tick must actually paint (a missing theme token renders transparent).
-    expect(
-      await anthropic
-        .getByTestId("pace-tick")
-        .first()
-        .evaluate((el) => getComputedStyle(el).backgroundColor),
-    ).not.toBe("rgba(0, 0, 0, 0)");
-    await expect(anthropic.getByTestId("pace-state")).toHaveText([
+    await expect(page.getByTestId("budget-editor")).toHaveCount(0);
+    // Seeded 5h: 3h of 5h elapsed at 23% → current 7.7 pts/h vs sustainable
+    // 38.5 pts/h; 7d: 4d of 7d at 41% → both under, so no delay.
+    await expect(anthropic.getByTestId("pacing-rates")).toHaveCount(2);
+    await expect(anthropic.getByTestId("pacing-rates").first()).toContainText(
+      "sustainable 39 pts/h",
+    );
+    await expect(anthropic.getByTestId("pacing-rates").first()).toContainText(
+      "current 7.7 pts/h (window avg)",
+    );
+    await expect(anthropic.getByTestId("pacing-state")).toHaveText([
       "on pace",
       "on pace",
     ]);
+    await expect(anthropic.getByTestId("pacing-delay")).toHaveText("none");
+    await expect(
+      anthropic.getByRole("switch", { name: "Automatic pacing" }),
+    ).toHaveAttribute("aria-checked", "true");
 
     const openai = cards.filter({ hasText: "OpenAI" });
     await expect(openai.getByText("API key")).toBeVisible();
     await expect(openai.locator('[role="progressbar"]')).toHaveCount(0);
+    await expect(openai.getByRole("switch")).toHaveCount(0);
   });
 
-  test("budget editor saves an API-key cap via PUT /costs/budgets and clears it", async ({
+  test("pacing switch turns pacing off via PUT /costs/pacing and back on", async ({
     page,
   }, testInfo) => {
-    // Budgets are one shared KV row; edit from a single project so parallel
-    // projects never race on it.
+    // The switch is one shared KV row; flip it from a single project so
+    // parallel projects never race on it.
     test.skip(testInfo.project.name !== "desktop-chromium");
     await page.goto("/ui/costs");
-    const openai = page
+    const anthropic = page
       .getByTestId("provider-card")
-      .filter({ hasText: "OpenAI" });
+      .filter({ hasText: "Anthropic" });
+    const toggle = anthropic.getByRole("switch", { name: "Automatic pacing" });
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
 
-    await openai.getByRole("button", { name: "Edit budgets" }).click();
-    // Typed key by key, a leading minus must survive and be rejected.
-    await openai.getByLabel("USD cap per day").pressSequentially("-1");
-    await expect(openai.getByLabel("USD cap per day")).toHaveValue("-1");
-    await openai.getByRole("button", { name: "Save budgets" }).click();
-    await expect(openai.getByRole("alert")).toContainText("positive");
-    await openai.getByLabel("USD cap per day").fill("5");
-    const saved = page.waitForResponse(
+    const off = page.waitForResponse(
       (r) =>
-        r.url().endsWith("/api/v1/costs/budgets") &&
+        r.url().endsWith("/api/v1/costs/pacing") &&
         r.request().method() === "PUT",
     );
-    await openai.getByRole("button", { name: "Save budgets" }).click();
-    expect((await saved).status()).toBe(200);
-    await expect(openai.getByTestId("budget-editor")).toHaveCount(0);
-    await expect(openai.getByText("USD cap · day")).toBeVisible();
+    await toggle.click();
+    const offResponse = await off;
+    expect(offResponse.status()).toBe(200);
+    expect(offResponse.request().postDataJSON()).toEqual({
+      provider: "anthropic",
+      account: "e2e-anth",
+      enabled: false,
+    });
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await expect(anthropic.getByTestId("pacing-delay")).toHaveText("off");
+    await expect(anthropic.getByTestId("pacing-state")).toHaveText([
+      "pacing off",
+      "pacing off",
+    ]);
 
     await page.reload();
-    await expect(openai.getByText("USD cap · day")).toBeVisible();
-    await openai.getByRole("button", { name: "Edit budgets" }).click();
-    await expect(openai.getByLabel("USD cap per day")).toHaveValue("5");
-    await openai.getByLabel("USD cap per day").fill("");
-    await openai.getByRole("button", { name: "Save budgets" }).click();
-    await expect(openai.getByText("USD cap · day")).toHaveCount(0);
-
-    // The seeded Anthropic percent cap survived both saves.
-    await expect(
-      page
-        .getByTestId("provider-card")
-        .filter({ hasText: "Anthropic" })
-        .getByText("Quota cap · 7d"),
-    ).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await page.reload();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
   });
 });

@@ -44,9 +44,9 @@ import {
 } from "./cost-tracker";
 import { getActiveSessions } from "./pipeline";
 import {
-  evaluateProviderBudgets,
-  parseProviderBudgets,
-  setProviderBudgets,
+  evaluateProviderPacing,
+  parsePacingSetting,
+  setPacingEnabled,
 } from "./provider-budgets";
 
 const MAX_OPERATIONS_BODY_BYTES = 8 * 1024;
@@ -544,40 +544,27 @@ export function handleGetCosts(configuredHostedMode = false): Response {
       observed_at: row.observedAt,
       stale: isProviderQuotaStale(row, Date.now()),
     })),
-    provider_budgets: evaluateProviderBudgets(),
-    can_edit_budgets: !requestIsHosted(configuredHostedMode),
+    provider_pacing: evaluateProviderPacing(),
+    can_edit_pacing: !requestIsHosted(configuredHostedMode),
   });
 }
 
 /**
- * `PUT /api/v1/costs/budgets` — replace the explicit provider budget list.
- * Implicit pace budgets are derived, never stored; an explicit `off` entry
- * disables one.
+ * `PUT /api/v1/costs/pacing` — switch one subscription account's automatic
+ * pacing on or off. Body: `{ provider, account, enabled }`.
  */
-export async function handlePutProviderBudgets(
+export async function handlePutProviderPacing(
   req: Request,
   configuredHostedMode = false,
 ): Promise<Response> {
-  const blocked = hostedWriteError("Provider budgets", configuredHostedMode);
+  const blocked = hostedWriteError("Provider pacing", configuredHostedMode);
   if (blocked) return blocked;
   const parsed = await readJsonBody(req);
   if (parsed instanceof Response) return parsed;
-  const body = jsonObject(parsed);
-  if (
-    !body ||
-    Object.keys(body).length !== 1 ||
-    !("provider_budgets" in body)
-  ) {
-    return errorResponse(
-      400,
-      "invalid_request",
-      "Body must be { provider_budgets: [...] }.",
-    );
+  const setting = parsePacingSetting(parsed);
+  if (typeof setting === "string") {
+    return errorResponse(400, "invalid_request", setting);
   }
-  const budgets = parseProviderBudgets(body.provider_budgets);
-  if (typeof budgets === "string") {
-    return errorResponse(400, "invalid_request", budgets);
-  }
-  setProviderBudgets(budgets);
-  return jsonResponse({ provider_budgets: evaluateProviderBudgets() });
+  setPacingEnabled(setting);
+  return jsonResponse({ provider_pacing: evaluateProviderPacing() });
 }

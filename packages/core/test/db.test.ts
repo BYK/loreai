@@ -378,11 +378,11 @@ describe("db", () => {
     ]);
   });
 
-  test("v102 deletes the retired daily_budget KV row and keeps provider budgets", () => {
+  test("v102 deletes the retired daily_budget KV row and keeps other KV rows", () => {
     const connection = db();
     connection.exec(`
       INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('daily_budget', '25');
-      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_budgets', '[]');
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_pacing', '[]');
       UPDATE schema_version SET version = 101;
     `);
     close();
@@ -391,10 +391,40 @@ describe("db", () => {
     expect(
       migrated
         .query(
-          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')",
+          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_pacing')",
         )
         .all(),
-    ).toEqual([{ key: "provider_budgets" }]);
+    ).toEqual([{ key: "provider_pacing" }]);
+    expect(
+      (
+        migrated.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
+  test("v103 deletes the retired provider_budgets KV row and keeps pacing switches", () => {
+    const connection = db();
+    const switches = '[{"provider":"anthropic","account":"a","enabled":false}]';
+    connection.exec(`
+      INSERT OR REPLACE INTO kv_meta (key, value)
+        VALUES ('provider_budgets', '[{"provider":"anthropic","mode":"off"}]');
+      UPDATE schema_version SET version = 102;
+    `);
+    connection
+      .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
+      .run("provider_pacing", switches);
+    close();
+
+    const migrated = db();
+    expect(
+      migrated
+        .query(
+          "SELECT key, value FROM kv_meta WHERE key IN ('provider_budgets', 'provider_pacing')",
+        )
+        .all(),
+    ).toEqual([{ key: "provider_pacing", value: switches }]);
     expect(
       (
         migrated.query("SELECT version FROM schema_version").get() as {

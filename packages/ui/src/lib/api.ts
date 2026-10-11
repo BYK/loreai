@@ -29,8 +29,8 @@ import {
   cursorPage,
   circuitBreakerResetResult,
   costsSnapshot,
-  providerBudgetsResult,
-  type ProviderBudgetInput,
+  providerPacingResult,
+  type ProviderPacingInput,
   dedupApplyReceipt,
   modelUsageDocument,
   dedupPreviewResponse,
@@ -1273,15 +1273,15 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getCosts(signal?: AbortSignal): Promise<CostsSnapshot> {
       return getJson("/costs", costsSnapshot, signal);
     },
-    putProviderBudgets(
-      budgets: ProviderBudgetInput[],
+    setProviderPacing(
+      setting: ProviderPacingInput,
       signal?: AbortSignal,
-    ): Promise<{ provider_budgets: CostsSnapshot["provider_budgets"] }> {
+    ): Promise<{ provider_pacing: CostsSnapshot["provider_pacing"] }> {
       return mutateJson(
         "PUT",
-        "/costs/budgets",
-        { provider_budgets: budgets },
-        providerBudgetsResult,
+        "/costs/pacing",
+        setting,
+        providerPacingResult,
         signal,
       );
     },

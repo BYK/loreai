@@ -1,22 +1,25 @@
 /**
- * Per-provider budgets (issue #1927), keyed by (provider, auth_kind, account,
- * window):
+ * Automatic subscription pacing (#2045): one on/off switch per subscription
+ * account `(provider, account)`, on by default. While on, every 5h / 7d quota
+ * window of the account counts:
  *
- * - `pace`: spread a subscription quota window (5h / 7d) evenly. Usage ahead
- *   of the even-pace line plus `headroom` ramps throttle pressure.
- * - `cap`: a hard limit — USD/tokens per UTC day or ISO week (summed from the
- *   daily provider ledger), or quota percent per 5h / 7d window.
- * - `off`: disables the implicit pace budget for one subscription window.
+ * - sustainable rate `s = (100 - u) / T` (percent per ms, `u` = used %,
+ *   `T` = ms to reset);
+ * - observed rate `r` = EWMA of `Δu/Δt` over successive in-memory quota
+ *   observations (samples with `Δt ≥ 60 s`, reset when `resetsAt` changes or
+ *   `u` drops); with fewer than 2 samples `r = u / (L - T)`;
+ * - `u ≥ 100` → maximum delay; `r ≤ s` → none; otherwise `ρ = r / s` and the
+ *   request waits `g · (ρ - 1)`, `g` = EWMA of the gaps between the account's
+ *   foreground requests.
  *
- * Every subscription account with quota rows gets an implicit pace budget for
- * each 5h / 7d window unless an explicit pace/off entry covers that window.
- * Caps never suppress pacing; both apply and the larger pressure wins.
+ * The largest window delay wins, capped at {@link MAX_PACING_DELAY_MS}.
+ * Curation is paused while the account is throttling; distillation and the
+ * cache warmer never are. API-key accounts have no reset window: no pacing.
  */
 
 import {
   getKV,
   setKV,
-  getProviderDayUsage,
   isProviderQuotaStale,
   listProviderQuotas,
   type ProviderAuthKind,
@@ -25,61 +28,12 @@ import {
 import { resolveAuth } from "./auth";
 import { resolveCostAttribution } from "./cost-attribution";
 
-export type QuotaWindow = "5h" | "7d";
-export type LedgerWindow = "day" | "week";
-export type ProviderBudgetWindow = QuotaWindow | LedgerWindow;
-export type ProviderBudgetUnit = "usd" | "tokens" | "percent";
+export type PacingWindow = "5h" | "7d";
 
-type BudgetScope = { provider: string; account: string | null };
-
-export type PaceBudget = BudgetScope & {
-  auth_kind: "subscription";
-  mode: "pace";
-  window: QuotaWindow;
-  headroom: number;
-};
-
-export type OffBudget = BudgetScope & {
-  auth_kind: "subscription";
-  mode: "off";
-  window: QuotaWindow;
-};
-
-export type CapBudget = BudgetScope & { auth_kind: ProviderAuthKind } & (
-    | { mode: "cap"; unit: "percent"; window: QuotaWindow; amount: number }
-    | {
-        mode: "cap";
-        unit: "usd" | "tokens";
-        window: LedgerWindow;
-        amount: number;
-      }
-  );
-
-export type ProviderBudget = PaceBudget | OffBudget | CapBudget;
-
-export type ProviderBudgetState =
-  | "ok"
-  | "throttling"
-  | "paused"
-  | "stale"
-  | "unknown"
-  | "off";
-
-export type ProviderBudgetStatus = ProviderBudget & {
-  /** Quota percent (pace / percent cap), USD or tokens used in the window. */
-  used: number | null;
-  /** Pace only: even-pace line plus headroom, in percent points. */
-  target: number | null;
-  /** Pace only: `used - target`, in percent points. */
-  ahead: number | null;
-  /** Cap only: `used / amount`. */
-  fraction: number | null;
-  /** Throttle pressure in [0, 1]; 1 also pauses background workers. */
-  pressure: number;
-  resets_at: number | null;
-  stale: boolean;
-  implicit: boolean;
-  status: ProviderBudgetState;
+export type PacingSetting = {
+  provider: string;
+  account: string;
+  enabled: boolean;
 };
 
 export type BudgetMatch = {
@@ -88,273 +42,156 @@ export type BudgetMatch = {
   account: string;
 };
 
-export type BudgetPressure = {
-  pressure: number;
-  budget: ProviderBudgetStatus | null;
+/** Inputs for one quota window; rates are percent per ms. */
+export type PacingWindowInput = {
+  window: string;
+  used: number;
+  resetsAt: number;
+  windowMs: number;
+  /** EWMA of observed Δu/Δt, or null with fewer than 2 samples. */
+  observedRate: number | null;
 };
 
-const PROVIDER_BUDGETS_KV_KEY = "provider_budgets";
-const MAX_BUDGETS = 50;
+export type PacingWindowStatus = {
+  window: string;
+  used: number;
+  resets_at: number;
+  /** `(100 - u) / T`, percent per hour. */
+  sustainable_rate: number;
+  /** Observed (or window-average) rate, percent per hour; null when unknown. */
+  current_rate: number | null;
+  rate_source: "observed" | "average" | "unknown";
+  /** `r / s`; null when the rate is unknown. */
+  ratio: number | null;
+  throttling: boolean;
+  delay_ms: number;
+};
+
+export type ProviderPacingStatus = {
+  provider: string;
+  account: string;
+  enabled: boolean;
+  throttling: boolean;
+  delay_ms: number;
+  /** EWMA of the gaps between this account's foreground requests. */
+  request_gap_ms: number | null;
+  windows: PacingWindowStatus[];
+};
+
+export const PROVIDER_PACING_KV_KEY = "provider_pacing";
+/** Maximum foreground pacing delay (MAX_THROTTLE_DELAY, 60 s). */
+export const MAX_PACING_DELAY_MS = 60_000;
+/** Minimum Δt between quota observations that count as a rate sample. */
+export const MIN_SAMPLE_INTERVAL_MS = 60_000;
+/** EWMA weight of the newest sample (rates and request gaps). */
+export const PACING_EWMA_ALPHA = 0.3;
+const HOUR_MS = 3_600_000;
+const MAX_SETTINGS = 200;
 const PROVIDER_RE = /^[a-z0-9._-]{1,64}$/;
 const ACCOUNT_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-const AUTH_KINDS = new Set(["api_key", "subscription"]);
-const QUOTA_WINDOWS = new Set(["5h", "7d"]);
-const LEDGER_WINDOWS = new Set(["day", "week"]);
+const PACING_WINDOWS = new Set(["5h", "7d"]);
 
-/** Default pace headroom, in percent points above the even-pace line. */
-export const DEFAULT_PACE_HEADROOM = 10;
-const MAX_PACE_HEADROOM = 50;
-/** Percent points ahead of target at which pace pressure reaches 1. */
-export const PACE_RAMP = 10;
-/** Cap fraction below which no throttling occurs. */
-const CAP_FLOOR = 0.5;
-/** Minimum elapsed hours used for the cap spend-rate estimate. */
-const MIN_RATE_HOURS = 1;
-/** Minimum remaining hours used for the sustainable cap rate. */
-const MIN_REMAINING_HOURS = 0.5;
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
+// ---------------------------------------------------------------------------
+// Settings
 
-const BASE_FIELDS = ["provider", "auth_kind", "account", "mode", "window"];
-const MODE_FIELDS: Record<ProviderBudget["mode"], Set<string>> = {
-  pace: new Set([...BASE_FIELDS, "headroom"]),
-  off: new Set(BASE_FIELDS),
-  cap: new Set([...BASE_FIELDS, "unit", "amount"]),
-};
-
-function parseEntry(entry: unknown): ProviderBudget | string {
+function parseSetting(entry: unknown): PacingSetting | string {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-    return "each provider budget must be an object.";
+    return "body must be an object.";
   }
   const rec = entry as Record<string, unknown>;
-  const mode = rec.mode;
-  if (mode !== "pace" && mode !== "cap" && mode !== "off") {
-    return 'mode must be "pace", "cap", or "off".';
-  }
   for (const key of Object.keys(rec)) {
-    if (!MODE_FIELDS[mode].has(key)) {
-      return `unknown field "${key}" for a ${mode} budget.`;
+    if (key !== "provider" && key !== "account" && key !== "enabled") {
+      return `unknown field "${key}".`;
     }
   }
-  const provider = rec.provider;
-  if (typeof provider !== "string" || !PROVIDER_RE.test(provider)) {
+  if (typeof rec.provider !== "string" || !PROVIDER_RE.test(rec.provider)) {
     return `provider must match ${PROVIDER_RE.source}.`;
   }
-  let account: string | null = null;
-  if (rec.account !== undefined && rec.account !== null) {
-    if (typeof rec.account !== "string" || !ACCOUNT_RE.test(rec.account)) {
-      return `account must match ${ACCOUNT_RE.source}.`;
-    }
-    account = rec.account;
+  if (typeof rec.account !== "string" || !ACCOUNT_RE.test(rec.account)) {
+    return `account must match ${ACCOUNT_RE.source}.`;
   }
-  const window = rec.window;
-  if (mode === "pace" || mode === "off") {
-    if (rec.auth_kind !== "subscription") {
-      return `${mode} budgets require auth_kind "subscription" — only subscription quota windows can be paced.`;
-    }
-    if (typeof window !== "string" || !QUOTA_WINDOWS.has(window)) {
-      return `${mode} budgets require window "5h" or "7d".`;
-    }
-    if (mode === "off") {
-      return {
-        provider,
-        auth_kind: "subscription",
-        account,
-        mode,
-        window: window as QuotaWindow,
-      };
-    }
-    const headroom = rec.headroom ?? DEFAULT_PACE_HEADROOM;
-    if (
-      typeof headroom !== "number" ||
-      !Number.isFinite(headroom) ||
-      headroom < 0 ||
-      headroom > MAX_PACE_HEADROOM
-    ) {
-      return `headroom must be a number of percent points in [0, ${MAX_PACE_HEADROOM}].`;
-    }
-    return {
-      provider,
-      auth_kind: "subscription",
-      account,
-      mode,
-      window: window as QuotaWindow,
-      headroom,
-    };
-  }
-  if (typeof rec.auth_kind !== "string" || !AUTH_KINDS.has(rec.auth_kind)) {
-    return 'auth_kind must be "api_key" or "subscription".';
-  }
-  const authKind = rec.auth_kind as ProviderAuthKind;
-  const unit = rec.unit;
-  if (unit !== "usd" && unit !== "tokens" && unit !== "percent") {
-    return 'unit must be "usd", "tokens", or "percent".';
-  }
-  if (unit === "percent") {
-    if (typeof window !== "string" || !QUOTA_WINDOWS.has(window)) {
-      return 'percent caps require window "5h" or "7d".';
-    }
-  } else if (typeof window !== "string" || !LEDGER_WINDOWS.has(window)) {
-    return `${unit} caps require window "day" or "week".`;
-  }
-  const amount = rec.amount;
-  const maxAmount = unit === "percent" ? 100 : 1e9;
-  if (
-    typeof amount !== "number" ||
-    !Number.isFinite(amount) ||
-    amount <= 0 ||
-    amount > maxAmount
-  ) {
-    return `amount must be a finite number in (0, ${maxAmount}].`;
-  }
-  return unit === "percent"
-    ? {
-        provider,
-        auth_kind: authKind,
-        account,
-        mode,
-        unit,
-        window: window as QuotaWindow,
-        amount,
-      }
-    : {
-        provider,
-        auth_kind: authKind,
-        account,
-        mode,
-        unit,
-        window: window as LedgerWindow,
-        amount,
-      };
+  if (typeof rec.enabled !== "boolean") return "enabled must be a boolean.";
+  return { provider: rec.provider, account: rec.account, enabled: rec.enabled };
 }
 
-/** Pace and off share a slot per window; caps get one slot per unit. */
-function slotKey(budget: ProviderBudget): string {
-  return [
-    budget.provider,
-    budget.auth_kind,
-    budget.account ?? "",
-    budget.window,
-    budget.mode === "cap" ? `cap:${budget.unit}` : "pace",
-  ].join("\x1f");
+/** Validate a `{ provider, account, enabled }` toggle. */
+export function parsePacingSetting(input: unknown): PacingSetting | string {
+  return parseSetting(input);
 }
 
-/**
- * Validate a user-supplied explicit budget list. Returns the normalized list,
- * or a human-readable error string.
- */
-export function parseProviderBudgets(
-  input: unknown,
-): ProviderBudget[] | string {
-  if (!Array.isArray(input)) return "provider_budgets must be an array.";
-  if (input.length > MAX_BUDGETS) {
-    return `provider_budgets accepts at most ${MAX_BUDGETS} entries.`;
-  }
-  const out: ProviderBudget[] = [];
-  const seen = new Set<string>();
-  for (const [index, entry] of input.entries()) {
-    const budget = parseEntry(entry);
-    if (typeof budget === "string") {
-      return `provider_budgets[${index}]: ${budget}`;
-    }
-    const key = slotKey(budget);
-    if (seen.has(key)) {
-      return `provider_budgets[${index}]: duplicate ${budget.mode === "cap" ? `${budget.unit} cap` : "pace/off entry"} for this provider, auth_kind, account, and window.`;
-    }
-    seen.add(key);
-    out.push(budget);
-  }
-  return out;
-}
-
-/**
- * Load the explicit budget list. Each persisted entry is re-validated
- * individually; invalid or duplicate entries are dropped. Never throws.
- */
-export function getProviderBudgets(): ProviderBudget[] {
+/** Stored switches; invalid or duplicate entries are dropped. Never throws. */
+export function getPacingSettings(): PacingSetting[] {
   let parsed: unknown;
   try {
-    const raw = getKV(PROVIDER_BUDGETS_KV_KEY);
+    const raw = getKV(PROVIDER_PACING_KV_KEY);
     if (!raw) return [];
     parsed = JSON.parse(raw);
   } catch {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  const out: ProviderBudget[] = [];
+  const out: PacingSetting[] = [];
   const seen = new Set<string>();
   for (const entry of parsed) {
-    const budget = parseEntry(entry);
-    if (typeof budget === "string") continue;
-    const key = slotKey(budget);
+    const setting = parseSetting(entry);
+    if (typeof setting === "string") continue;
+    const key = `${setting.provider}\x1f${setting.account}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(budget);
-    if (out.length === MAX_BUDGETS) break;
+    out.push(setting);
+    if (out.length === MAX_SETTINGS) break;
   }
   return out;
 }
 
-/** Replace the explicit budget list. */
-export function setProviderBudgets(list: ProviderBudget[]): void {
-  setKV(PROVIDER_BUDGETS_KV_KEY, JSON.stringify(list));
+/** Store one account's switch (a missing entry means enabled). */
+export function setPacingEnabled(setting: PacingSetting): void {
+  const rest = getPacingSettings().filter(
+    (s) => s.provider !== setting.provider || s.account !== setting.account,
+  );
+  const next = setting.enabled ? rest : [...rest, setting];
+  setKV(PROVIDER_PACING_KV_KEY, JSON.stringify(next.slice(-MAX_SETTINGS)));
 }
 
-function covers(
-  budget: { provider: string; auth_kind: string; account: string | null },
-  match: { provider: string; auth_kind: string; account: string },
-): boolean {
-  return (
-    budget.provider === match.provider &&
-    budget.auth_kind === match.auth_kind &&
-    (budget.account === null || budget.account === match.account)
+export function isPacingEnabled(provider: string, account: string): boolean {
+  return !getPacingSettings().some(
+    (s) => s.provider === provider && s.account === account && !s.enabled,
   );
 }
 
-/**
- * Implicit pace budgets: one per subscription (provider, account, window)
- * quota row for 5h / 7d, unless an explicit pace or off entry covers it.
- */
-function implicitBudgets(
-  explicit: ProviderBudget[],
-  rows: ProviderQuotaRow[],
-): PaceBudget[] {
-  const out: PaceBudget[] = [];
-  const seen = new Set<string>();
-  for (const row of rows) {
-    if (row.authKind !== "subscription") continue;
-    if (row.window !== "5h" && row.window !== "7d") continue;
-    const key = [row.provider, row.account, row.window].join("\x1f");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const overridden = explicit.some(
-      (b) =>
-        b.mode !== "cap" &&
-        b.window === row.window &&
-        covers(b, {
-          provider: row.provider,
-          auth_kind: row.authKind,
-          account: row.account,
-        }),
-    );
-    if (overridden) continue;
-    out.push({
-      provider: row.provider,
-      auth_kind: "subscription",
-      account: row.account,
-      mode: "pace",
-      window: row.window,
-      headroom: DEFAULT_PACE_HEADROOM,
-    });
-  }
-  return out;
+// ---------------------------------------------------------------------------
+// In-memory rate tracker
+
+type RateTrack = {
+  resetsAt: number | null;
+  lastUsed: number;
+  lastAt: number;
+  samples: number;
+  rate: number | null;
+};
+
+const rateTracks = new Map<string, RateTrack>();
+const requestGaps = new Map<string, { lastAt: number; gap: number | null }>();
+
+function trackKey(provider: string, account: string, window?: string): string {
+  return window === undefined
+    ? `${provider}\x1f${account}`
+    : `${provider}\x1f${account}\x1f${window}`;
+}
+
+function ewma(previous: number | null, sample: number): number {
+  return previous === null
+    ? sample
+    : PACING_EWMA_ALPHA * sample + (1 - PACING_EWMA_ALPHA) * previous;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function quotaPercentOf(row: ProviderQuotaRow): number | null {
+function quotaPercentOf(
+  row: Pick<ProviderQuotaRow, "usedPercent" | "limit" | "remaining">,
+): number | null {
   if (row.usedPercent !== null && Number.isFinite(row.usedPercent)) {
     return clamp(row.usedPercent, 0, 100);
   }
@@ -369,287 +206,241 @@ function quotaPercentOf(row: ProviderQuotaRow): number | null {
   return null;
 }
 
-/** Cap pressure: 0 below half the cap, linear to 1 at the cap. */
-function capRamp(fraction: number): number {
-  if (fraction >= 1) return 1;
-  return Math.max(0, (fraction - CAP_FLOOR) / (1 - CAP_FLOOR));
-}
-
-function stateFor(pressure: number): ProviderBudgetState {
-  return pressure >= 1 ? "paused" : pressure > 0 ? "throttling" : "ok";
-}
-
-type Measurement = Omit<
-  ProviderBudgetStatus,
-  keyof ProviderBudget | "implicit"
->;
-
-const UNKNOWN: Measurement = {
-  used: null,
-  target: null,
-  ahead: null,
-  fraction: null,
-  pressure: 0,
-  resets_at: null,
-  stale: false,
-  status: "unknown",
-};
-
-/** Pace or percent-cap measurement against one account's quota window. */
-function measureQuota(
-  budget: PaceBudget | Extract<CapBudget, { unit: "percent" }>,
-  row: ProviderQuotaRow,
-  now: number,
-): Measurement {
-  if (isProviderQuotaStale(row, now)) {
-    return {
-      ...UNKNOWN,
-      resets_at: row.resetsAt,
-      stale: true,
-      status: "stale",
-    };
+/**
+ * Feed one persisted quota observation into the rate tracker. Called where
+ * `provider_quotas` rows are written.
+ */
+export function recordQuotaObservation(row: ProviderQuotaRow): void {
+  if (row.authKind !== "subscription" || !PACING_WINDOWS.has(row.window)) {
+    return;
   }
   const used = quotaPercentOf(row);
-  if (used === null) return { ...UNKNOWN, resets_at: row.resetsAt };
-  if (budget.mode === "cap") {
-    const fraction = used / budget.amount;
-    const pressure = capRamp(fraction);
-    return {
-      ...UNKNOWN,
-      used,
-      fraction,
-      pressure,
-      resets_at: row.resetsAt,
-      status: stateFor(pressure),
-    };
+  if (used === null) return;
+  const key = trackKey(row.provider, row.account, row.window);
+  const track = rateTracks.get(key);
+  if (!track || track.resetsAt !== row.resetsAt || used < track.lastUsed) {
+    rateTracks.set(key, {
+      resetsAt: row.resetsAt,
+      lastUsed: used,
+      lastAt: row.observedAt,
+      samples: 1,
+      rate: null,
+    });
+    return;
   }
-  if (row.windowMinutes === null || row.resetsAt === null) {
-    return { ...UNKNOWN, used, resets_at: row.resetsAt };
-  }
-  const length = row.windowMinutes * 60_000;
-  if (!(length > 0)) return { ...UNKNOWN, used, resets_at: row.resetsAt };
-  const elapsed = clamp(length - (row.resetsAt - now), 0, length);
-  const target = Math.min(100, (100 * elapsed) / length + budget.headroom);
-  const ahead = used - target;
-  const pressure = used >= 100 ? 1 : clamp(ahead / PACE_RAMP, 0, 1);
-  return {
-    ...UNKNOWN,
-    used,
-    target,
-    ahead,
-    pressure,
-    resets_at: row.resetsAt,
-    status: stateFor(pressure),
-  };
+  const dt = row.observedAt - track.lastAt;
+  if (dt < MIN_SAMPLE_INTERVAL_MS) return;
+  track.rate = ewma(track.rate, (used - track.lastUsed) / dt);
+  track.lastUsed = used;
+  track.lastAt = row.observedAt;
+  track.samples++;
 }
 
-function utcDay(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
+/** Record a foreground request start for the account's gap EWMA. */
+export function recordForegroundRequest(
+  match: BudgetMatch | null,
+  now = Date.now(),
+): void {
+  if (!match || match.auth_kind !== "subscription") return;
+  const key = trackKey(match.provider, match.account);
+  const entry = requestGaps.get(key);
+  if (!entry) {
+    requestGaps.set(key, { lastAt: now, gap: null });
+    return;
+  }
+  if (now > entry.lastAt) entry.gap = ewma(entry.gap, now - entry.lastAt);
+  entry.lastAt = now;
 }
 
-/** [start, end) of the UTC day or ISO week (Monday 00:00 UTC) containing now. */
-export function ledgerWindowBounds(
-  window: LedgerWindow,
+export function _resetPacingTrackerForTest(): void {
+  rateTracks.clear();
+  requestGaps.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Delay
+
+/** Per-window evaluation; pure. */
+export function evaluatePacingWindow(
+  input: PacingWindowInput,
+  gapMs: number | null,
   now: number,
-): { start: number; end: number } {
-  const d = new Date(now);
-  const dayStart = Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-  );
-  if (window === "day") return { start: dayStart, end: dayStart + DAY_MS };
-  const sinceMonday = (d.getUTCDay() + 6) % 7;
-  const start = dayStart - sinceMonday * DAY_MS;
-  return { start, end: start + 7 * DAY_MS };
-}
-
-/**
- * USD/token cap: the 50%-floor ramp, gated by a rate check — no pressure
- * while the window's average spend rate is sustainable (at or below the
- * remaining amount spread over the hours left). Above it, pressure is shaped
- * so the throttle delay (pressure² × max) keeps the original curve
- * ramp² × tanh(overshoot / 3).
- */
-function measureLedger(
-  budget: Extract<CapBudget, { unit: "usd" | "tokens" }>,
-  now: number,
-): Measurement {
-  const { start, end } = ledgerWindowBounds(budget.window, now);
-  let used = 0;
-  for (let day = start; day <= now && day < end; day += DAY_MS) {
-    const usage = getProviderDayUsage(
-      utcDay(day),
-      budget.provider,
-      budget.auth_kind,
-      budget.account,
-    );
-    used += budget.unit === "usd" ? usage.cost : usage.tokens;
-  }
-  const fraction = used / budget.amount;
-  let pressure = 0;
-  if (fraction >= 1) {
-    pressure = 1;
-  } else if (fraction >= CAP_FLOOR) {
-    const elapsedHours = Math.max((now - start) / HOUR_MS, MIN_RATE_HOURS);
-    const remainingHours = Math.max((end - now) / HOUR_MS, MIN_REMAINING_HOURS);
-    const rate = used / elapsedHours;
-    const targetRate = (budget.amount - used) / remainingHours;
-    if (rate > targetRate) {
-      const overshoot = Math.min(rate / targetRate - 1, 10);
-      pressure = capRamp(fraction) * Math.sqrt(Math.tanh(overshoot / 3));
+): PacingWindowStatus | null {
+  const T = input.resetsAt - now;
+  if (!(T > 0) || !(input.windowMs > 0)) return null;
+  const u = clamp(input.used, 0, 100);
+  const sustainable = (100 - u) / T;
+  const elapsed = input.windowMs - T;
+  const rate = input.observedRate ?? (elapsed > 0 ? u / elapsed : null);
+  const source: PacingWindowStatus["rate_source"] =
+    input.observedRate !== null
+      ? "observed"
+      : rate !== null
+        ? "average"
+        : "unknown";
+  let delay = 0;
+  let ratio: number | null = null;
+  let throttling = false;
+  if (u >= 100) {
+    throttling = true;
+    delay = MAX_PACING_DELAY_MS;
+  } else if (rate !== null) {
+    ratio = rate / sustainable;
+    if (rate > sustainable) {
+      throttling = true;
+      delay = gapMs === null ? 0 : gapMs * (ratio - 1);
     }
   }
   return {
-    ...UNKNOWN,
-    used,
-    fraction,
-    pressure,
-    resets_at: end,
-    status: stateFor(pressure),
+    window: input.window,
+    used: u,
+    resets_at: input.resetsAt,
+    sustainable_rate: sustainable * HOUR_MS,
+    current_rate: rate === null ? null : rate * HOUR_MS,
+    rate_source: source,
+    ratio,
+    throttling,
+    delay_ms: Math.min(MAX_PACING_DELAY_MS, delay),
   };
 }
 
-function latestRow(
+/** Largest window delay, capped at {@link MAX_PACING_DELAY_MS}; pure. */
+export function computePacingDelayMs(
+  windows: PacingWindowInput[],
+  gapMs: number | null,
+  now: number,
+): number {
+  let delay = 0;
+  for (const w of windows) {
+    const status = evaluatePacingWindow(w, gapMs, now);
+    if (status) delay = Math.max(delay, status.delay_ms);
+  }
+  return delay;
+}
+
+function windowInputs(
   rows: ProviderQuotaRow[],
-  budget: ProviderBudget,
+  provider: string,
   account: string,
-): ProviderQuotaRow | null {
-  let best: ProviderQuotaRow | null = null;
+  now: number,
+): PacingWindowInput[] {
+  const latest = new Map<string, ProviderQuotaRow>();
   for (const row of rows) {
     if (
-      row.provider !== budget.provider ||
-      row.authKind !== budget.auth_kind ||
-      row.window !== budget.window ||
-      row.account !== account
+      row.provider !== provider ||
+      row.account !== account ||
+      row.authKind !== "subscription" ||
+      !PACING_WINDOWS.has(row.window)
     ) {
       continue;
     }
-    if (!best || row.observedAt > best.observedAt) best = row;
+    const prev = latest.get(row.window);
+    if (!prev || row.observedAt > prev.observedAt) latest.set(row.window, row);
   }
-  return best;
+  const out: PacingWindowInput[] = [];
+  for (const row of latest.values()) {
+    if (isProviderQuotaStale(row, now)) continue;
+    const used = quotaPercentOf(row);
+    if (used === null || row.resetsAt === null || row.windowMinutes === null) {
+      continue;
+    }
+    const track = rateTracks.get(trackKey(provider, account, row.window));
+    const observedRate =
+      track && track.resetsAt === row.resetsAt && track.samples >= 2
+        ? track.rate
+        : null;
+    out.push({
+      window: row.window,
+      used,
+      resetsAt: row.resetsAt,
+      windowMs: row.windowMinutes * 60_000,
+      observedRate,
+    });
+  }
+  return out.sort((a, b) => a.window.localeCompare(b.window));
 }
 
-/**
- * Measure a budget. Quota windows are per account: a budget without an
- * account (or `onlyAccount` unset) reports the worst-pressure account.
- */
-function measure(
-  budget: Exclude<ProviderBudget, OffBudget>,
+function statusFor(
   rows: ProviderQuotaRow[],
+  provider: string,
+  account: string,
+  enabled: boolean,
   now: number,
-  onlyAccount?: string,
-): Measurement {
-  if (budget.mode === "cap" && budget.unit !== "percent") {
-    return measureLedger(budget, now);
-  }
-  const quotaBudget = budget;
-  const accounts =
-    budget.account !== null
-      ? [budget.account]
-      : onlyAccount !== undefined
-        ? [onlyAccount]
-        : [
-            ...new Set(
-              rows
-                .filter(
-                  (row) =>
-                    row.provider === budget.provider &&
-                    row.authKind === budget.auth_kind &&
-                    row.window === budget.window,
-                )
-                .map((row) => row.account),
-            ),
-          ];
-  let worst: Measurement | null = null;
-  for (const account of accounts) {
-    const row = latestRow(rows, budget, account);
-    const result = row ? measureQuota(quotaBudget, row, now) : UNKNOWN;
-    if (!worst || result.pressure > worst.pressure) worst = result;
-  }
-  return worst ?? UNKNOWN;
-}
-
-function statusOf(
-  budget: ProviderBudget,
-  implicit: boolean,
-  rows: ProviderQuotaRow[],
-  now: number,
-  onlyAccount?: string,
-): ProviderBudgetStatus {
-  if (budget.mode === "off") {
-    return {
-      ...budget,
-      ...UNKNOWN,
-      status: "off",
-      implicit,
-    };
-  }
+): ProviderPacingStatus {
+  const gap = requestGaps.get(trackKey(provider, account))?.gap ?? null;
+  const windows = windowInputs(rows, provider, account, now)
+    .map((w) => evaluatePacingWindow(w, gap, now))
+    .filter((w): w is PacingWindowStatus => w !== null);
   return {
-    ...budget,
-    ...measure(budget, rows, now, onlyAccount),
-    implicit,
+    provider,
+    account,
+    enabled,
+    throttling: enabled && windows.some((w) => w.throttling),
+    delay_ms: enabled
+      ? windows.reduce((max, w) => Math.max(max, w.delay_ms), 0)
+      : 0,
+    request_gap_ms: gap,
+    windows,
   };
 }
 
-/** Statuses for every explicit (including off) and implicit budget. */
-export function evaluateProviderBudgets(
-  now = Date.now(),
-): ProviderBudgetStatus[] {
-  const explicit = getProviderBudgets();
-  const rows = listProviderQuotas();
-  return [
-    ...explicit.map((budget) => statusOf(budget, false, rows, now)),
-    ...implicitBudgets(explicit, rows).map((budget) =>
-      statusOf(budget, true, rows, now),
-    ),
-  ];
-}
-
-/**
- * Max pressure over one kind of budget covering an attribution, with the
- * budget that produced it. Quota windows are evaluated for the attribution's
- * own account. `cap` pressure (explicit user caps) may slow the user's own
- * requests; `pace` pressure only ever throttles Lore's background work.
- */
-export function providerBudgetPressure(
+/** Foreground pacing delay for an attribution; 0 when off or unpaced. */
+export function pacingDelayMs(
   match: BudgetMatch | null,
-  kind: "cap" | "pace",
   now = Date.now(),
-): BudgetPressure {
-  if (!match) return { pressure: 0, budget: null };
-  const explicit = getProviderBudgets();
-  const rows = listProviderQuotas();
-  let best: BudgetPressure = { pressure: 0, budget: null };
-  const candidates: Array<[ProviderBudget, boolean]> = [
-    ...explicit.map((b): [ProviderBudget, boolean] => [b, false]),
-    ...implicitBudgets(explicit, rows).map((b): [ProviderBudget, boolean] => [
-      b,
-      true,
-    ]),
-  ];
-  for (const [budget, implicit] of candidates) {
-    if (budget.mode !== kind || !covers(budget, match)) continue;
-    const status = statusOf(budget, implicit, rows, now, match.account);
-    if (status.pressure > best.pressure) {
-      best = { pressure: status.pressure, budget: status };
-    }
-  }
-  return best;
+): number {
+  if (!match || match.auth_kind !== "subscription") return 0;
+  if (!isPacingEnabled(match.provider, match.account)) return 0;
+  return statusFor(
+    listProviderQuotas(),
+    match.provider,
+    match.account,
+    true,
+    now,
+  ).delay_ms;
 }
 
-/** Human-readable budget name for logs. */
-export function describeProviderBudget(status: ProviderBudgetStatus): string {
-  const scope = `${status.provider}/${status.auth_kind}/${status.account ?? "*"}`;
-  const kind =
-    status.mode === "cap" ? `${status.unit} cap ${status.amount}` : status.mode;
-  const detail =
-    status.ahead !== null
-      ? ` ahead=${status.ahead.toFixed(1)}pts`
-      : status.fraction !== null
-        ? ` used=${(status.fraction * 100).toFixed(0)}%`
-        : "";
-  return `${scope} ${status.window} ${kind}${status.implicit ? " (implicit)" : ""}${detail}`;
+/** Curation pauses while the account's pacing is throttling (ρ > 1 or u ≥ 100). */
+export function isCurationPacingPaused(
+  match: BudgetMatch | null,
+  now = Date.now(),
+): boolean {
+  if (!match || match.auth_kind !== "subscription") return false;
+  if (!isPacingEnabled(match.provider, match.account)) return false;
+  return statusFor(
+    listProviderQuotas(),
+    match.provider,
+    match.account,
+    true,
+    now,
+  ).throttling;
+}
+
+/** Pacing status for every subscription account with 5h / 7d quota rows. */
+export function evaluateProviderPacing(
+  now = Date.now(),
+): ProviderPacingStatus[] {
+  const rows = listProviderQuotas();
+  const disabled = new Set(
+    getPacingSettings()
+      .filter((s) => !s.enabled)
+      .map((s) => trackKey(s.provider, s.account)),
+  );
+  const accounts = new Map<string, { provider: string; account: string }>();
+  for (const row of rows) {
+    if (row.authKind !== "subscription" || !PACING_WINDOWS.has(row.window)) {
+      continue;
+    }
+    accounts.set(trackKey(row.provider, row.account), {
+      provider: row.provider,
+      account: row.account,
+    });
+  }
+  return [...accounts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, { provider, account }]) =>
+      statusFor(rows, provider, account, !disabled.has(key), now),
+    );
 }
 
 /** Budget attribution for a session's last upstream; null when unknown. */
@@ -674,30 +465,15 @@ export function sessionBudgetMatch(
 }
 
 /**
- * Whether non-urgent background work (curation, warmer pings, incremental
- * distillation) should be skipped for an attribution: usage ahead of pace on
- * any pace budget, or a cap at full pressure.
- */
-export function backgroundBudgetPaused(
-  match: BudgetMatch | null,
-  now = Date.now(),
-): boolean {
-  return (
-    providerBudgetPressure(match, "pace", now).pressure > 0 ||
-    providerBudgetPressure(match, "cap", now).pressure >= 1
-  );
-}
-
-/**
- * {@link backgroundBudgetPaused} for a session's last upstream. Never throws:
+ * {@link isCurationPacingPaused} for a session's last upstream. Never throws:
  * a DB failure must not break the caller.
  */
-export function isBackgroundBudgetPaused(
+export function isSessionCurationPacingPaused(
   sessionID: string,
   upstream?: { providerID?: string; url?: string },
 ): boolean {
   try {
-    return backgroundBudgetPaused(sessionBudgetMatch(sessionID, upstream));
+    return isCurationPacingPaused(sessionBudgetMatch(sessionID, upstream));
   } catch {
     return false;
   }

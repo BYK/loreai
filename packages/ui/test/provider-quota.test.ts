@@ -1,15 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyBudgetEditor,
-  budgetEditorState,
-  budgetsForCard,
-  evenPacePercent,
-  explicitBudgets,
-  paceFor,
-  paceStateText,
-  type BudgetRow,
   displayProvider,
+  formatDelay,
+  formatRate,
+  pacingForCard,
+  pacingStateText,
   formatResetCountdown,
   groupProviderCards,
   quotaPercent,
@@ -166,411 +162,58 @@ describe("groupProviderCards", () => {
   });
 });
 
-describe("budgetsForCard", () => {
-  const card = {
-    provider: "anthropic",
-    auth_kind: "subscription" as const,
-    account: "a1",
+describe("pacing helpers", () => {
+  const window = {
+    window: "5h",
+    used: 40,
+    resets_at: 0,
+    sustainable_rate: 24,
+    current_rate: 48,
+    rate_source: "observed" as const,
+    ratio: 2,
+    throttling: true,
+    delay_ms: 10_000,
   };
-  const budget = (
-    o: Partial<Parameters<typeof budgetsForCard>[0][number]> = {},
-  ) => ({
-    provider: "anthropic",
-    auth_kind: "subscription" as const,
-    account: null,
-    mode: "cap" as const,
-    unit: "usd" as const,
-    window: "day" as const,
-    amount: 10,
-    used: null,
-    target: null,
-    ahead: null,
-    fraction: null,
-    pressure: 0,
-    resets_at: null,
-    stale: false,
-    implicit: false,
-    status: "ok" as const,
-    ...o,
-  });
 
-  it("matches the account wildcard and exact tuples, filters the rest", () => {
-    const budgets = [
-      budget(),
-      budget({ account: "a1" }),
-      budget({ auth_kind: "api_key" }),
-      budget({ account: "other" }),
-      budget({ provider: "openai" }),
-    ];
-    expect(budgetsForCard(budgets, card)).toHaveLength(2);
-  });
-});
-
-describe("provider budget pacing + editor", () => {
-  const card = {
-    provider: "anthropic",
-    auth_kind: "subscription" as const,
-    account: "a1",
-  };
-  const status = (o: Partial<BudgetRow> = {}): BudgetRow => ({
-    provider: "anthropic",
-    auth_kind: "subscription",
-    account: "a1",
-    mode: "pace",
-    window: "7d",
-    headroom: 10,
-    used: 41,
-    target: 67,
-    ahead: -26,
-    fraction: null,
-    pressure: 0,
-    resets_at: 1,
-    stale: false,
-    implicit: true,
-    status: "ok",
-    ...o,
-  });
-
-  it("paceStateText covers on pace / ahead / stale / off / unknown", () => {
-    expect(paceStateText(status(), false)).toBe("on pace");
-    expect(
-      paceStateText(
-        status({ used: 80, ahead: 13.4, pressure: 1, status: "paused" }),
-        false,
-      ),
-    ).toBe("ahead of pace by 13 pts — Lore is slowing background work");
-    // Ahead by less than the ramp still slows; never rounds down to 0 pts.
-    expect(paceStateText(status({ ahead: 0.3, pressure: 0.03 }), false)).toBe(
-      "ahead of pace by 1 pts — Lore is slowing background work",
-    );
-    expect(paceStateText(status({ status: "stale", stale: true }), false)).toBe(
-      "stale",
-    );
-    expect(paceStateText(status(), true)).toBe("stale");
-    expect(
-      paceStateText(status({ mode: "off", headroom: undefined }), false),
-    ).toBe("pacing off");
-    expect(
-      paceStateText(
-        status({ status: "unknown", target: null, ahead: null }),
-        false,
-      ),
-    ).toBeNull();
-    expect(paceStateText(null, false)).toBeNull();
-  });
-
-  it("evenPacePercent is target minus headroom, clamped", () => {
-    expect(evenPacePercent(status())).toBe(57);
-    expect(evenPacePercent(status({ target: 100, headroom: 10 }))).toBe(90);
-    expect(evenPacePercent(status({ target: 5, headroom: 10 }))).toBe(0);
-    expect(evenPacePercent(status({ target: null }))).toBeNull();
-    expect(evenPacePercent(status({ mode: "off" }))).toBeNull();
-  });
-
-  it("paceFor prefers the card's own account over an account-less entry", () => {
-    const wildcard = status({ account: null, mode: "off", implicit: false });
-    const own = status({ headroom: 20, implicit: false });
-    expect(paceFor([wildcard, own], card, "7d")).toBe(own);
-    expect(paceFor([wildcard], card, "7d")).toBe(wildcard);
-    expect(paceFor([own], card, "5h")).toBeNull();
-  });
-
-  it("explicitBudgets drops implicit rows and status fields", () => {
-    expect(
-      explicitBudgets([
-        status(),
-        status({ window: "5h", headroom: 25, implicit: false }),
-        status({ mode: "off", window: "7d", implicit: false }),
-        status({ mode: "cap", unit: "percent", amount: 80, implicit: false }),
-      ]),
-    ).toEqual([
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "pace",
-        window: "5h",
-        headroom: 25,
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "off",
-        window: "7d",
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "cap",
-        unit: "percent",
-        window: "7d",
-        amount: 80,
-      },
-    ]);
-  });
-
-  it("budgetEditorState reflects effective pace, headroom and caps", () => {
-    const state = budgetEditorState(
-      [
-        status({ window: "5h", headroom: 25, implicit: false }),
-        status({ mode: "off", window: "7d", implicit: false }),
-        status({
-          mode: "cap",
-          unit: "percent",
-          window: "7d",
-          amount: 80,
-          implicit: false,
-        }),
-      ],
-      card,
-    );
-    expect(state).toEqual({
-      kind: "subscription",
-      windows: {
-        "5h": { pace: true, headroom: "25", cap: "" },
-        "7d": { pace: false, headroom: "10", cap: "80" },
-      },
-    });
-    // No stored entries: the implicit default (pace on, 10 pts).
-    expect(budgetEditorState([], card)).toEqual({
-      kind: "subscription",
-      windows: {
-        "5h": { pace: true, headroom: "10", cap: "" },
-        "7d": { pace: true, headroom: "10", cap: "" },
-      },
-    });
-  });
-
-  it("applyBudgetEditor replaces only this account's entries", () => {
-    const other = status({
-      account: "zz",
-      window: "5h",
-      headroom: 30,
-      implicit: false,
-    });
-    const wildcardCap = status({
-      account: null,
-      mode: "cap",
-      unit: "percent",
-      amount: 90,
-      implicit: false,
-    });
-    const own = status({ window: "5h", headroom: 25, implicit: false });
-    const next = applyBudgetEditor([other, wildcardCap, own], card, {
-      kind: "subscription",
-      windows: {
-        "5h": { pace: true, headroom: "10", cap: "" },
-        "7d": { pace: false, headroom: "10", cap: "75" },
-      },
-    });
-    expect(next).toEqual([
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "zz",
-        mode: "pace",
-        window: "5h",
-        headroom: 30,
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: null,
-        mode: "cap",
-        unit: "percent",
-        window: "7d",
-        amount: 90,
-      },
-      // 5h back at the default headroom → left to the implicit budget.
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "off",
-        window: "7d",
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "cap",
-        unit: "percent",
-        window: "7d",
-        amount: 75,
-      },
-    ]);
-  });
-
-  it("applyBudgetEditor stores default-headroom pace when an account-less off would win", () => {
-    const wildcardOff = status({ account: null, mode: "off", implicit: false });
-    const next = applyBudgetEditor([wildcardOff], card, {
-      kind: "subscription",
-      windows: {
-        "5h": { pace: true, headroom: "10", cap: "" },
-        "7d": { pace: true, headroom: "10", cap: "" },
-      },
-    });
-    expect(next).toEqual([
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: null,
-        mode: "off",
-        window: "7d",
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "pace",
-        window: "7d",
-        headroom: 10,
-      },
-    ]);
-  });
-
-  it("applyBudgetEditor stores default-headroom pace when an account-less pace would win", () => {
-    const wildcardPace = status({
-      account: null,
-      mode: "pace",
-      headroom: 20,
-      implicit: false,
-    });
-    const next = applyBudgetEditor([wildcardPace], card, {
-      kind: "subscription",
-      windows: {
-        "5h": { pace: true, headroom: "10", cap: "" },
-        "7d": { pace: true, headroom: "10", cap: "" },
-      },
-    });
-    expect(next).toEqual([
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: null,
-        mode: "pace",
-        window: "7d",
-        headroom: 20,
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "pace",
-        window: "7d",
-        headroom: 10,
-      },
-    ]);
-  });
-
-  it("applyBudgetEditor writes API-key USD/token caps per day/week", () => {
-    const keyCard = {
-      provider: "openai",
-      auth_kind: "api_key" as const,
-      account: "k1",
+  it("pacingForCard matches subscription cards only", () => {
+    const row = {
+      provider: "anthropic",
+      account: "a1",
+      enabled: true,
+      throttling: false,
+      delay_ms: 0,
+      request_gap_ms: null,
+      windows: [],
     };
-    expect(
-      applyBudgetEditor([], keyCard, {
-        kind: "api_key",
-        caps: {
-          usd_day: "5",
-          usd_week: "",
-          tokens_day: "",
-          tokens_week: "2000000",
-        },
-      }),
-    ).toEqual([
-      {
-        provider: "openai",
-        auth_kind: "api_key",
-        account: "k1",
-        mode: "cap",
-        unit: "usd",
-        window: "day",
-        amount: 5,
-      },
-      {
-        provider: "openai",
-        auth_kind: "api_key",
-        account: "k1",
-        mode: "cap",
-        unit: "tokens",
-        window: "week",
-        amount: 2_000_000,
-      },
-    ]);
-    expect(
-      budgetEditorState(
-        [
-          status({
-            provider: "openai",
-            auth_kind: "api_key",
-            account: "k1",
-            mode: "cap",
-            unit: "usd",
-            window: "week",
-            amount: 20,
-            implicit: false,
-          }),
-        ],
-        keyCard,
-      ),
-    ).toEqual({
-      kind: "api_key",
-      caps: { usd_day: "", usd_week: "20", tokens_day: "", tokens_week: "" },
-    });
+    const card = {
+      provider: "anthropic",
+      auth_kind: "subscription" as const,
+      account: "a1",
+    };
+    expect(pacingForCard([row], card)).toBe(row);
+    expect(pacingForCard([row], { ...card, account: "a2" })).toBeNull();
+    expect(pacingForCard([row], { ...card, auth_kind: "api_key" })).toBeNull();
   });
 
-  it("applyBudgetEditor rejects out-of-range input", () => {
-    const sub = (
-      w5: Partial<{ pace: boolean; headroom: string; cap: string }>,
-    ) => ({
-      kind: "subscription" as const,
-      windows: {
-        "5h": { pace: true, headroom: "10", cap: "", ...w5 },
-        "7d": { pace: true, headroom: "10", cap: "" },
-      },
-    });
-    expect(applyBudgetEditor([], card, sub({ headroom: "51" }))).toMatch(
-      /0 and 50/,
+  it("formats rates and delays", () => {
+    expect(formatRate(null)).toBe("—");
+    expect(formatRate(7.66)).toBe("7.7 pts/h");
+    expect(formatRate(38.5)).toBe("39 pts/h");
+    expect(formatDelay(0)).toBe("none");
+    expect(formatDelay(4_200)).toBe("4.2s");
+    expect(formatDelay(60_000)).toBe("60s");
+  });
+
+  it("pacingStateText covers off / on pace / throttling / limit", () => {
+    expect(pacingStateText(window, false)).toBe("pacing off");
+    expect(pacingStateText({ ...window, throttling: false }, true)).toBe(
+      "on pace",
     );
-    expect(applyBudgetEditor([], card, sub({ headroom: "" }))).toMatch(
-      /0 and 50/,
+    expect(pacingStateText(window, true)).toBe(
+      "2.0× the sustainable rate — Lore is slowing requests",
     );
-    expect(applyBudgetEditor([], card, sub({ cap: "150" }))).toMatch(
-      /0 and 100/,
+    expect(pacingStateText({ ...window, used: 100 }, true)).toBe(
+      "limit reached — Lore is slowing requests",
     );
-    expect(applyBudgetEditor([], card, sub({ cap: "abc" }))).toMatch(
-      /0 and 100/,
-    );
-    // Disabled pacing ignores a junk headroom field.
-    expect(
-      applyBudgetEditor([], card, sub({ pace: false, headroom: "" })),
-    ).toEqual([
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "a1",
-        mode: "off",
-        window: "5h",
-      },
-    ]);
-    expect(
-      applyBudgetEditor(
-        [],
-        { ...card, auth_kind: "api_key" },
-        {
-          kind: "api_key",
-          caps: {
-            usd_day: "-1",
-            usd_week: "",
-            tokens_day: "",
-            tokens_week: "",
-          },
-        },
-      ),
-    ).toMatch(/positive/);
   });
 });

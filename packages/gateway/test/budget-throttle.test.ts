@@ -1,6 +1,5 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import {
-  throttleDelayForPressure,
   recordConversationCost,
   recordWorkerCost,
   recordWarmupCost,
@@ -13,36 +12,6 @@ import { getDailyCostForDay } from "@loreai/core";
 describe("budget-throttle", () => {
   beforeEach(() => {
     clearAllCosts();
-  });
-
-  // ---------------------------------------------------------------------------
-  // throttleDelayForPressure — provider-budget pressure → delay curve
-  // ---------------------------------------------------------------------------
-  describe("throttleDelayForPressure", () => {
-    test("no pressure means no delay", () => {
-      expect(throttleDelayForPressure(0)).toBe(0);
-      expect(throttleDelayForPressure(-1)).toBe(0);
-      expect(throttleDelayForPressure(Number.NaN)).toBe(0);
-    });
-
-    test("ramps with the square of pressure up to 60s", () => {
-      expect(throttleDelayForPressure(0.5)).toBe(15);
-      expect(throttleDelayForPressure(0.1)).toBe(0.6);
-      expect(throttleDelayForPressure(1)).toBe(60);
-    });
-
-    test("clamps pressure above 1", () => {
-      expect(throttleDelayForPressure(5)).toBe(60);
-    });
-
-    test("is monotonically increasing", () => {
-      let prev = 0;
-      for (let p = 0; p <= 1; p += 0.05) {
-        const delay = throttleDelayForPressure(p);
-        expect(delay).toBeGreaterThanOrEqual(prev);
-        prev = delay;
-      }
-    });
   });
 
   // ---------------------------------------------------------------------------

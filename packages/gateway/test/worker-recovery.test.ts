@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { curator, distillation, temporal } from "@loreai/core";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  curator,
+  distillation,
+  load as loadLoreConfig,
+  temporal,
+} from "@loreai/core";
 import { loadConfig } from "../src/config";
 import {
   getLLMClientForTest,
@@ -19,10 +27,10 @@ import {
 import type { SessionState } from "../src/translate/types";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
-const budgetPause = vi.hoisted(() => ({ paused: false }));
+const pacing = vi.hoisted(() => ({ throttling: false }));
 vi.mock("../src/provider-budgets", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/provider-budgets")>()),
-  isBackgroundBudgetPaused: () => budgetPause.paused,
+  isSessionCurationPacingPaused: () => pacing.throttling,
 }));
 
 const projectPath = "/tmp/lore-worker-recovery";
@@ -182,14 +190,12 @@ test.each(["usable", "malformed", "no-work"])(
   },
 );
 
-test("urgent distillation still runs while background work is budget-paused", async () => {
-  budgetPause.paused = true;
+test("urgent distillation still runs while pacing throttles", async () => {
+  pacing.throttling = true;
   try {
     seed();
     vi.mocked(upstreamFetch).mockImplementation(async () =>
-      response(
-        "<observations>Pace pauses leave urgent work alone.</observations>",
-      ),
+      response("<observations>Pacing leaves urgent work alone.</observations>"),
     );
     const run = vi.spyOn(distillation, "run");
     const curate = vi.spyOn(curator, "run");
@@ -199,9 +205,56 @@ test("urgent distillation still runs while background work is budget-paused", as
     expect(run.mock.calls[0][0]).toMatchObject({ urgent: true });
     expect(curate).not.toHaveBeenCalled();
   } finally {
-    budgetPause.paused = false;
+    pacing.throttling = false;
   }
 });
+
+test.each([true, false])(
+  "incremental distillation runs and in-flight curation follows pacing (throttling=%s)",
+  async (throttling) => {
+    pacing.throttling = throttling;
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "lore-pacing-cfg-"));
+      writeFileSync(
+        join(dir, ".lore.json"),
+        JSON.stringify({
+          knowledge: { enabled: true },
+          curator: { inFlight: true, afterTurns: 1 },
+        }),
+      );
+      const lore = await loadLoreConfig(dir);
+      rmSync(dir, { recursive: true, force: true });
+      vi.spyOn(temporal, "undistilledTokens").mockReturnValue(
+        lore.distillation.maxSegmentTokens * 10,
+      );
+      const run = vi
+        .spyOn(distillation, "run")
+        .mockResolvedValue(undefined as never);
+      const curate = vi
+        .spyOn(curator, "run")
+        .mockResolvedValue({ created: 0, updated: 0, deleted: 0 } as never);
+      const st = {
+        ...state(),
+        compactionAnomalyPending: false,
+        turnsSinceCuration: 1_000,
+      };
+      scheduleBackgroundWork(st, loadConfig());
+      await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+      expect(run.mock.calls[0][0]).not.toMatchObject({ urgent: true });
+      if (throttling) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(curate).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() => expect(curate).toHaveBeenCalledOnce());
+      }
+    } finally {
+      pacing.throttling = false;
+      const empty = mkdtempSync(join(tmpdir(), "lore-pacing-cfg-"));
+      await loadLoreConfig(empty);
+      rmSync(empty, { recursive: true, force: true });
+    }
+  },
+);
 
 test.each([
   "not JSON",
