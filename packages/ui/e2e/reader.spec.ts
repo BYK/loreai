@@ -5,31 +5,21 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  openReader,
+  openSearch,
+  revealRow,
+  rowWith,
+  selectInRow,
+} from "./reader-helpers";
+
 const FUTURE_ACTIONS = [
-  "Save note",
   "Ask agent",
   "Explore separately",
   "Start with selected context",
   "Share finding",
 ];
 const PASSAGE = "portability is a requirement";
-
-async function openReader(page: Page, query = "") {
-  const projects = await (await page.request.get("/api/v1/projects")).json();
-  const lore = projects.find((p: { name: string }) => p.name === "lore");
-  await page.goto(`/ui/projects/${lore.id}/sessions/e2e-reader${query}`);
-  await expect(page.getByTestId("session-view")).toBeVisible();
-  await expect(page.getByTestId("reader-coverage")).toHaveAttribute(
-    "data-coverage",
-    "partial",
-  );
-  return lore.id as string;
-}
-
-/** Stored message ids are derived server-side, so rows are found by content. */
-function rowWith(page: Page, text: string) {
-  return page.locator("[data-row-key]").filter({ hasText: text });
-}
 
 /**
  * Click load-older without scrolling: a real `.click()` scrolls the button
@@ -51,49 +41,6 @@ async function setsize(page: Page) {
     .first()
     .getAttribute("aria-setsize");
   return Number(value);
-}
-
-/** The quick-search bar is collapsed until Ctrl/Cmd+F or the Find button opens it. */
-async function openSearch(page: Page) {
-  await page.getByTestId("search-open").click();
-  await expect(page.getByTestId("search-input")).toBeFocused();
-}
-
-/** Bring the (possibly unmounted) row mentioning `marker` into view via search. */
-async function revealRow(page: Page, marker: string) {
-  await openSearch(page);
-  await page.getByTestId("search-input").fill(marker);
-  await expect(page.getByTestId("search-summary")).toContainText("1 match");
-  await page.getByTestId("search-next").click();
-  await expect(rowWith(page, marker)).toBeVisible();
-  await page.getByTestId("search-clear").click();
-  await expect(page.locator("mark.passage-search")).toHaveCount(0);
-}
-
-/** Select displayed text `needle` inside the row that mentions `marker` with a real Range. */
-async function selectInRow(page: Page, marker: string, needle: string) {
-  await revealRow(page, marker);
-  const row = rowWith(page, marker);
-  await expect(row).toHaveCount(1);
-  await row
-    .locator("[data-block][data-part]")
-    .first()
-    .evaluate((el, text) => {
-      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-        const at = (n as Text).data.indexOf(text);
-        if (at < 0) continue;
-        const range = document.createRange();
-        range.setStart(n, at);
-        range.setEnd(n, at + text.length);
-        const sel = window.getSelection()!;
-        sel.removeAllRanges();
-        sel.addRange(range);
-        return;
-      }
-      throw new Error(`"${text}" not found in ${el.textContent}`);
-    }, needle);
-  await row.dispatchEvent("pointerup");
 }
 
 /**

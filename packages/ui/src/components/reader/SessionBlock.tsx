@@ -64,6 +64,11 @@ export interface HighlightController {
   ) => readonly PassageHighlight[];
   /** Called with the first `<mark>` each time a highlight is (re)applied. */
   onApplied?: (mark: HTMLElement, highlight: PassageHighlight) => void;
+  /** Discussion washes for a block part (APP-02), outermost first. */
+  discussionSpans?: (
+    blockId: string,
+    partIndex: number,
+  ) => readonly HighlightSpan[];
 }
 
 function addresses(
@@ -136,6 +141,12 @@ export const RichText: Component<{
         span: { start: hit.start, end: hit.end, className: "passage-search" },
         source: hit,
       });
+    // Discussion washes go first so a selection or search mark nests
+    // inside them and stays visible.
+    const discussions = controller.discussionSpans?.(props.block, props.part);
+    if (discussions?.length) {
+      wanted.unshift(...discussions.map((span) => ({ span, source: null })));
+    }
     // Every other hit in this part is marked too — quieter, and never a
     // scroll target, so it gets no `source` for `onApplied`.
     for (const other of controller.searchHits?.(props.block, props.part) ??

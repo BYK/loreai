@@ -1,0 +1,39 @@
+{
+  "replies": [
+    {
+      "id": "<uuid-0>",
+      "discussion_id": "<uuid-1>",
+      "seq": 1,
+      "parent_reply_id": null,
+      "author": "user",
+      "content": {
+        "kind": "text",
+        "body": "Is this still true?"
+      },
+      "revision": 1,
+      "created_at": 1700000000000,
+      "updated_at": 1700000001000
+    },
+    {
+      "id": "<uuid-2>",
+      "discussion_id": "<uuid-1>",
+      "seq": 2,
+      "parent_reply_id": null,
+      "author": "agent:claude",
+      "content": {
+        "kind": "response",
+        "binding": {
+          "id": "<uuid-3>",
+          "session_id": "ui-contracts-session",
+          "message_id": "ui-contracts-response-message",
+          "agent": "claude",
+          "verified_at": 1700000002000
+        }
+      },
+      "revision": 1,
+      "created_at": 1700000003000,
+      "updated_at": 1700000004000
+    }
+  ],
+  "next_after": null
+}

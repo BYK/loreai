@@ -24,6 +24,7 @@ import { createSessionsState } from "./sessions";
 import { createRecallState } from "./recall";
 import { createKnowledgeSearchState } from "./knowledge-search";
 import { createDedupReviewState } from "./dedup-review";
+import { createDiscussionsState } from "./discussions";
 
 export interface AppStateDeps {
   client: ApiClient;
@@ -135,6 +136,11 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
   const knowledgeSearch = createKnowledgeSearchState({ client, tracked });
   const folk = createFolkState({ client });
   const dedupReview = createDedupReviewState(() => current);
+  const discussions = createDiscussionsState({
+    client,
+    tracked,
+    db: () => current,
+  });
 
   return {
     projects,
@@ -146,6 +152,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     knowledgeSearch,
     folk,
     dedupReview,
+    discussions,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {

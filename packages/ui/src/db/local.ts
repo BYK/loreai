@@ -12,7 +12,7 @@ import type { IndexNames } from "idb";
 
 import type { LoreUiDb, LoreUiSchema } from "./schema";
 
-export interface LocalDraft {
+export interface KnowledgeDraft {
   key: string;
   kind: "knowledge";
   /** Logical id being edited, or null for a new entry. */
@@ -20,6 +20,22 @@ export interface LocalDraft {
   body: { title: string; content: string; category: string };
   updatedAt: number;
 }
+
+/**
+ * An unsent discussion reply or opening message. Only an explicit submit
+ * sends it; nothing reads drafts into a request or a prompt on its own.
+ */
+export interface DiscussionDraft {
+  key: string;
+  kind: "discussion";
+  projectId: string;
+  /** Discussion id for a reply; null for a not-yet-created discussion. */
+  target: string | null;
+  body: { text: string };
+  updatedAt: number;
+}
+
+export type LocalDraft = KnowledgeDraft | DiscussionDraft;
 
 export interface PendingChange {
   key: string;

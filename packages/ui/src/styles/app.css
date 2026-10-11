@@ -55,6 +55,10 @@
   --gold: var(--g1); /* website --emphasis */
   --thread: var(--g4); /* website --link-border */
   --quote-edge: var(--g3); /* website --eyebrow */
+  --pastel-0: #e6f2df; /* discussion washes: sage */
+  --pastel-1: #f6ead6; /* peach */
+  --pastel-2: #e3ecf6; /* sky */
+  --pastel-3: #efe4f2; /* lilac */
   --danger: #8b3a3a; /* website --error */
   --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
   --avatar-bg: var(--g6); /* website --highlight-bg */
@@ -95,6 +99,10 @@
   --gold: #9ad3a4; /* website --emphasis */
   --thread: #4a7a55; /* website --link-border */
   --quote-edge: #79ab84; /* website --eyebrow */
+  --pastel-0: #1f3526;
+  --pastel-1: #3a3020;
+  --pastel-2: #1f2e3c;
+  --pastel-3: #33263a;
   --danger: #e39393; /* website --error */
   --avatar-bg: #172c20; /* website --highlight-bg */
   --avatar-text: #bfe0c4; /* website --highlight-text */
@@ -243,6 +251,48 @@
     border-radius: 3px;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
+  }
+  /* Discussion anchors: plain pastel washes, no borders — the text stays
+     the loudest thing. Tones rotate per discussion so overlaps read apart. */
+  .passage-discussion {
+    color: inherit;
+    border-radius: 3px;
+    cursor: pointer;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  .passage-discussion.tone-0 {
+    background: var(--pastel-0);
+  }
+  .passage-discussion.tone-1 {
+    background: var(--pastel-1);
+  }
+  .passage-discussion.tone-2 {
+    background: var(--pastel-2);
+  }
+  .passage-discussion.tone-3 {
+    background: var(--pastel-3);
+  }
+  .discussion-chip.tone-0,
+  .discussion-panel.tone-0 {
+    background: var(--pastel-0);
+  }
+  .discussion-chip.tone-1,
+  .discussion-panel.tone-1 {
+    background: var(--pastel-1);
+  }
+  .discussion-chip.tone-2,
+  .discussion-panel.tone-2 {
+    background: var(--pastel-2);
+  }
+  .discussion-chip.tone-3,
+  .discussion-panel.tone-3 {
+    background: var(--pastel-3);
+  }
+  .passage-discussion-resolved {
+    background: transparent !important;
+    text-decoration: underline dotted var(--line);
+    text-underline-offset: 3px;
   }
   .passage-search-all {
     background: color-mix(in srgb, var(--accent) 22%, transparent);

@@ -19,7 +19,8 @@ export type FutureActionName = (typeof FUTURE_ACTIONS)[number];
 
 /**
  * A disabled button for an action that a later slice implements. Always
- * disabled, always says so: the label is visible text (not just a tooltip)
+ * disabled (`aria-disabled`, so it stays in the Tab order and its reason is
+ * reachable from the keyboard), always says so: the label is visible text (not just a tooltip)
  * so the state is obvious in screenshots and to assistive technology.
  */
 export const FutureAction: Component<{
@@ -29,11 +30,11 @@ export const FutureAction: Component<{
 }> = (props) => (
   <Button
     variant={props.variant ?? "outline"}
-    disabled
     aria-disabled="true"
+    onClick={(e) => e.preventDefault()}
     title={`${props.name} — ${NOT_AVAILABLE_YET}`}
     class={cn(
-      "h-auto min-h-10 flex-col gap-0 py-1.5 leading-tight",
+      "h-auto min-h-10 cursor-not-allowed flex-col gap-0 py-1.5 leading-tight opacity-50",
       props.class,
     )}
   >
