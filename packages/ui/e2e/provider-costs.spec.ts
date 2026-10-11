@@ -23,6 +23,13 @@ test.describe("provider cost cards", () => {
     await expect(page.getByText("Daily budget")).toHaveCount(0);
     // Seeded 5h: 3h of 5h elapsed, used 23 → even pace 60; 7d: 4d of 7d, used 41.
     await expect(anthropic.getByTestId("pace-tick")).toHaveCount(2);
+    // The tick must actually paint (a missing theme token renders transparent).
+    expect(
+      await anthropic
+        .getByTestId("pace-tick")
+        .first()
+        .evaluate((el) => getComputedStyle(el).backgroundColor),
+    ).not.toBe("rgba(0, 0, 0, 0)");
     await expect(anthropic.getByTestId("pace-state")).toHaveText([
       "on pace",
       "on pace",

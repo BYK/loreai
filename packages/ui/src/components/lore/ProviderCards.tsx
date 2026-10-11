@@ -119,7 +119,7 @@ const QuotaLine: Component<{
           />
           <Show when={evenPace() !== null}>
             <div
-              class="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-fg/70"
+              class="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-foreground/70"
               style={{ left: `${evenPace()}%` }}
               data-testid="pace-tick"
               data-pace={evenPace()!.toFixed(1)}
