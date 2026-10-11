@@ -301,7 +301,6 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       onDeleteFolder={(key) => ws.state.activityLocal.deleteFolder(key)}
     />
   );
-  const participants = [{ id: "you", kind: "user" as const, label: "You" }];
   const selectParticipant = (participant: { id: string }) =>
     commitSearchQuery(`with:${participant.id}`);
   let restoreActivityScroll:
