@@ -3,7 +3,7 @@ import type { Component, JSX } from "solid-js";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { A } from "@solidjs/router";
 
-import type { CostsSnapshot, ProviderBudgetInput } from "~/contracts";
+import type { CostsSnapshot, ProviderPacingInput } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatMoney } from "~/lib/money";
 import { useWorkspace } from "~/routes/workspace";
@@ -43,8 +43,8 @@ export const CostsPage: Component = () => {
     }
   };
 
-  const saveBudgets = async (budgets: ProviderBudgetInput[]) => {
-    await ws.tracked(() => ws.client.putProviderBudgets(budgets));
+  const setPacing = async (setting: ProviderPacingInput) => {
+    await ws.tracked(() => ws.client.setProviderPacing(setting));
     await load();
   };
 
@@ -67,7 +67,7 @@ export const CostsPage: Component = () => {
       <div class="eyebrow mb-2">Operations</div>
       <h1 class="mb-1 text-[25px] font-semibold">Cost intelligence</h1>
       <p class="mb-6 max-w-prose text-sm text-muted">
-        Spend, quota and budgets per provider account, Lore’s worker overhead,
+        Spend, quota and pacing per provider account, Lore’s worker overhead,
         and estimated savings. Historical values are estimates from stored data.
       </p>
 
@@ -101,9 +101,9 @@ export const CostsPage: Component = () => {
             <ProviderCards
               providers={data().providers}
               quotas={data().quotas}
-              budgets={data().provider_budgets}
+              pacing={data().provider_pacing}
               money={formatMoney}
-              onSaveBudgets={data().can_edit_budgets ? saveBudgets : undefined}
+              onSetPacing={data().can_edit_pacing ? setPacing : undefined}
             />
 
             <Show when={data().daily.entries.some((day) => day.cost > 0)}>

@@ -853,19 +853,23 @@ describe("warming mutations", () => {
   it("rejects all mutations in hosted mode before changing state", async () => {
     const { enableHostedMode, _resetHostedModeForTest, getKV } =
       await import("@loreai/core");
-    const previous = getKV("provider_budgets");
+    const previous = getKV("provider_pacing");
     enableHostedMode();
     try {
-      const response = await api("/api/v1/costs/budgets", {
+      const response = await api("/api/v1/costs/pacing", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider_budgets: [] }),
+        body: JSON.stringify({
+          provider: "anthropic",
+          account: "acct",
+          enabled: false,
+        }),
       });
       expect(response.status).toBe(403);
       expect(
         ((await response.json()) as { error: { type: string } }).error.type,
       ).toBe("forbidden");
-      expect(getKV("provider_budgets")).toBe(previous);
+      expect(getKV("provider_pacing")).toBe(previous);
     } finally {
       _resetHostedModeForTest();
     }
@@ -904,13 +908,17 @@ describe("hosted config before data-plane initialization", () => {
 
       const costs = await request("/api/v1/costs");
       expect(costs.status).toBe(200);
-      expect(await costs.json()).toMatchObject({ can_edit_budgets: false });
+      expect(await costs.json()).toMatchObject({ can_edit_pacing: false });
 
       const mutations: Array<[string, string, unknown?]> = [
         ["PATCH", "/api/v1/warming/settings", { enabled: false }],
         ["POST", "/api/v1/warming/circuit-breaker/reset"],
         ["PATCH", "/api/v1/warming/sessions/active/mode", { mode: "stop" }],
-        ["PUT", "/api/v1/costs/budgets", { provider_budgets: [] }],
+        [
+          "PUT",
+          "/api/v1/costs/pacing",
+          { provider: "anthropic", account: "acct", enabled: false },
+        ],
       ];
       for (const [method, path, body] of mutations) {
         const response = await request(path, {
@@ -934,7 +942,7 @@ describe("hosted config before data-plane initialization", () => {
   });
 });
 
-describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
+describe("GET /api/v1/costs + PUT /api/v1/costs/pacing", () => {
   it("returns daily, live and historical summaries with a 14-day trend", async () => {
     const data = await body<{
       live: {
@@ -948,8 +956,8 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
         worker_breakdown: { recall: { cost: number } };
       };
       daily: { entries: Array<{ date: string; cost: number }> };
-      provider_budgets: unknown[];
-      can_edit_budgets: boolean;
+      provider_pacing: unknown[];
+      can_edit_pacing: boolean;
       sessions: unknown[];
       providers: unknown[];
       quotas: unknown[];
@@ -966,8 +974,9 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
     });
     expect(data.daily.entries).toHaveLength(14);
     expect(data.daily).not.toHaveProperty("budget");
-    expect(data.provider_budgets).toEqual([]);
-    expect(data.can_edit_budgets).toBe(true);
+    expect(data.provider_pacing).toEqual([]);
+    expect(data.can_edit_pacing).toBe(true);
+    expect(data).not.toHaveProperty("provider_budgets");
     expect(data.sessions).toEqual([]);
     expect(data.providers).toEqual([]);
     expect(data.quotas).toEqual([]);
@@ -1063,17 +1072,18 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
     });
   });
 
-  it("PUT /costs/budgets replaces the explicit list and returns statuses", async () => {
+  it("PUT /costs/pacing switches one account and the snapshot reflects it", async () => {
     const { db, getKV, setKV, upsertProviderQuota } =
       await import("@loreai/core");
-    const previous = getKV("provider_budgets");
+    const previous = getKV("provider_pacing");
     const put = (payload: unknown) =>
-      api("/api/v1/costs/budgets", {
+      api("/api/v1/costs/pacing", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
     db().exec("DELETE FROM provider_quotas");
+    db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
     try {
       const now = Date.now();
       upsertProviderQuota({
@@ -1090,115 +1100,64 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
         source: "anthropic-unified",
         observedAt: now,
       });
-      const ok = await put({
-        provider_budgets: [
-          {
-            provider: "anthropic",
-            auth_kind: "subscription",
-            account: "acct-put",
-            mode: "cap",
-            unit: "percent",
-            window: "7d",
-            amount: 80,
-          },
-          {
-            provider: "openai",
-            auth_kind: "api_key",
-            account: null,
-            mode: "cap",
-            unit: "usd",
-            window: "week",
-            amount: 5,
-          },
-        ],
-      });
-      expect(ok.status).toBe(200);
-      const saved = (await ok.json()) as {
-        provider_budgets: Array<Record<string, unknown>>;
+      const before = (await (await api("/api/v1/costs")).json()) as {
+        provider_pacing: Array<Record<string, unknown>>;
       };
-      expect(saved.provider_budgets).toEqual([
-        expect.objectContaining({
-          mode: "cap",
-          unit: "percent",
-          used: 40,
-          fraction: 0.5,
-          pressure: 0,
-          implicit: false,
-          stale: false,
-        }),
-        expect.objectContaining({
-          provider: "openai",
-          mode: "cap",
-          unit: "usd",
-          window: "week",
-          used: 0,
-          implicit: false,
-        }),
+      // Missing entry means pacing is on.
+      expect(before.provider_pacing).toEqual([
         expect.objectContaining({
           provider: "anthropic",
           account: "acct-put",
-          mode: "pace",
-          window: "7d",
-          headroom: 10,
-          implicit: true,
+          enabled: true,
+          windows: [expect.objectContaining({ window: "7d", used: 40 })],
         }),
       ]);
-      // Implicit budgets are derived, never stored.
-      expect(JSON.parse(getKV("provider_budgets") ?? "[]")).toHaveLength(2);
-      const snapshot = (await (await api("/api/v1/costs")).json()) as {
-        provider_budgets: unknown[];
-      };
-      // Same budgets; pace targets move with the clock between the two reads.
-      const identity = (list: unknown[]) =>
-        (list as Array<Record<string, unknown>>).map(
-          ({ target: _t, ahead: _a, ...rest }) => rest,
-        );
-      expect(identity(snapshot.provider_budgets)).toEqual(
-        identity(saved.provider_budgets),
-      );
 
-      // An explicit "off" disables the implicit pace budget.
       const off = await put({
-        provider_budgets: [
-          {
-            provider: "anthropic",
-            auth_kind: "subscription",
-            account: "acct-put",
-            mode: "off",
-            window: "7d",
-          },
-        ],
+        provider: "anthropic",
+        account: "acct-put",
+        enabled: false,
       });
+      expect(off.status).toBe(200);
       expect(
-        ((await off.json()) as { provider_budgets: unknown[] })
-          .provider_budgets,
-      ).toEqual([expect.objectContaining({ mode: "off", status: "off" })]);
+        ((await off.json()) as { provider_pacing: unknown[] }).provider_pacing,
+      ).toEqual([
+        expect.objectContaining({
+          account: "acct-put",
+          enabled: false,
+          throttling: false,
+          delay_ms: 0,
+        }),
+      ]);
+      expect(JSON.parse(getKV("provider_pacing") ?? "[]")).toEqual([
+        { provider: "anthropic", account: "acct-put", enabled: false },
+      ]);
 
-      const stored = getKV("provider_budgets");
+      // Switching back on removes the entry: missing means enabled.
+      const on = await put({
+        provider: "anthropic",
+        account: "acct-put",
+        enabled: true,
+      });
+      expect(on.status).toBe(200);
+      expect(JSON.parse(getKV("provider_pacing") ?? "[]")).toEqual([]);
+
+      const stored = getKV("provider_pacing");
       for (const bad of [
         null,
         [],
         {},
-        { provider_budgets: "nope" },
-        { provider_budgets: [], amount: 5 },
-        { amount: 5 },
+        { provider: "anthropic", account: "acct-put" },
+        { provider: "anthropic", account: "acct-put", enabled: "no" },
+        { provider: "Anthropic!", account: "acct-put", enabled: false },
+        { provider: "anthropic", account: "", enabled: false },
         {
-          provider_budgets: [
-            {
-              provider: "openai",
-              auth_kind: "api_key",
-              mode: "cap",
-              unit: "percent",
-              window: "day",
-              amount: 5,
-            },
-          ],
+          provider: "anthropic",
+          account: "acct-put",
+          enabled: false,
+          headroom: 10,
         },
-        {
-          provider_budgets: [
-            { provider: "openai", unit: "usd", window: "daily", amount: 5 },
-          ],
-        },
+        { provider_budgets: [] },
       ]) {
         const response = await put(bad);
         expect(response.status, JSON.stringify(bad)).toBe(400);
@@ -1206,13 +1165,22 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
           error: { type: "invalid_request" },
         });
       }
-      expect(getKV("provider_budgets")).toBe(stored);
+      expect(getKV("provider_pacing")).toBe(stored);
     } finally {
       db().exec("DELETE FROM provider_quotas");
       if (previous === null)
-        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
-      else setKV("provider_budgets", previous);
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
+      else setKV("provider_pacing", previous);
     }
+  });
+
+  it("the retired PUT /costs/budgets route is gone", async () => {
+    const response = await api("/api/v1/costs/budgets", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider_budgets: [] }),
+    });
+    expect(response.status).toBe(404);
   });
 
   it("the retired PATCH /costs/budget route is gone", async () => {

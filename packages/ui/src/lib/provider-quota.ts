@@ -1,6 +1,6 @@
 /** Pure helpers for the per-provider cost cards (#1926 UI half). */
 
-import type { CostsSnapshot, ProviderBudgetInput } from "~/contracts";
+import type { CostsSnapshot } from "~/contracts";
 
 export type ProviderRow = {
   provider: string;
@@ -49,7 +49,8 @@ export function quotaStale(row: QuotaRow, now: number): boolean {
     : age > QUOTA_STALE_FALLBACK_MS;
 }
 
-export type BudgetRow = CostsSnapshot["provider_budgets"][number];
+export type PacingRow = CostsSnapshot["provider_pacing"][number];
+export type PacingWindowRow = PacingRow["windows"][number];
 
 export type ProviderCardModel = {
   key: string;
@@ -192,283 +193,39 @@ export function groupProviderCards(
   return [...cards.values()];
 }
 
-/**
- * Budgets that apply to a card: same provider and auth_kind, with account
- * either unset (every account) or equal to the card's.
- */
-export function budgetsForCard(
-  budgets: BudgetRow[],
+/** Pacing status for a subscription card; API-key cards are never paced. */
+export function pacingForCard(
+  pacing: PacingRow[],
   card: Pick<ProviderCardModel, "provider" | "auth_kind" | "account">,
-): BudgetRow[] {
-  return budgets.filter(
-    (b) =>
-      b.provider === card.provider &&
-      b.auth_kind === card.auth_kind &&
-      (b.account === null || b.account === card.account),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Provider budgets (#1927): pace state + the per-card budget editor.
-// ---------------------------------------------------------------------------
-
-export const DEFAULT_PACE_HEADROOM = 10;
-export const PACE_WINDOWS = ["5h", "7d"] as const;
-export type PaceWindow = (typeof PACE_WINDOWS)[number];
-export const CAP_FIELDS = [
-  { key: "usd_day", unit: "usd", window: "day", label: "USD cap per day" },
-  { key: "usd_week", unit: "usd", window: "week", label: "USD cap per week" },
-  {
-    key: "tokens_day",
-    unit: "tokens",
-    window: "day",
-    label: "Token cap per day",
-  },
-  {
-    key: "tokens_week",
-    unit: "tokens",
-    window: "week",
-    label: "Token cap per week",
-  },
-] as const;
-export type CapField = (typeof CAP_FIELDS)[number]["key"];
-
-type CardScope = Pick<ProviderCardModel, "provider" | "auth_kind" | "account">;
-
-export type BudgetEditorState =
-  | {
-      kind: "subscription";
-      windows: Record<
-        PaceWindow,
-        { pace: boolean; headroom: string; cap: string }
-      >;
-    }
-  | { kind: "api_key"; caps: Record<CapField, string> };
-
-function exactScope(
-  b: { provider: string; auth_kind: string; account: string | null },
-  card: CardScope,
-) {
+): PacingRow | null {
+  if (card.auth_kind !== "subscription") return null;
   return (
-    b.provider === card.provider &&
-    b.auth_kind === card.auth_kind &&
-    b.account === card.account
+    pacing.find(
+      (p) => p.provider === card.provider && p.account === card.account,
+    ) ?? null
   );
 }
 
-/**
- * The pace/off status governing one quota window of a card: an entry for the
- * card's own account wins over an account-less one. Implicit pace budgets are
- * reported per account, so they count as the card's own.
- */
-export function paceFor(
-  budgets: BudgetRow[],
-  card: CardScope,
-  window: string,
-): BudgetRow | null {
-  const candidates = budgetsForCard(budgets, card).filter(
-    (b) => (b.mode === "pace" || b.mode === "off") && b.window === window,
-  );
-  return (
-    candidates.find((b) => b.account === card.account) ?? candidates[0] ?? null
-  );
+/** Quota usage rate in percentage points per hour. */
+export function formatRate(perHour: number | null): string {
+  if (perHour === null || !Number.isFinite(perHour)) return "—";
+  return `${perHour < 10 ? perHour.toFixed(1) : perHour.toFixed(0)} pts/h`;
 }
 
-/** "on pace" / "ahead of pace by N pts — …" / "stale" / "pacing off"; null when unknown. */
-export function paceStateText(
-  pace: BudgetRow | null,
-  quotaIsStale: boolean,
-): string | null {
-  if (!pace) return null;
-  if (pace.mode === "off") return "pacing off";
-  if (quotaIsStale || pace.status === "stale") return "stale";
-  if (pace.status === "unknown" || pace.ahead === null) return null;
-  if (pace.ahead > 0 && pace.pressure > 0) {
-    return `ahead of pace by ${Math.max(1, Math.round(pace.ahead))} pts — Lore is slowing background work`;
-  }
-  return "on pace";
+/** Pacing delay per request, e.g. "none", "4.2s", "60s". */
+export function formatDelay(ms: number): string {
+  if (!(ms > 0)) return "none";
+  const seconds = ms / 1000;
+  return `${seconds < 10 ? seconds.toFixed(1) : seconds.toFixed(0)}s`;
 }
 
-/** Even-pace position (percent of the bar): the target without headroom. */
-export function evenPacePercent(pace: BudgetRow | null): number | null {
-  if (!pace || pace.mode !== "pace" || pace.target === null) return null;
-  return Math.min(100, Math.max(0, pace.target - (pace.headroom ?? 0)));
-}
-
-/** The stored (explicit) budget list, stripped of status fields. */
-export function explicitBudgets(budgets: BudgetRow[]): ProviderBudgetInput[] {
-  const out: ProviderBudgetInput[] = [];
-  for (const b of budgets) {
-    if (b.implicit) continue;
-    const scope = {
-      provider: b.provider,
-      auth_kind: b.auth_kind,
-      account: b.account,
-    };
-    if (b.mode === "off" && (b.window === "5h" || b.window === "7d")) {
-      out.push({ ...scope, mode: "off", window: b.window });
-    } else if (b.mode === "pace" && (b.window === "5h" || b.window === "7d")) {
-      out.push({
-        ...scope,
-        mode: "pace",
-        window: b.window,
-        headroom: b.headroom ?? DEFAULT_PACE_HEADROOM,
-      });
-    } else if (b.mode === "cap" && b.amount !== undefined) {
-      if (b.unit === "percent" && (b.window === "5h" || b.window === "7d")) {
-        out.push({
-          ...scope,
-          mode: "cap",
-          unit: "percent",
-          window: b.window,
-          amount: b.amount,
-        });
-      } else if (
-        (b.unit === "usd" || b.unit === "tokens") &&
-        (b.window === "day" || b.window === "week")
-      ) {
-        out.push({
-          ...scope,
-          mode: "cap",
-          unit: b.unit,
-          window: b.window,
-          amount: b.amount,
-        });
-      }
-    }
-  }
-  return out;
-}
-
-/** Editor fields for a card, from the effective budgets in the snapshot. */
-export function budgetEditorState(
-  budgets: BudgetRow[],
-  card: CardScope,
-): BudgetEditorState {
-  const own = budgets.filter(
-    (b) => !b.implicit && exactScope(b, card) && b.mode === "cap",
-  );
-  if (card.auth_kind === "subscription") {
-    const windows = {} as Record<
-      PaceWindow,
-      { pace: boolean; headroom: string; cap: string }
-    >;
-    for (const w of PACE_WINDOWS) {
-      const pace = paceFor(budgets, card, w);
-      const cap = own.find((b) => b.unit === "percent" && b.window === w);
-      windows[w] = {
-        pace: pace?.mode !== "off",
-        headroom: String(
-          pace?.mode === "pace"
-            ? (pace.headroom ?? DEFAULT_PACE_HEADROOM)
-            : DEFAULT_PACE_HEADROOM,
-        ),
-        cap: cap?.amount !== undefined ? String(cap.amount) : "",
-      };
-    }
-    return { kind: "subscription", windows };
-  }
-  const caps = {} as Record<CapField, string>;
-  for (const f of CAP_FIELDS) {
-    const cap = own.find((b) => b.unit === f.unit && b.window === f.window);
-    caps[f.key] = cap?.amount !== undefined ? String(cap.amount) : "";
-  }
-  return { kind: "api_key", caps };
-}
-
-function parseAmount(raw: string): number | null | undefined {
-  const text = raw.trim();
-  if (text === "") return null;
-  const value = Number(text);
-  return Number.isFinite(value) ? value : undefined;
-}
-
-/**
- * The full explicit list to PUT after editing one card: every other scope's
- * stored entries are kept verbatim; this card's own account entries are
- * replaced. Returns an error message for invalid input.
- */
-export function applyBudgetEditor(
-  budgets: BudgetRow[],
-  card: CardScope,
-  state: BudgetEditorState,
-): ProviderBudgetInput[] | string {
-  const kept = explicitBudgets(budgets).filter((b) => !exactScope(b, card));
-  const scope = {
-    provider: card.provider,
-    auth_kind: card.auth_kind,
-    account: card.account,
-  };
-  const next: ProviderBudgetInput[] = [];
-  if (state.kind === "subscription") {
-    for (const w of PACE_WINDOWS) {
-      const field = state.windows[w];
-      if (field.pace) {
-        const headroom = parseAmount(field.headroom);
-        if (
-          headroom === undefined ||
-          headroom === null ||
-          headroom < 0 ||
-          headroom > 50
-        ) {
-          return `Headroom for the ${w} window must be between 0 and 50 points.`;
-        }
-        // The implicit default paces at 10 points, but any account-less
-        // pace/off entry for this window replaces it (gateway
-        // implicitBudgets), so the account then needs its own entry.
-        const wildcardGoverns = kept.some(
-          (b) =>
-            b.mode !== "cap" &&
-            b.window === w &&
-            b.account === null &&
-            b.provider === card.provider &&
-            b.auth_kind === card.auth_kind,
-        );
-        if (headroom !== DEFAULT_PACE_HEADROOM || wildcardGoverns) {
-          next.push({
-            ...scope,
-            auth_kind: "subscription",
-            mode: "pace",
-            window: w,
-            headroom,
-          });
-        }
-      } else {
-        next.push({
-          ...scope,
-          auth_kind: "subscription",
-          mode: "off",
-          window: w,
-        });
-      }
-      const cap = parseAmount(field.cap);
-      if (cap === undefined || (cap !== null && (cap <= 0 || cap > 100))) {
-        return `The ${w} quota cap must be between 0 and 100%.`;
-      }
-      if (cap !== null)
-        next.push({
-          ...scope,
-          mode: "cap",
-          unit: "percent",
-          window: w,
-          amount: cap,
-        });
-    }
-  } else {
-    for (const f of CAP_FIELDS) {
-      const cap = parseAmount(state.caps[f.key]);
-      if (cap === undefined || (cap !== null && cap <= 0)) {
-        return `${f.label} must be a positive number.`;
-      }
-      if (cap !== null)
-        next.push({
-          ...scope,
-          mode: "cap",
-          unit: f.unit,
-          window: f.window,
-          amount: cap,
-        });
-    }
-  }
-  return [...kept, ...next];
+/** One-line pacing state for a quota window. */
+export function pacingStateText(
+  window: PacingWindowRow,
+  enabled: boolean,
+): string {
+  if (!enabled) return "pacing off";
+  if (window.used >= 100) return "limit reached — Lore is slowing requests";
+  if (!window.throttling) return "on pace";
+  return `${(window.ratio ?? 0).toFixed(1)}× the sustainable rate — Lore is slowing requests`;
 }

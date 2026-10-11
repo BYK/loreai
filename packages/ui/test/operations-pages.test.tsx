@@ -159,8 +159,8 @@ const costsData: CostsSnapshot = {
   sessions: warmingData.sessions.slice(0, 1),
   providers: [],
   quotas: [],
-  provider_budgets: [],
-  can_edit_budgets: true,
+  provider_pacing: [],
+  can_edit_pacing: true,
 };
 
 function clientWith(partial: Partial<ApiClient>): ApiClient {
