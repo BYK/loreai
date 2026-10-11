@@ -265,9 +265,7 @@ export function parseProviderQuotaHeaders(
       parsedMinutes !== null && parsedMinutes > 0 ? parsedMinutes : null;
     const usedPercent = percent(num(headers.get(`${base}-used-percent`)));
     const resetsAt = epochMs(num(headers.get(`${base}-reset-at`)));
-    if (minutes === null && resetsAt === null && usedPercent === null) {
-      continue;
-    }
+    if (minutes === null && resetsAt === null) continue;
     const windowId =
       minutes === 300
         ? "5h"

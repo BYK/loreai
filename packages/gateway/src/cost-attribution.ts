@@ -17,6 +17,54 @@ export type CostAttribution = {
   account: string;
 };
 
+const MAX_ANTHROPIC_ORGANIZATION_KEYS = 256;
+const anthropicOrganizations = new Map<string, string>();
+
+function anthropicOrganizationKey(
+  credential: AuthCredential | null | undefined,
+  sessionID: string | undefined,
+): string[] {
+  const keys: string[] = [];
+  if (credential?.value) {
+    keys.push(`credential:${authFingerprint(credential)}`);
+  }
+  if (sessionID) keys.push(`session:${sessionID}`);
+  return keys;
+}
+
+function rememberAnthropicOrganization(
+  organizationID: string,
+  credential: AuthCredential | null | undefined,
+  sessionID: string | undefined,
+): void {
+  for (const key of anthropicOrganizationKey(credential, sessionID)) {
+    anthropicOrganizations.delete(key);
+    anthropicOrganizations.set(key, organizationID);
+    if (anthropicOrganizations.size > MAX_ANTHROPIC_ORGANIZATION_KEYS) {
+      const oldest = anthropicOrganizations.keys().next().value;
+      if (oldest !== undefined) anthropicOrganizations.delete(oldest);
+    }
+  }
+}
+
+function cachedAnthropicOrganization(
+  credential: AuthCredential | null | undefined,
+  sessionID: string | undefined,
+): string | null {
+  for (const key of anthropicOrganizationKey(credential, sessionID)) {
+    const organizationID = anthropicOrganizations.get(key);
+    if (organizationID === undefined) continue;
+    anthropicOrganizations.delete(key);
+    anthropicOrganizations.set(key, organizationID);
+    return organizationID;
+  }
+  return null;
+}
+
+export function _resetCostAttributionForTest(): void {
+  anthropicOrganizations.clear();
+}
+
 function providerFromHost(hostname: string, upstreamURL: string): string {
   const host = hostname.toLowerCase();
   // Codex lives on ChatGPT's host but stays grouped under "openai" — the
@@ -131,6 +179,17 @@ export function resolveCostAttribution(input: {
     requestHeaders,
   } = input;
   const provider = resolveProvider(providerID, upstreamURL);
+  const responseAnthropicOrganizationID =
+    provider === "anthropic"
+      ? headerValue(responseHeaders, "anthropic-organization-id")
+      : null;
+  if (responseAnthropicOrganizationID) {
+    rememberAnthropicOrganization(
+      responseAnthropicOrganizationID,
+      credential,
+      sessionID,
+    );
+  }
   // The Codex route only exists for ChatGPT subscriptions.
   const codexRoute = providerID?.trim().toLowerCase() === "openai-codex";
   const requestChatGPTAccountId = headerValue(
@@ -177,7 +236,8 @@ export function resolveCostAttribution(input: {
       provider === "openai"
         ? chatgptAccountId
         : provider === "anthropic"
-          ? headerValue(responseHeaders, "anthropic-organization-id")
+          ? (responseAnthropicOrganizationID ??
+            cachedAnthropicOrganization(credential, sessionID))
           : null;
     if (stableAccountId) account = sha256(stableAccountId).slice(0, 12);
   } else if (credential?.value) {

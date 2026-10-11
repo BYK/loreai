@@ -1,12 +1,17 @@
-import { describe, test, expect } from "vitest";
+import { afterEach, describe, test, expect } from "vitest";
 import { createHash } from "node:crypto";
-import { resolveCostAttribution } from "../src/cost-attribution";
+import {
+  resolveCostAttribution,
+  _resetCostAttributionForTest,
+} from "../src/cost-attribution";
 import { authFingerprint } from "../src/auth";
 import {
   captureBillingPrefix,
   captureSessionHeaders,
   _resetForTest,
 } from "../src/cch";
+
+afterEach(_resetCostAttributionForTest);
 
 describe("resolveCostAttribution", () => {
   test("explicit providerID wins and is normalized", () => {
@@ -246,6 +251,48 @@ describe("resolveCostAttribution", () => {
       createHash("sha256").update("org-123").digest("hex").slice(0, 12),
     );
     expect(withoutOrganization.account).toBe("default");
+  });
+
+  test("anthropic organization is reused for later headerless attribution", () => {
+    _resetForTest();
+    const sessionID = "anthropic-org-cache-session";
+    captureBillingPrefix(
+      sessionID,
+      "x-anthropic-billing-header: cc_version=2.1.181.abcde; cc_entrypoint=cli; cch=abcde",
+    );
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-cached",
+    };
+    const response = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      credential,
+      responseHeaders: new Headers({
+        "anthropic-organization-id": "org-cached",
+      }),
+    });
+    const later = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      credential,
+    });
+    const withoutKnownOrganization = resolveCostAttribution({
+      providerID: "anthropic",
+      credential: { scheme: "bearer", value: "sk-ant-oat01-unseen" },
+    });
+    const sessionOnly = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+    });
+
+    expect(later.account).toBe(response.account);
+    expect(response.account).toBe(
+      createHash("sha256").update("org-cached").digest("hex").slice(0, 12),
+    );
+    expect(withoutKnownOrganization.account).toBe("default");
+    expect(sessionOnly.account).toBe(response.account);
+    _resetForTest();
   });
 
   test("openai subscription via x-codex-* response headers", () => {
