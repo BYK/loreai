@@ -94,7 +94,7 @@ describe("encode/decode", () => {
       "x~m.01J~0~1~3~" + h,
       "1~~0~1~3~" + h, // empty block id
       "1~m.a b~0~1~3~" + h, // whitespace in id
-      "1~k.01J~0~1~3~" + h, // unknown block namespace
+      "1~x.01J~0~1~3~" + h, // unknown block namespace
       `1~m.01J~0~0~${MAX_ANCHOR_OFFSET + 1}~${h}`,
       "1~m.01J~0~1~3~" + h + "~",
       "1".repeat(5000),

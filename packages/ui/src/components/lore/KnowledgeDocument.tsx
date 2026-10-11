@@ -408,6 +408,12 @@ export const KnowledgeDocument: Component<{
                       >
                         Discuss whole entry
                       </Button>
+                      <FutureActionRow
+                        actions={FUTURE_ACTIONS.filter(
+                          (name) => name !== "Save note",
+                        )}
+                        class="w-full"
+                      />
                     </div>
                   }
                 >

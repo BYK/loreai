@@ -680,7 +680,6 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       buttons.map((b) => b.textContent?.replace(NOT_AVAILABLE_YET, "").trim()),
     ).toEqual([
-      "Save note",
       "Ask agent",
       "Explore separately",
       "Start with selected context",
