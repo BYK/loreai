@@ -88,8 +88,14 @@ export function createDiscussionsState(deps: {
       .filter((d): d is Discussion => d !== undefined);
   }
 
+  /** Latest load per source key: an older, slower load never overwrites it. */
+  const sourceLoads = new Map<string, number>();
+
   async function loadSource(projectId: string, source: DiscussionSource) {
     const key = sourceKey(projectId, source);
+    const token = (sourceLoads.get(key) ?? 0) + 1;
+    sourceLoads.set(key, token);
+    const current = () => sourceLoads.get(key) === token;
     setStore("sources", key, (s) => ({
       ...(s ?? EMPTY_LIST),
       loading: true,
@@ -113,6 +119,7 @@ export function createDiscussionsState(deps: {
         cursor = result.next_cursor;
         if (!cursor) break;
       }
+      if (!current()) return;
       setStore("sources", key, {
         ids,
         loaded: true,
@@ -121,6 +128,7 @@ export function createDiscussionsState(deps: {
         next: cursor,
       });
     } catch (error) {
+      if (!current()) return;
       setStore("sources", key, (s) => ({
         ...(s ?? EMPTY_LIST),
         loading: false,
