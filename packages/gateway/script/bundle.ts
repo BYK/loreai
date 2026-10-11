@@ -130,6 +130,13 @@ await esbuild.build({
   },
 });
 
+const automergeRequire = createRequire(`${packageDir}/`);
+const automergeEntry = automergeRequire.resolve("@automerge/automerge");
+copyFileSync(
+  join(dirname(automergeEntry), "automerge_wasm_bg.wasm"),
+  join(distDir, "automerge_wasm_bg.wasm"),
+);
+
 // ---------------------------------------------------------------------------
 // Bun ESM bundle — for @loreai/opencode plugin running under Bun
 // ---------------------------------------------------------------------------

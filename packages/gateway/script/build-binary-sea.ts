@@ -411,6 +411,11 @@ async function runFossilize(
     console.log(`✓ Binary: ${ourPath}`);
   }
 
+  const automergeRequire = createRequire(`${packageDir}/`);
+  const automergeEntry = automergeRequire.resolve("@automerge/automerge");
+  const automergeWasm = join(dirname(automergeEntry), "automerge_wasm_bg.wasm");
+  copyFileSync(automergeWasm, join(distBinDir, "automerge_wasm_bg.wasm"));
+
   // gzip (if --release)
   if (flags.release) {
     for (const target of targets) {

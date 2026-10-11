@@ -21,7 +21,10 @@
  * 'upgrade' handler either returns 426 (under Node) or silently closes
  * the socket (under Bun), both of which stop the client from retrying.
  */
-import { describe, it, expect } from "vitest";
+import { request as httpRequest } from "node:http";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
+import { startServer } from "../src/server";
+import { loadConfig } from "../src/config";
 
 /**
  * Mirror of the `isWebSocketUpgrade` check in server.ts. Duplicated here
@@ -69,5 +72,76 @@ describe("WebSocket upgrade detection", () => {
   it("rejects a non-websocket Upgrade value", () => {
     const req = makeReq({ Upgrade: "h2c", Connection: "Upgrade" });
     expect(isWebSocketUpgrade(req)).toBe(false);
+  });
+});
+
+describe("Fluid spike remote-peer refusal", () => {
+  const previousFlag = process.env.LORE_FLUID_SPIKE;
+  let gateway: Awaited<ReturnType<typeof startServer>>;
+
+  beforeAll(async () => {
+    process.env.LORE_FLUID_SPIKE = "1";
+    gateway = await startServer(
+      {
+        ...loadConfig(),
+        hosts: ["127.0.0.1"],
+        port: 0,
+        remoteGateway: false,
+        hostedMode: false,
+      },
+      { peerAddressForRequest: () => "192.0.2.10" },
+    );
+    await gateway.ready;
+  });
+
+  afterAll(async () => {
+    await gateway.stop();
+    if (previousFlag === undefined) delete process.env.LORE_FLUID_SPIKE;
+    else process.env.LORE_FLUID_SPIKE = previousFlag;
+  });
+
+  it("returns 403 for non-loopback Fluid HTTP requests", async () => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest(
+        {
+          hostname: "127.0.0.1",
+          port: gateway.port,
+          path: "/documents/tenant",
+        },
+        (response) => {
+          response.resume();
+          response.once("end", () => resolve(response.statusCode ?? 500));
+        },
+      );
+      request.once("error", reject);
+      request.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it("returns 403 for non-loopback Fluid WebSocket upgrades", async () => {
+    const status = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest({
+        hostname: "127.0.0.1",
+        port: gateway.port,
+        path: "/socket.io/?EIO=4&transport=websocket",
+        headers: {
+          Connection: "Upgrade",
+          Upgrade: "websocket",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "Sec-WebSocket-Version": "13",
+        },
+      });
+      request.once("response", (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode ?? 500));
+      });
+      request.once("upgrade", () =>
+        reject(new Error("unexpected WebSocket upgrade")),
+      );
+      request.once("error", reject);
+      request.end();
+    });
+    expect(status).toBe(403);
   });
 });

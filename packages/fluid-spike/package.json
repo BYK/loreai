@@ -1,0 +1,38 @@
+{
+  "name": "@loreai/fluid-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "bench": "node src/orchestrator.mjs",
+    "build:agents": "node src/build-agents.mjs",
+    "bench:node": "node src/node-bench.mjs",
+    "bench:cjs": "node src/build-cjs.mjs",
+    "bench:cjs:smoke": "node src/cjs-smoke.mjs",
+    "participants:fluid": "node src/participants-fluid.mjs",
+    "bench:size": "node size/run.mjs",
+    "report:automerge": "node src/registry-report.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@automerge/automerge": "3.5.0",
+    "@automerge/automerge-repo": "2.5.6",
+    "@automerge/automerge-repo-network-websocket": "2.5.6",
+    "@fluidframework/tinylicious-client": "3.4.0",
+    "@fluidframework/tinylicious-driver": "3.4.0",
+    "fluid-framework": "3.4.0",
+    "lib0": "0.2.119",
+    "y-protocols": "1.0.7",
+    "y-websocket": "3.1.0",
+    "yjs": "13.6.33",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/ws": "8.18.2",
+    "@types/node": "24.13.1",
+    "esbuild": "0.25.12",
+    "vite": "8.3.0"
+  }
+}

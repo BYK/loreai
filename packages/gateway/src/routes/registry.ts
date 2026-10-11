@@ -22,6 +22,7 @@ import { knowledgeRoutes } from "./knowledge";
 import { managementRoutes } from "./management";
 import { geminiRoutes } from "./gemini";
 import { bedrockRoutes } from "./bedrock";
+import { spikeNocrdtRoutes } from "../spike-nocrdt/routes";
 
 /**
  * Mount order. Exact-path modules first; the regex-pattern modules register
@@ -35,6 +36,7 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   controlRoutes,
   dashboardRoutes,
   knowledgeRoutes,
+  spikeNocrdtRoutes,
   managementRoutes,
   geminiRoutes,
   bedrockRoutes,

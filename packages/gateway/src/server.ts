@@ -106,6 +106,24 @@ export async function startServer(
     config = { ...config, port: DEFAULT_PORT };
   }
   assertGatewayAccessConfigured(config);
+  const fluidSpikeEnabled = process.env.LORE_FLUID_SPIKE === "1";
+  const comparisonVariant = process.env.LORE_SPIKE_VARIANT;
+  if (
+    comparisonVariant &&
+    !["yjs", "automerge", "nocrdt"].includes(comparisonVariant)
+  ) {
+    throw new Error(`Unsupported LORE_SPIKE_VARIANT: ${comparisonVariant}`);
+  }
+  if (fluidSpikeEnabled && (config.remoteGateway || config.hostedMode)) {
+    throw new Error(
+      "LORE_FLUID_SPIKE is local-only and cannot run in remote or hosted mode.",
+    );
+  }
+  if (comparisonVariant && (config.remoteGateway || config.hostedMode)) {
+    throw new Error(
+      "LORE_SPIKE_VARIANT is local-only and cannot run in remote or hosted mode.",
+    );
+  }
   if (config.allowRemoteManagement) {
     log.notice(
       "warning: remote management access is enabled; every client accepted by the listener can access /ui and /api",
@@ -162,9 +180,32 @@ export async function startServer(
   const servers: Server[] = [];
   const boundHosts: string[] = [];
   let resolvedPort = config.port;
+  let fluidService:
+    | {
+        dispatchHttp: (
+          request: IncomingMessage,
+          response: ServerResponse,
+        ) => boolean;
+        handlesUpgrade: (
+          request: IncomingMessage,
+          socket: import("node:stream").Duplex,
+        ) => boolean;
+        stop: () => Promise<void>;
+      }
+    | undefined;
+  let comparisonService:
+    | {
+        handlesUpgrade: (
+          request: IncomingMessage,
+          socket: import("node:stream").Duplex,
+        ) => boolean;
+        stop: () => Promise<void>;
+      }
+    | undefined;
   try {
     for (const host of config.hosts) {
       const s = createHttpServer((nodeReq, nodeRes) => {
+        if (fluidService?.dispatchHttp(nodeReq, nodeRes)) return;
         void handleNodeRequest(
           nodeReq,
           nodeRes,
@@ -188,6 +229,8 @@ export async function startServer(
       // install a dedicated listener that writes a 426 + closes the socket.
       // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
       s.on("upgrade", (req, socket) => {
+        if (fluidService?.handlesUpgrade(req, socket)) return;
+        if (comparisonService?.handlesUpgrade(req, socket)) return;
         const pathname = new URL(req.url ?? "/", "http://gateway.local")
           .pathname;
         if (isDataPlanePath(pathname) && req.headers.origin !== undefined) {
@@ -301,11 +344,28 @@ export async function startServer(
       }
       servers.push(s);
       boundHosts.push(host);
+      if (fluidSpikeEnabled && !fluidService) {
+        const { createFluidService } = await import("./fluid");
+        fluidService = await createFluidService(
+          s,
+          resolvedPort,
+          options.peerAddressForRequest,
+        );
+      }
+      if (comparisonVariant === "yjs" && !comparisonService) {
+        const { createYjsService } = await import("./spike-yjs");
+        comparisonService = createYjsService(s);
+      } else if (comparisonVariant === "automerge" && !comparisonService) {
+        const { createAutomergeService } = await import("./spike-automerge");
+        comparisonService = createAutomergeService(s);
+      }
     }
   } catch (e) {
     // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
     // already bound — close the successfully-bound servers so we don't leak
     // file descriptors, then re-throw for startGateway() to handle.
+    await fluidService?.stop().catch(() => {});
+    await comparisonService?.stop().catch(() => {});
     await Promise.all(servers.map((server) => closeBoundServer(server)));
     throw e;
   }
@@ -327,9 +387,15 @@ export async function startServer(
   const result = {
     stop: (deadlineMs?: number): Promise<void> => {
       if (!stopPromise) {
-        stopPromise = Promise.all(
-          servers.map((server) => closeBoundServer(server, deadlineMs)),
-        )
+        stopPromise = Promise.all([
+          fluidService?.stop(),
+          comparisonService?.stop(),
+        ])
+          .then(() =>
+            Promise.all(
+              servers.map((server) => closeBoundServer(server, deadlineMs)),
+            ),
+          )
           .then(() => {})
           .catch((error: unknown) => {
             stopPromise = undefined;
