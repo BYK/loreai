@@ -49,8 +49,14 @@ declare
   v_field_count integer;
 begin
   perform pg_advisory_xact_lock(hashtextextended(p_scope::text, 0));
-  if public.scope_role(p_scope) is distinct from 'admin' then
-    raise exception 'only a scope admin may remove members' using errcode = '42501';
+  if public.scope_role(p_scope) is distinct from 'admin'
+     and not (
+       p_user = auth.uid()
+       and public.scope_role(p_scope) is not null
+     )
+  then
+    raise exception 'only a scope admin may remove other members'
+      using errcode = '42501';
   end if;
 
   select role into v_target_role

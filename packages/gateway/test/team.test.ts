@@ -484,11 +484,11 @@ describe("removeTeamMember", () => {
     expect((await keystore.getScopeKey("s-crash", SELF)).byteLength).toBe(32);
   });
 
-  it("leaves without persisting a wrap and unlinks every local project", async () => {
+  it("leaves as an editor without persisting a wrap and unlinks every local project", async () => {
     const c = makeClient({
       scopeId: "s-leave",
       members: [
-        { user_id: SELF, role: "admin" },
+        { user_id: SELF, role: "editor" },
         { user_id: "other-admin", role: "admin" },
         { user_id: "editor", role: "editor" },
       ],

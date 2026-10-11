@@ -326,6 +326,105 @@ describe.skipIf(SKIP)(
       ).toBe(0);
     });
 
+    it("lets an editor leave with rotated wraps and verifies member/key reads under RLS", async () => {
+      const owner = await h.createUser();
+      const editor = await h.createUser();
+      const viewer = await h.createUser();
+      const scope = await createTeam(owner);
+      await addMember(owner, scope, editor, "editor");
+      await addMember(owner, scope, viewer, "viewer");
+      await publishKey(owner);
+      await publishKey(editor);
+      await publishKey(viewer);
+      await seedScopeKeys(scope, owner, [owner, editor, viewer]);
+
+      const visibleMembers = await h.asUser(editor, (client) =>
+        client.query(
+          "select user_id from public.scope_members where scope_id=$1",
+          [scope],
+        ),
+      );
+      expect(
+        visibleMembers.rows
+          .map((row) => row.user_id)
+          .sort((a, b) => a.localeCompare(b)),
+      ).toEqual([owner, editor, viewer].sort((a, b) => a.localeCompare(b)));
+      const visibleKey = await h.asUser(editor, (client) =>
+        client.query(
+          "select user_id, public_key from public.identity_pub where user_id=$1",
+          [owner],
+        ),
+      );
+      expect(visibleKey.rows).toHaveLength(1);
+      expect(visibleKey.rows[0].user_id).toBe(owner);
+
+      const result = await remove(editor, scope, editor, 0, [
+        wrap(owner),
+        wrap(viewer),
+      ]);
+      expect(result.rows[0].epoch).toBe(1);
+      const newWraps = await h.client
+        .query(
+          "select member_user_id, author_id, wrapped_dek from public.scope_keys where scope_id=$1 and key_epoch=1 order by member_user_id",
+          [scope],
+        )
+        .then((response) => response.rows);
+      expect(newWraps).toEqual(
+        [owner, viewer]
+          .sort((a, b) => a.localeCompare(b))
+          .map((memberUserId) => ({
+            member_user_id: memberUserId,
+            author_id: editor,
+            wrapped_dek: "next-wrap",
+          })),
+      );
+      expect(
+        await h.client
+          .query(
+            "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
+            [scope, editor],
+          )
+          .then((response) => response.rows[0].count),
+      ).toBe(0);
+      expect(
+        await h.client
+          .query("select key_epoch from public.scopes where id=$1", [scope])
+          .then((response) => response.rows[0].key_epoch),
+      ).toBe(1);
+    });
+
+    it("lets a viewer leave without granting them permission to remove others", async () => {
+      const owner = await h.createUser();
+      const viewer = await h.createUser();
+      const editor = await h.createUser();
+      const scope = await createTeam(owner);
+      await addMember(owner, scope, viewer, "viewer");
+      await addMember(owner, scope, editor, "editor");
+      await publishKey(owner);
+      await publishKey(viewer);
+      await publishKey(editor);
+      await seedScopeKeys(scope, owner, [owner, viewer, editor]);
+
+      const result = await remove(viewer, scope, viewer, 0, [
+        wrap(owner),
+        wrap(editor),
+      ]);
+
+      expect(result.rows[0].epoch).toBe(1);
+      expect(await snapshot(scope, viewer)).toMatchObject({
+        membership: null,
+        epoch: 1,
+      });
+      expect(
+        await h.client
+          .query(
+            "select count(*)::int as count from public.scope_keys where scope_id=$1 and member_user_id=$2",
+            [scope, viewer],
+          )
+          .then((response) => response.rows[0].count),
+      ).toBe(0);
+    });
+
     it("revokes direct execution of the old removal RPC", async () => {
       const admin = await h.createUser();
       const target = await h.createUser();
@@ -342,7 +441,7 @@ describe.skipIf(SKIP)(
       expect(error.code).toBe("42501");
     });
 
-    it("returns 42501 for a non-admin and P0002 for a missing target", async () => {
+    it("returns 42501 when an editor removes someone else and P0002 for a missing target", async () => {
       const owner = await h.createUser();
       const editor = await h.createUser();
       const scope = await createTeam(owner);
