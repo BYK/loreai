@@ -305,7 +305,7 @@ export const ModelUsagePage: Component = () => {
   const hasData = () => (doc()?.days.length ?? 0) > 0;
   const hasRows = () => filteredRows().length > 0;
 
-  const numberFmt = new Intl.NumberFormat("en-GB");
+  const numberFmt = new Intl.NumberFormat();
 
   return (
     <div
@@ -334,15 +334,22 @@ export const ModelUsagePage: Component = () => {
             <div class="mb-5 flex flex-wrap items-end gap-3">
               <div class="min-w-52">
                 <Select
-                  value={project() ?? ""}
-                  onChange={(value) => setProject(value || null)}
+                  value={project() ?? "all"}
+                  onChange={(value) =>
+                    setProject(value === "all" ? null : value)
+                  }
                   options={[
-                    "",
-                    ...(ws.projects.data()?.map((p) => p.id) ?? []),
+                    "all",
+                    ...new Set(
+                      [
+                        project(),
+                        ...(ws.projects.data()?.map((p) => p.id) ?? []),
+                      ].filter((id): id is string => !!id),
+                    ),
                   ]}
                   itemComponent={(props) => (
                     <SelectItem item={props.item}>
-                      {props.item.rawValue === ""
+                      {props.item.rawValue === "all"
                         ? "All projects"
                         : (ws.projects
                             .data()
@@ -361,7 +368,7 @@ export const ModelUsagePage: Component = () => {
                   >
                     <SelectValue<string>>
                       {(state) =>
-                        state.selectedOption() === ""
+                        state.selectedOption() === "all"
                           ? "All projects"
                           : (ws.projects
                               .data()

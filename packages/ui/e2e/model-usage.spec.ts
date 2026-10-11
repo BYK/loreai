@@ -48,6 +48,10 @@ test.describe("model usage page", () => {
     // gpt-5 2, m 1 → 6 session-days).
     const projects = await (await page.request.get("/api/v1/projects")).json();
     const lore = projects.find((p: { name: string }) => p.name === "lore")!;
+    // The closed trigger shows "All projects", not a blank value.
+    await expect(page.getByTestId("project-select")).toContainText(
+      "All projects",
+    );
     await page.getByTestId("project-select").click();
     await page.getByRole("option", { name: "lore", exact: true }).click();
     await expect(page.getByTestId("chart-status")).toContainText(
@@ -101,5 +105,18 @@ test.describe("model usage page", () => {
       "claude-sonnet-4",
       "Gemini 2.5 Pro",
     ]);
+
+    // Switching back to All projects restores the trigger label (regression:
+    // the "" option rendered blank).
+    await page.getByTestId("project-select").click();
+    await page
+      .getByRole("option", { name: "All projects", exact: true })
+      .click();
+    await expect(page.getByTestId("project-select")).toContainText(
+      "All projects",
+    );
+    await expect(page.getByTestId("chart-status")).toContainText(
+      "8 active session-days",
+    );
   });
 });

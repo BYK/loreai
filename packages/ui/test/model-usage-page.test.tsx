@@ -200,7 +200,13 @@ describe("ModelUsagePage", () => {
           path="*"
           component={() => (
             <WorkspaceProvider
-              client={clientWith({ getModelUsage })}
+              client={clientWith({
+                getModelUsage,
+                listProjects: async () =>
+                  [
+                    { id: "proj-2", name: "Project Two", knowledge_count: 0 },
+                  ] as never,
+              })}
               db={Promise.resolve(null)}
             >
               <ModelUsagePage />
@@ -217,6 +223,33 @@ describe("ModelUsagePage", () => {
       expect(links.length).toBe(2);
       expect(links[1]?.getAttribute("href")).toContain("project=proj-2");
     });
+    // The closed trigger keeps showing "All projects" by default and shows
+    // the project name while a project is selected.
+    const triggers = screen.getAllByTestId("project-select");
+    expect(triggers[0]?.textContent).toBe("All projects");
+    await waitFor(() => expect(triggers[1]?.textContent).toBe("Project Two"));
+  });
+
+  it("keeps 'All projects' in the trigger after selecting and switching back", async () => {
+    mountPage(
+      clientWith({ getModelUsage: async () => usageData }),
+      "/model-usage",
+      [{ id: "proj-2", name: "Project Two" }],
+    );
+    await waitFor(() =>
+      expect(document.querySelectorAll("tbody tr").length).toBe(3),
+    );
+    const trigger = screen.getByTestId("project-select");
+    expect(trigger.textContent).toBe("All projects");
+    // Kobalte opens the listbox on a primary-button pointerdown.
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(await screen.findByRole("option", { name: "Project Two" }));
+    await waitFor(() => expect(trigger.textContent).toBe("Project Two"));
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(
+      await screen.findByRole("option", { name: "All projects" }),
+    );
+    await waitFor(() => expect(trigger.textContent).toBe("All projects"));
   });
 
   it("shows the nothing-recorded empty state", async () => {
