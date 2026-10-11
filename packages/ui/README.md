@@ -791,7 +791,18 @@ blocks or falls outside — the reader shows a hint instead of guessing.
 A reading becomes a `SourceAnchor` published as `?a=<encoded>` on the
 route; reload decodes it, finds the row, scrolls it into view and highlights
 the passage by wrapping text nodes in `<mark data-passage-mark>` (DOM
-operations, never HTML strings). Resolution states surface as banners:
+operations, never HTML strings). The reveal centres the mark and then
+holds it on screen for ~24 frames (`revealMark`): the rows around it enter
+at the estimate and their first measures adjust the scroll against the
+offset the virtualiser still holds from before the native scroll, and the
+in-flow selection panel the link opens shrinks the scroller — on a phone
+by almost half — so a one-shot `scrollIntoView` could leave the passage
+under the panel (#1863). Only a mark that is *moved out of* the band
+below the sticky toolbar is re-centred, through the virtualiser's own
+scroll with the offset handed over; the first user gesture ends the hold.
+`e2e/reader.spec.ts` asserts the mark's box against the scroller's visible
+box after a same-page reload and in a fresh browser context, on the
+desktop and mobile projects. Resolution states surface as banners:
 `changed` ("Source changed since this link was made", the passage is not
 highlighted), `missing` (older pages are searched up to
 `DEEP_LINK_SEARCH_PAGES` = 10, then "not found in the loaded history" /

@@ -96,6 +96,36 @@ async function selectInRow(page: Page, marker: string, needle: string) {
   await row.dispatchEvent("pointerup");
 }
 
+/**
+ * The target passage sits inside the part of the reader scroller that the
+ * sticky toolbar leaves visible — mounted is not enough: a source link opens
+ * the in-flow selection panel below the scroller, which on a phone takes
+ * almost half the screen, and the passage must not end up under it (#1863).
+ * Checked twice so a passage that lands and is then dragged away by a late
+ * row measure still fails.
+ */
+async function expectPassageOnScreen(page: Page) {
+  const mark = page.locator("mark.passage-target").first();
+  await expect(mark).toBeVisible();
+  await expect(page.getByTestId("selection-panel")).toBeVisible();
+  const placement = async () => {
+    const [m, scroller, toolbar] = await Promise.all([
+      mark.boundingBox(),
+      page.getByTestId("session-scroll").boundingBox(),
+      page.getByTestId("reader-toolbar").boundingBox(),
+    ]);
+    if (!m || !scroller || !toolbar) return "unmeasured";
+    const top = toolbar.y + toolbar.height;
+    const bottom = scroller.y + scroller.height;
+    return m.y >= top && m.y + m.height <= bottom
+      ? "on screen"
+      : `mark ${m.y.toFixed(0)}–${(m.y + m.height).toFixed(0)} outside ${top.toFixed(0)}–${bottom.toFixed(0)}`;
+  };
+  await expect.poll(placement, { timeout: 3000 }).toBe("on screen");
+  await page.waitForTimeout(500);
+  expect(await placement()).toBe("on screen");
+}
+
 test.describe("session reader", () => {
   test("lands at the newest message and pages older history in on an upward scroll", async ({
     page,
@@ -132,6 +162,7 @@ test.describe("session reader", () => {
   test("UX-01: select a passage → stable link → reload → same passage highlighted", async ({
     page,
     context,
+    browser,
   }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openReader(page);
@@ -207,6 +238,17 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "230 messages, complete as captured",
     );
+    await expectPassageOnScreen(page);
+
+    // The link opened elsewhere: no cached window to restore from, the
+    // reader pages back from the newest page alone.
+    const fresh = await browser.newContext(test.info().project.use);
+    const other = await fresh.newPage();
+    await other.goto(copiedLink);
+    await expect(other.locator("mark.passage-target")).toHaveText([PASSAGE]);
+    await expect(other.getByTestId("link-state")).toHaveCount(0);
+    await expectPassageOnScreen(other);
+    await fresh.close();
   });
 
   test("loading older history twice keeps the row under the eye where it was", async ({
@@ -510,8 +552,8 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("stale-indicator")).toHaveCount(0);
     const marks = page.locator("mark.passage-target");
     await expect(marks).toHaveText([query]);
-    // Viewport position after reload is #1863 (mobile lands under the panel).
     await expect(page.getByTestId("link-state")).toHaveCount(0);
+    await expectPassageOnScreen(page);
   });
 
   test("keyboard: rows are focusable and Enter selects a whole block", async ({
