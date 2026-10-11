@@ -246,7 +246,8 @@ function currentAnchorHash(
   source: SourceBlocks,
 ): string | null {
   const parts = source.blocks.get(anchor.blockId);
-  if (!parts) return null;
+  // A block with no parts left (a cleared entry) has nothing to anchor to.
+  if (!parts || parts.length === 0) return null;
   if (anchor.partIndex === undefined) return blockHashOf(parts);
   return parts[anchor.partIndex] ?? null;
 }

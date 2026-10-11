@@ -4,6 +4,7 @@ import { deleteProject, moveSessions } from "../src/data";
 import {
   DiscussionError,
   addReply,
+  anchorStatusOf,
   blockHashOf,
   createDiscussion,
   createThread,
@@ -450,6 +451,20 @@ describe("discussions", () => {
     );
   });
 
+  it("marks a whole-block anchor source_missing when its entry has no paragraphs left", () => {
+    const blockId = knowledgeBlockId("cleared");
+    const anchor = {
+      blockId,
+      start: 0,
+      end: 4,
+      contentHash: contentHash("Para."),
+    };
+    expect(anchorStatusOf([anchor], { blocks: new Map([[blockId, []]]) })).toBe(
+      "source_missing",
+    );
+    expect(knowledgePartHashes(" \n\n  ")).toEqual([]);
+  });
+
   it("binds only responses from a session discussion's own session", () => {
     const { discussion } = start();
     const elsewhere = message(p.id, "s2", "other session", "assistant");
@@ -517,6 +532,50 @@ describe("discussions", () => {
       )
       .get() as { n: number };
     expect(orphans.n).toBe(0);
+    const unused = db()
+      .query(
+        "SELECT COUNT(*) AS n FROM response_bindings WHERE id NOT IN (SELECT response_binding_id FROM discussion_replies WHERE response_binding_id IS NOT NULL)",
+      )
+      .get() as { n: number };
+    expect(unused.n).toBe(0);
+  });
+
+  it("drops the binding of a stranded reply that was its only user", () => {
+    const answer = message(p.id, "s1", "the answer", "assistant");
+    const logicalId = ltm.create({
+      projectPath: p.path,
+      scope: "project",
+      category: "gotcha",
+      title: "Only knowledge",
+      content: "Para.",
+    });
+    const k = createDiscussion({
+      projectId: p.id,
+      source: { kind: "knowledge", id: logicalId },
+      anchors: [
+        {
+          blockId: knowledgeBlockId(logicalId),
+          partIndex: 0,
+          start: 0,
+          end: 4,
+          contentHash: contentHash("Para."),
+        },
+      ],
+      quote: "Para",
+    });
+    addReply(p.id, k.discussion.id, {
+      expectedRevision: k.discussion.revision,
+      responseMessageId: answer,
+    });
+    const target = `/test/discussions/move-${Date.now()}-${seq++}`;
+    moveSessions(["s1"], p.id, target);
+    const to = ensureProject(target);
+    const left = db()
+      .query(
+        "SELECT COUNT(*) AS n FROM response_bindings WHERE project_id IN (?, ?)",
+      )
+      .get(p.id, to) as { n: number };
+    expect(left.n).toBe(0);
   });
 
   it("isolates projects", () => {

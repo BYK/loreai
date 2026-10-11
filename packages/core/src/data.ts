@@ -1740,6 +1740,11 @@ export function moveSessions(
       database
         .query(`DELETE FROM discussion_replies WHERE ${strandedReplies}`)
         .run(...strandedArgs);
+      database
+        .query(
+          `DELETE FROM response_bindings WHERE project_id = ? AND session_id IN (${placeholders}) AND id NOT IN (SELECT response_binding_id FROM discussion_replies WHERE response_binding_id IS NOT NULL)`,
+        )
+        .run(fromProjectId, ...allIds);
       // Session-anchored discussions follow their source session; their
       // replies and verified response bindings move with them.
       database
