@@ -11,7 +11,7 @@ import {
 } from "@automerge/automerge-repo";
 import { cbor } from "@automerge/automerge-repo/slim";
 import { NodeWSServerAdapter } from "@automerge/automerge-repo-network-websocket";
-import { WebSocket, WebSocketServer } from "ws";
+import * as WebSocket from "ws";
 import { db, withTransaction } from "@loreai/core";
 import {
   hasSpikeShare,
@@ -219,15 +219,15 @@ export function createAutomergeService(_server: Server): {
   stop(): Promise<void>;
 } {
   initializeStorageSchema();
-  const wss = new WebSocketServer({
+  const wss = new WebSocket.WebSocketServer({
     noServer: true,
     maxPayload: 2 * 1024 * 1024,
   });
-  const participantBySocket = new WeakMap<WebSocket, string>();
-  const claimsBySocket = new WeakMap<WebSocket, SpikeClaims>();
-  const peerBySocket = new WeakMap<WebSocket, string>();
+  const participantBySocket = new WeakMap<WebSocket.WebSocket, string>();
+  const claimsBySocket = new WeakMap<WebSocket.WebSocket, SpikeClaims>();
+  const peerBySocket = new WeakMap<WebSocket.WebSocket, string>();
   const peerParticipants = new Map<string, string>();
-  const peerSockets = new Map<string, WebSocket>();
+  const peerSockets = new Map<string, WebSocket.WebSocket>();
   const trackedDocuments = new Map<
     string,
     Automerge.Doc<Record<string, unknown>>
@@ -236,9 +236,9 @@ export function createAutomergeService(_server: Server): {
     string,
     Map<string, ReturnType<typeof Automerge.initSyncState>>
   >();
-  const sockets = new Set<WebSocket>();
+  const sockets = new Set<WebSocket.WebSocket>();
   type AdapterSocket = Parameters<NodeWSServerAdapter["receiveMessage"]>[1];
-  wss.on("connection", (socket: WebSocket) => {
+  wss.on("connection", (socket: WebSocket.WebSocket) => {
     sockets.add(socket);
     socket.once("message", (data: WebSocket.RawData) => {
       try {
@@ -412,7 +412,7 @@ export function createAutomergeService(_server: Server): {
         request,
         socket,
         Buffer.alloc(0),
-        (webSocket: WebSocket) => {
+        (webSocket: WebSocket.WebSocket) => {
           participantBySocket.set(webSocket, claims.participant);
           claimsBySocket.set(webSocket, claims);
           wss.emit("connection", webSocket, request);
