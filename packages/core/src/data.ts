@@ -772,16 +772,8 @@ export function clearProject(projectPath: string): ClearResult {
     deleteOwnedProjectSessionStates(database, pid);
     // session_meta is a derived cache — sweep the project's rows with the rest.
     database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
-    // Discussions are project-owned application data (APP-01): replies and
-    // response bindings first, then discussions, then threads.
-    for (const table of [
-      "discussion_replies",
-      "response_bindings",
-      "discussions",
-      "threads",
-    ]) {
-      database.query(`DELETE FROM ${table} WHERE project_id = ?`).run(pid);
-    }
+    // Thread links are project-owned application data (#1809).
+    database.query("DELETE FROM thread_links WHERE project_id = ?").run(pid);
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
@@ -943,18 +935,10 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM session_meta WHERE project_id = ?")
       .run(projectId);
-    // Discussions are project-owned application data (APP-01): replies and
-    // response bindings first, then discussions, then threads.
-    for (const table of [
-      "discussion_replies",
-      "response_bindings",
-      "discussions",
-      "threads",
-    ]) {
-      database
-        .query(`DELETE FROM ${table} WHERE project_id = ?`)
-        .run(projectId);
-    }
+    // Thread links are project-owned application data (#1809).
+    database
+      .query("DELETE FROM thread_links WHERE project_id = ?")
+      .run(projectId);
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
@@ -1720,54 +1704,13 @@ export function moveSessions(
           `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
-      // A bound response is content of its session. Replies in discussions
-      // that stay behind (knowledge-anchored) and only point at a leaving
-      // session's response carry no authored text: drop them and bump their
-      // discussion's revision so stale writers conflict.
-      const strandedReplies = `project_id = ? AND response_binding_id IN (SELECT id FROM response_bindings WHERE project_id = ? AND session_id IN (${placeholders})) AND discussion_id NOT IN (SELECT id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}))`;
-      const strandedArgs = [
-        fromProjectId,
-        fromProjectId,
-        ...allIds,
-        fromProjectId,
-        ...allIds,
-      ];
+      // A thread link lives in its source session's project, so links
+      // anchored in a moving session move with it.
       database
         .query(
-          `UPDATE discussions SET revision = revision + 1, updated_at = ?1, last_activity_at = MAX(?1, last_activity_at + 1) WHERE id IN (SELECT discussion_id FROM discussion_replies WHERE ${strandedReplies})`,
+          `UPDATE thread_links SET project_id = ?, updated_at = MAX(?, updated_at + 1) WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
         )
-        .run(Date.now(), ...strandedArgs);
-      database
-        .query(`DELETE FROM discussion_replies WHERE ${strandedReplies}`)
-        .run(...strandedArgs);
-      database
-        .query(
-          `DELETE FROM response_bindings WHERE project_id = ? AND session_id IN (${placeholders}) AND id NOT IN (SELECT response_binding_id FROM discussion_replies WHERE response_binding_id IS NOT NULL)`,
-        )
-        .run(fromProjectId, ...allIds);
-      // Session-anchored discussions follow their source session; their
-      // replies and verified response bindings move with them.
-      database
-        .query(
-          `UPDATE discussion_replies SET project_id = ? WHERE project_id = ? AND discussion_id IN (SELECT id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}))`,
-        )
-        .run(toId, fromProjectId, fromProjectId, ...allIds);
-      // Threads stay with the project, so the moved discussions leave them.
-      database
-        .query(
-          `UPDATE threads SET updated_at = MAX(?1, updated_at + 1) WHERE id IN (SELECT thread_id FROM discussions WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders}) AND thread_id IS NOT NULL)`,
-        )
-        .run(Date.now(), fromProjectId, ...allIds);
-      database
-        .query(
-          `UPDATE discussions SET project_id = ?, thread_id = NULL WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
-        )
-        .run(toId, fromProjectId, ...allIds);
-      database
-        .query(
-          `UPDATE response_bindings SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-        )
-        .run(toId, fromProjectId, ...allIds);
+        .run(toId, Date.now(), fromProjectId, ...allIds);
       // Clear both projects' fair cursors within this write transaction whenever
       // moving; queued rows remain durable even if ownership changed before
       // the transaction began.

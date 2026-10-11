@@ -35,7 +35,7 @@ import { defaultModelForProvider } from "./worker-model";
 import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
-import { handleDiscussionRequest } from "./api-discussions";
+import { handleThreadRequest } from "./api-threads";
 import { handlePromotionRequest } from "./promotions";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 import {
@@ -903,8 +903,8 @@ export async function handleAPIRequest(
   const method = req.method;
   let params: RouteParams | null;
 
-  const discussion = await handleDiscussionRequest(req, url);
-  if (discussion) return discussion;
+  const thread = await handleThreadRequest(req, url);
+  if (thread) return thread;
 
   // -----------------------------------------------------------------------
   // Data read endpoints

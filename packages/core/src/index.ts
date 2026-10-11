@@ -33,7 +33,9 @@ export {
 } from "./references";
 export * as syncData from "./sync-data";
 export * as data from "./data";
-export * as discussions from "./discussions";
+export * as threadLinks from "./thread-links";
+export * as sourceAnchors from "./source-anchors";
+export * as anchoredNotes from "./anchored-notes";
 export * as sql from "./sql";
 export * as dedupApply from "./dedup-apply";
 export * as listQuery from "./list-query";

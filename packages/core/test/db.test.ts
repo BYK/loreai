@@ -310,43 +310,33 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
-  test("v103: discussion tables exist and enforce the reply XOR", () => {
-    const tables = (
-      db()
-        .query(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('threads', 'discussions', 'discussion_replies', 'response_bindings')",
-        )
-        .all() as Array<{ name: string }>
-    ).map((r) => r.name);
-    expect(tables.sort()).toEqual([
-      "discussion_replies",
-      "discussions",
-      "response_bindings",
-      "threads",
-    ]);
+  test("v103: thread_links exists and ties its columns together", () => {
     const sqlText = (
       db()
-        .query(
-          "SELECT sql FROM sqlite_master WHERE name = 'discussion_replies'",
-        )
+        .query("SELECT sql FROM sqlite_master WHERE name = 'thread_links'")
         .get() as { sql: string }
     ).sql;
     expect(sqlText).toContain(
-      "(body IS NULL) <> (response_binding_id IS NULL)",
+      "(parent_session_id IS NULL) = (source_kind = 'knowledge')",
     );
-  });
-
-  test("v103 recovery re-creates dropped discussion tables", () => {
-    db().exec(
-      "DROP TABLE discussion_replies; DROP TABLE response_bindings; DROP TABLE discussions; DROP TABLE threads;",
-    );
-    close();
-    const tables = db()
+    expect(sqlText).toContain("(state = 'failed') = (error IS NOT NULL)");
+    const legacy = db()
       .query(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('threads', 'discussions', 'discussion_replies', 'response_bindings')",
       )
       .all();
-    expect(tables).toHaveLength(4);
+    expect(legacy).toEqual([]);
+  });
+
+  test("v103 recovery re-creates a dropped thread_links table", () => {
+    db().exec("DROP TABLE thread_links;");
+    close();
+    const tables = db()
+      .query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_links'",
+      )
+      .all();
+    expect(tables).toHaveLength(1);
   });
 
   test("v100: session_prompt_deltas.created_at exists on a fresh DB", () => {

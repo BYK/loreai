@@ -2480,78 +2480,50 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   SELECT 1;
   `,
   `
-  -- Version 103: durable discussions (APP-01, #1809). Application-owned
-  -- threads, anchored discussions and their replies. Discussions reference
-  -- source blocks (a session message or a knowledge entry) through logical
-  -- SourceAnchor JSON plus the source content hash; they never copy the
-  -- transcript beyond the short quote the UI shows. A reply is either authored
-  -- text or a reference to a verified native response (response_bindings:
-  -- an assistant temporal message checked to belong to the project), never
-  -- both.
-  CREATE TABLE IF NOT EXISTS threads (
+  -- Version 103: thread links (#1809). A thread started from a selection is
+  -- a forked agent session the gateway runs on the harness through ACP. The
+  -- row keeps the selection (logical SourceAnchor JSON, the short UI quote,
+  -- the source hash), the harness, the ACP and Lore child session ids and
+  -- the lifecycle state. The child's turns live in temporal_messages like any
+  -- other session; nothing here copies a transcript.
+  CREATE TABLE IF NOT EXISTS thread_links (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 1,
-    created_by TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_threads_project_updated
-    ON threads(project_id, updated_at DESC, id DESC);
-  CREATE TABLE IF NOT EXISTS discussions (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('discussion', 'note')),
+    parent_session_id TEXT,
     source_kind TEXT NOT NULL CHECK (source_kind IN ('session', 'knowledge')),
     source_id TEXT NOT NULL,
     anchors TEXT NOT NULL,
     quote TEXT NOT NULL,
     source_hash TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'resolved')),
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
+    agent TEXT NOT NULL,
+    fork_mode TEXT NOT NULL CHECK (fork_mode IN ('native', 'seeded')),
+    fork_point TEXT,
+    acp_session_id TEXT,
+    child_session_id TEXT UNIQUE,
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    state TEXT NOT NULL
+      CHECK (state IN ('starting', 'running', 'idle', 'failed', 'closed')),
+    error TEXT,
     revision INTEGER NOT NULL DEFAULT 1,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    last_activity_at INTEGER NOT NULL
+    last_activity_at INTEGER NOT NULL,
+    CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
+    CHECK ((state = 'failed') = (error IS NOT NULL)),
+    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL))
   );
-  CREATE INDEX IF NOT EXISTS idx_discussions_project_activity
-    ON discussions(project_id, last_activity_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS idx_discussions_activity
-    ON discussions(last_activity_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS idx_discussions_source
-    ON discussions(project_id, source_kind, source_id, created_at, id);
-  CREATE INDEX IF NOT EXISTS idx_discussions_thread
-    ON discussions(thread_id) WHERE thread_id IS NOT NULL;
-  CREATE TABLE IF NOT EXISTS response_bindings (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    agent TEXT NOT NULL,
-    verified_at INTEGER NOT NULL,
-    UNIQUE (project_id, message_id)
-  );
-  CREATE TABLE IF NOT EXISTS discussion_replies (
-    id TEXT PRIMARY KEY,
-    discussion_id TEXT NOT NULL REFERENCES discussions(id) ON DELETE CASCADE,
-    project_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    parent_reply_id TEXT REFERENCES discussion_replies(id) ON DELETE SET NULL,
-    author TEXT NOT NULL,
-    body TEXT,
-    response_binding_id TEXT REFERENCES response_bindings(id),
-    revision INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    CHECK ((body IS NULL) <> (response_binding_id IS NULL)),
-    UNIQUE (discussion_id, seq)
-  );
-  CREATE INDEX IF NOT EXISTS idx_discussion_replies_project
-    ON discussion_replies(project_id);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
+    ON thread_links(project_id, last_activity_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_activity
+    ON thread_links(last_activity_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_source
+    ON thread_links(project_id, source_kind, source_id);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_parent
+    ON thread_links(parent_session_id) WHERE parent_session_id IS NOT NULL;
   `,
 ]);
 
@@ -5004,73 +4976,47 @@ function recoverMissingObjects(database: Database) {
       );
     }
   }
-  // Version 103: durable discussions (APP-01). Plain CREATE IF NOT EXISTS,
-  // so recovery re-creates any table or index a partial apply lost.
+  // Version 103: thread links (#1809). Plain CREATE IF NOT EXISTS, so
+  // recovery re-creates the table or an index a partial apply lost.
   database.exec(`
-  CREATE TABLE IF NOT EXISTS threads (
+  CREATE TABLE IF NOT EXISTS thread_links (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 1,
-    created_by TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_threads_project_updated
-    ON threads(project_id, updated_at DESC, id DESC);
-  CREATE TABLE IF NOT EXISTS discussions (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('discussion', 'note')),
+    parent_session_id TEXT,
     source_kind TEXT NOT NULL CHECK (source_kind IN ('session', 'knowledge')),
     source_id TEXT NOT NULL,
     anchors TEXT NOT NULL,
     quote TEXT NOT NULL,
     source_hash TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'resolved')),
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
+    agent TEXT NOT NULL,
+    fork_mode TEXT NOT NULL CHECK (fork_mode IN ('native', 'seeded')),
+    fork_point TEXT,
+    acp_session_id TEXT,
+    child_session_id TEXT UNIQUE,
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    state TEXT NOT NULL
+      CHECK (state IN ('starting', 'running', 'idle', 'failed', 'closed')),
+    error TEXT,
     revision INTEGER NOT NULL DEFAULT 1,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    last_activity_at INTEGER NOT NULL
+    last_activity_at INTEGER NOT NULL,
+    CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
+    CHECK ((state = 'failed') = (error IS NOT NULL)),
+    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL))
   );
-  CREATE INDEX IF NOT EXISTS idx_discussions_project_activity
-    ON discussions(project_id, last_activity_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS idx_discussions_activity
-    ON discussions(last_activity_at DESC, id DESC);
-  CREATE INDEX IF NOT EXISTS idx_discussions_source
-    ON discussions(project_id, source_kind, source_id, created_at, id);
-  CREATE INDEX IF NOT EXISTS idx_discussions_thread
-    ON discussions(thread_id) WHERE thread_id IS NOT NULL;
-  CREATE TABLE IF NOT EXISTS response_bindings (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id TEXT NOT NULL,
-    agent TEXT NOT NULL,
-    verified_at INTEGER NOT NULL,
-    UNIQUE (project_id, message_id)
-  );
-  CREATE TABLE IF NOT EXISTS discussion_replies (
-    id TEXT PRIMARY KEY,
-    discussion_id TEXT NOT NULL REFERENCES discussions(id) ON DELETE CASCADE,
-    project_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    parent_reply_id TEXT REFERENCES discussion_replies(id) ON DELETE SET NULL,
-    author TEXT NOT NULL,
-    body TEXT,
-    response_binding_id TEXT REFERENCES response_bindings(id),
-    revision INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    CHECK ((body IS NULL) <> (response_binding_id IS NULL)),
-    UNIQUE (discussion_id, seq)
-  );
-  CREATE INDEX IF NOT EXISTS idx_discussion_replies_project
-    ON discussion_replies(project_id);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
+    ON thread_links(project_id, last_activity_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_activity
+    ON thread_links(last_activity_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_source
+    ON thread_links(project_id, source_kind, source_id);
+  CREATE INDEX IF NOT EXISTS idx_thread_links_parent
+    ON thread_links(parent_session_id) WHERE parent_session_id IS NOT NULL;
   `);
   // Version 56: projects.last_refcheck_at (reference-validity rate gate, #627).
   {
@@ -5163,8 +5109,6 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "context_ltm_source_mutations",
   "dedup_feedback",
   "dedup_operations",
-  "discussion_replies",
-  "discussions",
   "distillation_vec",
   "distillations",
   "entities",
@@ -5177,7 +5121,6 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "lat_sections",
   "project_id_aliases",
   "project_path_aliases",
-  "response_bindings",
   "session_prompt_deltas",
   "source_windows", // Disposable; source-project deletion cascades it away.
   "semantic_token_cache", // Disposable; source-project deletion cascades it away.
@@ -5185,7 +5128,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "temporal_embedding_queue", // Local metadata follows temporal_messages via its project-update trigger.
   "temporal_messages",
   "temporal_vec",
-  "threads",
+  "thread_links",
   "tool_calls",
   "warmup_histograms",
 ] as const);
@@ -5416,40 +5359,10 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
-    // A message belongs to one project, so a binding for the same message on
-    // both sides is a stale duplicate: keep the target's and re-point the
-    // source's replies at it, so the re-key below cannot hit
-    // UNIQUE (project_id, message_id).
-    d.query(
-      `UPDATE discussion_replies
-          SET response_binding_id = (
-            SELECT t.id FROM response_bindings AS t
-              JOIN response_bindings AS s ON s.message_id = t.message_id
-             WHERE s.id = discussion_replies.response_binding_id
-               AND t.project_id = ?2)
-        WHERE response_binding_id IN (
-          SELECT s.id FROM response_bindings AS s
-           WHERE s.project_id = ?1
-             AND EXISTS (SELECT 1 FROM response_bindings AS t
-                          WHERE t.project_id = ?2 AND t.message_id = s.message_id))`,
-    ).run(sourceId, targetId);
-    d.query(
-      `DELETE FROM response_bindings AS s
-        WHERE s.project_id = ?1
-          AND EXISTS (SELECT 1 FROM response_bindings AS t
-                       WHERE t.project_id = ?2 AND t.message_id = s.message_id)`,
-    ).run(sourceId, targetId);
-    for (const table of [
-      "threads",
-      "discussions",
-      "discussion_replies",
-      "response_bindings",
-    ]) {
-      d.query(`UPDATE ${table} SET project_id = ? WHERE project_id = ?`).run(
-        targetId,
-        sourceId,
-      );
-    }
+    d.query("UPDATE thread_links SET project_id = ? WHERE project_id = ?").run(
+      targetId,
+      sourceId,
+    );
     // Prompt deltas are globally keyed by (session_id, seq), so project_id is
     // not part of their identity and can be re-keyed directly.
     d.query(

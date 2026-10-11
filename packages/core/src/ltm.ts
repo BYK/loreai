@@ -191,6 +191,23 @@ export type KnowledgeMetadata = {
    *  Absent → heuristic default (advisory when enforceable). Author intent
    *  always wins. See `semantic-lint/check.ts` `enforcementLevel`. */
   enforce?: "strict" | "soft" | "off" | boolean;
+  /** Selection a human note was written on (#1809): the source block and
+   *  its logical anchors, re-checked on read like a thread link's. */
+  anchor?: KnowledgeAnchor;
+};
+
+export type KnowledgeAnchor = {
+  source_kind: "session" | "knowledge";
+  source_id: string;
+  anchors: Array<{
+    blockId: string;
+    partIndex?: number;
+    start: number;
+    end: number;
+    contentHash: string;
+  }>;
+  quote: string;
+  source_hash: string;
 };
 
 /** Parse the raw `metadata` TEXT column into a typed object. Tolerant: a
