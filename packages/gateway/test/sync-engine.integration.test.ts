@@ -1323,13 +1323,44 @@ describe.skipIf(SKIP)("sync engine self-leave", () => {
       ),
     ).toHaveLength(1);
 
+    // syncOnce pushes before its post-pull reconciliation, so a follow-up push can be queued by
+    // that reconciliation. Require the next cycle to settle rather than assuming one is enough.
     const secondCycle = await syncOnce();
-    expect(secondCycle).toEqual({
+    expect(secondCycle).toMatchObject({
+      pulled: 0,
+      conflicts: 0,
+      skipped: 0,
+    });
+    expect(secondCycle.notAuthed).toBeUndefined();
+    expect(secondCycle.quotaHit).toBeUndefined();
+    expect(syncData.getSyncState("knowledge", logicalId)?.scope_id).toBeNull();
+
+    const settledCycle = await syncOnce();
+    expect(settledCycle).toMatchObject({
       pushed: 0,
       pulled: 0,
       conflicts: 0,
       skipped: 0,
     });
-    expect(syncData.getSyncState("knowledge", logicalId)?.scope_id).toBeNull();
+    expect(
+      await h.asUser(member, (c) =>
+        c
+          .query(
+            "select id from public.knowledge where scope_id=$1 and id=$2",
+            [scope, logicalId],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
+    expect(
+      await h.asUser(admin, (c) =>
+        c
+          .query(
+            "select id from public.knowledge where scope_id=$1 and id=$2",
+            [admin, logicalId],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
   });
 });
