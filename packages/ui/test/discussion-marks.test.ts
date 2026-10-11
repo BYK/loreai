@@ -112,6 +112,9 @@ describe("discussion anchors → highlights", () => {
     const stale = disc("d4", [a("m.1", 0, 0, 30)], {
       anchor_status: "stale_anchor",
     });
+    // An empty part anchor draws no highlight, so it offers no reply either.
+    const empty = disc("d5", [a("m.1", 0, 8, 8)]);
+    expect(discussionSpans([empty], "m.1", 0)).toEqual([]);
     const sel = {
       blockId: "m.1",
       partIndex: 0,
@@ -120,7 +123,9 @@ describe("discussion anchors → highlights", () => {
       contentHash: "x",
     };
     expect(
-      overlappingDiscussions([d1, d2, whole, stale], sel).map((d) => d.id),
+      overlappingDiscussions([d1, d2, whole, stale, empty], sel).map(
+        (d) => d.id,
+      ),
     ).toEqual(["d1", "d3"]);
     // Touching ends do not overlap.
     expect(
