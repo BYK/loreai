@@ -75,7 +75,8 @@ export type PrefixCut = (body: string) => string | null;
 /**
  * Pick the prefix a thread inherits: the live body if it contains the
  * anchor, else the newest unexpired snapshot that does, else a cold start.
- * A body is only replayed for the same model and account as the child.
+ * A body is only replayed for the same model and account as the child; an
+ * older body that matches wins over a newer one that doesn't.
  */
 export function resolveParentPrefix(
   state: SessionState,
@@ -108,14 +109,17 @@ export function resolveParentPrefix(
   ];
   if (candidates.length === 0)
     return { mode: "cold", reason: "no_cached_body" };
+  let mismatch: threadLinks.PrefixReason | undefined;
   for (const candidate of candidates) {
     const prefix = cut(decompressBody(candidate.body));
     if (prefix === null) continue;
     if (candidate.model !== child.model) {
-      return { mode: "cold", reason: "model_mismatch" };
+      mismatch ??= "model_mismatch";
+      continue;
     }
     if (candidate.account !== child.account) {
-      return { mode: "cold", reason: "account_mismatch" };
+      mismatch ??= "account_mismatch";
+      continue;
     }
     return {
       mode: candidate.mode,
@@ -126,5 +130,5 @@ export function resolveParentPrefix(
       bodyBytes: Buffer.byteLength(prefix),
     };
   }
-  return { mode: "cold", reason: "anchor_not_cached" };
+  return { mode: "cold", reason: mismatch ?? "anchor_not_cached" };
 }

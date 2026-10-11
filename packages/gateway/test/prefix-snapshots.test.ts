@@ -7,6 +7,7 @@ import { evictSession } from "@loreai/core";
 import { recordCacheTurnUsage } from "../src/pipeline";
 import { compressBody, decompressBody } from "../src/cache-analytics";
 import {
+  capturePrefixSnapshot,
   forgetPrefixSnapshots,
   resolveParentPrefix,
   sessionPrefixSnapshots,
@@ -186,6 +187,24 @@ describe("prefix snapshots", () => {
     state.cacheAnalytics.lastRequestMeta = null;
     const prefix = resolveParentPrefix(state, CHILD, cutAt("ANCHOR-1"));
     expect(prefix.mode).toBe("snapshot");
+  });
+
+  test("an older matching snapshot wins over a newer mismatched one", () => {
+    const state = session(LAYER1);
+    const now = Date.now();
+    const older = { body: compressBody(LAYER0), wire: "anthropic" as const };
+    capturePrefixSnapshot(state, { ...older, model: MODEL, sentAt: now - 2 });
+    capturePrefixSnapshot(state, { ...older, model: "other", sentAt: now - 1 });
+    expect(resolveParentPrefix(state, CHILD, cutAt("ANCHOR-1")).mode).toBe(
+      "snapshot",
+    );
+    expect(
+      resolveParentPrefix(
+        state,
+        { ...CHILD, model: "third" },
+        cutAt("ANCHOR-1"),
+      ),
+    ).toEqual({ mode: "cold", reason: "model_mismatch" });
   });
 
   test("falls back cold on model or account mismatch and with no bodies", () => {

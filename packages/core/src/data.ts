@@ -1734,7 +1734,7 @@ export function moveSessions(
       // anchored in a moving session move with it.
       database
         .query(
-          `UPDATE thread_links SET project_id = ?, updated_at = MAX(?, updated_at + 1) WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
+          `UPDATE thread_links SET project_id = ?, revision = revision + 1, updated_at = MAX(?, updated_at + 1) WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
         )
         .run(toId, Date.now(), fromProjectId, ...allIds);
       // Clear both projects' fair cursors within this write transaction whenever

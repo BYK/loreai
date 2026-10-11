@@ -16639,7 +16639,7 @@ export function recordCacheTurnUsage(
       }
     }
     sessionState.cacheAnalytics.lastRequestMeta = wire
-      ? { model, wire, sentAt: Date.now() }
+      ? { model, wire, sentAt: sessionState.lastRequestTime || Date.now() }
       : null;
     if (genAiSpan) {
       setCacheAnalyticsAttributes(

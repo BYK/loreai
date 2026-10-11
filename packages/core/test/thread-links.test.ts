@@ -240,7 +240,10 @@ describe("thread links", () => {
     const { p, session, link } = seeded();
     const to = project();
     moveSessions([session], p.id, to.path);
-    expect(getThreadLink(to.id, link.id).projectId).toBe(to.id);
+    expect(getThreadLink(to.id, link.id)).toMatchObject({
+      projectId: to.id,
+      revision: link.revision + 1,
+    });
     const target = project();
     mergeProjectInternal(to.id, target.id);
     expect(getThreadLink(target.id, link.id).projectId).toBe(target.id);
