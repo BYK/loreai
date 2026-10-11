@@ -240,6 +240,19 @@ describe("project list sections", () => {
     );
   });
 
+  it("lets All collapse after expanding for an active project", async () => {
+    renderProjectList(SEVEN, "delta");
+
+    const all = screen.getByTestId("nav-all-projects");
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
+
+    fireEvent.click(all);
+
+    expect(all).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelector('[data-section="all"]')).toBeNull();
+  });
+
   it("keeps search available without an All button for ≤5 projects", async () => {
     renderProjectList(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");

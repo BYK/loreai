@@ -1,5 +1,12 @@
 import type { Component } from "solid-js";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  Show,
+} from "solid-js";
 import { A } from "@solidjs/router";
 
 import type { ProjectSummary } from "~/contracts";
@@ -29,10 +36,18 @@ export const ProjectListBody: Component<{
       props.activeProjectId,
     ),
   );
-  const allExpanded = createMemo(
-    () =>
-      showAll() ||
-      sections().rest.some((project) => project.id === props.activeProjectId),
+  createEffect(
+    on(
+      () => props.activeProjectId,
+      (activeProjectId) => {
+        if (
+          activeProjectId &&
+          sections().rest.some((project) => project.id === activeProjectId)
+        ) {
+          setShowAll(true);
+        }
+      },
+    ),
   );
   const row = (
     project: ProjectSummary,
@@ -150,14 +165,14 @@ export const ProjectListBody: Component<{
             <Show when={sections().rest.length > 0}>
               <button
                 type="button"
-                aria-expanded={allExpanded()}
+                aria-expanded={showAll()}
                 data-testid="nav-all-projects"
                 class="mx-1 my-1 rounded-md px-2 py-1 text-left text-xs text-muted hover:bg-soft"
                 onClick={() => setShowAll((value) => !value)}
               >
                 All projects ({sections().rest.length})
               </button>
-              <Show when={allExpanded()}>
+              <Show when={showAll()}>
                 <For each={sections().rest}>
                   {(project) => row(project, "all")}
                 </For>
