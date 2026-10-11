@@ -12,7 +12,7 @@
  *   DELETE /api/v1/discussions/:id/replies/:rid?project=…&expected_revision=N
  *   GET    /api/v1/projects/:id/threads[?limit][&cursor]
  *   POST   /api/v1/projects/:id/threads
- *   GET    /api/v1/projects/:id/threads/:tid
+ *   GET    /api/v1/projects/:id/threads/:tid[?limit][&cursor]
  *   PATCH  /api/v1/projects/:id/threads/:tid
  *   DELETE /api/v1/projects/:id/threads/:tid?expected_revision=N
  *   POST   /api/v1/projects/:id/threads/:tid/discussions        { discussion_id, expected_revision }
@@ -463,11 +463,16 @@ async function replyRoute(
   const pid = requireProject(url.searchParams.get("project"));
   if (req.method === "PATCH") {
     const body = await readBody(req, updateReplyBody);
-    const reply = discussions.updateReply(pid, discussionId, replyId, {
-      expectedRevision: body.expected_revision,
-      body: body.body,
+    const { reply, discussion } = discussions.updateReply(
+      pid,
+      discussionId,
+      replyId,
+      { expectedRevision: body.expected_revision, body: body.body },
+    );
+    return jsonResponse({
+      reply: replyOut(reply),
+      discussion: discussionOut(discussion),
     });
-    return jsonResponse({ reply: replyOut(reply) });
   }
   if (req.method === "DELETE") {
     discussions.deleteReply(pid, discussionId, replyId, queryRevision(url));
@@ -528,14 +533,32 @@ async function threadRoute(
   switch (req.method) {
     case "GET": {
       const thread = discussions.getThread(pid, threadId);
+      // Same cursor scope as `GET /api/v1/discussions?thread_id=…`, so a
+      // `next_cursor` continues on either endpoint.
+      const scope = ["", "", "", threadId].join("\u0000");
+      const limit = parseLimit(url, DISCUSSION_LIST_LIMIT, DISCUSSION_LIST_MAX);
+      const token = url.searchParams.get("cursor");
+      const after = token
+        ? decodeActivityCursor(token, "discussions", pid, scope)
+        : undefined;
       const linked = discussions.listDiscussions({
         projectId: pid,
         threadId,
-        limit: DISCUSSION_LIST_MAX,
+        limit,
+        after: after ? { lastActivityAt: after.at, id: after.id } : undefined,
       });
       return jsonResponse({
         thread: threadOut(thread),
         discussions: linked.discussions.map(discussionOut),
+        next_cursor: linked.next
+          ? encodeActivityCursor(
+              "discussions",
+              pid,
+              scope,
+              linked.next.lastActivityAt,
+              linked.next.id,
+            )
+          : null,
       });
     }
     case "PATCH": {

@@ -307,6 +307,26 @@ describe("discussions API", () => {
       (await api(`/api/v1/projects/${other.projectId}/threads/${thread.id}`))
         .status,
     ).toBe(404);
+    const second = (await start(s)).discussion;
+    await send(
+      "POST",
+      `/api/v1/projects/${s.projectId}/threads/${thread.id}/discussions`,
+      { discussion_id: second.id, expected_revision: 1 },
+    );
+    const page1 = await apiJSON<Json>(
+      `/api/v1/projects/${s.projectId}/threads/${thread.id}?limit=1`,
+    );
+    expect(page1.discussions.map((d: Json) => d.id)).toEqual([second.id]);
+    expect(page1.next_cursor).toEqual(expect.any(String));
+    const page2 = await apiJSON<Json>(
+      `/api/v1/projects/${s.projectId}/threads/${thread.id}?limit=1&cursor=${encodeURIComponent(page1.next_cursor)}`,
+    );
+    expect(page2.discussions.map((d: Json) => d.id)).toEqual([discussion.id]);
+    expect(page2.next_cursor).toBeNull();
+    const viaList = await apiJSON<Json>(
+      `/api/v1/discussions?project=${s.projectId}&thread_id=${thread.id}&limit=1&cursor=${encodeURIComponent(page1.next_cursor)}`,
+    );
+    expect(viaList.discussions.map((d: Json) => d.id)).toEqual([discussion.id]);
     const unlink = await send(
       "DELETE",
       `/api/v1/projects/${s.projectId}/threads/${thread.id}/discussions/${discussion.id}?expected_revision=2`,

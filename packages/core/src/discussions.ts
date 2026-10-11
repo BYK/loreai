@@ -1116,7 +1116,7 @@ export function updateReply(
   discussionId: string,
   replyId: string,
   input: { expectedRevision: number; body: unknown },
-): DiscussionReply {
+): { reply: DiscussionReply; discussion: Discussion } {
   const body = validateBody(input.body);
   withTransaction(() => {
     const reply = getReply(projectId, discussionId, replyId);
@@ -1133,11 +1133,16 @@ export function updateReply(
     );
     sql.run(
       db(),
-      sql`UPDATE discussions SET updated_at = ${t}, last_activity_at = ${t}
+      sql`UPDATE discussions
+             SET revision = revision + 1, updated_at = ${t}, last_activity_at = ${t}
            WHERE id = ${discussionId}`,
     );
+    touchDiscussionThread(discussionId, t);
   });
-  return getReply(projectId, discussionId, replyId);
+  return {
+    reply: getReply(projectId, discussionId, replyId),
+    discussion: getDiscussion(projectId, discussionId),
+  };
 }
 
 export function deleteReply(
@@ -1164,6 +1169,7 @@ export function deleteReply(
              SET revision = revision + 1, updated_at = ${t}, last_activity_at = ${t}
            WHERE id = ${discussionId}`,
     );
+    touchDiscussionThread(discussionId, t);
   });
 }
 
@@ -1206,6 +1212,14 @@ function touchThread(threadId: string, at: number): void {
   sql.run(
     db(),
     sql`UPDATE threads SET updated_at = ${at} WHERE id = ${threadId}`,
+  );
+}
+
+function touchDiscussionThread(discussionId: string, at: number): void {
+  sql.run(
+    db(),
+    sql`UPDATE threads SET updated_at = ${at}
+         WHERE id = (SELECT thread_id FROM discussions WHERE id = ${discussionId})`,
   );
 }
 

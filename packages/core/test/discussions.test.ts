@@ -678,6 +678,33 @@ describe("discussions", () => {
     ).toBe(older.id);
   });
 
+  it("bumps the discussion and its thread when a reply is edited or deleted", () => {
+    const thread = createThread({ projectId: p.id, title: "Edits" });
+    const { discussion } = start();
+    const linked = updateDiscussion(p.id, discussion.id, {
+      expectedRevision: 1,
+      threadId: thread.id,
+    });
+    const added = addReply(p.id, discussion.id, {
+      expectedRevision: linked.revision,
+      body: "first",
+    });
+    const before = getThread(p.id, thread.id).updatedAt;
+    const edited = updateReply(p.id, discussion.id, added.reply.id, {
+      expectedRevision: added.reply.revision,
+      body: "second",
+    });
+    expect(edited.reply.content).toEqual({ kind: "text", body: "second" });
+    expect(edited.discussion.revision).toBe(added.discussion.revision + 1);
+    expect(edited.discussion.lastActivityAt).toBeGreaterThan(
+      added.discussion.lastActivityAt,
+    );
+    const afterEdit = getThread(p.id, thread.id).updatedAt;
+    expect(afterEdit).toBeGreaterThan(before);
+    deleteReply(p.id, discussion.id, added.reply.id, edited.reply.revision);
+    expect(getThread(p.id, thread.id).updatedAt).toBeGreaterThan(afterEdit);
+  });
+
   it("links discussions to threads and unlinks on thread delete", () => {
     const thread = createThread({ projectId: p.id, title: "Auth rework" });
     const { discussion } = start();
