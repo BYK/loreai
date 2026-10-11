@@ -16,9 +16,9 @@ import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
 import { resolveCostAttribution } from "./cost-attribution";
 import {
-  computeProviderBudgetPressure,
-  evaluateProviderBudgets,
-  getProviderBudgets,
+  describeProviderBudget,
+  isSessionBudgetPaused,
+  providerBudgetPressure,
 } from "./provider-budgets";
 import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
@@ -456,18 +456,10 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
-  getDailyThrottleDelay,
-  estimateRequestCost,
-  getDailySpend,
-  getDailyBudget,
-  getCostRate,
+  throttleDelayForPressure,
   getSessionCosts,
 } from "./cost-tracker";
-import {
-  getQuotaForCredential,
-  computeQuotaPressure,
-  isQuotaPaused,
-} from "./quota";
+import { isQuotaPaused } from "./quota";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -17218,7 +17210,11 @@ function scheduleBackgroundWorkForTenant(
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
   // Urgent distillation is exempt (it unblocks the next user turn).
-  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
+  // A provider budget at full pressure (quota far ahead of pace, or a cap
+  // exhausted) pauses the same work.
+  const quotaPaused =
+    isQuotaPaused(resolveAuth(sessionID)) ||
+    isSessionBudgetPaused(sessionID, sessionState.lastUpstream);
 
   // Worker circuit breaker: when background workers have been failing for a
   // sustained period, stop hammering the upstream every turn — allow only a
@@ -22662,55 +22658,42 @@ async function handleConversationTurnPrepared(
   preparation.dispose();
   modifiedReq.signal = foregroundAbort.signal;
 
-  // --- Daily budget + OAuth quota throttle ---
-  // Apply an invisible proxy-level sleep to slow the agent when approaching
-  // the daily budget OR the Anthropic OAuth quota. The sleep is capped to
-  // avoid causing cache busts (which would be self-defeating — costing more
-  // than the throttle saved).
-  const dailyBudget = getDailyBudget();
-  // Quota pressure is an independent signal — applies even with no USD budget.
-  // Gated to Anthropic-OAuth accounts; 0 for everything else.
-  const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
-  const quotaPressure = computeQuotaPressure(quotaSnapshot);
-  // Per-provider budgets (#1927): evaluated only when any are configured,
-  // using whatever attribution is known pre-upstream. A DB failure must
-  // never break the request.
-  let providerPressure = 0;
+  // --- Provider budget throttle (#1927) ---
+  // Apply an invisible proxy-level sleep to slow the agent when a budget
+  // covering this request's attribution is under pressure (subscription
+  // quota ahead of pace, or a cap filling up too fast). The sleep is capped
+  // to avoid causing cache busts (which would be self-defeating — costing
+  // more than the throttle saved). A DB failure must never break the request.
+  let budgetPressure: ReturnType<typeof providerBudgetPressure> = {
+    pressure: 0,
+    budget: null,
+  };
   try {
-    if (getProviderBudgets().length > 0) {
-      const attribution = resolveCostAttribution({
+    const attribution = resolveCostAttribution({
+      sessionID,
+      providerID: sessionState.lastUpstream?.providerID,
+      upstreamURL: sessionState.lastUpstream?.url,
+      credential: resolveAuth(
         sessionID,
-        providerID: sessionState.lastUpstream?.providerID,
-        upstreamURL: sessionState.lastUpstream?.url,
-        credential: resolveAuth(
-          sessionID,
-          sessionState.lastUpstream?.providerID,
-        ),
-        requestHeaders: req.rawHeaders,
-      });
-      providerPressure =
-        attribution.provider === "unknown"
-          ? 0
-          : computeProviderBudgetPressure(evaluateProviderBudgets(), {
-              provider: attribution.provider,
-              auth_kind: attribution.authKind,
-              account: attribution.account,
-            });
-    }
+        sessionState.lastUpstream?.providerID,
+      ),
+      requestHeaders: req.rawHeaders,
+    });
+    budgetPressure = providerBudgetPressure(
+      attribution.provider === "unknown"
+        ? null
+        : {
+            provider: attribution.provider,
+            auth_kind: attribution.authKind,
+            account: attribution.account,
+          },
+    );
   } catch (err) {
     log.info(`provider-budget: evaluation failed: ${String(err)}`);
   }
-  const combinedQuotaPressure = Math.max(quotaPressure, providerPressure);
-  if (dailyBudget > 0 || combinedQuotaPressure > 0) {
-    const inputTokens =
-      getLastTransformEstimate(sessionID) ||
-      coreEstimateTokens(JSON.stringify(modifiedReq.messages));
-    const estimatedCost = estimateRequestCost(req.model, inputTokens);
-    const delay = getDailyThrottleDelay(
-      dailyBudget,
-      estimatedCost,
-      combinedQuotaPressure,
-    );
+  if (budgetPressure.pressure > 0 && budgetPressure.budget) {
+    const trippedBudget = budgetPressure.budget;
+    const delay = throttleDelayForPressure(budgetPressure.pressure);
 
     if (delay > 0) {
       // Cap delay to avoid pushing the next request past the cache TTL boundary.
@@ -22728,11 +22711,8 @@ async function handleConversationTurnPrepared(
         log.info(
           `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
             `session=${sessionID.slice(0, 16)} ` +
-            `spend=$${getDailySpend().spend.toFixed(2)} ` +
-            `rate=$${getCostRate().toFixed(2)}/hr` +
-            (providerPressure >= quotaPressure && providerPressure > 0
-              ? " (provider-budget)"
-              : ""),
+            `pressure=${budgetPressure.pressure.toFixed(2)} ` +
+            `budget=${describeProviderBudget(trippedBudget)}`,
         );
         try {
           await completeBudgetThrottleDelay(

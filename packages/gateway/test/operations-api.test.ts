@@ -10,13 +10,10 @@ let server: { stop: () => Promise<void>; port: number; hosts: string[] };
 let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 let envWarming: string | undefined;
-let envBudget: string | undefined;
 
 beforeAll(async () => {
   envWarming = process.env.LORE_WARMING_ENABLED;
-  envBudget = process.env.LORE_DAILY_BUDGET;
   delete process.env.LORE_WARMING_ENABLED;
-  delete process.env.LORE_DAILY_BUDGET;
   dbPath = `/tmp/lore-operations-api-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   process.env.LORE_DB_PATH = dbPath;
   process.env.LORE_LISTEN_PORT = "0";
@@ -50,8 +47,6 @@ afterAll(async () => {
   if (resetPipelineState) await resetPipelineState();
   if (envWarming === undefined) delete process.env.LORE_WARMING_ENABLED;
   else process.env.LORE_WARMING_ENABLED = envWarming;
-  if (envBudget === undefined) delete process.env.LORE_DAILY_BUDGET;
-  else process.env.LORE_DAILY_BUDGET = envBudget;
   for (const suffix of ["", "-shm", "-wal"]) {
     const file = `${dbPath}${suffix}`;
     try {
@@ -858,19 +853,19 @@ describe("warming mutations", () => {
   it("rejects all mutations in hosted mode before changing state", async () => {
     const { enableHostedMode, _resetHostedModeForTest, getKV } =
       await import("@loreai/core");
-    const previous = getKV("daily_budget");
+    const previous = getKV("provider_budgets");
     enableHostedMode();
     try {
-      const response = await api("/api/v1/costs/budget", {
-        method: "PATCH",
+      const response = await api("/api/v1/costs/budgets", {
+        method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amount: 5 }),
+        body: JSON.stringify({ provider_budgets: [] }),
       });
       expect(response.status).toBe(403);
       expect(
         ((await response.json()) as { error: { type: string } }).error.type,
       ).toBe("forbidden");
-      expect(getKV("daily_budget")).toBe(previous);
+      expect(getKV("provider_budgets")).toBe(previous);
     } finally {
       _resetHostedModeForTest();
     }
@@ -909,15 +904,13 @@ describe("hosted config before data-plane initialization", () => {
 
       const costs = await request("/api/v1/costs");
       expect(costs.status).toBe(200);
-      expect(await costs.json()).toMatchObject({
-        daily: { budget: { can_edit: false } },
-      });
+      expect(await costs.json()).toMatchObject({ can_edit_budgets: false });
 
       const mutations: Array<[string, string, unknown?]> = [
         ["PATCH", "/api/v1/warming/settings", { enabled: false }],
         ["POST", "/api/v1/warming/circuit-breaker/reset"],
         ["PATCH", "/api/v1/warming/sessions/active/mode", { mode: "stop" }],
-        ["PATCH", "/api/v1/costs/budget", { amount: 5 }],
+        ["PUT", "/api/v1/costs/budgets", { provider_budgets: [] }],
       ];
       for (const [method, path, body] of mutations) {
         const response = await request(path, {
@@ -941,7 +934,7 @@ describe("hosted config before data-plane initialization", () => {
   });
 });
 
-describe("GET/PATCH /api/v1/costs", () => {
+describe("GET /api/v1/costs + PUT /api/v1/costs/budgets", () => {
   it("returns daily, live and historical summaries with a 14-day trend", async () => {
     const data = await body<{
       live: {
@@ -954,10 +947,9 @@ describe("GET/PATCH /api/v1/costs", () => {
         session_count: number;
         worker_breakdown: { recall: { cost: number } };
       };
-      daily: {
-        entries: Array<{ date: string; cost: number }>;
-        budget: { amount: number };
-      };
+      daily: { entries: Array<{ date: string; cost: number }> };
+      provider_budgets: unknown[];
+      can_edit_budgets: boolean;
       sessions: unknown[];
       providers: unknown[];
       quotas: unknown[];
@@ -973,7 +965,9 @@ describe("GET/PATCH /api/v1/costs", () => {
       worker_breakdown: { recall: { cost: 0 } },
     });
     expect(data.daily.entries).toHaveLength(14);
-    expect(data.daily.budget.amount).toBe(0);
+    expect(data.daily).not.toHaveProperty("budget");
+    expect(data.provider_budgets).toEqual([]);
+    expect(data.can_edit_budgets).toBe(true);
     expect(data.sessions).toEqual([]);
     expect(data.providers).toEqual([]);
     expect(data.quotas).toEqual([]);
@@ -1069,263 +1063,165 @@ describe("GET/PATCH /api/v1/costs", () => {
     });
   });
 
-  it("sets and disables the daily budget, and rejects invalid values", async () => {
-    const { db, getKV, setKV } = await import("@loreai/core");
-    const previous = getKV("daily_budget");
-    try {
-      const saved = await body<{ amount: number; disabled: boolean }>(
-        "/api/v1/costs/budget",
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 12.5 }),
-        },
-      );
-      expect(saved).toEqual({ amount: 12.5, disabled: false });
-
-      const disabled = await body<{ amount: number; disabled: boolean }>(
-        "/api/v1/costs/budget",
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 0 }),
-        },
-      );
-      expect(disabled).toEqual({ amount: 0, disabled: true });
-
-      const invalid = await api("/api/v1/costs/budget", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amount: -1 }),
-      });
-      expect(invalid.status).toBe(400);
-    } finally {
-      if (previous === null)
-        db().query("DELETE FROM kv_meta WHERE key = ?").run("daily_budget");
-      else setKV("daily_budget", previous);
-    }
-  });
-
-  it("ignores ineffective environment budget values just like the cost tracker", async () => {
-    const { db, getKV, setKV } = await import("@loreai/core");
-    const previous = getKV("daily_budget");
-    const envBefore = process.env.LORE_DAILY_BUDGET;
-    try {
-      setKV("daily_budget", "12");
-      for (const envValue of ["0", "-1", "not-a-budget", "Infinity", "1e309"]) {
-        process.env.LORE_DAILY_BUDGET = envValue;
-        const snapshot = await body<{
-          daily: {
-            budget: {
-              amount: number;
-              env_override: string | null;
-              can_edit: boolean;
-            };
-          };
-        }>("/api/v1/costs");
-        expect(snapshot.daily.budget).toMatchObject({
-          amount: 12,
-          env_override: null,
-          can_edit: true,
-        });
-
-        const response = await api("/api/v1/costs/budget", {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 9 }),
-        });
-        expect(response.status).toBe(200);
-        setKV("daily_budget", "12");
-      }
-    } finally {
-      if (envBefore === undefined) delete process.env.LORE_DAILY_BUDGET;
-      else process.env.LORE_DAILY_BUDGET = envBefore;
-      if (previous === null)
-        db().query("DELETE FROM kv_meta WHERE key = ?").run("daily_budget");
-      else setKV("daily_budget", previous);
-    }
-  });
-
-  it("accepts provider budgets, echoes statuses, and validates malformed input", async () => {
-    const { db, getKV, setKV } = await import("@loreai/core");
+  it("PUT /costs/budgets replaces the explicit list and returns statuses", async () => {
+    const { db, getKV, setKV, upsertProviderQuota } =
+      await import("@loreai/core");
     const previous = getKV("provider_budgets");
-    const restore = () => {
-      if (previous === null)
-        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
-      else setKV("provider_budgets", previous);
-    };
-    const patch = (payload: unknown) =>
-      api("/api/v1/costs/budget", {
-        method: "PATCH",
+    const put = (payload: unknown) =>
+      api("/api/v1/costs/budgets", {
+        method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
+    db().exec("DELETE FROM provider_quotas");
     try {
-      const ok = await patch({
+      const now = Date.now();
+      upsertProviderQuota({
+        provider: "anthropic",
+        authKind: "subscription",
+        account: "acct-put",
+        window: "7d",
+        label: null,
+        windowMinutes: 10080,
+        usedPercent: 40,
+        remaining: null,
+        limit: null,
+        resetsAt: now + 3 * 24 * 3600_000,
+        source: "anthropic-unified",
+        observedAt: now,
+      });
+      const ok = await put({
         provider_budgets: [
           {
             provider: "anthropic",
             auth_kind: "subscription",
-            account: null,
+            account: "acct-put",
+            mode: "cap",
             unit: "percent",
             window: "7d",
             amount: 80,
           },
-          { provider: "openai", unit: "usd", window: "daily", amount: 5 },
+          {
+            provider: "openai",
+            auth_kind: "api_key",
+            account: null,
+            mode: "cap",
+            unit: "usd",
+            window: "week",
+            amount: 5,
+          },
         ],
       });
       expect(ok.status).toBe(200);
       const saved = (await ok.json()) as {
-        provider_budgets: Array<{
-          provider: string;
-          unit: string;
-          window: string;
-          used: number | null;
-          stale: boolean;
-        }>;
+        provider_budgets: Array<Record<string, unknown>>;
       };
-      expect(saved.provider_budgets).toHaveLength(2);
-      expect(saved.provider_budgets[0]).toMatchObject({
-        provider: "anthropic",
-        unit: "percent",
-        window: "7d",
-      });
-      expect(getKV("provider_budgets")).toContain('"percent"');
-
-      const get = (await (await api("/api/v1/costs")).json()) as {
+      expect(saved.provider_budgets).toEqual([
+        expect.objectContaining({
+          mode: "cap",
+          unit: "percent",
+          used: 40,
+          fraction: 0.5,
+          pressure: 0,
+          implicit: false,
+          stale: false,
+        }),
+        expect.objectContaining({
+          provider: "openai",
+          mode: "cap",
+          unit: "usd",
+          window: "week",
+          used: 0,
+          implicit: false,
+        }),
+        expect.objectContaining({
+          provider: "anthropic",
+          account: "acct-put",
+          mode: "pace",
+          window: "7d",
+          headroom: 10,
+          implicit: true,
+        }),
+      ]);
+      // Implicit budgets are derived, never stored.
+      expect(JSON.parse(getKV("provider_budgets") ?? "[]")).toHaveLength(2);
+      const snapshot = (await (await api("/api/v1/costs")).json()) as {
         provider_budgets: unknown[];
       };
-      expect(get.provider_budgets).toHaveLength(2);
+      // Same budgets; pace targets move with the clock between the two reads.
+      const identity = (list: unknown[]) =>
+        (list as Array<Record<string, unknown>>).map(
+          ({ target: _t, ahead: _a, ...rest }) => rest,
+        );
+      expect(identity(snapshot.provider_budgets)).toEqual(
+        identity(saved.provider_budgets),
+      );
 
-      for (const bad of [
-        {
-          provider_budgets: [
-            {
-              provider: "anthropic",
-              unit: "usd",
-              window: "daily",
-              amount: 1,
-              extra: 1,
-            },
-          ],
-        },
-        {
-          provider_budgets: [
-            {
-              provider: "anthropic",
-              unit: "widgets",
-              window: "daily",
-              amount: 1,
-            },
-          ],
-        },
-        {
-          provider_budgets: [
-            { provider: "anthropic", unit: "usd", window: "5h", amount: 1 },
-          ],
-        },
-        {
-          provider_budgets: Array.from({ length: 51 }, () => ({
+      // An explicit "off" disables the implicit pace budget.
+      const off = await put({
+        provider_budgets: [
+          {
             provider: "anthropic",
-            unit: "usd",
-            window: "daily",
-            amount: 1,
-          })),
-        },
+            auth_kind: "subscription",
+            account: "acct-put",
+            mode: "off",
+            window: "7d",
+          },
+        ],
+      });
+      expect(
+        ((await off.json()) as { provider_budgets: unknown[] })
+          .provider_budgets,
+      ).toEqual([expect.objectContaining({ mode: "off", status: "off" })]);
+
+      const stored = getKV("provider_budgets");
+      for (const bad of [
+        null,
+        [],
+        {},
+        { provider_budgets: "nope" },
+        { provider_budgets: [], amount: 5 },
+        { amount: 5 },
         {
           provider_budgets: [
             {
-              provider: "anthropic",
+              provider: "openai",
+              auth_kind: "api_key",
+              mode: "cap",
               unit: "percent",
-              window: "5h",
-              amount: 80,
-            },
-            {
-              provider: "anthropic",
-              unit: "percent",
-              window: "5h",
-              amount: 90,
+              window: "day",
+              amount: 5,
             },
           ],
         },
         {
           provider_budgets: [
-            {
-              provider: "anthropic",
-              unit: "percent",
-              window: "daily",
-              amount: 101,
-            },
-          ],
-        },
-        // daily + percent is rejected even when the amount is in range
-        {
-          provider_budgets: [
-            {
-              provider: "anthropic",
-              unit: "percent",
-              window: "daily",
-              amount: 50,
-            },
+            { provider: "openai", unit: "usd", window: "daily", amount: 5 },
           ],
         },
       ]) {
-        const res = await patch(bad);
-        expect(res.status).toBe(400);
-        expect(
-          ((await res.json()) as { error: { type: string } }).error.type,
-        ).toBe("invalid_request");
+        const response = await put(bad);
+        expect(response.status, JSON.stringify(bad)).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: { type: "invalid_request" },
+        });
       }
-
-      // Legacy body still returns exactly { amount, disabled }.
-      const legacy = (await (await patch({ amount: 3 })).json()) as Record<
-        string,
-        unknown
-      >;
-      expect(Object.keys(legacy).sort()).toEqual(["amount", "disabled"]);
+      expect(getKV("provider_budgets")).toBe(stored);
     } finally {
-      restore();
-    }
-  });
-
-  it("LORE_DAILY_BUDGET blocks amount but not provider budgets", async () => {
-    const { db, getKV, setKV } = await import("@loreai/core");
-    const previous = getKV("provider_budgets");
-    const envBefore = process.env.LORE_DAILY_BUDGET;
-    const patch = (payload: unknown) =>
-      api("/api/v1/costs/budget", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    try {
-      process.env.LORE_DAILY_BUDGET = "42";
-      expect((await patch({ amount: 5 })).status).toBe(409);
-      expect((await patch({ amount: 5, provider_budgets: [] })).status).toBe(
-        409,
-      );
-      expect(
-        (
-          await patch({
-            provider_budgets: [
-              {
-                provider: "anthropic",
-                unit: "usd",
-                window: "daily",
-                amount: 2,
-              },
-            ],
-          })
-        ).status,
-      ).toBe(200);
-      expect(getKV("provider_budgets")).toContain('"usd"');
-    } finally {
-      if (envBefore === undefined) delete process.env.LORE_DAILY_BUDGET;
-      else process.env.LORE_DAILY_BUDGET = envBefore;
+      db().exec("DELETE FROM provider_quotas");
       if (previous === null)
         db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
       else setKV("provider_budgets", previous);
     }
+  });
+
+  it("the retired PATCH /costs/budget route is gone", async () => {
+    const response = await api("/api/v1/costs/budget", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ amount: 5 }),
+    });
+    expect(response.status).toBe(404);
   });
 
   it("advertises PATCH for loopback-origin management preflights", async () => {

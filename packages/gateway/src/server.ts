@@ -29,7 +29,6 @@ import {
   DEFAULT_PORT,
   type GatewayConfig,
 } from "./config";
-import { bootstrapDailySpend } from "./cost-tracker";
 import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
@@ -111,9 +110,6 @@ export async function startServer(
       "warning: remote management access is enabled; every client accepted by the listener can access /ui and /api",
     );
   }
-
-  // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
-  bootstrapDailySpend();
 
   // Wire embedding-worker OOM backoff/latch events to Sentry. Idempotent: the
   // hook is assigned (not stacked), so a repeat startServer() is harmless.

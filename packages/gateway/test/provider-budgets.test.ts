@@ -11,8 +11,9 @@ import {
   setProviderBudgets,
   parseProviderBudgets,
   evaluateProviderBudgets,
-  computeProviderBudgetPressure,
-  type ProviderBudget,
+  providerBudgetPressure,
+  ledgerWindowBounds,
+  type ProviderBudgetStatus,
 } from "../src/provider-budgets";
 
 const NOW = Date.UTC(2099, 0, 1, 12, 0, 0); // fixed noon UTC
@@ -26,18 +27,6 @@ function clear(): void {
 
 beforeEach(clear);
 afterEach(clear);
-
-function budget(overrides: Partial<ProviderBudget> = {}): ProviderBudget {
-  return {
-    provider: "anthropic",
-    auth_kind: null,
-    account: null,
-    unit: "usd",
-    window: "daily",
-    amount: 10,
-    ...overrides,
-  };
-}
 
 function costRow(
   overrides: Partial<Parameters<typeof addProviderCost>[0]> = {},
@@ -76,306 +65,643 @@ function quotaRow(overrides: Partial<ProviderQuotaRow> = {}): ProviderQuotaRow {
   };
 }
 
+const HOUR = 3600_000;
+const SUB = { provider: "anthropic", auth_kind: "subscription" as const };
+
+function only(
+  statuses: ProviderBudgetStatus[],
+  filter: Partial<ProviderBudgetStatus>,
+): ProviderBudgetStatus {
+  const hits = statuses.filter((s) =>
+    Object.entries(filter).every(
+      ([key, value]) => (s as Record<string, unknown>)[key] === value,
+    ),
+  );
+  expect(hits).toHaveLength(1);
+  return hits[0]!;
+}
+
 describe("parseProviderBudgets", () => {
-  test("accepts a valid list and normalizes nulls", () => {
+  test("accepts pace, off and cap entries; pace headroom defaults to 10", () => {
     const parsed = parseProviderBudgets([
+      { ...SUB, mode: "pace", window: "7d" },
+      { ...SUB, account: "acct1", mode: "off", window: "5h" },
+      { ...SUB, mode: "cap", unit: "percent", window: "7d", amount: 80 },
       {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "abc123",
-        unit: "percent",
-        window: "5h",
-        amount: 80,
+        provider: "openai",
+        auth_kind: "api_key",
+        account: null,
+        mode: "cap",
+        unit: "usd",
+        window: "week",
+        amount: 25,
       },
-      { provider: "openai", unit: "usd", window: "daily", amount: 5 },
+      {
+        provider: "openai",
+        auth_kind: "api_key",
+        mode: "cap",
+        unit: "tokens",
+        window: "day",
+        amount: 1e6,
+      },
     ]);
     expect(parsed).toEqual([
+      { ...SUB, account: null, mode: "pace", window: "7d", headroom: 10 },
+      { ...SUB, account: "acct1", mode: "off", window: "5h" },
       {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        account: "abc123",
+        ...SUB,
+        account: null,
+        mode: "cap",
         unit: "percent",
-        window: "5h",
+        window: "7d",
         amount: 80,
       },
       {
         provider: "openai",
-        auth_kind: null,
+        auth_kind: "api_key",
         account: null,
+        mode: "cap",
         unit: "usd",
-        window: "daily",
-        amount: 5,
+        window: "week",
+        amount: 25,
+      },
+      {
+        provider: "openai",
+        auth_kind: "api_key",
+        account: null,
+        mode: "cap",
+        unit: "tokens",
+        window: "day",
+        amount: 1e6,
       },
     ]);
   });
 
   test.each([
-    "not-an-array",
     [
+      "percent caps need a quota window",
+      { ...SUB, mode: "cap", unit: "percent", window: "day", amount: 50 },
+      /percent caps require window "5h" or "7d"/,
+    ],
+    [
+      "usd caps need a ledger window",
+      { ...SUB, mode: "cap", unit: "usd", window: "5h", amount: 5 },
+      /usd caps require window "day" or "week"/,
+    ],
+    [
+      "tokens caps need a ledger window",
+      { ...SUB, mode: "cap", unit: "tokens", window: "7d", amount: 5 },
+      /tokens caps require window "day" or "week"/,
+    ],
+    [
+      "legacy daily window",
+      { ...SUB, mode: "cap", unit: "usd", window: "daily", amount: 5 },
+      /usd caps require window/,
+    ],
+    [
+      "pace on an API key",
+      { provider: "openai", auth_kind: "api_key", mode: "pace", window: "7d" },
+      /auth_kind "subscription"/,
+    ],
+    [
+      "pace on a ledger window",
+      { ...SUB, mode: "pace", window: "week" },
+      /window "5h" or "7d"/,
+    ],
+    [
+      "headroom above 50",
+      { ...SUB, mode: "pace", window: "5h", headroom: 51 },
+      /headroom/,
+    ],
+    [
+      "negative headroom",
+      { ...SUB, mode: "pace", window: "5h", headroom: -1 },
+      /headroom/,
+    ],
+    [
+      "percent above 100",
+      { ...SUB, mode: "cap", unit: "percent", window: "5h", amount: 101 },
+      /amount/,
+    ],
+    [
+      "zero amount",
+      { ...SUB, mode: "cap", unit: "usd", window: "day", amount: 0 },
+      /amount/,
+    ],
+    [
+      "missing mode (legacy shape)",
+      { ...SUB, unit: "usd", window: "day", amount: 5 },
+      /mode/,
+    ],
+    [
+      "field of another mode",
+      { ...SUB, mode: "off", window: "5h", headroom: 5 },
+      /unknown field "headroom"/,
+    ],
+    [
+      "cap without auth_kind",
       {
-        provider: "anthropic",
+        provider: "openai",
+        mode: "cap",
         unit: "usd",
-        window: "daily",
-        amount: 1,
-        extra: 1,
+        window: "day",
+        amount: 5,
       },
+      /auth_kind/,
     ],
-    [{ provider: "ANTHROPIC", unit: "usd", window: "daily", amount: 1 }],
-    [{ provider: "anthropic", unit: "widgets", window: "daily", amount: 1 }],
-    [{ provider: "anthropic", unit: "usd", window: "5h", amount: 1 }],
-    [{ provider: "anthropic", unit: "percent", window: "daily", amount: 101 }],
-    [{ provider: "anthropic", unit: "usd", window: "daily", amount: 0 }],
-    [{ provider: "anthropic", unit: "usd", window: "daily", amount: NaN }],
-    [{ provider: "anthropic", unit: "usd", window: "daily", amount: 2e9 }],
-    [
-      {
-        provider: "anthropic",
-        unit: "usd",
-        window: "daily",
-        amount: 1,
-        auth_kind: "oauth",
-      },
-    ],
-    [
-      { provider: "anthropic", unit: "usd", window: "daily", amount: 1 },
-      { provider: "anthropic", unit: "usd", window: "daily", amount: 2 },
-    ],
-    Array.from({ length: 51 }, () => ({
-      provider: "anthropic",
-      unit: "usd",
-      window: "daily",
-      amount: 1,
-    })),
-  ])("rejects invalid input %#", (input) => {
-    expect(typeof parseProviderBudgets(input)).toBe("string");
+  ])("rejects %s", (_name, entry, message) => {
+    const parsed = parseProviderBudgets([entry]);
+    expect(typeof parsed).toBe("string");
+    expect(parsed).toMatch(/^provider_budgets\[0\]: /);
+    expect(parsed).toMatch(message);
   });
 
-  test("daily + percent is rejected with a specific message", () => {
+  test("pace and off share a window slot; caps coexist with pace", () => {
     expect(
       parseProviderBudgets([
-        { provider: "anthropic", unit: "percent", window: "daily", amount: 50 },
+        { ...SUB, mode: "pace", window: "7d" },
+        { ...SUB, mode: "off", window: "7d" },
       ]),
-    ).toBe(
-      'percent budgets apply to quota windows (5h/7d); daily budgets must be "usd" or "tokens".',
-    );
+    ).toMatch(/provider_budgets\[1\]: duplicate pace\/off entry/);
+    expect(
+      parseProviderBudgets([
+        { ...SUB, mode: "pace", window: "7d" },
+        { ...SUB, mode: "cap", unit: "percent", window: "7d", amount: 90 },
+      ]),
+    ).toHaveLength(2);
   });
 
-  test("different auth kinds on the same tuple are not duplicates", () => {
-    const parsed = parseProviderBudgets([
-      {
-        provider: "anthropic",
-        auth_kind: "api_key",
-        unit: "usd",
-        window: "daily",
-        amount: 1,
-      },
-      {
-        provider: "anthropic",
-        auth_kind: "subscription",
-        unit: "usd",
-        window: "daily",
-        amount: 1,
-      },
-    ]);
-    expect(parsed).toHaveLength(2);
+  test("rejects non-arrays and oversized lists", () => {
+    expect(parseProviderBudgets({})).toBe("provider_budgets must be an array.");
+    expect(
+      parseProviderBudgets(
+        Array.from({ length: 51 }, (_, i) => ({
+          ...SUB,
+          account: `a${i}`,
+          mode: "pace",
+          window: "5h",
+        })),
+      ),
+    ).toMatch(/at most 50/);
   });
 });
 
 describe("getProviderBudgets / setProviderBudgets", () => {
   test("round-trips through KV", () => {
-    const list = [budget(), budget({ unit: "tokens", amount: 5000 })];
+    const list = parseProviderBudgets([
+      { ...SUB, mode: "pace", window: "5h", headroom: 5 },
+    ]);
+    if (typeof list === "string") throw new Error(list);
     setProviderBudgets(list);
     expect(getProviderBudgets()).toEqual(list);
   });
 
-  test("corrupted JSON or invalid entries fall back to []", () => {
-    setKV("provider_budgets", "{not json");
-    expect(getProviderBudgets()).toEqual([]);
-    setKV("provider_budgets", '[{"provider":"BAD","unit":"x"}]');
-    expect(getProviderBudgets()).toEqual([]);
-  });
-});
-
-describe("evaluateProviderBudgets", () => {
-  test("daily usd sums today's rows; auth_kind null aggregates all kinds", () => {
-    addProviderCost(costRow({ cost: 4 }));
-    addProviderCost(costRow({ authKind: "api_key", cost: 4 }));
-    setProviderBudgets([
-      budget({ amount: 10 }),
-      budget({ auth_kind: "subscription", amount: 10 }),
-    ]);
-    const statuses = evaluateProviderBudgets(NOW);
-    expect(statuses[0]).toMatchObject({ used: 8, fraction: 0.8, stale: false });
-    expect(statuses[1]).toMatchObject({ used: 4, fraction: 0.4, stale: false });
-    expect(statuses[0]?.resets_at).toBe(Date.UTC(2099, 0, 2));
-  });
-
-  test("daily tokens sums all token columns; account filters", () => {
-    addProviderCost(costRow());
-    addProviderCost(costRow({ account: "acct2" }));
-    setProviderBudgets([
-      budget({ unit: "tokens", account: "acct1", amount: 330 }),
-    ]);
-    const statuses = evaluateProviderBudgets(NOW);
-    expect(statuses[0]?.used).toBe(165);
-    expect(statuses[0]?.fraction).toBeCloseTo(0.5);
-  });
-
-  test("percent window uses the latest quota snapshot", () => {
-    upsertProviderQuota(quotaRow({ window: "5h", usedPercent: 40 }));
-    upsertProviderQuota(
-      quotaRow({ window: "5h", usedPercent: 60, observedAt: NOW - 30_000 }),
-    );
-    setProviderBudgets([budget({ unit: "percent", window: "5h", amount: 80 })]);
-    const status = evaluateProviderBudgets(NOW)[0];
-    expect(status).toMatchObject({
-      used: 60,
-      resets_at: NOW + 2 * 3600_000,
-      stale: false,
-    });
-    expect(status?.fraction).toBeCloseTo(0.75);
-  });
-
-  test("rolled-over window reports used 0, stale, keeps observed resets_at", () => {
-    upsertProviderQuota(
-      quotaRow({ usedPercent: 90, resetsAt: NOW - 3600_000 }),
-    );
-    setProviderBudgets([budget({ unit: "percent", window: "5h", amount: 80 })]);
-    expect(evaluateProviderBudgets(NOW)[0]).toMatchObject({
-      used: 0,
-      fraction: 0,
-      resets_at: NOW - 3600_000,
-      stale: true,
-    });
-  });
-
-  test("snapshot older than its window reports unknown, not the stale value", () => {
-    upsertProviderQuota(
-      quotaRow({
-        usedPercent: 90,
-        resetsAt: null,
-        observedAt: NOW - 6 * 3600_000,
-      }),
-    );
-    setProviderBudgets([budget({ unit: "percent", window: "5h", amount: 80 })]);
-    expect(evaluateProviderBudgets(NOW)[0]).toMatchObject({
-      used: null,
-      fraction: null,
-      resets_at: null,
-      stale: true,
-    });
-  });
-
-  test("missing snapshot yields null used/fraction and stale", () => {
-    setProviderBudgets([budget({ unit: "percent", window: "7d", amount: 80 })]);
-    expect(evaluateProviderBudgets(NOW)[0]).toMatchObject({
-      used: null,
-      fraction: null,
-      resets_at: null,
-      stale: true,
-    });
-  });
-
-  test("percent derives from limit/remaining when used_percent is null", () => {
-    upsertProviderQuota(
-      quotaRow({ usedPercent: null, limit: 100, remaining: 25 }),
-    );
-    setProviderBudgets([
-      budget({ unit: "percent", window: "5h", amount: 100 }),
-    ]);
-    const status = evaluateProviderBudgets(NOW)[0];
-    expect(status?.used).toBe(75);
-    expect(status?.fraction).toBeCloseTo(0.75);
-  });
-
-  test("daily percent entries in KV are dropped before evaluation", () => {
+  test("re-validates stored entries one by one, dropping invalid and duplicate ones", () => {
     setKV(
       "provider_budgets",
       JSON.stringify([
+        // Pre-#1927-revision shape: no mode, "daily" window.
         {
           provider: "anthropic",
           auth_kind: null,
           account: null,
-          unit: "percent",
+          unit: "usd",
           window: "daily",
-          amount: 50,
+          amount: 10,
+        },
+        { ...SUB, account: null, mode: "pace", window: "7d", headroom: 20 },
+        { ...SUB, account: null, mode: "off", window: "7d" },
+        "garbage",
+        {
+          ...SUB,
+          account: null,
+          mode: "cap",
+          unit: "percent",
+          window: "5h",
+          amount: 90,
         },
       ]),
     );
-    // First line of defense: the loader re-validates and drops the entry.
-    expect(getProviderBudgets()).toEqual([]);
-    expect(evaluateProviderBudgets(NOW)).toEqual([]);
+    expect(getProviderBudgets()).toEqual([
+      { ...SUB, account: null, mode: "pace", window: "7d", headroom: 20 },
+      {
+        ...SUB,
+        account: null,
+        mode: "cap",
+        unit: "percent",
+        window: "5h",
+        amount: 90,
+      },
+    ]);
   });
 
-  test("quota rows for other auth kinds/accounts do not match", () => {
-    upsertProviderQuota(quotaRow({ account: "other", usedPercent: 90 }));
-    setProviderBudgets([
-      budget({ unit: "percent", window: "5h", account: "acct1", amount: 80 }),
-    ]);
-    expect(evaluateProviderBudgets(NOW)[0]?.stale).toBe(true);
+  test("corrupt JSON and non-array values yield []", () => {
+    setKV("provider_budgets", "{not json");
+    expect(getProviderBudgets()).toEqual([]);
+    setKV("provider_budgets", JSON.stringify({ provider: "anthropic" }));
+    expect(getProviderBudgets()).toEqual([]);
   });
 });
 
-describe("computeProviderBudgetPressure", () => {
-  const match = {
+describe("pace evaluation", () => {
+  // 5h window: 300 minutes. resetsAt sets how much of it has elapsed.
+  function paceAt(elapsedFraction: number, used: number, headroom?: number) {
+    upsertProviderQuota(
+      quotaRow({
+        usedPercent: used,
+        // At 100% elapsed the window has not reset yet (1 ms left).
+        resetsAt: NOW + Math.max(1, (1 - elapsedFraction) * 5 * HOUR),
+        observedAt: NOW - 1000,
+      }),
+    );
+    if (headroom !== undefined) {
+      setProviderBudgets([
+        { ...SUB, account: "acct1", mode: "pace", window: "5h", headroom },
+      ]);
+    }
+    return only(evaluateProviderBudgets(NOW), { window: "5h" });
+  }
+
+  test("target is the even-pace line plus headroom at 0% / 50% / 100% elapsed", () => {
+    expect(paceAt(0, 5).target).toBeCloseTo(10);
+    clear();
+    expect(paceAt(0.5, 5).target).toBeCloseTo(60);
+    clear();
+    expect(paceAt(1, 5).target).toBe(100);
+    clear();
+    expect(paceAt(0.5, 5, 0).target).toBeCloseTo(50);
+    clear();
+    expect(paceAt(0.5, 5, 25).target).toBeCloseTo(75);
+  });
+
+  test("on pace means no pressure", () => {
+    const status = paceAt(0.5, 60);
+    expect(status.ahead).toBeCloseTo(0);
+    expect(status.pressure).toBe(0);
+    expect(status.status).toBe("ok");
+    expect(status.implicit).toBe(true);
+  });
+
+  test("ahead of target ramps pressure over PACE_RAMP (10 points)", () => {
+    const half = paceAt(0.5, 65);
+    expect(half.ahead).toBeCloseTo(5);
+    expect(half.pressure).toBeCloseTo(0.5);
+    expect(half.status).toBe("throttling");
+    clear();
+    const full = paceAt(0.5, 75);
+    expect(full.pressure).toBe(1);
+    expect(full.status).toBe("paused");
+  });
+
+  test("used 100% is pressure 1 even at the end of the window", () => {
+    const status = paceAt(1, 100);
+    expect(status.ahead).toBe(0);
+    expect(status.pressure).toBe(1);
+  });
+
+  test("a stale window has pressure 0 and status stale", () => {
+    upsertProviderQuota(
+      quotaRow({
+        usedPercent: 99,
+        resetsAt: NOW - 1000,
+        observedAt: NOW - 3 * HOUR,
+      }),
+    );
+    const status = only(evaluateProviderBudgets(NOW), { window: "5h" });
+    expect(status).toMatchObject({
+      stale: true,
+      status: "stale",
+      pressure: 0,
+      used: null,
+    });
+  });
+
+  test("an unknown window length cannot be paced", () => {
+    upsertProviderQuota(quotaRow({ windowMinutes: null, usedPercent: 99 }));
+    const status = only(evaluateProviderBudgets(NOW), { window: "5h" });
+    expect(status).toMatchObject({
+      status: "unknown",
+      pressure: 0,
+      target: null,
+      used: 99,
+    });
+  });
+});
+
+describe("implicit pace budgets", () => {
+  test("every subscription account with 5h/7d quota rows is paced by default", () => {
+    upsertProviderQuota(quotaRow({ window: "5h" }));
+    upsertProviderQuota(
+      quotaRow({
+        window: "7d",
+        windowMinutes: 10080,
+        resetsAt: NOW + 3 * 24 * HOUR,
+      }),
+    );
+    upsertProviderQuota(
+      quotaRow({
+        account: "acct2",
+        window: "7d",
+        windowMinutes: 10080,
+        resetsAt: NOW + 24 * HOUR,
+      }),
+    );
+    upsertProviderQuota(
+      quotaRow({ authKind: "api_key", account: "key1", window: "requests" }),
+    );
+    const statuses = evaluateProviderBudgets(NOW);
+    expect(
+      statuses.map((s) => [
+        s.account,
+        s.window,
+        s.mode,
+        s.implicit,
+        s.mode === "pace" ? s.headroom : null,
+      ]),
+    ).toEqual([
+      ["acct1", "5h", "pace", true, 10],
+      ["acct1", "7d", "pace", true, 10],
+      ["acct2", "7d", "pace", true, 10],
+    ]);
+  });
+
+  test("an explicit pace entry overrides the implicit one for that window", () => {
+    upsertProviderQuota(quotaRow({ window: "5h" }));
+    upsertProviderQuota(
+      quotaRow({
+        window: "7d",
+        windowMinutes: 10080,
+        resetsAt: NOW + 3 * 24 * HOUR,
+      }),
+    );
+    setProviderBudgets([
+      { ...SUB, account: "acct1", mode: "pace", window: "7d", headroom: 30 },
+    ]);
+    const statuses = evaluateProviderBudgets(NOW);
+    expect(statuses.map((s) => [s.window, s.implicit])).toEqual([
+      ["7d", false],
+      ["5h", true],
+    ]);
+    expect(only(statuses, { window: "7d" })).toMatchObject({ headroom: 30 });
+  });
+
+  test("explicit off disables pacing; an account-less entry covers every account", () => {
+    upsertProviderQuota(quotaRow({ window: "5h" }));
+    upsertProviderQuota(quotaRow({ account: "acct2", window: "5h" }));
+    setProviderBudgets([{ ...SUB, account: null, mode: "off", window: "5h" }]);
+    const statuses = evaluateProviderBudgets(NOW);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({
+      mode: "off",
+      status: "off",
+      pressure: 0,
+      implicit: false,
+    });
+  });
+
+  test("a percent cap does not disable implicit pacing", () => {
+    upsertProviderQuota(quotaRow({ window: "5h" }));
+    setProviderBudgets([
+      {
+        ...SUB,
+        account: "acct1",
+        mode: "cap",
+        unit: "percent",
+        window: "5h",
+        amount: 80,
+      },
+    ]);
+    const statuses = evaluateProviderBudgets(NOW);
+    expect(statuses.map((s) => [s.mode, s.implicit])).toEqual([
+      ["cap", false],
+      ["pace", true],
+    ]);
+  });
+});
+
+describe("cap evaluation", () => {
+  test("percent cap: 50%-floor ramp on the quota fraction", () => {
+    upsertProviderQuota(quotaRow({ usedPercent: 60 }));
+    setProviderBudgets([
+      {
+        ...SUB,
+        account: "acct1",
+        mode: "cap",
+        unit: "percent",
+        window: "5h",
+        amount: 80,
+      },
+      { ...SUB, account: "acct1", mode: "off", window: "5h" },
+    ]);
+    const cap = only(evaluateProviderBudgets(NOW), { mode: "cap" });
+    expect(cap.fraction).toBeCloseTo(0.75);
+    expect(cap.pressure).toBeCloseTo(0.5);
+    expect(cap.target).toBeNull();
+    expect(cap.ahead).toBeNull();
+  });
+
+  test("usd day cap: no pressure below half or at a sustainable rate", () => {
+    setProviderBudgets([
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: null,
+        mode: "cap",
+        unit: "usd",
+        window: "day",
+        amount: 10,
+      },
+    ]);
+    addProviderCost(costRow({ cost: 4 }));
+    let cap = only(evaluateProviderBudgets(NOW), { mode: "cap" });
+    expect(cap).toMatchObject({ used: 4, pressure: 0, status: "ok" });
+    expect(cap.resets_at).toBe(Date.UTC(2099, 0, 2));
+    // 6 USD by 23:00: 0.26 USD/h average vs 4 USD left over the last hour.
+    addProviderCost(costRow({ cost: 2, account: "acct2" }));
+    cap = only(evaluateProviderBudgets(Date.UTC(2099, 0, 1, 23)), {
+      mode: "cap",
+    });
+    expect(cap.used).toBe(6);
+    expect(cap.pressure).toBe(0);
+  });
+
+  test("usd day cap: rate overshoot keeps the original ramp² × tanh curve", () => {
+    setProviderBudgets([
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: "acct1",
+        mode: "cap",
+        unit: "usd",
+        window: "day",
+        amount: 10,
+      },
+    ]);
+    addProviderCost(costRow({ cost: 6 }));
+    const cap = only(evaluateProviderBudgets(NOW), { mode: "cap" });
+    // rate 0.5/h vs sustainable 4/12h → overshoot 0.5
+    const expected = 0.2 * Math.sqrt(Math.tanh(0.5 / 3));
+    expect(cap.pressure).toBeCloseTo(expected);
+    expect(cap.pressure ** 2 * 60).toBeCloseTo(60 * 0.04 * Math.tanh(0.5 / 3));
+    addProviderCost(costRow({ cost: 4 }));
+    expect(only(evaluateProviderBudgets(NOW), { mode: "cap" }).pressure).toBe(
+      1,
+    );
+  });
+
+  test("tokens cap sums all token columns", () => {
+    setProviderBudgets([
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: "acct1",
+        mode: "cap",
+        unit: "tokens",
+        window: "day",
+        amount: 1000,
+      },
+    ]);
+    addProviderCost(costRow());
+    expect(only(evaluateProviderBudgets(NOW), { mode: "cap" }).used).toBe(165);
+  });
+
+  describe("week window", () => {
+    // 2026-10-12 is a Monday.
+    const WED = Date.UTC(2026, 9, 14, 12);
+    const NEXT_MON = Date.UTC(2026, 9, 19, 0, 30);
+
+    test("bounds are the ISO week from Monday 00:00 UTC", () => {
+      expect(ledgerWindowBounds("week", WED)).toEqual({
+        start: Date.UTC(2026, 9, 12),
+        end: Date.UTC(2026, 9, 19),
+      });
+      expect(ledgerWindowBounds("week", Date.UTC(2026, 9, 18, 23, 59))).toEqual(
+        {
+          start: Date.UTC(2026, 9, 12),
+          end: Date.UTC(2026, 9, 19),
+        },
+      );
+      expect(ledgerWindowBounds("week", NEXT_MON).start).toBe(
+        Date.UTC(2026, 9, 19),
+      );
+    });
+
+    test("sums Monday..today and resets on Monday", () => {
+      setProviderBudgets([
+        {
+          provider: "openai",
+          auth_kind: "api_key",
+          account: "key1",
+          mode: "cap",
+          unit: "usd",
+          window: "week",
+          amount: 100,
+        },
+      ]);
+      const row = (day: string, cost: number) =>
+        addProviderCost(
+          costRow({
+            day,
+            cost,
+            provider: "openai",
+            authKind: "api_key",
+            account: "key1",
+          }),
+        );
+      row("2026-10-11", 50); // previous week's Sunday
+      row("2026-10-12", 3);
+      row("2026-10-14", 4);
+      row("2026-10-19", 7); // next week
+      let cap = only(evaluateProviderBudgets(WED), { mode: "cap" });
+      expect(cap.used).toBe(7);
+      expect(cap.resets_at).toBe(Date.UTC(2026, 9, 19));
+      cap = only(evaluateProviderBudgets(NEXT_MON), { mode: "cap" });
+      expect(cap.used).toBe(7);
+      expect(cap.resets_at).toBe(Date.UTC(2026, 9, 26));
+      row("2026-10-19", 1);
+      expect(
+        only(evaluateProviderBudgets(NEXT_MON), { mode: "cap" }).used,
+      ).toBe(8);
+    });
+  });
+});
+
+describe("providerBudgetPressure", () => {
+  const MATCH = {
     provider: "anthropic",
-    auth_kind: "subscription",
+    auth_kind: "subscription" as const,
     account: "acct1",
   };
 
-  function status(fraction: number | null, overrides = {}) {
-    return {
-      ...budget({ auth_kind: "subscription", account: "acct1" }),
-      used: 0,
-      fraction,
-      resets_at: null,
-      stale: false,
-      ...overrides,
-    };
-  }
-
-  test("ramps from 0 at 50% to 1 at 100%", () => {
-    const statuses = (f: number) => [status(f)];
-    expect(computeProviderBudgetPressure(statuses(0.4), match)).toBe(0);
-    expect(computeProviderBudgetPressure(statuses(0.75), match)).toBeCloseTo(
-      0.5,
+  test("is the max over matching budgets and names the one that tripped", () => {
+    upsertProviderQuota(
+      quotaRow({ usedPercent: 65, resetsAt: NOW + 2.5 * HOUR }),
     );
-    expect(computeProviderBudgetPressure(statuses(1.2), match)).toBe(1);
+    setProviderBudgets([
+      {
+        ...SUB,
+        account: "acct1",
+        mode: "cap",
+        unit: "percent",
+        window: "5h",
+        amount: 100,
+      },
+    ]);
+    const result = providerBudgetPressure(MATCH, NOW);
+    expect(result.pressure).toBeCloseTo(0.5);
+    expect(result.budget).toMatchObject({
+      mode: "pace",
+      implicit: true,
+      window: "5h",
+    });
   });
 
-  test("non-matching provider/auth/account contribute nothing", () => {
+  test("other accounts, auth kinds and providers are unaffected", () => {
+    upsertProviderQuota(quotaRow({ usedPercent: 100 }));
+    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(1);
     expect(
-      computeProviderBudgetPressure(
-        [status(0.9, { provider: "openai" })],
-        match,
-      ),
+      providerBudgetPressure({ ...MATCH, account: "acct2" }, NOW).pressure,
     ).toBe(0);
     expect(
-      computeProviderBudgetPressure(
-        [status(0.9, { auth_kind: "api_key" })],
-        match,
-      ),
+      providerBudgetPressure({ ...MATCH, auth_kind: "api_key" }, NOW).pressure,
     ).toBe(0);
     expect(
-      computeProviderBudgetPressure([status(0.9, { account: "other" })], match),
+      providerBudgetPressure({ ...MATCH, provider: "openai" }, NOW).pressure,
     ).toBe(0);
+    expect(providerBudgetPressure(null, NOW)).toEqual({
+      pressure: 0,
+      budget: null,
+    });
   });
 
-  test("wildcard budgets match; max across mixed units wins", () => {
-    const statuses = [
-      status(0.9, { unit: "percent", window: "5h" }),
-      status(0.6, { unit: "tokens" }),
-      status(1.05, { auth_kind: null, account: null }),
-    ];
-    expect(computeProviderBudgetPressure(statuses, match)).toBe(1);
-    // and without the saturated budget, the 90% one wins
+  test("an account-less pace budget evaluates the attribution's own account", () => {
+    upsertProviderQuota(quotaRow({ usedPercent: 100 }));
+    upsertProviderQuota(quotaRow({ account: "acct2", usedPercent: 1 }));
+    setProviderBudgets([
+      { ...SUB, account: null, mode: "pace", window: "5h", headroom: 10 },
+    ]);
+    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(1);
     expect(
-      computeProviderBudgetPressure(statuses.slice(0, 2), match),
-    ).toBeCloseTo(0.8);
+      providerBudgetPressure({ ...MATCH, account: "acct2" }, NOW).pressure,
+    ).toBe(0);
+    // The snapshot reports the worst account.
+    expect(only(evaluateProviderBudgets(NOW), { mode: "pace" })).toMatchObject({
+      account: null,
+      pressure: 1,
+    });
   });
 
-  test("null fractions are ignored; null match is 0", () => {
-    expect(computeProviderBudgetPressure([status(null)], match)).toBe(0);
-    expect(computeProviderBudgetPressure([status(0.9)], null)).toBe(0);
+  test("off silences pacing entirely", () => {
+    upsertProviderQuota(quotaRow({ usedPercent: 100 }));
+    setProviderBudgets([
+      { ...SUB, account: "acct1", mode: "off", window: "5h" },
+    ]);
+    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(0);
+  });
+
+  test("a leftover global daily_budget KV row has no effect", () => {
+    setKV("daily_budget", "0.01");
+    addProviderCost(costRow({ cost: 500 }));
+    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(0);
   });
 });

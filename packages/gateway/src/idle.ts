@@ -113,6 +113,7 @@ import {
   deleteSessionCosts,
 } from "./cost-tracker";
 import { deleteBillingPrefix } from "./cch";
+import { isSessionBudgetPaused } from "./provider-budgets";
 import {
   maybeFetchQuota,
   isQuotaPaused,
@@ -697,9 +698,14 @@ export function startIdleScheduler(
       // (see isWorkerCreditPaused) so a credit top-up recovers automatically.
       if (isWorkerCreditPaused(sessionID)) continue;
 
-      // Skip background work for OAuth accounts near quota exhaustion — preserve
-      // remaining entitlement for user-facing conversation turns.
-      if (isQuotaPaused(resolveAuth(sessionID))) continue;
+      // Skip background work for OAuth accounts near quota exhaustion, or
+      // when a provider budget covering the session is at full pressure —
+      // preserve remaining entitlement for user-facing conversation turns.
+      if (
+        isQuotaPaused(resolveAuth(sessionID)) ||
+        isSessionBudgetPaused(sessionID, state.lastUpstream)
+      )
+        continue;
 
       // Coalesce with any distillation/curation already in-flight OR queued for
       // this session. The synchronous distillation claim covers the global-queue

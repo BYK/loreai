@@ -6,7 +6,7 @@ import {
   estimateAvoidedCompactions,
   getSessionCosts,
   recordConversationCost,
-  resetDailyBudgetState,
+  resetDailyCostsCache,
   updateShadowContext,
 } from "../src/cost-tracker";
 import { saveSessionCosts } from "@loreai/core";
@@ -23,7 +23,7 @@ const POST_COMPACTION_CONTEXT = 30_000;
 
 beforeEach(() => {
   clearAllCosts();
-  resetDailyBudgetState();
+  resetDailyCostsCache();
 });
 
 describe("estimateAvoidedCompactions (#983)", () => {

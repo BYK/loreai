@@ -6,7 +6,7 @@ import {
   recordWarmupCost,
   deleteSessionCosts,
   getProviderCostSummary,
-  resetDailyBudgetState,
+  resetDailyCostsCache,
 } from "../src/cost-tracker";
 import type { CostAttribution } from "../src/cost-attribution";
 
@@ -108,7 +108,7 @@ describe("provider cost attribution", () => {
     });
     // Simulate a cold tracker: no bootstrap ran, so the date is unset —
     // the summary must roll the day itself rather than read "" as today.
-    resetDailyBudgetState();
+    resetDailyCostsCache();
     const summary = getProviderCostSummary();
     const row = summary.find(
       (r) => r.provider === "anthropic" && r.account === "acct123",

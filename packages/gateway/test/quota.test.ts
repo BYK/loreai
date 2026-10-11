@@ -16,7 +16,6 @@ import {
   getQuotaForCredential,
   getQuotaForFingerprint,
   isQuotaPaused,
-  computeQuotaPressure,
   deleteQuotaForFingerprint,
   _resetQuotaForTest,
   type QuotaSnapshot,
@@ -533,38 +532,6 @@ describe("isQuotaPaused", () => {
   test("false for null / unknown credential", () => {
     expect(isQuotaPaused(null)).toBe(false);
     expect(isQuotaPaused(API_KEY)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// computeQuotaPressure
-// ---------------------------------------------------------------------------
-
-describe("computeQuotaPressure", () => {
-  function snap(five: number, seven: number): QuotaSnapshot {
-    return {
-      fiveHour: { utilization: five, resetsAt: null },
-      sevenDay: { utilization: seven, resetsAt: null },
-      fetchedAt: Date.now(),
-    };
-  }
-
-  test("0 below the 80% floor", () => {
-    expect(computeQuotaPressure(snap(50, 70))).toBe(0);
-    expect(computeQuotaPressure(snap(80, 80))).toBe(0);
-  });
-
-  test("ramps to 1 at 100%", () => {
-    expect(computeQuotaPressure(snap(100, 0))).toBe(1);
-    expect(computeQuotaPressure(snap(90, 0))).toBeCloseTo(0.5);
-  });
-
-  test("uses the max of 5h and 7d", () => {
-    expect(computeQuotaPressure(snap(40, 90))).toBeCloseTo(0.5);
-  });
-
-  test("0 for null snapshot", () => {
-    expect(computeQuotaPressure(null)).toBe(0);
   });
 });
 

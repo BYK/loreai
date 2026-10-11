@@ -1,3 +1,4 @@
+import { getDailyCostForDay } from "@loreai/core";
 /**
  * Pipeline streaming-response coverage (Anthropic conversation turns).
  *
@@ -93,8 +94,6 @@ import { getDegradationWarning } from "../src/worker-health";
 import {
   clearAllCosts,
   computeCallCost,
-  getCostRate,
-  getDailySpend,
   getSessionCosts,
 } from "../src/cost-tracker";
 import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
@@ -4016,8 +4015,7 @@ describe("Pipeline — streaming responses", () => {
             }),
           );
         });
-        expect(getDailySpend().spend).toBeGreaterThan(0);
-        expect(getCostRate()).toBeGreaterThan(0);
+        expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBeGreaterThan(0);
         expect(getDailyCostForDay(today)).toBeGreaterThan(ledgerBefore);
         expect(store).not.toHaveBeenCalled();
       } finally {
@@ -5913,7 +5911,7 @@ describe("Pipeline — streaming responses", () => {
         });
       });
 
-      expect(getDailySpend().spend).toBeGreaterThan(0);
+      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBeGreaterThan(0);
       expect(getDailyCostForDay(today)).toBeGreaterThan(ledgerBefore);
       expect(store).toHaveBeenCalledTimes(2);
       expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({

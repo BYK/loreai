@@ -174,12 +174,12 @@ export const dashboardRoutes: RouteModule = {
         wrapOperations((ops) => ops.handleGetCosts(ctx.config.hostedMode)),
       ),
     );
-    app.patch(
-      "/api/v1/costs/budget",
+    app.put(
+      "/api/v1/costs/budgets",
       ctx.declaredMethodsOnly(
-        ["PATCH"],
+        ["PUT"],
         wrapOperations((ops, req) =>
-          ops.handleSetDailyBudget(req, ctx.config.hostedMode),
+          ops.handlePutProviderBudgets(req, ctx.config.hostedMode),
         ),
       ),
     );

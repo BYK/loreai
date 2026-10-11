@@ -1,3 +1,4 @@
+import { getDailyCostForDay } from "@loreai/core";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -5,8 +6,7 @@ import { db } from "@loreai/core";
 import { MockAgent } from "undici";
 import {
   getAllSessionCosts,
-  getDailySpend,
-  resetDailyBudgetState,
+  resetDailyCostsCache,
 } from "../src/cost-tracker";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import {
@@ -512,9 +512,9 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
       pipelineCalls++;
       return mockedPipelineResponse(body, model, streaming);
     });
-    resetDailyBudgetState();
+    resetDailyCostsCache();
     initialStorage = storageSnapshot();
-    initialSpend = getDailySpend().spend;
+    initialSpend = getDailyCostForDay(new Date().toISOString().slice(0, 10));
   });
 
   afterAll(async () => {
@@ -543,7 +543,7 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
       expect(dispatcherCalls).toBe(0);
       expect(getActiveSessions().size).toBe(0);
       expect(getAllSessionCosts().size).toBe(0);
-      expect(getDailySpend().spend).toBe(initialSpend);
+      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(initialSpend);
       expect(storageSnapshot()).toEqual(initialStorage);
     },
   );
@@ -568,7 +568,7 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
       expect(dispatcherCalls).toBe(0);
       expect(getActiveSessions().size).toBe(0);
       expect(getAllSessionCosts().size).toBe(0);
-      expect(getDailySpend().spend).toBe(initialSpend);
+      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(initialSpend);
       expect(storageSnapshot()).toEqual(initialStorage);
     },
   );
