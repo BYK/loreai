@@ -265,6 +265,100 @@ test.describe("persistent workspace panes", () => {
     await expect(document).toBeVisible();
   });
 
+  test("shows the selected document outside full mode and restores the list maximize", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop responsive pane layout",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+
+    const list = page.locator(LIST);
+    const document = page.getByTestId("document-pane");
+    const maximize = page.getByTestId("pane-max-list");
+    await expect(list).toBeVisible();
+    await expect(document).toBeVisible();
+    await maximize.click();
+
+    const project = list
+      .getByTestId("nav-project")
+      .filter({ hasText: "lore" });
+    await project.click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
+    await expect(list).toBeVisible();
+    await expect(document).toBeHidden();
+
+    for (const width of [1000, 400]) {
+      await page.setViewportSize({ width, height: 800 });
+      await expect(list).toBeHidden();
+      await expect(document).toBeVisible();
+      await expect(page.getByTestId("pane-max-list")).toHaveCount(0);
+      await expect(page.getByTestId("pane-max-document")).toHaveCount(0);
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(list).toBeVisible();
+    await expect(document).toBeHidden();
+    await expect(maximize).toHaveAttribute("aria-label", "Restore list");
+  });
+
+  test("shows the list outside full mode when the document is maximized", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop responsive pane layout",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+
+    const list = page.locator(LIST);
+    const document = page.getByTestId("document-pane");
+    const maximize = page.getByTestId("pane-max-document");
+    await maximize.click();
+    await expect(list).toBeHidden();
+    await expect(document).toBeVisible();
+
+    await page.setViewportSize({ width: 400, height: 800 });
+    await expect(list).toBeVisible();
+    await expect(document).toBeHidden();
+    await expect(page.getByTestId("pane-max-document")).toHaveCount(0);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(list).toBeHidden();
+    await expect(document).toBeVisible();
+    await expect(maximize).toHaveAttribute("aria-label", "Restore document");
+  });
+
+  test("keeps minimized-pane chips usable in split mode", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop pane controls",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    await page.getByTestId("pane-min-nav").click();
+    await page.getByTestId("pane-min-participants").click();
+    await page.setViewportSize({ width: 1000, height: 800 });
+
+    const navChip = page.getByTestId("pane-chip-nav");
+    const participantsChip = page.getByTestId("pane-chip-participants");
+    await expect(navChip).toBeVisible();
+    await expect(participantsChip).toBeVisible();
+
+    await navChip.click();
+    await page.getByRole("button", { name: "Restore", exact: true }).click();
+    await expect(page.locator('[data-pane="nav"]')).toBeVisible();
+
+    await participantsChip.click();
+    await page.getByRole("button", { name: "Restore", exact: true }).click();
+    await expect(participantsChip).toBeVisible();
+  });
+
   test("restores the list from a chip while Navigation is maximized", async ({
     page,
   }, testInfo) => {

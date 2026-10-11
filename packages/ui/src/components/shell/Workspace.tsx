@@ -199,27 +199,30 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const itemSelected = () => !rootMatch();
   const full = () => mode() === "full";
   const narrow = () => mode() !== "full";
-  const onlyMaximized = () => layoutState().maximized !== null;
-  const hiddenByMaximize = (pane: Pane) =>
-    onlyMaximized() && layoutState().maximized !== pane;
+  const activeMaximized = () =>
+    full() ? layoutState().maximized : null;
+  const hiddenByMaximize = (pane: Pane) => {
+    const maximized = activeMaximized();
+    return maximized !== null && maximized !== pane;
+  };
   const leftOpen = () =>
     layoutState().nav === "open" || layoutState().participants === "open";
   const showLeft = () =>
     leftOpen() &&
-    (layoutState().maximized === null ||
-      layoutState().maximized === "nav" ||
-      layoutState().maximized === "participants") &&
+    (activeMaximized() === null ||
+      activeMaximized() === "nav" ||
+      activeMaximized() === "participants") &&
     (full() || mode() === "split");
   const showList = () =>
     layoutState().list === "open" &&
     !hiddenByMaximize("list") &&
     (full() || (!itemSelected() && mode() !== "full"));
   const showDocument = () =>
-    layoutState().maximized === "document" ||
-    (layoutState().maximized === null &&
+    activeMaximized() === "document" ||
+    (activeMaximized() === null &&
       (full() || itemSelected() || !showList()));
   const showDivider = () =>
-    full() && showList() && showDocument() && layoutState().maximized === null;
+    full() && showList() && showDocument() && activeMaximized() === null;
   const navChip = () => layoutState().nav === "min" || hiddenByMaximize("nav");
   const participantsChip = () =>
     layoutState().participants === "min" ||
@@ -389,7 +392,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
         <ListPane
           visible={showList()}
           full={full()}
-          maximized={layoutState().maximized === "list"}
+          maximized={activeMaximized() === "list"}
           width={layoutState().listWidth}
           header={
             <PaneHeader
