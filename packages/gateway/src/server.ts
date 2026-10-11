@@ -23,7 +23,7 @@ import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Readable } from "node:stream";
-import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { db, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
 import {
   assertGatewayAccessConfigured,
   DEFAULT_PORT,
@@ -109,6 +109,14 @@ export async function startServer(
     log.notice(
       "warning: remote management access is enabled; every client accepted by the listener can access /ui and /api",
     );
+  }
+
+  // Open (and migrate) the database before serving so the schema exists
+  // ahead of the first request. Non-fatal: the next db() call retries.
+  try {
+    db();
+  } catch (error) {
+    log.warn(`database open at startup failed: ${String(error)}`);
   }
 
   // Wire embedding-worker OOM backoff/latch events to Sentry. Idempotent: the
