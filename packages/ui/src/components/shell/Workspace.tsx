@@ -536,6 +536,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     const timer = globalThis.setInterval(updateClock, 60_000);
     const keydown = (event: KeyboardEvent) => {
       if (!shouldHandleSpace(event)) return;
+      if (!currentActivityItem() && location.pathname !== "/") return;
       if (nextUnread()) event.preventDefault();
     };
     document.addEventListener("keydown", keydown);

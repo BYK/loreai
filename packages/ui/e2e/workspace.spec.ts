@@ -69,6 +69,18 @@ async function waitForUnpinnedActivity(page: Page, keys: string[]) {
   }, keys);
 }
 
+async function dispatchSpace(page: Page) {
+  return page.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
 async function expectActivityAnchorAfterReturn(
   page: Page,
   useBrowserBack: boolean,
@@ -318,6 +330,32 @@ async function expectPagedActivityScrollAfterReturn(
 }
 
 test.describe("persistent workspace panes", () => {
+  test("Space only advances unread activity from an activity document", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop workspace");
+    await page.goto("/ui/costs");
+    await expect(page.getByTestId("costs-page")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.locator(
+          '[data-testid="activity-item"] [data-testid="activity-unread-chip"]',
+        ).count(),
+      )
+      .toBeGreaterThan(0);
+
+    expect(await dispatchSpace(page)).toBe(false);
+    await expect(page).toHaveURL(/\/ui\/costs$/);
+
+    const session = page.locator(
+      '[data-testid="activity-item"][data-activity-kind="session"]',
+    ).first();
+    await expect(session).toBeVisible();
+    await session.locator("a").click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/?]+/);
+    expect(await dispatchSpace(page)).toBe(true);
+  });
+
   test("keeps the mobile app bar within 360px and 400px viewports", async ({
     page,
   }) => {
