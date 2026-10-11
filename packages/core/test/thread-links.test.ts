@@ -404,6 +404,39 @@ describe("thread links", () => {
     ).toBe("invalid");
   });
 
+  it("freezes the session and worktree of an ended thread, except clearing it", () => {
+    const { p, link } = seeded();
+    const wt = { path: "/tmp/wt-a", branch: "lore/thread-a" };
+    const bound = updateThreadLink(p.id, link.id, {
+      expectedRevision: link.revision,
+      worktree: wt,
+    });
+    const closed = updateThreadLink(p.id, link.id, {
+      expectedRevision: bound.revision,
+      state: "closed",
+    });
+    expect(closed.worktree).toEqual(wt);
+    for (const change of [
+      { acpSessionId: "acp-late" },
+      { worktree: { path: "/tmp/wt-b", branch: "lore/thread-b" } },
+    ]) {
+      expect(
+        code(() =>
+          updateThreadLink(p.id, link.id, {
+            expectedRevision: closed.revision,
+            ...change,
+          }),
+        ),
+      ).toBe("invalid");
+    }
+    expect(getThreadLink(p.id, link.id).revision).toBe(closed.revision);
+    const cleared = updateThreadLink(p.id, link.id, {
+      expectedRevision: closed.revision,
+      worktree: null,
+    });
+    expect(cleared).toMatchObject({ state: "closed", worktree: null });
+  });
+
   it("deletes with an expected revision", () => {
     const { p, link } = seeded();
     expect(code(() => deleteThreadLink(p.id, link.id, 2))).toBe(

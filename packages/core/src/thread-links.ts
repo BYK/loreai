@@ -453,6 +453,13 @@ export function updateThreadLink(
   return snapshot(() => {
     const row = linkRow(projectId, id);
     checkRevision(row.revision, input.expectedRevision);
+    if (
+      (row.state === "closed" || row.state === "failed") &&
+      (acpSessionId !== null || (worktree !== undefined && worktree !== null))
+    ) {
+      // An ended thread may only drop a worktree it kept for uncommitted work.
+      fail("invalid", `a ${row.state} thread's session and worktree are final`);
+    }
     const sets: SqlFragment[] = [];
     if (input.state !== undefined && input.state !== row.state) {
       if (!TRANSITIONS[row.state].includes(input.state)) {
