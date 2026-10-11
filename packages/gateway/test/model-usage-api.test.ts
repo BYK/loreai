@@ -3,9 +3,22 @@
  * Cache-Control, export Content-Disposition filename derivation, filter
  * errors, and the project filter.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import {
+  offloadAllOrTimeout,
+  READ_JOB_TIMED_OUT,
+} from "../../core/src/read-offload";
+
+vi.mock("../../core/src/read-offload", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("../../core/src/read-offload")>();
+  return {
+    ...original,
+    offloadAllOrTimeout: vi.fn(original.offloadAllOrTimeout),
+  };
+});
 
 let baseURL: string;
 let dbPath: string;
@@ -112,6 +125,13 @@ describe("GET /api/v1/model-usage", () => {
     );
     expect(missing.status).toBe(404);
     expect((await missing.json()).error.type).toBe("not_found");
+  });
+
+  it("503s when the read pool cannot serve the aggregate", async () => {
+    vi.mocked(offloadAllOrTimeout).mockResolvedValueOnce(READ_JOB_TIMED_OUT);
+    const res = await api("/api/v1/model-usage");
+    expect(res.status).toBe(503);
+    expect((await res.json()).error.type).toBe("service_unavailable");
   });
 });
 

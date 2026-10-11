@@ -48,7 +48,7 @@ export interface ReadJobSpec {
   params: ReadParam[];
   mode: ReadMode;
   /** Fixed diagnostic label for heavy maintenance SQL; never use SQL text. */
-  telemetryKind?: "temporal-prune";
+  telemetryKind?: "temporal-prune" | "model-usage";
 }
 
 /**

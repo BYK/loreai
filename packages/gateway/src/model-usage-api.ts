@@ -45,6 +45,9 @@ function toErrorResponse(err: unknown): Response {
   if (err instanceof modelUsage.ModelUsageLimitError) {
     return errorResponse(422, "result_too_large", err.message);
   }
+  if (err instanceof modelUsage.ModelUsageUnavailableError) {
+    return errorResponse(503, "service_unavailable", err.message);
+  }
   throw err;
 }
 
@@ -54,17 +57,19 @@ function documentResponse(doc: modelUsage.DailyUsageDocument): Response {
   return response;
 }
 
-export function handleGetModelUsage(url: URL): Response {
+export async function handleGetModelUsage(url: URL): Promise<Response> {
   try {
-    return documentResponse(modelUsage.buildDailyModelUsage(parseFilter(url)));
+    return documentResponse(
+      await modelUsage.buildDailyModelUsage(parseFilter(url)),
+    );
   } catch (err) {
     return toErrorResponse(err);
   }
 }
 
-export function handleExportModelUsage(url: URL): Response {
+export async function handleExportModelUsage(url: URL): Promise<Response> {
   try {
-    const doc = modelUsage.buildDailyModelUsage(parseFilter(url));
+    const doc = await modelUsage.buildDailyModelUsage(parseFilter(url));
     const today = new Date().toISOString().slice(0, 10);
     const from = url.searchParams.get("from") ?? doc.days[0]?.day ?? today;
     const to =

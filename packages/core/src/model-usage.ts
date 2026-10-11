@@ -4,9 +4,13 @@
  * model-tides "daily" document format (format/version/constants ported from
  * model-tides src/daily-usage.ts and src/weekly-snapshot.ts).
  */
-import { db } from "./db";
 import { sql } from "./sql";
 import { currentTenantId } from "./tenant";
+import {
+  isReadJobFailure,
+  offloadAllOrTimeout,
+  type ReadJobFailure,
+} from "./read-offload";
 
 // Ported from model-tides src/daily-usage.ts.
 export const DAILY_FORMAT = "model-tides-daily";
@@ -15,15 +19,6 @@ export const MAX_DAILY_CELLS = 200_000;
 // Ported from model-tides src/weekly-snapshot.ts.
 export const MIN_WEEK_TIME = Date.UTC(1999, 11, 27);
 export const FUTURE_MARGIN_MS = 7 * 86_400_000;
-
-// Mutable copy so tests can shrink the cap without seeding MAX_DAILY_CELLS
-// rows. Production code must read `dailyCellCap`, not MAX_DAILY_CELLS.
-let dailyCellCap = MAX_DAILY_CELLS;
-
-/** Test-only — restore by passing undefined. Not part of the public API. */
-export function _setMaxDailyCellsForTest(cap?: number): void {
-  dailyCellCap = cap ?? MAX_DAILY_CELLS;
-}
 
 export interface DailyUsageDocument {
   readonly format: typeof DAILY_FORMAT;
@@ -61,6 +56,14 @@ export class ModelUsageLimitError extends Error {
   }
 }
 
+/** The read-worker pool could not serve the aggregate scan (timeout/pressure). */
+export class ModelUsageUnavailableError extends Error {
+  constructor() {
+    super("Model usage statistics are temporarily unavailable");
+    this.name = "ModelUsageUnavailableError";
+  }
+}
+
 export interface ModelUsageFilter {
   /** Inclusive UTC day bound, `YYYY-MM-DD`. */
   from?: string;
@@ -95,9 +98,9 @@ function dayStartMs(day: string, field: "from" | "to"): number {
  * stored assistant messages with provider/model metadata. Sessions are the
  * unit (matching model-tides daily counts), not messages.
  */
-export function buildDailyModelUsage(
+export async function buildDailyModelUsage(
   filter: ModelUsageFilter = {},
-): DailyUsageDocument {
+): Promise<DailyUsageDocument> {
   let fromMs: number | undefined;
   let toExclusiveMs: number | undefined;
   if (filter.from !== undefined) {
@@ -144,13 +147,19 @@ export function buildDailyModelUsage(
     WHERE ${conditions}
     GROUP BY day, model
     ORDER BY day, model
-    LIMIT ${dailyCellCap + 1}`;
+    LIMIT ${MAX_DAILY_CELLS + 1}`;
 
-  const rows = sql.all<{ day: string; model: string; sessions: number }>(
-    db(),
-    query,
-  );
-  if (rows.length > dailyCellCap) {
+  // Offload the GROUP BY scan to the read-worker pool: on real databases the
+  // unfiltered aggregate would block the gateway event loop for hundreds of
+  // milliseconds. No per-call deadline exists — the pool's shared
+  // vectorSearchTimeoutMs() applies (default 10s).
+  const rows = (await offloadAllOrTimeout(query.text, [...query.params], {
+    telemetryKind: "model-usage",
+  })) as { day: string; model: string; sessions: number }[] | ReadJobFailure;
+  if (isReadJobFailure(rows)) {
+    throw new ModelUsageUnavailableError();
+  }
+  if (rows.length > MAX_DAILY_CELLS) {
     throw new ModelUsageLimitError(
       `Model usage result exceeds ${MAX_DAILY_CELLS} model-day cells`,
     );
@@ -171,7 +180,7 @@ export function buildDailyModelUsage(
       continue;
     }
     cells++;
-    if (cells > dailyCellCap) {
+    if (cells > MAX_DAILY_CELLS) {
       throw new ModelUsageLimitError(
         `Model usage result exceeds ${MAX_DAILY_CELLS} model-day cells`,
       );

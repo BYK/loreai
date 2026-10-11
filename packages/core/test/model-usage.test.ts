@@ -1,17 +1,27 @@
 /**
  * Tests for buildDailyModelUsage (#2026): session-count aggregation over
  * temporal_messages, provider/model metadata filters, day bounds, tenant
- * scoping, and the model-tides v2 document shape.
+ * scoping, the model-tides v2 document shape, and read-pool failure policy.
  */
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import {
   buildDailyModelUsage,
-  _setMaxDailyCellsForTest,
+  MAX_DAILY_CELLS,
   ModelUsageFilterError,
   ModelUsageLimitError,
+  ModelUsageUnavailableError,
 } from "../src/model-usage";
+import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "../src/read-offload";
 import { withTenant } from "../src/tenant";
+
+vi.mock("../src/read-offload", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/read-offload")>();
+  return {
+    ...original,
+    offloadAllOrTimeout: vi.fn(original.offloadAllOrTimeout),
+  };
+});
 
 const PROJECT = "/test/model-usage/project";
 const PROJECT_B = "/test/model-usage/project-b";
@@ -68,13 +78,9 @@ beforeEach(() => {
   pidB = ensureProject(PROJECT_B);
 });
 
-afterEach(() => {
-  _setMaxDailyCellsForTest();
-});
-
 describe("buildDailyModelUsage", () => {
-  test("empty database yields a valid empty document", () => {
-    const doc = buildDailyModelUsage();
+  test("empty database yields a valid empty document", async () => {
+    const doc = await buildDailyModelUsage();
     expect(doc).toEqual({
       format: "model-tides-daily",
       version: 2,
@@ -83,7 +89,7 @@ describe("buildDailyModelUsage", () => {
     });
   });
 
-  test("multiple turns of one session/model/day count once", () => {
+  test("multiple turns of one session/model/day count once", async () => {
     for (let i = 0; i < 4; i++) {
       add({
         sessionId: "s1",
@@ -91,13 +97,13 @@ describe("buildDailyModelUsage", () => {
         metadata: assistantMeta("claude-sonnet-4"),
       });
     }
-    const doc = buildDailyModelUsage();
+    const doc = await buildDailyModelUsage();
     expect(doc.days).toEqual([
       { day: "2025-03-01", models: { "anthropic/claude-sonnet-4": 1 } },
     ]);
   });
 
-  test("same session on two days counts once per day", () => {
+  test("same session on two days counts once per day", async () => {
     add({
       sessionId: "s1",
       createdAt: DAY1 + 60_000,
@@ -108,14 +114,14 @@ describe("buildDailyModelUsage", () => {
       createdAt: DAY2 + 60_000,
       metadata: assistantMeta("claude-sonnet-4"),
     });
-    const doc = buildDailyModelUsage();
+    const doc = await buildDailyModelUsage();
     expect(doc.days).toEqual([
       { day: "2025-03-01", models: { "anthropic/claude-sonnet-4": 1 } },
       { day: "2025-03-02", models: { "anthropic/claude-sonnet-4": 1 } },
     ]);
   });
 
-  test("two models same day count one each; models sorted by key", () => {
+  test("two models same day count one each; models sorted by key", async () => {
     add({
       sessionId: "s1",
       createdAt: DAY1,
@@ -126,7 +132,7 @@ describe("buildDailyModelUsage", () => {
       createdAt: DAY1 + 60_000,
       metadata: assistantMeta("claude-sonnet-4"),
     });
-    const doc = buildDailyModelUsage();
+    const doc = await buildDailyModelUsage();
     expect(doc.days).toHaveLength(1);
     expect(Object.keys(doc.days[0].models)).toEqual([
       "anthropic/claude-sonnet-4",
@@ -136,7 +142,7 @@ describe("buildDailyModelUsage", () => {
     expect(doc.days[0].models["anthropic/claude-sonnet-4"]).toBe(1);
   });
 
-  test("same session_id in two projects counts twice", () => {
+  test("same session_id in two projects counts twice", async () => {
     add({
       sessionId: "shared",
       createdAt: DAY1,
@@ -150,11 +156,11 @@ describe("buildDailyModelUsage", () => {
       },
       pidB,
     );
-    const doc = buildDailyModelUsage();
+    const doc = await buildDailyModelUsage();
     expect(doc.days[0].models["anthropic/claude-sonnet-4"]).toBe(2);
   });
 
-  test("excludes user messages and missing/invalid model metadata", () => {
+  test("excludes user messages and missing/invalid model metadata", async () => {
     const base = { sessionId: "s1", createdAt: DAY1 };
     add({ ...base, role: "user", metadata: assistantMeta("claude-sonnet-4") });
     add({ ...base, sessionId: "s2", metadata: assistantMeta("unknown") });
@@ -165,10 +171,10 @@ describe("buildDailyModelUsage", () => {
     add({ ...base, sessionId: "s7", metadata: '{"providerID":"anthropic"}' });
     add({ ...base, sessionId: "s8", metadata: null });
     add({ ...base, sessionId: "s9", metadata: assistantMeta(5, null) });
-    expect(buildDailyModelUsage().days).toEqual([]);
+    expect((await buildDailyModelUsage()).days).toEqual([]);
   });
 
-  test("drops invalid model names, keeps a 320-char model", () => {
+  test("drops invalid model names, keeps a 320-char model", async () => {
     const good = "anthropic/" + "m".repeat(310); // total length exactly 320
     add({
       sessionId: "s1",
@@ -178,7 +184,7 @@ describe("buildDailyModelUsage", () => {
     add({
       sessionId: "s2",
       createdAt: DAY1,
-      metadata: assistantMeta("ctrlx"),
+      metadata: assistantMeta("ctrl\u0001x"),
     });
     add({
       sessionId: "s3",
@@ -190,11 +196,11 @@ describe("buildDailyModelUsage", () => {
       createdAt: DAY1,
       metadata: assistantMeta("m".repeat(310)),
     });
-    const doc = buildDailyModelUsage();
+    const doc = await buildDailyModelUsage();
     expect(doc.days).toEqual([{ day: "2025-03-01", models: { [good]: 1 } }]);
   });
 
-  test("from/to bounds are inclusive UTC days at exact millisecond edges", () => {
+  test("from/to bounds are inclusive UTC days at exact millisecond edges", async () => {
     add({
       sessionId: "s1",
       createdAt: DAY1, // 00:00:00.000
@@ -210,15 +216,21 @@ describe("buildDailyModelUsage", () => {
       createdAt: DAY2, // excluded when to=2025-03-01
       metadata: assistantMeta("claude-sonnet-4"),
     });
-    const doc = buildDailyModelUsage({ from: "2025-03-01", to: "2025-03-01" });
+    const doc = await buildDailyModelUsage({
+      from: "2025-03-01",
+      to: "2025-03-01",
+    });
     expect(doc.days).toEqual([
       { day: "2025-03-01", models: { "anthropic/claude-sonnet-4": 2 } },
     ]);
-    const all = buildDailyModelUsage({ from: "2025-03-01", to: "2025-03-02" });
+    const all = await buildDailyModelUsage({
+      from: "2025-03-01",
+      to: "2025-03-02",
+    });
     expect(all.days[1].models["anthropic/claude-sonnet-4"]).toBe(1);
   });
 
-  test("projectId filter scopes counts to one project", () => {
+  test("projectId filter scopes counts to one project", async () => {
     add({
       sessionId: "s1",
       createdAt: DAY1,
@@ -232,12 +244,13 @@ describe("buildDailyModelUsage", () => {
       },
       pidB,
     );
-    expect(buildDailyModelUsage({ projectId: pidB }).days[0].models).toEqual({
+    const doc = await buildDailyModelUsage({ projectId: pidB });
+    expect(doc.days[0].models).toEqual({
       "anthropic/claude-sonnet-4": 1,
     });
   });
 
-  test("rows from another tenant's project are not counted", () => {
+  test("rows from another tenant's project are not counted", async () => {
     const foreignPid = withTenant("model-usage-foreign", () =>
       ensureProject("/test/model-usage/foreign"),
     );
@@ -249,44 +262,70 @@ describe("buildDailyModelUsage", () => {
         metadata: assistantMeta("claude-sonnet-4"),
       }),
     );
-    expect(buildDailyModelUsage().days).toEqual([]);
-    expect(buildDailyModelUsage({ projectId: foreignPid }).days).toEqual([]);
-  });
-
-  test("rejects unreal and inverted date filters", () => {
-    expect(() => buildDailyModelUsage({ from: "2026-02-30" })).toThrow(
-      ModelUsageFilterError,
-    );
-    expect(() => buildDailyModelUsage({ from: "not-a-date" })).toThrow(
-      ModelUsageFilterError,
-    );
-    expect(() =>
-      buildDailyModelUsage({ from: "2025-03-02", to: "2025-03-01" }),
-    ).toThrow(ModelUsageFilterError);
-    // Same day from == to is a valid single-day range.
+    expect((await buildDailyModelUsage()).days).toEqual([]);
     expect(
-      buildDailyModelUsage({ from: "2025-03-01", to: "2025-03-01" }).days,
+      (await buildDailyModelUsage({ projectId: foreignPid })).days,
     ).toEqual([]);
   });
 
-  test("throws ModelUsageLimitError past the cell cap", () => {
-    _setMaxDailyCellsForTest(2);
-    for (const sessionId of ["s1", "s2", "s3"]) {
-      add({
-        sessionId,
-        createdAt: DAY1,
-        metadata: assistantMeta(`${sessionId}-model`),
-      });
-    }
-    expect(() => buildDailyModelUsage()).toThrow(ModelUsageLimitError);
+  test("rejects unreal and inverted date filters", async () => {
+    await expect(buildDailyModelUsage({ from: "2026-02-30" })).rejects.toThrow(
+      ModelUsageFilterError,
+    );
+    await expect(buildDailyModelUsage({ from: "not-a-date" })).rejects.toThrow(
+      ModelUsageFilterError,
+    );
+    await expect(
+      buildDailyModelUsage({ from: "2025-03-02", to: "2025-03-01" }),
+    ).rejects.toThrow(ModelUsageFilterError);
+    // Same day from == to is a valid single-day range.
+    expect(
+      (await buildDailyModelUsage({ from: "2025-03-01", to: "2025-03-01" }))
+        .days,
+    ).toEqual([]);
   });
 
-  test("days before MIN_WEEK_TIME are dropped", () => {
+  test("days before MIN_WEEK_TIME are dropped", async () => {
     add({
       sessionId: "s1",
       createdAt: Date.UTC(1990, 0, 1),
       metadata: assistantMeta("claude-sonnet-4"),
     });
-    expect(buildDailyModelUsage().days).toEqual([]);
+    expect((await buildDailyModelUsage()).days).toEqual([]);
   });
+
+  test("throws ModelUsageUnavailableError when the read pool times out", async () => {
+    vi.mocked(offloadAllOrTimeout).mockResolvedValueOnce(READ_JOB_TIMED_OUT);
+    await expect(buildDailyModelUsage()).rejects.toThrow(
+      ModelUsageUnavailableError,
+    );
+  });
+
+  test(
+    "throws ModelUsageLimitError past MAX_DAILY_CELLS with real data",
+    { timeout: 60_000 },
+    async () => {
+      // Seed MAX_DAILY_CELLS + 1 distinct (day, model) cells in one
+      // transaction: ~549 days x 365 models, all valid.
+      const base = Date.UTC(2024, 0, 1);
+      const stmt = db().query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'assistant', 'c', 1, 0, ?, ?)`,
+      );
+      db().query("BEGIN").run();
+      for (let i = 0; i < MAX_DAILY_CELLS + 1; i++) {
+        stmt.run(
+          `cap-${i}`,
+          pid,
+          `cap-s${i % 64}`,
+          base + Math.floor(i / 365) * 86_400_000 + (i % 365) * 60_000,
+          JSON.stringify({ providerID: "p", modelID: `m${i % 365}` }),
+        );
+      }
+      db().query("COMMIT").run();
+      await expect(buildDailyModelUsage()).rejects.toThrow(
+        ModelUsageLimitError,
+      );
+    },
+  );
 });
