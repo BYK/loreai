@@ -52,9 +52,12 @@ const STATUS_LABELS = {
 } as const;
 
 const REFUSAL_LABELS = {
-  stale_revision: "Changed since you reviewed it — rescan and review again",
+  stale_revision:
+    "This group changed since you reviewed it — rescan and review again",
   not_found: "An entry was removed since the scan",
   scope_mismatch: "An entry is no longer in this scope",
+  title_conflict:
+    "The private copy's title is already used by another shared entry. Rename one of them, then review the group again.",
   conflicting_groups: "Shares an entry with another accepted group",
 } as const;
 
@@ -72,14 +75,21 @@ function currentVersion(
     : undefined;
 }
 
+function keeperCandidates(group: DedupPreviewGroup) {
+  return group.pool === "project_shared"
+    ? group.candidates.filter((candidate) => candidate.scope === "shared")
+    : group.candidates;
+}
+
 function suggestedKeeper(group: DedupPreviewGroup): string {
+  const candidates = keeperCandidates(group);
   return (
-    group.candidates.find(
+    candidates.find(
       (candidate) =>
         candidate.id === group.suggested_keep_id ||
         candidate.logical_id === group.suggested_keep_id,
     )?.logical_id ??
-    group.candidates[0]?.logical_id ??
+    candidates[0]?.logical_id ??
     group.suggested_keep_id
   );
 }
@@ -116,6 +126,9 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   const [syncStatusLoading, setSyncStatusLoading] = createSignal(false);
   const [syncStatusFailed, setSyncStatusFailed] = createSignal(false);
   const [persistenceError, setPersistenceError] = createSignal(false);
+  const [contentChoices, setContentChoices] = createSignal<
+    Record<string, string | null>
+  >({});
   const refreshMarks = async (projectId = props.projectId) => {
     setMarks(await ws.state.dedupReview.list(projectId));
   };
@@ -152,11 +165,27 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     const fallback = suggestedKeeper(group);
     const selected =
       keepers()[group.group_id] ?? markFor(group)?.keepId ?? fallback;
-    return group.candidates.some(
+    return keeperCandidates(group).some(
       (candidate) => candidate.logical_id === selected,
     )
       ? selected
       : fallback;
+  };
+  const contentFromFor = (group: DedupPreviewGroup) => {
+    const selected = contentChoices()[group.group_id];
+    const contentFromId =
+      selected === undefined
+        ? markFor(group)?.contentFromId
+        : (selected ?? undefined);
+    if (contentFromId === undefined) return undefined;
+    return group.candidates.some(
+      (candidate) =>
+        candidate.logical_id === contentFromId &&
+        candidate.logical_id !== keeperFor(group) &&
+        candidate.scope === "project",
+    )
+      ? contentFromId
+      : undefined;
   };
   const [versionLoads, setVersionLoads] = createSignal<
     Record<string, VersionLoad>
@@ -222,7 +251,13 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   const saveDecision = async (decision: "accept" | "skip") => {
     const group = focusedGroup();
     if (!group || (decision === "accept" && focusedGroupChanged())) return;
-    const mark = markFrom(group, decision, keeperFor(group), props.projectId);
+    const mark = markFrom(
+      group,
+      decision,
+      keeperFor(group),
+      props.projectId,
+      contentFromFor(group),
+    );
     const saved = await ws.state.dedupReview.put(mark);
     setPersistenceError(!saved);
     if (saved) await refreshMarks();
@@ -272,6 +307,9 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           keepId: mark.keepId,
           mergeIds: [...mark.mergeIds],
           expectedRevisions: { ...mark.expectedRevisions },
+          ...(mark.contentFromId === undefined
+            ? {}
+            : { contentFromId: mark.contentFromId }),
         })),
         ...(scope === "global" ? { projectId: null } : {}),
       };
@@ -301,6 +339,17 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     record.body.projectId === null
       ? globalKnowledgeHref(id)
       : knowledgeHref(record.projectId, id);
+  const conflictingEntryIdFor = (
+    record: DedupApplyRecord,
+    refused: DedupApplyReceipt["refused"][number],
+  ) =>
+    refused.error.code === "title_conflict"
+      ? refused.error.details.find(
+          (detail) =>
+            detail.reason === "title_conflict" &&
+            record.candidateTitles[detail.id] === undefined,
+        )?.id
+      : undefined;
   const syncConsequence = () => {
     if (syncStatus()?.enabled) {
       const pending = syncStatus()?.pending_changes;
@@ -525,6 +574,20 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                 )}
               </For>
             </p>
+            <Show when={applied.contentFrom}>
+              {(contentFrom) => (
+                <p class="mt-2 text-xs text-muted">
+                  Kept title and content from{" "}
+                  <A
+                    class="text-accent underline"
+                    href={knowledgeLinkFor(record, contentFrom().id)}
+                  >
+                    {titleFor(record, contentFrom().id)}
+                  </A>{" "}
+                  as a new version; the prior version remains in history.
+                </p>
+              )}
+            </Show>
             <p class="mt-2 text-xs text-muted">Applied</p>
           </div>
         )}
@@ -553,6 +616,19 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
             </p>
             <p class="mt-2 text-xs text-gold">
               {REFUSAL_LABELS[refused.error.code]}
+              <Show when={conflictingEntryIdFor(record, refused)}>
+                {(id) => (
+                  <>
+                    {" "}
+                    <A
+                      class="text-accent underline"
+                      href={globalKnowledgeHref(id())}
+                    >
+                      {titleFor(record, id())}
+                    </A>
+                  </>
+                )}
+              </Show>
             </p>
           </div>
         )}
@@ -569,10 +645,40 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   );
   const chooseKeeper = (group: DedupPreviewGroup, id: string) => {
     setKeepers((previous) => ({ ...previous, [group.group_id]: id }));
+    setContentChoices((previous) => ({
+      ...previous,
+      [group.group_id]: null,
+    }));
     const existing = markFor(group);
     if (existing && markStatus(group, existing) !== "stale") {
       void ws.state.dedupReview
         .put(markFrom(group, existing.decision, id, props.projectId))
+        .then(async (saved) => {
+          setPersistenceError(!saved);
+          if (saved) await refreshMarks();
+        });
+    }
+  };
+  const chooseContent = (
+    group: DedupPreviewGroup,
+    contentFromId: string | undefined,
+  ) => {
+    setContentChoices((previous) => ({
+      ...previous,
+      [group.group_id]: contentFromId ?? null,
+    }));
+    const existing = markFor(group);
+    if (existing && markStatus(group, existing) !== "stale") {
+      void ws.state.dedupReview
+        .put(
+          markFrom(
+            group,
+            existing.decision,
+            keeperFor(group),
+            props.projectId,
+            contentFromId,
+          ),
+        )
         .then(async (saved) => {
           setPersistenceError(!saved);
           if (saved) await refreshMarks();
@@ -1083,31 +1189,81 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                                 Open knowledge document
                               </A>
                             </div>
-                            <label class="mt-4 flex cursor-pointer items-start gap-2 border-t border-line pt-3 text-sm">
-                              <input
-                                type="radio"
-                                name={`keeper-${group().group_id}`}
-                                value={candidate.logical_id}
-                                aria-label={`Keep this one (${index() + 1})`}
-                                checked={
-                                  keeperFor(group()) === candidate.logical_id
-                                }
-                                onChange={() =>
-                                  chooseKeeper(group(), candidate.logical_id)
-                                }
-                              />
-                              <span>
-                                Keep this one
-                                <span class="ml-1 text-xs text-muted">
-                                  ({index() + 1})
+                            <Show
+                              when={
+                                group().pool !== "project_shared" ||
+                                candidate.scope === "shared"
+                              }
+                            >
+                              <label class="mt-4 flex cursor-pointer items-start gap-2 border-t border-line pt-3 text-sm">
+                                <input
+                                  type="radio"
+                                  name={`keeper-${group().group_id}`}
+                                  value={candidate.logical_id}
+                                  aria-label={`Keep this one (${index() + 1})`}
+                                  checked={
+                                    keeperFor(group()) === candidate.logical_id
+                                  }
+                                  onChange={() =>
+                                    chooseKeeper(group(), candidate.logical_id)
+                                  }
+                                />
+                                <span>
+                                  Keep this one
+                                  <span class="ml-1 text-xs text-muted">
+                                    ({index() + 1})
+                                  </span>
                                 </span>
-                              </span>
-                            </label>
+                              </label>
+                            </Show>
                           </article>
                         );
                       }}
                     </For>
                   </div>
+
+                  <Show when={group().pool === "project_shared"}>
+                    <fieldset
+                      class="space-y-2 border-t border-line px-4 py-3"
+                      data-testid="content-to-keep"
+                    >
+                      <legend class="text-sm font-medium">
+                        Content to keep
+                      </legend>
+                      <label class="flex cursor-pointer items-start gap-2 text-sm">
+                        <input
+                          type="radio"
+                          name={`content-${group().group_id}`}
+                          checked={contentFromFor(group()) === undefined}
+                          onChange={() => chooseContent(group(), undefined)}
+                        />
+                        <span>the shared entry's content</span>
+                      </label>
+                      <For
+                        each={group().candidates.filter(
+                          (candidate) => candidate.scope === "project",
+                        )}
+                      >
+                        {(candidate) => (
+                          <label class="flex cursor-pointer items-start gap-2 text-sm">
+                            <input
+                              type="radio"
+                              name={`content-${group().group_id}`}
+                              value={candidate.logical_id}
+                              aria-label={`the private copy: “${candidate.title}”`}
+                              checked={
+                                contentFromFor(group()) === candidate.logical_id
+                              }
+                              onChange={() =>
+                                chooseContent(group(), candidate.logical_id)
+                              }
+                            />
+                            <span>the private copy: “{candidate.title}”</span>
+                          </label>
+                        )}
+                      </For>
+                    </fieldset>
+                  </Show>
 
                   <div class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
                     <Show when={focusedGroupChanged()}>
@@ -1180,17 +1336,32 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                       )
                       .map((candidate) => candidate.title)
                       .join(", ");
+                  const contentSource = () =>
+                    group.candidates.find(
+                      (candidate) =>
+                        candidate.logical_id === mark()?.contentFromId,
+                    );
                   return (
                     <li>
                       <p class="m-0 font-medium">
                         {keepTitle()} ← {mergeTitles()}
                       </p>
+                      <Show when={contentSource()}>
+                        {(source) => (
+                          <p class="mt-1 text-xs text-muted">
+                            “{keepTitle()}” takes the title and content of “
+                            {source().title}” as a new version, remains shared,
+                            and the prior version stays in history.
+                          </p>
+                        )}
+                      </Show>
                       <p class="mt-1 text-xs text-muted">
                         {loreFileConsequence(
                           group,
                           mark()?.keepId ?? suggestedKeeper(group),
                           props.projectId,
                           ws.projects.data() ?? [],
+                          mark()?.contentFromId,
                         )}
                       </p>
                     </li>

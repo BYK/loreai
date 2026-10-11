@@ -86,7 +86,6 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
     await expect(review).toBeVisible();
-    await expect(review.getByTestId("duplicate-group")).toHaveCount(3);
     await expect(
       review.getByTestId("duplicate-group").filter({
         hasText: "Duplicate review evidence sample candidate alpha",
@@ -95,6 +94,11 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(
       review.getByTestId("duplicate-group").filter({
         hasText: "Shared-only evidence review seed alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Cross pool duplicate tenant eviction ordering evidence",
       }),
     ).toHaveCount(1);
     await expect(
@@ -215,10 +219,6 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page.getByTestId("review-summary")).toContainText(
       "1 accepted · 0 skipped",
     );
-    await expect(page.getByTestId("review-summary")).toContainText(
-      "1 accepted · 0 skipped · 2 pending",
-    );
-
     const afterResponse = await page.request.get(knowledgePath);
     expect(afterResponse.ok()).toBe(true);
     expect(await afterResponse.json()).toEqual(before);

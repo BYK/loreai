@@ -513,7 +513,7 @@ describe("ui contracts against the real gateway", () => {
       ],
     };
     await contractRoute(
-      "dedup-apply.json",
+      "dedup-apply-gateway.json",
       `/projects/${SEEDED.dedupProjectId}/dedup/apply`,
       v1(["projects", SEEDED.dedupProjectId, "dedup", "apply"]),
       dedupApplyReceipt,

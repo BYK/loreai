@@ -13,10 +13,32 @@
           "tombstoneVersionId": "<uuid-3>"
         }
       ],
-      "appliedAt": 1700000000000
+      "appliedAt": 1700000000000,
+      "contentFrom": {
+        "id": "<uuid-2>",
+        "revision": 1,
+        "replacedKeepRevision": 1,
+        "keepVersionId": "<uuid-4>"
+      }
     }
   ],
-  "refused": [],
+  "refused": [
+    {
+      "groupIndex": 1,
+      "keepId": "<uuid-5>",
+      "mergeIds": ["<uuid-6>"],
+      "error": {
+        "code": "title_conflict",
+        "message": "The replacement title is already used by another shared entry.",
+        "details": [
+          {
+            "id": "<uuid-6>",
+            "reason": "title_conflict"
+          }
+        ]
+      }
+    }
+  ],
   "startedAt": 1700000001000,
   "finishedAt": 1700000002000,
   "replayed": false

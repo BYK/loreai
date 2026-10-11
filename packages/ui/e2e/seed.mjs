@@ -144,6 +144,92 @@ for (const viewport of ["desktop", "mobile"]) {
         confidence: 0.88,
       });
     }
+
+    const replacementPhrase = (
+      viewport === "desktop"
+        ? [
+            "Qorvex zintara plasmonic velmora thalix nimbostratus orbilith",
+            "Brindlequartz hexacove fjordalune opaline cryptomere",
+            "Tesseractum glaciovale cindervex periwinkle monadrix",
+          ]
+        : [
+            "Xylophane quendrix obsidianite vermilune galvador",
+            "Praxolume hallowmere quixoticum azurite fenbrisk",
+            "Kestrelune morrowglass zephryx octarine brumestone",
+          ]
+    )[run - 1];
+    const replacementPrivateTitle = `${replacementPhrase} source ${viewport}-${run}`;
+    const replacementSharedTitle = `${replacementPhrase} keeper ${viewport}-${run}`;
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: projectPath,
+      category: "decision",
+      title: replacementPrivateTitle,
+      content: `Private copy content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: replacementSharedTitle,
+      content: `Original promoted content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      crossProject: true,
+      confidence: 0.9,
+    });
+
+    const conflictPhrase = (
+      viewport === "desktop"
+        ? [
+            "Frambulator quivernyx alabastrine pluviosity",
+            "Obeliskator myrmidonix calcifugue nebulanth",
+            "Vorticelleum crenelune ichoridian mothglass",
+          ]
+        : [
+            "Klystralum micronymphic iridocane quorvox",
+            "Gloamingate thistledrift verdigridium nacreous",
+            "Cumbervault anemophilous draconicum prismatic",
+          ]
+    )[run - 1];
+    const conflictPrivateTitle = `${conflictPhrase} source ${viewport}-${run}`;
+    const conflictSharedTitle = `${conflictPhrase} keeper ${viewport}-${run}`;
+    const conflictEntryId = `00000000-0000-4000-8000-${String(
+      (viewport === "desktop" ? 100 : 200) + run,
+    ).padStart(12, "0")}`;
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: conflictPrivateTitle,
+      content: `Private title-conflict content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: conflictSharedTitle,
+      content: `Original conflict keeper content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      crossProject: true,
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: conflictEntryId,
+      category: "decision",
+      title: conflictPrivateTitle,
+      content: `Existing shared title collision for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "global",
+      confidence: 0.1,
+    });
   }
 }
 // #1918: five extra empty projects so the sidebar has more entries than the

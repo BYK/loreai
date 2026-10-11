@@ -51,6 +51,7 @@ export interface DedupApplyDecision {
   keepId: string;
   mergeIds: string[];
   expectedRevisions: Record<string, number>;
+  contentFromId?: string;
 }
 
 export interface DedupApplyBody {
@@ -64,7 +65,7 @@ export interface DedupApplyBody {
 const dedupApplyDetail = type({
   id: nonEmptyString,
   reason:
-    "'not_found' | 'scope_mismatch' | 'stale_revision' | 'conflicting_groups'",
+    "'not_found' | 'scope_mismatch' | 'stale_revision' | 'title_conflict' | 'conflicting_groups'",
   "expectedRevision?": nonNegInt,
   "actualRevision?": nonNegInt,
 });
@@ -74,7 +75,7 @@ const dedupGroupRefused = type({
   keepId: nonEmptyString,
   mergeIds: nonEmptyString.array(),
   error: {
-    code: "'not_found' | 'scope_mismatch' | 'stale_revision' | 'conflicting_groups'",
+    code: "'not_found' | 'scope_mismatch' | 'stale_revision' | 'title_conflict' | 'conflicting_groups'",
     message: "string",
     details: dedupApplyDetail.array(),
   },
@@ -92,6 +93,12 @@ const dedupGroupApplied = type({
   keepRevision: nonNegInt,
   merged: dedupMergedEntry.array(),
   appliedAt: epochMs,
+  "contentFrom?": {
+    id: nonEmptyString,
+    revision: nonNegInt,
+    replacedKeepRevision: nonNegInt,
+    keepVersionId: nonEmptyString,
+  },
 });
 
 export const dedupApplyReceipt = type({

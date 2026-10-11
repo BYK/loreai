@@ -36,6 +36,7 @@ export function markFrom(
   decision: DedupReviewMark["decision"],
   keepId: string,
   projectId = group.project_id ?? "shared",
+  contentFromId?: string,
 ): DedupReviewMark {
   const keep = group.candidates.find(
     (candidate) => candidate.logical_id === keepId,
@@ -46,6 +47,8 @@ export function markFrom(
     .map((candidate) => candidate.logical_id)
     .filter((id) => id !== keepId)
     .sort();
+  if (contentFromId !== undefined && !mergeIds.includes(contentFromId))
+    throw new Error("Content source must be a merge candidate in the group");
   return {
     key: `${projectId}/${group.group_id}`,
     kind: "dedup",
@@ -60,6 +63,7 @@ export function markFrom(
         candidate.revision,
       ]),
     ),
+    ...(contentFromId === undefined ? {} : { contentFromId }),
     markedAt: Date.now(),
   };
 }
@@ -69,21 +73,26 @@ export function loreFileConsequence(
   keepId: string,
   routeProjectId: string,
   projects: readonly { id: string; name: string | null }[],
+  contentFromId?: string,
 ): string {
-  const affectedProjects = [
-    ...new Set(
-      group.candidates
-        .filter(
-          (candidate) =>
-            candidate.logical_id !== keepId && candidate.project_id !== null,
-        )
-        .map((candidate) => candidate.project_id as string),
-    ),
-  ];
-  if (affectedProjects.length === 0)
+  const affectedProjects = group.candidates
+    .filter(
+      (candidate) =>
+        candidate.logical_id !== keepId && candidate.project_id !== null,
+    )
+    .map((candidate) => candidate.project_id as string);
+  if (contentFromId !== undefined) {
+    const keeper = group.candidates.find(
+      (candidate) => candidate.logical_id === keepId,
+    );
+    if (keeper?.project_id !== null && keeper?.project_id !== undefined)
+      affectedProjects.push(keeper.project_id);
+  }
+  const uniqueProjects = [...new Set(affectedProjects)];
+  if (uniqueProjects.length === 0)
     return ".lore.md files are not affected (the removed entries belong to no project)";
 
-  const labels = affectedProjects.map((id) =>
+  const labels = uniqueProjects.map((id) =>
     id === routeProjectId
       ? "this project"
       : (projects.find((project) => project.id === id)?.name ?? id),

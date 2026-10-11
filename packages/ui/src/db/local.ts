@@ -43,6 +43,7 @@ export interface DedupReviewMark {
   keepId: string;
   mergeIds: string[];
   expectedRevisions: Record<string, number>;
+  contentFromId?: string;
   markedAt: number;
 }
 

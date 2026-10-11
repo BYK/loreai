@@ -137,6 +137,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
     route: "/projects/p/dedup/apply",
     schema: dedupApplyReceipt,
   },
+  "dedup-apply-gateway.json": {
+    route: "/projects/p/dedup/apply",
+    schema: dedupApplyReceipt,
+  },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {
     route: "/projects/p/knowledge",

@@ -45,7 +45,7 @@ const GROUP: DedupPreviewGroup = {
 };
 
 describe("dedup review decisions", () => {
-  it("builds a local mark with sorted logical merge ids and revision snapshot", () => {
+  it("builds a mark with sorted logical merge ids and revision snapshot", () => {
     expect(markFrom(GROUP, "accept", "k2", "p1")).toMatchObject({
       key: "p1/project:abc",
       kind: "dedup",
@@ -56,6 +56,15 @@ describe("dedup review decisions", () => {
       mergeIds: ["k1"],
       expectedRevisions: { k1: 3, k2: 2 },
     });
+    expect(markFrom(GROUP, "accept", "k2", "p1")).not.toHaveProperty(
+      "contentFromId",
+    );
+    expect(markFrom(GROUP, "accept", "k2", "p1", "k1")).toMatchObject({
+      contentFromId: "k1",
+    });
+    expect(() => markFrom(GROUP, "accept", "k2", "p1", "k2")).toThrow(
+      "Content source must be a merge candidate in the group",
+    );
   });
 
   it("distinguishes pending, accepted, skipped and stale marks", () => {
@@ -219,5 +228,28 @@ describe("dedup review decisions", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("includes the keeper project when replacing its content", () => {
+    const projectShared = {
+      ...GROUP,
+      pool: "project_shared" as const,
+      candidates: GROUP.candidates.map((candidate) =>
+        candidate.logical_id === "k1"
+          ? { ...candidate, project_id: "keeper-project" }
+          : { ...candidate, project_id: "p1" },
+      ),
+    };
+    expect(
+      loreFileConsequence(
+        projectShared,
+        "k1",
+        "p1",
+        [{ id: "keeper-project", name: "Keeper Project" }],
+        "k2",
+      ),
+    ).toBe(
+      "Regenerates .lore.md for this project, Keeper Project (when .lore.md export is enabled)",
+    );
   });
 });

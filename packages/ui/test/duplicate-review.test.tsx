@@ -125,6 +125,16 @@ function receiptFor(
                 tombstoneVersionId: `${id}-tombstone`,
               })),
               appliedAt: 1_700_000_000_001,
+              ...(decision.contentFromId === undefined
+                ? {}
+                : {
+                    contentFrom: {
+                      id: decision.contentFromId,
+                      revision: 1,
+                      replacedKeepRevision: 1,
+                      keepVersionId: `${decision.keepId}-version-2`,
+                    },
+                  }),
             },
           ]
         : [];
@@ -546,6 +556,8 @@ describe("DuplicateReview", () => {
     expect(sharedBody?.reviewedAt).toBe(expectedSharedReviewedAt);
     expect(projectBody?.actor).toBe("lore-ui");
     expect(sharedBody?.actor).toBe("lore-ui");
+    expect(projectBody?.decisions[0]).not.toHaveProperty("contentFromId");
+    expect(sharedBody?.decisions[0]).not.toHaveProperty("contentFromId");
     expect(projectBody?.operationId).not.toBe(sharedBody?.operationId);
     const operations = await screen.findAllByTestId("dedup-apply-operation");
     expect(operations).toHaveLength(2);
@@ -756,7 +768,7 @@ describe("DuplicateReview", () => {
       "Entry first-merge",
     );
     expect(await screen.findByTestId("refused-group")).toHaveTextContent(
-      "Changed since you reviewed it — rescan and review again",
+      "This group changed since you reviewed it — rescan and review again",
     );
     expect(screen.getAllByTestId("applied-group")).toHaveLength(1);
     expect(screen.getAllByTestId("refused-group")).toHaveLength(1);

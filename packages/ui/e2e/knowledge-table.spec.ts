@@ -12,12 +12,8 @@ async function loreProjectId(page: Page) {
 
 test.describe("knowledge table routes", () => {
   test("filter and sort state survives reload", async ({ page }) => {
-    await page.goto("/ui");
-    const project = page
-      .getByRole("navigation", { name: "Workspace" })
-      .getByTestId("nav-project")
-      .first();
-    await project.click();
+    const projectId = await loreProjectId(page);
+    await page.goto(`/ui/projects/${projectId}`);
     await page.getByRole("link", { name: /Browse knowledge/ }).click();
     await page.getByRole("button", { name: "category" }).click();
     await page.getByRole("option", { name: "gotcha" }).click();
