@@ -85,9 +85,9 @@ export const AppBar: Component<{
   onOpenNav?: () => void;
   searchProjectId?: string;
 }> = (props) => (
-  <header class="flex h-12 flex-none items-center gap-2 border-b border-line bg-surface px-3 sm:gap-4 sm:px-4">
+  <header class="flex h-12 min-w-0 flex-none items-center gap-2 border-b border-line bg-surface px-3 sm:gap-4 sm:px-4">
     <Show when={props.leading}>
-      <span class="min-[1100px]:hidden">{props.leading}</span>
+      <span class="min-w-0 min-[1100px]:hidden">{props.leading}</span>
     </Show>
     <A
       href="/"
@@ -97,13 +97,17 @@ export const AppBar: Component<{
       <Logo wordmark="sm" />
     </A>
     <Show when={props.chips}>
-      {(chips) => <div class="shrink-0">{chips()}</div>}
+      {(chips) => (
+        <div class="hidden shrink-0 min-[760px]:block">{chips()}</div>
+      )}
     </Show>
     <SearchEntry searchProjectId={props.searchProjectId} />
-    <div class="ml-auto flex items-center gap-2">
+    <div class="ml-auto flex shrink-0 items-center gap-2">
       <FolkStatus />
       <ThemeToggle />
-      <Avatar label="You" />
+      <span class="hidden min-[760px]:inline-flex">
+        <Avatar label="You" />
+      </span>
       <Show when={props.onOpenNav}>
         <Button
           variant="outline"

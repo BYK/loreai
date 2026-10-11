@@ -69,8 +69,8 @@
   --hairline: color-mix(in srgb, var(--line) 52%, var(--surface));
   --selected: var(--pastel-sage);
   --selected-text: var(--g0);
-  --unread: #dfc5c2;
-  --unread-soft: color-mix(in srgb, var(--pastel-rose) 45%, var(--surface));
+  --unread: var(--accent-soft-text);
+  --unread-soft: color-mix(in srgb, var(--pastel-sage) 45%, var(--surface));
 
   /* Elevation — the website's two card shadows (theme.css .card / .feature). */
   --shadow-soft: 0 4px 14px rgba(26, 51, 32, 0.06);
@@ -118,8 +118,8 @@
   --hairline: color-mix(in srgb, var(--line) 48%, var(--surface));
   --selected: var(--pastel-sage);
   --selected-text: #dce9de;
-  --unread: #493331;
-  --unread-soft: color-mix(in srgb, var(--pastel-rose) 65%, var(--surface));
+  --unread: var(--accent-soft-text);
+  --unread-soft: color-mix(in srgb, var(--pastel-sage) 65%, var(--surface));
 
   --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.28);
   --shadow-lifted: 0 14px 34px rgba(0, 0, 0, 0.38); /* website .modal */

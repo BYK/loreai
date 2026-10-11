@@ -12,6 +12,8 @@ const STORES = [
   "drafts",
   "pendingChanges",
   "reviewDecisions",
+  "activityState",
+  "activityFolders",
 ] as const;
 
 async function deleteDatabase(page: Page) {
@@ -32,6 +34,47 @@ async function createV1(page: Page) {
       req.onupgradeneeded = () => {
         const store = req.result.createObjectStore("meta", { keyPath: "key" });
         store.put({ key: "e2e-legacy", value: "kept" });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+  });
+}
+
+async function createV4(page: Page) {
+  await deleteDatabase(page);
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open("lore-ui", 4);
+      req.onupgradeneeded = () => {
+        const database = req.result;
+        database
+          .createObjectStore("meta", { keyPath: "key" })
+          .put({ key: "e2e-legacy", value: "kept" });
+        for (const name of [
+          "projects",
+          "knowledge",
+          "sessions",
+          "entities",
+          "messageBlocks",
+        ]) {
+          const store = database.createObjectStore(name, { keyPath: "key" });
+          store.createIndex("by-scope", "scope");
+          store.createIndex("by-accessed", "accessedAt");
+          store.createIndex("by-stored", "storedAt");
+        }
+        database.createObjectStore("collections", { keyPath: "key" });
+        const drafts = database.createObjectStore("drafts", { keyPath: "key" });
+        drafts.createIndex("by-updated", "updatedAt");
+        const pending = database.createObjectStore("pendingChanges", {
+          keyPath: "key",
+        });
+        pending.createIndex("by-created", "createdAt");
+        const decisions = database.createObjectStore("reviewDecisions", {
+          keyPath: "key",
+        });
+        decisions.createIndex("by-project", "projectId");
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -97,16 +140,16 @@ async function expectDatabaseVersion(page: Page, version: number) {
 }
 
 test.describe("IndexedDB cache migrations and recovery", () => {
-  test("upgrades v1 without dropping meta and creates the complete v4 schema", async ({
+  test("upgrades v1 without dropping meta and creates the complete v5 schema", async ({
     page,
   }) => {
     await page.goto("/ui");
     await createV1(page);
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
+    await expectDatabaseVersion(page, 5);
     const info = await openInfo(page);
-    expect(info.version).toBe(4);
+    expect(info.version).toBe(5);
     expect(info.stores.sort()).toEqual([...STORES].sort());
     for (const name of ["projects", "knowledge", "sessions", "messageBlocks"]) {
       expect(info.indexes[name]?.sort()).toEqual(
@@ -116,6 +159,19 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     expect(info.indexes.drafts).toEqual(["by-updated"]);
     expect(info.indexes.pendingChanges).toEqual(["by-created"]);
     expect(info.indexes.reviewDecisions).toEqual(["by-project"]);
+    expect(info.legacyValue).toEqual({ key: "e2e-legacy", value: "kept" });
+  });
+
+  test("upgrades v4 activity stores without dropping existing data", async ({
+    page,
+  }) => {
+    await page.goto("/ui");
+    await createV4(page);
+    await page.reload();
+    await expectConnectionStatus(page);
+    const info = await openInfo(page);
+    expect(info.version).toBe(5);
+    expect(info.stores.sort()).toEqual([...STORES].sort());
     expect(info.legacyValue).toEqual({ key: "e2e-legacy", value: "kept" });
   });
 
@@ -237,7 +293,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
+    await expectDatabaseVersion(page, 5);
     expect((await openInfo(page)).stores.sort()).toEqual([...STORES].sort());
   });
 
@@ -249,7 +305,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await page.evaluate(
       () =>
         new Promise<void>((resolve, reject) => {
-          const req = indexedDB.open("lore-ui", 4);
+          const req = indexedDB.open("lore-ui", 6);
           req.onupgradeneeded = () =>
             req.result.createObjectStore("meta", { keyPath: "key" });
           req.onsuccess = () => {
@@ -261,8 +317,8 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
-    expect((await openInfo(page)).version).toBe(4);
+    await expectDatabaseVersion(page, 5);
+    expect((await openInfo(page)).version).toBe(5);
   });
 
   test("survives user-cleared site data during SPA navigation", async ({
@@ -292,7 +348,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         const databases = await page.evaluate(() => indexedDB.databases());
         return databases.find((db) => db.name === "lore-ui")?.version;
       })
-      .toBe(4);
-    expect((await openInfo(page)).version).toBe(4);
+      .toBe(5);
+    expect((await openInfo(page)).version).toBe(5);
   });
 });

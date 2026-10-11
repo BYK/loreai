@@ -11,6 +11,10 @@ import type { Loader } from "~/lib/loader";
 import type { ProjectSummary } from "~/contracts";
 import { openLoreDb, type LoreUiDb } from "~/db";
 import { createAppState, type AppState } from "~/state";
+import {
+  createActivityListState,
+  type ActivityListState,
+} from "~/state/activity-list";
 
 export interface Workspace {
   client: ApiClient;
@@ -18,6 +22,7 @@ export interface Workspace {
   projects: Loader<ProjectSummary[]>;
   connection: ConnectionStore;
   state: AppState;
+  activityList: ActivityListState;
   projectById: (id: string | null | undefined) => ProjectSummary | undefined;
   /** Runs a read against the gateway and mirrors its outcome into the connection state. */
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
@@ -60,12 +65,14 @@ export const WorkspaceProvider: ParentComponent<{
     db: props.db ?? openLoreDb(),
     tracked,
   });
+  const activityList = createActivityListState();
 
   const ws: Workspace = {
     client,
     projects: state.projects.list,
     connection,
     state,
+    activityList,
     projectById: state.projects.byId,
     tracked,
   };

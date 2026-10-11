@@ -18,6 +18,69 @@ async function firstVisibleRow(scroller: Locator) {
   });
 }
 
+async function installPr3KnowledgeQuery(page: Page) {
+  await page.route("**/api/v1/activity**", async (route) => {
+    const requestedUrl = new URL(route.request().url());
+    if (requestedUrl.searchParams.get("q") !== "type:knowledge PR3") {
+      await route.continue();
+      return;
+    }
+    const fixtureUrl = new URL(requestedUrl);
+    fixtureUrl.searchParams.set("q", "type:knowledge");
+    fixtureUrl.searchParams.delete("cursor");
+    const response = await route.fetch({ url: fixtureUrl.toString() });
+    const activity = (await response.json()) as {
+      items: Array<{ title: string }>;
+    };
+    await route.fulfill({
+      response,
+      json: {
+        ...activity,
+        items: activity.items.map((item) => ({
+          ...item,
+          title: `PR3 ${item.title}`,
+        })),
+      },
+    });
+  });
+}
+
+async function waitForUnpinnedActivity(page: Page, keys: string[]) {
+  await page.waitForFunction(async (activityKeys) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("lore-ui");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const records = await new Promise<
+      Array<{ key: string; pinned_at?: number }>
+    >((resolve, reject) => {
+      const request = db
+        .transaction("activityState", "readonly")
+        .objectStore("activityState")
+        .getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return activityKeys.every((key) =>
+      records.some((record) => record.key === key && !record.pinned_at),
+    );
+  }, keys);
+}
+
+async function dispatchSpace(page: Page) {
+  return page.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
 async function expectActivityAnchorAfterReturn(
   page: Page,
   useBrowserBack: boolean,
@@ -89,6 +152,82 @@ async function expectActivityAnchorAfterReturn(
   if (!after) throw new Error("list has no visible row after returning");
   expect(after.key).toBe(before.key);
   expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(1);
+}
+
+async function expectFilteredKnowledgeScrollAfterReturn(
+  page: Page,
+  useBrowserBack: boolean,
+) {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await installPr3KnowledgeQuery(page);
+  await page.goto(`/ui?q=${encodeURIComponent("type:knowledge PR3")}`);
+
+  const scroller = page.getByTestId("activity-list-body");
+  await expect(scroller).toBeVisible();
+  await expect
+    .poll(() => scroller.locator("[data-list-key]").count())
+    .toBeGreaterThan(10);
+  await scroller.evaluate((element) => {
+    element.scrollTop = 244;
+  });
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop))
+    .toBe(244);
+  const before = await firstVisibleRow(scroller);
+  if (!before) throw new Error("filtered list has no visible row");
+
+  const targetKey = await scroller.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const target = [
+      ...element.querySelectorAll<HTMLElement>("[data-list-key]"),
+    ].find((candidate) => {
+      const rowBounds = candidate.getBoundingClientRect();
+      return (
+        candidate.dataset.activityKind === "knowledge" &&
+        rowBounds.top >= bounds.top &&
+        rowBounds.bottom <= bounds.bottom
+      );
+    });
+    return target?.dataset.listKey ?? null;
+  });
+  if (!targetKey) throw new Error("filtered list has no fully visible row");
+  const target = scroller.locator(`[data-list-key="${targetKey}"]`);
+  const title = target.getByTestId("activity-title");
+  await expect(title).toHaveClass(/font-semibold/);
+  const targetBounds = await target.boundingBox();
+  if (!targetBounds) throw new Error("activity row has no bounding box");
+  await page.mouse.click(
+    targetBounds.x + targetBounds.width / 2,
+    targetBounds.y + targetBounds.height / 2,
+  );
+  await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/knowledge\//);
+  await expect(scroller).toBeHidden();
+
+  if (useBrowserBack) await page.goBack();
+  else await page.getByTestId("mobile-back").click();
+  await expect(page).toHaveURL(/\/ui\/?(\?q=[^#]*)?$/);
+  await expect(scroller).toBeVisible();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  await expect
+    .poll(() => scroller.evaluate((element) => element.scrollTop))
+    .toBe(244);
+  const after = await firstVisibleRow(scroller);
+  if (!after) throw new Error("filtered list has no visible row after return");
+  expect(after.key).toBe(before.key);
+  expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(2);
+  await expect(title).toHaveClass(/font-medium/);
+  await expect(title).not.toHaveClass(/font-semibold/);
+  await expect(target.getByTestId("activity-unread-chip")).toHaveClass(
+    /bg-soft/,
+  );
+  await expect(target.getByTestId("activity-unread-chip")).toHaveClass(
+    /text-muted/,
+  );
 }
 
 async function expectPagedActivityScrollAfterReturn(
@@ -191,6 +330,36 @@ async function expectPagedActivityScrollAfterReturn(
 }
 
 test.describe("persistent workspace panes", () => {
+  test("Space only advances unread activity from an activity document", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop workspace");
+    await page.goto("/ui/costs");
+    await expect(page.getByTestId("costs-page")).toBeVisible();
+    await expect
+      .poll(() =>
+        page
+          .locator(
+            '[data-testid="activity-item"] [data-testid="activity-unread-chip"]',
+          )
+          .count(),
+      )
+      .toBeGreaterThan(0);
+
+    expect(await dispatchSpace(page)).toBe(false);
+    await expect(page).toHaveURL(/\/ui\/costs$/);
+
+    const activity = page
+      .locator(
+        '[data-testid="activity-item"][data-activity-kind="knowledge"]:has([data-testid="activity-unread-chip"].bg-accent-soft)',
+      )
+      .first();
+    await expect(activity).toBeVisible();
+    await activity.locator("a").click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/knowledge\/[^/?]+/);
+    expect(await dispatchSpace(page)).toBe(true);
+  });
+
   test("keeps the mobile app bar within 360px and 400px viewports", async ({
     page,
   }) => {
@@ -232,6 +401,103 @@ test.describe("persistent workspace panes", () => {
     }
   });
 
+  test("keeps every document app bar child inside a 400px viewport in both themes", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 400, height: 800 });
+    await page.goto("/ui");
+    await page.getByTestId("activity-item").first().click();
+    await expect(page.getByTestId("document-pane")).toBeVisible();
+    const appBar = page.getByRole("banner");
+    const themeCycle = page.getByTestId("theme-cycle");
+    const themeRoot = page.getByTestId("theme-toggle");
+
+    for (const choice of ["light", "dark"]) {
+      for (let step = 0; step < 3; step += 1) {
+        if ((await themeRoot.getAttribute("data-theme-choice")) === choice) {
+          break;
+        }
+        await themeCycle.click();
+      }
+      await expect(themeRoot).toHaveAttribute("data-theme-choice", choice);
+      const overflow = await appBar.evaluate((header) => {
+        const bounds = Array.from(header.querySelectorAll<HTMLElement>("*"))
+          .filter((element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              Number(style.opacity) !== 0 &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          })
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              tag: element.tagName,
+              label:
+                element.getAttribute("aria-label") ??
+                element.textContent?.trim().slice(0, 30),
+              left: rect.left,
+              right: rect.right,
+            };
+          });
+        return {
+          widths: { client: header.clientWidth, scroll: header.scrollWidth },
+          children: bounds.filter(
+            (rect) => rect.left < 0 || rect.right > window.innerWidth,
+          ),
+        };
+      });
+      expect(overflow.widths.scroll).toBeLessThanOrEqual(
+        overflow.widths.client,
+      );
+      expect(overflow.children).toEqual([]);
+    }
+  });
+
+  test("matches session unread rule color to the list unread chip", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop reader color");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/ui?q=${encodeURIComponent("type:session")}`);
+    const row = page
+      .locator('[data-testid="activity-item"][data-activity-kind="session"]')
+      .first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("session row has no stable key");
+    await row.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Unread", exact: true }).click();
+    await row.locator("a").click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\//);
+    const unreadMessage = page.locator("[data-unread]").first();
+    await expect(unreadMessage).toBeVisible();
+    const colors = await unreadMessage.evaluate((message, listKey) => {
+      const chip = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="activity-item"][data-activity-kind="session"]',
+        ),
+      )
+        .filter((item) => item.dataset.listKey !== listKey)
+        .map((item) =>
+          item.querySelector<HTMLElement>(
+            '[data-testid="activity-unread-chip"]',
+          ),
+        )
+        .find((candidate) => candidate !== null);
+      if (!chip) throw new Error("session unread chip was not retained");
+      return {
+        rule: getComputedStyle(message).borderLeftColor,
+        chip: getComputedStyle(chip).color,
+      };
+    }, key);
+    expect(colors.rule).toBe(colors.chip);
+  });
+
   test("keeps the same activity list and selection while opening a session route", async ({
     page,
   }, testInfo) => {
@@ -254,7 +520,7 @@ test.describe("persistent workspace panes", () => {
     await expect(item).toBeInViewport();
     await item.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+/);
-    await expect(item).toHaveAttribute("aria-current", "page");
+    await expect(item.locator("a")).toHaveAttribute("aria-current", "page");
     await expect
       .poll(() =>
         list.evaluate(
@@ -530,6 +796,21 @@ test.describe("persistent workspace panes", () => {
     await expectActivityAnchorAfterReturn(page, true);
   });
 
+  for (const back of [
+    { name: "Back link", useBrowserBack: false },
+    { name: "browser Back", useBrowserBack: true },
+  ]) {
+    test(`restores filtered mobile scroll and read state via ${back.name}`, async ({
+      page,
+    }, testInfo) => {
+      test.skip(
+        !testInfo.project.name.includes("mobile"),
+        "filtered mobile activity list",
+      );
+      await expectFilteredKnowledgeScrollAfterReturn(page, back.useBrowserBack);
+    });
+  }
+
   for (const scenario of [
     { name: "first page", loadSecondPage: false },
     { name: "after loading page two", loadSecondPage: true },
@@ -553,4 +834,167 @@ test.describe("persistent workspace panes", () => {
       });
     }
   }
+
+  test("bulk archive and Inbox actions update activity filters", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop bulk toolbar");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const row = page.getByTestId("activity-item").first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Archive", exact: true }).click();
+
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("in:archive");
+    await search.press("Enter");
+    const archivedRow = page.locator(`[data-list-key="${key}"]`);
+    await expect(archivedRow).toBeVisible();
+    await archivedRow.getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Inbox", exact: true }).click();
+
+    await page.getByRole("searchbox", { name: "Search list" }).fill("in:inbox");
+    await page.getByRole("searchbox", { name: "Search list" }).press("Enter");
+    await expect(page.locator(`[data-list-key="${key}"]`)).toBeVisible();
+  });
+
+  test("unpins all checked rows from is:pinned and persists both transitions", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop bulk toolbar");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const rows = page.getByTestId("activity-item");
+    await expect.poll(() => rows.count()).toBeGreaterThan(1);
+    const keys = [
+      await rows.nth(0).getAttribute("data-list-key"),
+      await rows.nth(1).getAttribute("data-list-key"),
+    ];
+    if (!keys[0] || !keys[1])
+      throw new Error("activity rows have no stable key");
+    const activityKeys = keys.filter((key): key is string => key !== null);
+    await rows.nth(0).getByRole("checkbox").check();
+    await rows.nth(1).getByRole("checkbox").check();
+    await page.getByRole("button", { name: "Pin", exact: true }).click();
+
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("is:pinned");
+    await search.press("Enter");
+    await expect(page.getByTestId("activity-item")).toHaveCount(2);
+    for (const key of activityKeys) {
+      const row = page.locator(`[data-list-key="${key}"]`);
+      await expect(row).toBeVisible();
+      await row.getByRole("checkbox").check();
+    }
+    await page.getByRole("button", { name: "Unpin", exact: true }).click();
+    await expect(page.getByTestId("activity-item")).toHaveCount(0);
+    await waitForUnpinnedActivity(page, activityKeys);
+    await page.reload();
+    await expect(page.getByTestId("activity-item")).toHaveCount(0);
+  });
+
+  test("creates a folder and moves selected activity into it", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name.includes("mobile"), "desktop bulk toolbar");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const row = page.getByTestId("activity-item").first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.getByRole("checkbox").check();
+    const moveButton = page.getByRole("button", {
+      name: "Move to folder",
+      exact: true,
+    });
+    await moveButton.click();
+    const newFolder = page
+      .getByTestId("activity-folder-menu")
+      .getByRole("button", { name: "New folder…" });
+    await expect(newFolder).toBeVisible();
+    const newFolderBounds = await newFolder.boundingBox();
+    if (!newFolderBounds) throw new Error("folder option has no bounding box");
+    await page.mouse.click(
+      newFolderBounds.x + newFolderBounds.width / 2,
+      newFolderBounds.y + newFolderBounds.height / 2,
+    );
+    await page.getByLabel("Folder name").fill("Work notes");
+    await page.getByTestId("activity-folder-save").click();
+
+    await page
+      .getByTestId("activity-item")
+      .nth(1)
+      .getByRole("checkbox")
+      .check();
+    await moveButton.click();
+    const folderOption = page
+      .getByTestId("activity-folder-menu")
+      .getByRole("button", { name: "Work notes", exact: true });
+    await expect(folderOption).toBeVisible();
+    const folderOptionBounds = await folderOption.boundingBox();
+    if (!folderOptionBounds)
+      throw new Error("folder option has no bounding box");
+    await page.mouse.click(
+      folderOptionBounds.x + folderOptionBounds.width / 2,
+      folderOptionBounds.y + folderOptionBounds.height / 2,
+    );
+    await expect(page.getByTestId("activity-folder-menu")).toBeHidden();
+    await page
+      .getByTestId("activity-folder")
+      .filter({ hasText: "Work notes" })
+      .click();
+    await expect(page.locator(`[data-list-key="${key}"]`)).toBeVisible();
+  });
+
+  test("opening knowledge activity marks it read and keeps document actions", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop document actions",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", { name: "Search list" });
+    await search.fill("type:knowledge is:unread");
+    await search.press("Enter");
+    const row = page
+      .locator('[data-testid="activity-item"][data-activity-kind="knowledge"]')
+      .first();
+    await expect(row).toBeVisible();
+    const key = await row.getAttribute("data-list-key");
+    if (!key) throw new Error("activity row has no stable key");
+    await row.locator("a").click();
+    await expect(page).toHaveURL(
+      /\/ui\/(projects\/[^/]+\/knowledge|knowledge)\//,
+    );
+    await expect(page.getByTestId("workspace-next-unread")).toBeVisible();
+    await expect(page.getByTestId("workspace-next-item")).toBeEnabled();
+    await expect(page.locator(`[data-list-key="${key}"]`)).toHaveCount(0);
+  });
+
+  test("participant search commits a with query", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop participant pane",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    const search = page.getByRole("searchbox", {
+      name: "Search participants",
+    });
+    await expect(search).toBeVisible();
+    await search.fill("You");
+    await page
+      .getByTestId("workspace-participant")
+      .filter({ hasText: "You" })
+      .click();
+    await expect(page).toHaveURL(/q=with%3Auser/);
+  });
 });

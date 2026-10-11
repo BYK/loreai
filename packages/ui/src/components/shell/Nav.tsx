@@ -20,6 +20,7 @@ import {
 } from "@loreai/core/activity-query";
 import { pins } from "~/state/pins";
 import { savedSearches, type SavedSearch } from "~/state/saved-searches";
+import type { ActivityFolderRecord } from "~/db";
 
 const NavItem: Component<{
   href: string;
@@ -93,6 +94,10 @@ export interface NavProps {
   query?: string;
   footer?: JSX.Element;
   class?: string;
+  folders?: readonly ActivityFolderRecord[];
+  onNewFolder?: () => void;
+  onEditFolder?: (folder: ActivityFolderRecord) => void;
+  onDeleteFolder?: (key: string) => void;
 }
 
 export const Nav: Component<NavProps> = (props) => {
@@ -296,6 +301,59 @@ export const Nav: Component<NavProps> = (props) => {
             </button>
           </div>
         )}
+      </For>
+      <div class="mt-2 flex items-center justify-between px-3 text-[10px] uppercase tracking-[0.1em] text-muted">
+        <span>Folders</span>
+        <button
+          type="button"
+          aria-label="Create folder"
+          title="Create folder"
+          data-testid="activity-folder-create"
+          class="rounded px-1 text-xs hover:bg-soft"
+          onClick={() => props.onNewFolder?.()}
+        >
+          +
+        </button>
+      </div>
+      <For each={props.folders ?? []}>
+        {(folder) => {
+          const query = `in:folder:${
+            /\s/.test(folder.name) ? `"${folder.name}"` : folder.name
+          }`;
+          return (
+            <div class="group flex items-center gap-1">
+              <NavItem
+                href={withWorkspaceQuery("/", query)}
+                active={currentQuery() === query}
+                testId="activity-folder"
+              >
+                {folder.name}
+              </NavItem>
+              <button
+                type="button"
+                aria-label={`Rename ${folder.name}`}
+                data-testid="activity-folder-rename"
+                class="rounded px-1 text-[10px] text-muted hover:bg-soft"
+                onClick={() => props.onEditFolder?.(folder)}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                aria-label={`Delete ${folder.name}`}
+                data-testid="activity-folder-delete"
+                class="rounded px-1 text-[10px] text-muted hover:bg-soft"
+                onClick={() => {
+                  if (globalThis.confirm(`Delete folder "${folder.name}"?`)) {
+                    props.onDeleteFolder?.(folder.key);
+                  }
+                }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        }}
       </For>
       <NavHeading>Memory</NavHeading>
       <NavItem href="/entities" active={!!atEntities()} testId="nav-entities">

@@ -8,20 +8,21 @@ import {
   onCleanup,
   Show,
 } from "solid-js";
-import { A } from "@solidjs/router";
+import { A, useLocation } from "@solidjs/router";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
 import { parseActivityQuery } from "@loreai/core/activity-query";
-import type { ActivityItem } from "~/contracts";
 import { useWorkspace } from "~/routes/workspace";
 import { ACTIVITY_KIND_UI } from "~/lib/activity-kinds";
 import { formatActivityTime } from "~/lib/format";
 import { withWorkspaceQuery } from "~/lib/href";
 import {
+  activityUnreadChip,
   activityItemKey,
   clientFilter,
-  DEFAULT_ACTIVITY_LOCAL_STATE,
+  unreadCount,
 } from "~/state/activity-filter";
+import { Avatar } from "~/components/lore/Avatar";
 
 const PAGE_SIZE = 50;
 const PAGE_BUDGET = 5;
@@ -34,7 +35,10 @@ export const ActivityListBody: Component<{
   ) => void;
 }> = (props) => {
   const ws = useWorkspace();
-  const [items, setItems] = createSignal<ActivityItem[]>([]);
+  const items = ws.activityList.items;
+  const setItems = ws.activityList.setItems;
+  const selectedKeys = ws.activityList.selectedKeys;
+  const setSelectedKeys = ws.activityList.setSelectedKeys;
   const [nextPage, setNextPage] = createSignal<{
     query: string;
     cursor: string;
@@ -48,6 +52,7 @@ export const ActivityListBody: Component<{
   let requestActive = false;
 
   const parsed = createMemo(() => parseActivityQuery(props.query));
+  const location = useLocation();
   const errors = () => parsed().errors;
   const hasClientFilters = () =>
     parsed().client.in.length > 0 ||
@@ -55,7 +60,7 @@ export const ActivityListBody: Component<{
     parsed().client.is.length > 0;
   const visibleItems = createMemo(() =>
     items().filter((item) =>
-      clientFilter(item, parsed().client, DEFAULT_ACTIVITY_LOCAL_STATE),
+      clientFilter(item, parsed().client, ws.state.activityLocal.snapshot()),
     ),
   );
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
@@ -71,8 +76,10 @@ export const ActivityListBody: Component<{
     overscan: 6,
   });
   props.onVirtualizedScrollRestore?.((scrollTop, index) => {
-    if (index === null) virtualizer.scrollToOffset(scrollTop);
-    else virtualizer.scrollToIndex(index, { align: "start" });
+    if (index !== null) {
+      virtualizer.scrollToIndex(index, { align: "start" });
+    }
+    virtualizer.scrollToOffset(scrollTop);
   });
   const virtualItems = createMemo(() => virtualizer.getVirtualItems());
 
@@ -151,7 +158,10 @@ export const ActivityListBody: Component<{
   createEffect(
     on(
       () => props.query,
-      (query) => void loadFirst(query),
+      (query) => {
+        setSelectedKeys([]);
+        void loadFirst(query);
+      },
       { defer: false },
     ),
   );
@@ -225,62 +235,153 @@ export const ActivityListBody: Component<{
               {(virtualItem) => {
                 const item = () => visibleItems()[virtualItem.index];
                 return (
-                  <Show when={item()}>
-                    {(activity) => {
-                      const row = activity();
+                  <Show when={item()} keyed>
+                    {(row) => {
                       const registry = ACTIVITY_KIND_UI[row.kind];
+                      const key = activityItemKey(row);
+                      const local = () => ws.state.activityLocal.snapshot();
+                      const unread = () => unreadCount(row, local());
+                      const chip = () => activityUnreadChip(row, local());
+                      const href = () =>
+                        withWorkspaceQuery(registry.href(row), props.query);
+                      const current = () =>
+                        registry.isCurrent(row, location.pathname);
+                      const participants = row.participants.slice(0, 3);
+                      const rest =
+                        row.participants.length - participants.length;
+                      const checked = () => selectedKeys().includes(key);
                       return (
-                        <A
-                          href={withWorkspaceQuery(
-                            registry.href(row),
-                            props.query,
-                          )}
-                          end
-                          activeClass="bg-selected text-selected-text"
-                          data-list-key={`${row.kind}:${row.project_id}:${row.id}`}
+                        <div
+                          data-list-key={key}
                           data-testid="activity-item"
                           data-activity-kind={row.kind}
-                          ref={(element) =>
-                            virtualizer.measureElement(
-                              element as unknown as HTMLDivElement,
-                            )
-                          }
                           data-index={virtualItem.index}
-                          class="group absolute left-0 top-0 flex min-h-[68px] w-full flex-col gap-0.5 border-b border-hairline px-3 py-2 text-left no-underline hover:bg-soft"
+                          ref={(element) => virtualizer.measureElement(element)}
+                          class={`group absolute left-0 top-0 flex min-h-[68px] w-full items-start gap-2 border-b border-hairline px-3 py-2 ${
+                            current() ? "bg-selected text-selected-text" : ""
+                          } ${unread() > 0 && !current() ? "bg-unread-soft" : ""}`}
                           style={{
                             transform: `translateY(${virtualItem.start}px)`,
                           }}
                         >
-                          <span class="flex min-w-0 items-center gap-2">
-                            <span class="min-w-0 flex-1 truncate text-sm font-medium text-text">
-                              {row.title}
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${row.title}`}
+                            checked={checked()}
+                            class="mt-1 accent-accent"
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={(event) =>
+                              setSelectedKeys((keys) =>
+                                event.currentTarget.checked
+                                  ? [...new Set([...keys, key])]
+                                  : keys.filter((selected) => selected !== key),
+                              )
+                            }
+                          />
+                          <A
+                            href={href()}
+                            end
+                            aria-current={current() ? "page" : undefined}
+                            class="flex min-w-0 flex-1 items-center gap-2 text-left no-underline"
+                            onClick={() => {
+                              ws.activityList.setCurrentKey(key);
+                              if (registry.readMode === "item") {
+                                queueMicrotask(() =>
+                                  ws.state.activityLocal.markRead(
+                                    key,
+                                    row.total,
+                                  ),
+                                );
+                              }
+                            }}
+                          >
+                            <span class="flex flex-none items-center -space-x-1">
+                              <For each={participants}>
+                                {(participant) => (
+                                  <span title={participant.label}>
+                                    <Avatar
+                                      label={participant.label.slice(0, 1)}
+                                      kind={
+                                        participant.kind === "agent"
+                                          ? "agent"
+                                          : "person"
+                                      }
+                                      size="sm"
+                                    />
+                                  </span>
+                                )}
+                              </For>
+                              <Show when={rest > 0}>
+                                <span class="inline-flex size-6 items-center justify-center rounded-md bg-soft text-[10px] text-muted">
+                                  +{rest}
+                                </span>
+                              </Show>
                             </span>
-                            <Show when={row.match === "fuzzy"}>
-                              <span
-                                class="shrink-0 text-[10px] text-muted"
-                                aria-label="Approximate match"
-                              >
-                                ~
+                            <span class="min-w-0 flex-1">
+                              <span class="flex min-w-0 items-center">
+                                <span
+                                  class={`truncate text-sm ${
+                                    unread() > 0
+                                      ? "font-semibold"
+                                      : "font-medium"
+                                  } ${current() ? "text-selected-text" : "text-text"}`}
+                                  data-testid="activity-title"
+                                >
+                                  {row.title}
+                                </span>
+                                <span
+                                  class={`truncate text-sm ${
+                                    current()
+                                      ? "text-selected-text/70"
+                                      : "text-muted"
+                                  }`}
+                                >
+                                  {row.snippet ? ` – ${row.snippet}` : ""}
+                                </span>
+                                <Show when={row.match === "fuzzy"}>
+                                  <span
+                                    class="ml-1 shrink-0 text-[10px] text-muted"
+                                    aria-label="Approximate match"
+                                  >
+                                    ~
+                                  </span>
+                                </Show>
                               </span>
-                            </Show>
-                          </span>
-                          <span class="truncate text-xs text-muted">
-                            {row.snippet}
-                          </span>
-                          <span class="flex items-center gap-2 text-[10px] text-muted">
-                            <span>{row.project_name}</span>
-                            <span>·</span>
-                            <span>{registry.label}</span>
-                            <span>·</span>
-                            <time
-                              dateTime={new Date(
-                                row.last_activity_at,
-                              ).toISOString()}
-                            >
-                              {formatActivityTime(row.last_activity_at)}
-                            </time>
-                          </span>
-                        </A>
+                              <span
+                                class={`mt-1 flex min-w-0 items-center gap-1 text-[10px] ${
+                                  current()
+                                    ? "text-selected-text/70"
+                                    : "text-muted"
+                                }`}
+                              >
+                                <span class="min-w-0 truncate">
+                                  {row.project_name} · {registry.label}
+                                </span>
+                                <span class="ml-auto flex flex-none items-center gap-2">
+                                  <time
+                                    dateTime={new Date(
+                                      row.last_activity_at,
+                                    ).toISOString()}
+                                  >
+                                    {formatActivityTime(row.last_activity_at)}
+                                  </time>
+                                  <span
+                                    class={`rounded px-1.5 py-0.5 ${
+                                      current()
+                                        ? "bg-selected text-selected-text"
+                                        : chip().unread
+                                          ? "bg-accent-soft text-accent-soft-text"
+                                          : "bg-soft text-muted"
+                                    }`}
+                                    data-testid="activity-unread-chip"
+                                  >
+                                    {chip().label}
+                                  </span>
+                                </span>
+                              </span>
+                            </span>
+                          </A>
+                        </div>
                       );
                     }}
                   </Show>

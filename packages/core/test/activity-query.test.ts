@@ -129,4 +129,11 @@ describe("parseActivityQuery", () => {
       '""',
     ]);
   });
+
+  test("parses quoted folder names after the folder prefix", () => {
+    const parsed = parseActivityQuery('in:folder:"my folder"');
+
+    expect(parsed.client.folders).toEqual(["my folder"]);
+    expect(parsed.errors).toEqual([]);
+  });
 });

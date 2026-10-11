@@ -6,12 +6,15 @@ import {
   createSignal,
   on,
   onCleanup,
+  onMount,
   Show,
 } from "solid-js";
 import {
   A,
   type RouteSectionProps,
   useMatch,
+  useLocation,
+  useNavigate,
   useResolvedPath,
   useSearchParams,
 } from "@solidjs/router";
@@ -20,6 +23,7 @@ import * as PopoverPrimitive from "@kobalte/core/popover";
 
 import { useWorkspace } from "~/routes/workspace";
 import { ActivityListBody } from "~/components/shell/ActivityListBody";
+import { ActivityBulkToolbar } from "~/components/shell/ActivityBulkToolbar";
 import { ParticipantsPane } from "~/components/shell/ParticipantsPane";
 import { ListPane } from "~/components/shell/ListPane";
 import { Nav } from "~/components/shell/Nav";
@@ -37,8 +41,30 @@ import {
 } from "~/state/pane-layout";
 import { withWorkspaceQuery } from "~/lib/href";
 import { savedSearches } from "~/state/saved-searches";
-import { DEFAULT_ACTIVITY_QUERY } from "@loreai/core/activity-query";
+import {
+  DEFAULT_ACTIVITY_QUERY,
+  parseActivityQuery,
+} from "@loreai/core/activity-query";
+import type { ActivityItem } from "~/contracts";
 import { activitySearchTitle } from "~/lib/activity-search";
+import { ACTIVITY_KIND_UI } from "~/lib/activity-kinds";
+import {
+  activityItemKey,
+  clientFilter,
+  unreadCount,
+} from "~/state/activity-filter";
+import { deriveParticipants } from "~/state/activity-participants";
+import { shouldHandleSpace } from "~/state/activity-navigation";
+import {
+  archive,
+  folderNameError,
+  markRead,
+  markUnread,
+  pin,
+  unarchive,
+  unpin,
+} from "~/state/activity-local";
+import type { ActivityFolderRecord, ActivityStateRecord } from "~/db";
 
 type LayoutMode = "full" | "split" | "single";
 
@@ -145,12 +171,20 @@ const RestorePopover: Component<{
 
 export const Workspace: Component<RouteSectionProps> = (props) => {
   const ws = useWorkspace();
+  const location = useLocation();
+  const navigate = useNavigate();
   const outlet = children(() => props.children);
   const [search, setSearch] = useSearchParams<{ q?: string }>();
   const [searchDraft, setSearchDraft] = createSignal(
     typeof search.q === "string" ? search.q : "",
   );
   const [activityCount, setActivityCount] = createSignal(0);
+  const [clock, setClock] = createSignal(Date.now());
+  const [folderDialog, setFolderDialog] = createSignal<{
+    folder: ActivityFolderRecord | null;
+    moveSelection: boolean;
+  } | null>(null);
+  const [folderName, setFolderName] = createSignal("");
   const [layoutState, setLayoutState] = createSignal(loadPaneLayout());
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());
   const [navOpen, setNavOpen] = createSignal(false);
@@ -261,9 +295,14 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       stale={ws.state.projects.status()}
       projects={ws.projects.data()}
       query={query()}
+      folders={ws.state.activityLocal.snapshot().folders}
+      onNewFolder={() => openFolderDialog()}
+      onEditFolder={(folder) => openFolderDialog(folder)}
+      onDeleteFolder={(key) => ws.state.activityLocal.deleteFolder(key)}
     />
   );
-  const participants = [{ id: "you", kind: "user" as const, label: "You" }];
+  const selectParticipant = (participant: { id: string }) =>
+    commitSearchQuery(`with:${participant.id}`);
   let restoreActivityScroll:
     | ((scrollTop: number, index: number | null) => void)
     | undefined;
@@ -292,6 +331,219 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       .find((entry) => entry.query === current);
     return activitySearchTitle(current, activityCount(), saved?.title);
   };
+  const parsedActivityQuery = createMemo(() => parseActivityQuery(query()));
+  const visibleActivityItems = createMemo(() =>
+    ws.activityList
+      .items()
+      .filter((item) =>
+        clientFilter(
+          item,
+          parsedActivityQuery().client,
+          ws.state.activityLocal.snapshot(),
+        ),
+      ),
+  );
+  const currentActivityItem = createMemo(() => {
+    const items = ws.activityList.items();
+    const currentKey = ws.activityList.currentKey();
+    return (
+      items.find(
+        (item) =>
+          activityItemKey(item) === currentKey &&
+          ACTIVITY_KIND_UI[item.kind].isCurrent(item, location.pathname),
+      ) ??
+      items.find((item) =>
+        ACTIVITY_KIND_UI[item.kind].isCurrent(item, location.pathname),
+      )
+    );
+  });
+  const participants = createMemo(() =>
+    deriveParticipants(ws.activityList.items(), clock()),
+  );
+  const selectedRows = createMemo(() => {
+    const selected = new Set(ws.activityList.selectedKeys());
+    return ws.activityList
+      .items()
+      .filter((item) => selected.has(activityItemKey(item)));
+  });
+  const allVisibleSelected = () =>
+    visibleActivityItems().length > 0 &&
+    visibleActivityItems().every((item) =>
+      ws.activityList.selectedKeys().includes(activityItemKey(item)),
+    );
+  const allSelectedPinned = () =>
+    selectedRows().length > 0 &&
+    selectedRows().every(
+      (item) =>
+        ws.state.activityLocal.record(activityItemKey(item)).pinned_at !==
+        undefined,
+    );
+  const clearSelection = () => ws.activityList.setSelectedKeys([]);
+
+  function toggleSelectAll(checked: boolean) {
+    ws.activityList.setSelectedKeys(
+      checked ? visibleActivityItems().map(activityItemKey) : [],
+    );
+  }
+
+  function selectedActivitySnapshot() {
+    return selectedRows().map((item) => ({
+      item,
+      key: activityItemKey(item),
+    }));
+  }
+
+  function applyToSelected(
+    transition: (
+      item: ActivityItem,
+      record: ActivityStateRecord,
+    ) => ActivityStateRecord,
+  ) {
+    const selected = selectedActivitySnapshot();
+    ws.state.activityLocal.applyBatch(
+      selected.map(({ key, item }) => ({
+        key,
+        transition: (record) => transition(item, record),
+      })),
+    );
+    clearSelection();
+  }
+
+  const openFolderDialog = (
+    folder: ActivityFolderRecord | null = null,
+    moveSelection = false,
+  ) => {
+    setFolderName(folder?.name ?? "");
+    setFolderDialog({ folder, moveSelection });
+  };
+  const folderValidation = () =>
+    folderNameError(
+      folderName(),
+      ws.state.activityLocal.snapshot().folders,
+      folderDialog()?.folder?.key,
+    );
+  function saveFolder() {
+    const current = folderDialog();
+    if (!current || folderValidation()) return;
+    const selected = current.moveSelection ? selectedActivitySnapshot() : [];
+    const id = current.folder
+      ? current.folder.key
+      : ws.state.activityLocal.createFolder(folderName());
+    if (current.folder) {
+      ws.state.activityLocal.renameFolder(id, folderName());
+    } else if (current.moveSelection) {
+      ws.state.activityLocal.moveToFolder(
+        selected.map(({ key }) => key),
+        id,
+      );
+      clearSelection();
+    }
+    setFolderDialog(null);
+  }
+
+  const matchingIndex = () => {
+    const current = currentActivityItem();
+    if (!current) return -1;
+    const visible = visibleActivityItems();
+    const visibleIndex = visible.findIndex(
+      (item) => activityItemKey(item) === activityItemKey(current),
+    );
+    if (visibleIndex >= 0) return visibleIndex;
+    const loaded = ws.activityList.items();
+    const currentIndex = loaded.findIndex(
+      (item) => activityItemKey(item) === activityItemKey(current),
+    );
+    const after = visible.findIndex(
+      (item) =>
+        loaded.findIndex(
+          (candidate) => activityItemKey(candidate) === activityItemKey(item),
+        ) > currentIndex,
+    );
+    return after >= 0 ? after - 1 : visible.length - 1;
+  };
+  const hasNextUnread = () =>
+    !!currentActivityItem() &&
+    visibleActivityItems().some(
+      (item) => unreadCount(item, ws.state.activityLocal.snapshot()) > 0,
+    );
+  function navigateToActivity(item: ActivityItem) {
+    ws.activityList.setCurrentKey(activityItemKey(item));
+    navigate(
+      withWorkspaceQuery(ACTIVITY_KIND_UI[item.kind].href(item), query()),
+    );
+    if (ACTIVITY_KIND_UI[item.kind].readMode === "item") {
+      queueMicrotask(() =>
+        ws.state.activityLocal.markRead(activityItemKey(item), item.total),
+      );
+    }
+  }
+  function nextUnread(): boolean {
+    const inDocument = ws.activityList.nextUnread();
+    if (inDocument?.()) return true;
+    const items = visibleActivityItems();
+    if (!items.length) return false;
+    const current = matchingIndex();
+    for (let step = 1; step <= items.length; step++) {
+      const item = items[(current + step + items.length) % items.length]!;
+      if (unreadCount(item, ws.state.activityLocal.snapshot()) > 0) {
+        navigateToActivity(item);
+        return true;
+      }
+    }
+    return false;
+  }
+  const nextItemTarget = () => {
+    const current = currentActivityItem();
+    const visible = visibleActivityItems();
+    const currentVisibleIndex = current
+      ? visible.findIndex(
+          (item) => activityItemKey(item) === activityItemKey(current),
+        )
+      : -1;
+    const loaded = ws.activityList.items();
+    const currentLoadedIndex = current
+      ? loaded.findIndex(
+          (item) => activityItemKey(item) === activityItemKey(current),
+        )
+      : -1;
+    return currentVisibleIndex >= 0
+      ? visible[currentVisibleIndex + 1]
+      : visible.find(
+          (item) =>
+            loaded.findIndex(
+              (candidate) =>
+                activityItemKey(candidate) === activityItemKey(item),
+            ) > currentLoadedIndex,
+        );
+  };
+  const nextItem = () => {
+    const next = nextItemTarget();
+    if (next) navigateToActivity(next);
+  };
+
+  createEffect(
+    on(currentActivityItem, (item) => {
+      if (!item) return;
+      if (ACTIVITY_KIND_UI[item.kind].readMode === "item") {
+        ws.state.activityLocal.markRead(activityItemKey(item), item.total);
+      }
+    }),
+  );
+
+  onMount(() => {
+    const updateClock = () => setClock(Date.now());
+    const timer = globalThis.setInterval(updateClock, 60_000);
+    const keydown = (event: KeyboardEvent) => {
+      if (!shouldHandleSpace(event)) return;
+      if (!currentActivityItem() && !rootMatch()) return;
+      if (nextUnread()) event.preventDefault();
+    };
+    document.addEventListener("keydown", keydown);
+    onCleanup(() => {
+      globalThis.clearInterval(timer);
+      document.removeEventListener("keydown", keydown);
+    });
+  });
 
   function resizeFromKeyboard(event: KeyboardEvent) {
     if (!showDivider()) return;
@@ -370,7 +622,10 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
                   dispatch({ type: "restore", pane: "participants" })
                 }
               >
-                <ParticipantsPane participants={participants} />
+                <ParticipantsPane
+                  participants={participants()}
+                  onSelectParticipant={selectParticipant}
+                />
               </RestorePopover>
             </Show>
             <Show when={listChip()}>
@@ -426,7 +681,10 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
                 setLayout={dispatch}
                 controls={full()}
               />
-              <ParticipantsPane participants={participants} />
+              <ParticipantsPane
+                participants={participants()}
+                onSelectParticipant={selectParticipant}
+              />
             </section>
           </Show>
         </aside>
@@ -447,6 +705,55 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           query={queryInput()}
           onQueryInput={setSearchQuery}
           onCommitQuery={commitSearchQuery}
+          hasSelection={ws.activityList.selectedKeys().length > 0}
+          selectionControl={
+            <input
+              type="checkbox"
+              aria-label="Select all visible activity"
+              checked={allVisibleSelected()}
+              class="accent-accent"
+              onChange={(event) => toggleSelectAll(event.currentTarget.checked)}
+            />
+          }
+          toolbar={
+            <ActivityBulkToolbar
+              allSelected={allVisibleSelected()}
+              folders={ws.state.activityLocal.snapshot().folders}
+              unpin={allSelectedPinned()}
+              onSelectAll={toggleSelectAll}
+              onRead={() =>
+                applyToSelected((item, record) =>
+                  markRead(record, item.total, Date.now()),
+                )
+              }
+              onUnread={() =>
+                applyToSelected((_item, record) =>
+                  markUnread(record, Date.now()),
+                )
+              }
+              onArchive={() =>
+                applyToSelected((_item, record) => archive(record, Date.now()))
+              }
+              onInbox={() =>
+                applyToSelected((_item, record) => unarchive(record))
+              }
+              onPin={() => {
+                const shouldUnpin = allSelectedPinned();
+                applyToSelected((_item, record) =>
+                  shouldUnpin ? unpin(record) : pin(record, Date.now()),
+                );
+              }}
+              onMove={(folderId) => {
+                ws.state.activityLocal.moveToFolder(
+                  selectedActivitySnapshot().map(({ key }) => key),
+                  folderId,
+                );
+                clearSelection();
+              }}
+              onNewFolder={() => openFolderDialog(null, true)}
+              onClear={clearSelection}
+            />
+          }
           restoreVirtualizedScroll={(scrollTop, index) =>
             restoreActivityScroll?.(scrollTop, index)
           }
@@ -525,8 +832,98 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
             />
           </Show>
           <div class="min-h-0 flex-1 overflow-auto">{outlet()}</div>
+          <Show when={currentActivityItem()}>
+            <footer class="flex h-9 flex-none items-center justify-end gap-2 border-t border-hairline px-3 text-xs">
+              <button
+                type="button"
+                data-testid="workspace-next-unread"
+                disabled={!hasNextUnread()}
+                class="rounded px-2 py-1 text-muted hover:bg-soft disabled:opacity-40"
+                onClick={nextUnread}
+              >
+                Next unread
+              </button>
+              <button
+                type="button"
+                data-testid="workspace-next-item"
+                disabled={!nextItemTarget()}
+                class="rounded px-2 py-1 text-muted hover:bg-soft disabled:opacity-40"
+                onClick={nextItem}
+              >
+                Next item
+              </button>
+            </footer>
+          </Show>
         </main>
       </div>
+      <Show when={folderDialog()}>
+        {(dialog) => (
+          <DialogPrimitive.Root
+            open
+            onOpenChange={(open) => {
+              if (!open) setFolderDialog(null);
+            }}
+          >
+            <DialogPrimitive.Portal>
+              <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <DialogPrimitive.Overlay class="fixed inset-0 bg-background/80" />
+                <DialogPrimitive.Content
+                  aria-label={dialog().folder ? "Rename folder" : "New folder"}
+                  class="relative z-50 w-full max-w-sm border border-hairline bg-surface p-5 text-text"
+                >
+                  <DialogPrimitive.Title class="text-sm font-medium">
+                    {dialog().folder ? "Rename folder" : "New folder"}
+                  </DialogPrimitive.Title>
+                  <form
+                    class="mt-4 flex flex-col gap-3"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveFolder();
+                    }}
+                  >
+                    <label class="flex flex-col gap-1 text-xs">
+                      Name
+                      <input
+                        aria-label="Folder name"
+                        data-testid="activity-folder-name"
+                        class="h-9 border border-hairline bg-transparent px-2 text-sm"
+                        value={folderName()}
+                        onInput={(event) =>
+                          setFolderName(event.currentTarget.value)
+                        }
+                      />
+                    </label>
+                    <Show when={folderValidation()}>
+                      {(message) => (
+                        <p role="alert" class="text-xs text-danger">
+                          {message()}
+                        </p>
+                      )}
+                    </Show>
+                    <div class="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        class="rounded px-3 py-1.5 text-xs text-muted hover:bg-soft"
+                        onClick={() => setFolderDialog(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        data-testid="activity-folder-save"
+                        disabled={!!folderValidation()}
+                        class="rounded bg-selected px-3 py-1.5 text-xs text-selected-text disabled:opacity-50"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </form>
+                </DialogPrimitive.Content>
+              </div>
+            </DialogPrimitive.Portal>
+          </DialogPrimitive.Root>
+        )}
+      </Show>
       <Show when={mode() === "single"}>
         <DialogPrimitive.Root open={navOpen()} onOpenChange={setDrawerOpen}>
           <DialogPrimitive.Portal>

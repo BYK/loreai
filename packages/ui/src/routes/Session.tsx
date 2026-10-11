@@ -4,7 +4,14 @@
  * the `a` query parameter is the addressable state (a source anchor).
  */
 import type { Component } from "solid-js";
-import { createMemo, Match, Show, Switch } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  Match,
+  Show,
+  Switch,
+} from "solid-js";
 import { useParams, useSearchParams } from "@solidjs/router";
 
 import { DocHeader } from "~/components/lore/Document";
@@ -17,6 +24,7 @@ import { isApiError } from "~/lib/api";
 
 import { knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
+import { absoluteMessageIndex } from "~/state/session-read-position";
 
 function decodeParam(segment: string | undefined): string | undefined {
   if (segment === undefined) return undefined;
@@ -70,6 +78,62 @@ export const Session: Component = () => {
 
   const reader = ws.state.sessions.reader(projectId, sessionId);
   const context = ws.state.sessions.context(projectId, sessionId);
+  const activityKey = () => {
+    const project = projectId();
+    const session = sessionId();
+    return project && session ? `session:${project}:${session}` : null;
+  };
+  const [readAtOpen, setReadAtOpen] = createSignal<{
+    key: string;
+    total: number;
+    hasReadCursor: boolean;
+  } | null>(null);
+  createEffect(() => {
+    const key = activityKey();
+    if (!key || !ws.state.activityLocal.loaded()) return;
+    if (readAtOpen()?.key !== key) {
+      const record = ws.state.activityLocal.record(key);
+      setReadAtOpen({
+        key,
+        total: record.read_total ?? 0,
+        hasReadCursor: record.read_total !== undefined,
+      });
+    }
+  });
+  const readPosition = createMemo(() => {
+    const key = activityKey();
+    const captured = readAtOpen();
+    if (!key || captured?.key !== key) return undefined;
+    const messages = reader.messages();
+    const messageCount = reader.messageCount();
+    const isUnread = (messageId: string) => {
+      const index = messages.findIndex((message) => message.id === messageId);
+      return (
+        index >= 0 &&
+        absoluteMessageIndex(index, messageCount, messages.length) >=
+          captured.total
+      );
+    };
+    const initial = messages.find(
+      (message, index) =>
+        absoluteMessageIndex(index, messageCount, messages.length) >=
+        captured.total,
+    );
+    return {
+      isUnread,
+      initialMessageId: captured.hasReadCursor ? (initial?.id ?? null) : null,
+      onSeen(messageId: string) {
+        const index = messages.findIndex((message) => message.id === messageId);
+        if (index >= 0) {
+          ws.state.activityLocal.markReadTo(
+            key,
+            absoluteMessageIndex(index, messageCount, messages.length) + 1,
+          );
+        }
+      },
+      register: ws.activityList.registerNextUnread,
+    };
+  });
   const hrefForKnowledge = (id: string) => knowledgeHref(projectId() ?? "", id);
   const projectsSettled = () =>
     ws.projects.data() !== undefined || ws.projects.error() !== undefined;
@@ -174,6 +238,7 @@ export const Session: Component = () => {
                   ws.tracked(() => ws.client.getDistillation(id))
                 }
                 context={context.loader.data() ?? null}
+                readPosition={readPosition()}
                 knowledgeHref={hrefForKnowledge}
                 header={header()}
               />

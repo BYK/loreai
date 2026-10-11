@@ -1,5 +1,5 @@
 /**
- * IndexedDB schema for the UI cache (`lore-ui`, version 4).
+ * IndexedDB schema for the UI cache (`lore-ui`, version 5).
  *
  * Everything in the entity stores is a disposable projection of `/api/v1`
  * responses — the gateway's SQLite store is the only authority. `drafts` and
@@ -25,7 +25,22 @@ import type {
 } from "./local";
 
 export const LORE_DB_NAME = "lore-ui";
-export const LORE_DB_VERSION = 4;
+export const LORE_DB_VERSION = 5;
+
+export interface ActivityStateRecord {
+  key: string;
+  read_total?: number;
+  read_at?: number;
+  archived_at?: number;
+  pinned_at?: number;
+}
+
+export interface ActivityFolderRecord {
+  key: string;
+  name: string;
+  keys: string[];
+  created_at: number;
+}
 
 /** A cached API record plus bookkeeping for TTL and LRU eviction. */
 export interface CachedRecord<T> {
@@ -129,6 +144,14 @@ export interface LoreUiSchema extends DBSchema {
     key: string;
     value: LocalDedupReviewRecord;
     indexes: { "by-project": string };
+  };
+  activityState: {
+    key: string;
+    value: ActivityStateRecord;
+  };
+  activityFolders: {
+    key: string;
+    value: ActivityFolderRecord;
   };
 }
 

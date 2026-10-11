@@ -28,7 +28,6 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     const mobile = await page.getByTestId("open-nav").isVisible();
     const expected = [
       "logo",
-      ...(mobile ? ["pane-chip-participants"] : []),
       "search",
       "Account and sync: Not signed in",
       ...(mobile
@@ -150,6 +149,10 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       );
       await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
       await setTheme(page, choice);
+      await expect(page.getByTestId("session-scroll")).toBeVisible();
+      await expect
+        .poll(() => page.locator("[data-row-key]").count())
+        .toBeGreaterThan(0);
       const themeControl = (await page.getByTestId("theme-cycle").isVisible())
         ? page.getByTestId("theme-cycle")
         : page.getByTestId(`theme-${choice}`);

@@ -41,6 +41,8 @@ const ALL_STORES = [
   "drafts",
   "pendingChanges",
   "reviewDecisions",
+  "activityState",
+  "activityFolders",
 ] as const;
 
 let opening: Promise<LoreUiDb | null> | null = null;
@@ -82,6 +84,10 @@ function upgrade(db: IDBDatabase, oldVersion: number) {
       keyPath: "key",
     });
     decisions.createIndex("by-project", "projectId");
+  }
+  if (oldVersion < 5) {
+    db.createObjectStore("activityState", { keyPath: "key" });
+    db.createObjectStore("activityFolders", { keyPath: "key" });
   }
 }
 

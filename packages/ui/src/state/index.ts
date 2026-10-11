@@ -26,6 +26,7 @@ import { createSessionsState } from "./sessions";
 import { createRecallState } from "./recall";
 import { createKnowledgeSearchState } from "./knowledge-search";
 import { createDedupReviewState } from "./dedup-review";
+import { createActivityLocalState } from "./activity-local";
 
 export interface AppStateDeps {
   client: ApiClient;
@@ -137,6 +138,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
   const knowledgeSearch = createKnowledgeSearchState({ client, tracked });
   const folk = createFolkState({ client });
   const dedupReview = createDedupReviewState(() => current);
+  const activityLocal = createActivityLocalState(() => current);
 
   return {
     projects,
@@ -175,6 +177,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
         }
       },
     },
+    activityLocal,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {
@@ -192,6 +195,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
           },
         );
         await current;
+        await activityLocal.rehydrate();
       },
     },
     /** Resolves once the db handle (and so the repos) is ready. Test hook. */

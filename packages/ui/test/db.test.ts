@@ -66,7 +66,7 @@ async function open(f: IDBFactory) {
 }
 
 describe("openLoreDb", () => {
-  it("creates a v4 database with every store", async () => {
+  it("creates a v5 database with every store", async () => {
     const f = factory();
     const db = await open(f);
     expect(db).not.toBeNull();
@@ -82,12 +82,14 @@ describe("openLoreDb", () => {
       "drafts",
       "pendingChanges",
       "reviewDecisions",
+      "activityState",
+      "activityFolders",
     ] as const) {
       expect(db!.objectStoreNames.contains(name)).toBe(true);
     }
   });
 
-  it("upgrades v3 to v4 without dropping local data", async () => {
+  it("upgrades v3 to v5 without dropping local data", async () => {
     const f = factory();
     const v3 = await new Promise<IDBDatabase>((resolve, reject) => {
       const req = f.open(LORE_DB_NAME, 3);
@@ -149,7 +151,7 @@ describe("openLoreDb", () => {
     v3.close();
 
     const db = await open(f);
-    expect(db?.version).toBe(4);
+    expect(db?.version).toBe(5);
     expect(await getMeta(db, "theme")).toBe("dark");
     expect(await createDraftsStore(db).get("p1/k1")).toMatchObject({
       body: { title: "Draft" },
@@ -225,7 +227,7 @@ describe("openLoreDb", () => {
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(4);
+    expect(db!.version).toBe(5);
     expect(await getMeta(db, "pref")).toEqual({ theme: "dark" });
     expect(db!.objectStoreNames.contains("knowledge")).toBe(true);
     expect(db!.objectStoreNames.contains("entities")).toBe(true);
@@ -250,10 +252,51 @@ describe("openLoreDb", () => {
     expect(db!.objectStoreNames.contains("collections")).toBe(true);
   });
 
-  it("resets when a higher version exists (VersionError) and reopens at v4", async () => {
+  it("upgrades v4 to v5 without dropping local data", async () => {
     const f = factory();
     const v4 = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = f.open(LORE_DB_NAME, 5);
+      const req = f.open(LORE_DB_NAME, 4);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore("meta", { keyPath: "key" });
+        for (const name of [
+          "projects",
+          "knowledge",
+          "sessions",
+          "messageBlocks",
+          "entities",
+        ]) {
+          const store = db.createObjectStore(name, { keyPath: "key" });
+          store.createIndex("by-scope", "scope");
+          store.createIndex("by-accessed", "accessedAt");
+          store.createIndex("by-stored", "storedAt");
+        }
+        db.createObjectStore("collections", { keyPath: "key" });
+        const drafts = db.createObjectStore("drafts", { keyPath: "key" });
+        drafts.createIndex("by-updated", "updatedAt");
+        const pending = db.createObjectStore("pendingChanges", {
+          keyPath: "key",
+        });
+        pending.createIndex("by-created", "createdAt");
+        const decisions = db.createObjectStore("reviewDecisions", {
+          keyPath: "key",
+        });
+        decisions.createIndex("by-project", "projectId");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    v4.close();
+    const db = await open(f);
+    expect(db?.version).toBe(5);
+    expect(db?.objectStoreNames.contains("activityState")).toBe(true);
+    expect(db?.objectStoreNames.contains("activityFolders")).toBe(true);
+  });
+
+  it("resets when a higher version exists (VersionError) and reopens at v5", async () => {
+    const f = factory();
+    const v4 = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = f.open(LORE_DB_NAME, 6);
       req.onupgradeneeded = () => {
         req.result.createObjectStore("meta", { keyPath: "key" });
       };
@@ -264,7 +307,7 @@ describe("openLoreDb", () => {
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(4);
+    expect(db!.version).toBe(5);
   });
 
   it("resolves null when open keeps failing", async () => {

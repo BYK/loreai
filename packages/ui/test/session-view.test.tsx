@@ -165,6 +165,163 @@ function mount(over: Partial<Parameters<typeof SessionView>[0]> = {}) {
   return { ...utils, changes, clipboard, setAnchor, anchor };
 }
 
+function setUnreadMessageGeometry(
+  scroller: HTMLElement,
+  clampToBottom: boolean,
+) {
+  const rectDescriptor = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "getBoundingClientRect",
+  );
+  const scrollToDescriptor = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "scrollTo",
+  );
+  const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value(this: HTMLElement): DOMRect {
+      if (this === scroller) {
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 800,
+          bottom: 800,
+          width: 800,
+          height: 800,
+          toJSON: () => ({}),
+        };
+      }
+      if (this.dataset.messageId) {
+        const top = Number(this.dataset.index) * 120 - scroller.scrollTop;
+        return {
+          x: 0,
+          y: top,
+          top,
+          left: 0,
+          right: 800,
+          bottom: top + 120,
+          width: 800,
+          height: 120,
+          toJSON: () => ({}),
+        };
+      }
+      return originalRect.call(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value(this: HTMLElement, options?: ScrollToOptions | number) {
+      const top = typeof options === "number" ? options : options?.top;
+      if (typeof top !== "number") return;
+      this.scrollTop = clampToBottom ? 0 : Math.max(0, Math.floor(top));
+      this.dispatchEvent(new Event("scroll"));
+    },
+  });
+  return () => {
+    if (rectDescriptor) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "getBoundingClientRect",
+        rectDescriptor,
+      );
+    }
+    if (scrollToDescriptor) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "scrollTo",
+        scrollToDescriptor,
+      );
+    }
+  };
+}
+
+describe("SessionView: unread navigation", () => {
+  it("steps through the unread messages and stops after the last visible one", async () => {
+    const messages = older(12);
+    let nextUnread = () => false;
+    mount({
+      messages,
+      distillations: [],
+      messageCount: messages.length,
+      hasOlder: false,
+      readPosition: {
+        isUnread: () => true,
+        initialMessageId: "old-0",
+        onSeen: () => {},
+        register: (next) => {
+          nextUnread = next;
+        },
+      },
+    });
+    await tick();
+    const scroller = screen.getByTestId("session-scroll");
+    const restoreLayout = setUnreadMessageGeometry(scroller, false);
+    try {
+      expect(nextUnread()).toBe(true);
+      await tick();
+      const firstStepOffset = scroller.scrollTop;
+      let steps = 1;
+      let previousOffset = firstStepOffset;
+      while (nextUnread()) {
+        steps += 1;
+        expect(steps).toBeLessThan(messages.length);
+        await tick();
+        const offset = scroller.scrollTop;
+        expect(offset).toBeGreaterThan(previousOffset);
+        previousOffset = offset;
+      }
+      expect(steps).toBeLessThan(messages.length);
+
+      scroller.dispatchEvent(new Event("wheel"));
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+      await tick();
+      expect(nextUnread()).toBe(true);
+      await tick();
+      expect(scroller.scrollTop).toBe(firstStepOffset);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("steps once per visible unread row when the session is already at its bottom", async () => {
+    const messages = older(4);
+    let nextUnread = () => false;
+    mount({
+      messages,
+      distillations: [],
+      messageCount: messages.length,
+      hasOlder: false,
+      readPosition: {
+        isUnread: () => true,
+        initialMessageId: "old-0",
+        onSeen: () => {},
+        register: (next) => {
+          nextUnread = next;
+        },
+      },
+    });
+    await tick();
+    const scroller = screen.getByTestId("session-scroll");
+    const restoreLayout = setUnreadMessageGeometry(scroller, true);
+    try {
+      let steps = 0;
+      while (nextUnread()) {
+        steps += 1;
+        expect(steps).toBeLessThan(messages.length);
+        await tick();
+        expect(scroller.scrollTop).toBe(0);
+      }
+      expect(steps).toBeGreaterThan(0);
+    } finally {
+      restoreLayout();
+    }
+  });
+});
+
 describe("SessionView: deep links", () => {
   it("highlights the linked passage, opens the panel and shows no warning", async () => {
     const block = messageBlock(SPECIMEN[2]!); // "Should we replace the SQLite…"
