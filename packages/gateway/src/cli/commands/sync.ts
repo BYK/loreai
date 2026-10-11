@@ -19,6 +19,7 @@
  * subcommand).
  */
 import { buildOutputCommand } from "../lib/command";
+import { UsageError } from "../lib/errors";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandSync } from "../sync-cmd";
 
@@ -76,6 +77,17 @@ export const syncCommand = buildOutputCommand<
     // `sub` is the optional subcommand string itself (or undefined).
     // The legacy commandSync wants a positionals string[].
     const expectedVersion = flags["expected-version"];
+    if (
+      (sub !== "conflicts" &&
+        (action !== undefined || conflictId !== undefined)) ||
+      (expectedVersion !== undefined &&
+        (sub !== "conflicts" || action !== "keep"))
+    ) {
+      throw new UsageError({
+        message: "Invalid arguments for lore sync.",
+        tryCommand: "lore sync --help",
+      });
+    }
     const syncOptions =
       expectedVersion === undefined
         ? {}

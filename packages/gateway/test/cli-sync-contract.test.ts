@@ -236,18 +236,9 @@ describe("Phase 3D.3b — typed lore sync", () => {
     vi.resetModules();
   });
 
-  test("sync rejects extra positional with exit code 20 (UsageError), not 252 (F-1)", async () => {
-    // Per-slice F-1 (CRITICAL): Stricli's ExitCode.InvalidArgument = -4
-    // is silently truncated by Node's process exit code (mod 256) to
-    // 252 without an explicit determineExitCode mapping (Stricli's
-    // determineExitCode only fires for thrown values, not scanner
-    // errors). We remap the exit code in runCli() to 20 (UsageError)
-    // after detecting scanner errors via stderr monitoring.
+  test("sync rejects extra positional with exit code 20", async () => {
     const { runCli } = await import("../src/cli/cli");
     process.argv = ["node", "lore", "sync", "enable", "extra-arg"];
-    // Do NOT pre-set process.exitCode — Stricli's `??=` only writes
-    // when exitCode is null/undefined, so a pre-existing 0 would mask
-    // the InvalidArgument exit code entirely.
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
     let capturedExitCode: number | undefined;
@@ -257,7 +248,6 @@ describe("Phase 3D.3b — typed lore sync", () => {
     } finally {
       process.exitCode = priorExitCode;
     }
-    // The remapping sets process.exitCode = 20 (UsageError).
     expect(capturedExitCode).toBe(20);
   });
 
