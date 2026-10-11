@@ -37,6 +37,7 @@ import {
 } from "~/db";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
 import { resetThemeStoreForTests, THEME_STORAGE_KEY, theme } from "~/lib/theme";
+import { PANE_LAYOUT_STORAGE_KEY } from "~/state/pane-layout";
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -317,6 +318,34 @@ function stubSinglePaneViewport() {
   }));
 }
 
+function pointerEvent(
+  type:
+    | "pointerdown"
+    | "pointermove"
+    | "pointerup"
+    | "pointercancel"
+    | "lostpointercapture",
+  pointerId: number,
+  clientX: number,
+) {
+  const event = new Event(type, { bubbles: true });
+  Object.defineProperties(event, {
+    pointerId: { value: pointerId },
+    clientX: { value: clientX },
+  });
+  return event;
+}
+
+function stubPointerCapture(element: HTMLElement, pointerId: number) {
+  const setPointerCapture = vi.fn();
+  Object.defineProperties(element, {
+    setPointerCapture: { value: setPointerCapture },
+    hasPointerCapture: { value: (id: number) => id === pointerId },
+    releasePointerCapture: { value: vi.fn() },
+  });
+  return setPointerCapture;
+}
+
 /** Seed a fake-indexeddb cache with the shared fixtures and hand it to mount. */
 async function seededDb(): Promise<Promise<LoreUiDb | null>> {
   const { IDBFactory } = await import("./idb-globals");
@@ -372,6 +401,107 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   resetThemeStoreForTests();
+});
+
+describe("shell: list divider persistence", () => {
+  beforeEach(() => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+
+  it("persists a pointer drag once at its final width", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+    const setPointerCapture = stubPointerCapture(divider, 7);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    fireEvent(divider, pointerEvent("pointerdown", 7, 340));
+    for (let move = 1; move <= 5; move++) {
+      fireEvent(divider, pointerEvent("pointermove", 7, 340 + move * 10));
+    }
+
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(divider).toHaveAttribute("aria-valuenow", "390");
+    expect(
+      setItem.mock.calls.filter(([key]) => key === PANE_LAYOUT_STORAGE_KEY),
+    ).toHaveLength(0);
+
+    fireEvent(divider, pointerEvent("pointerup", 7, 390));
+
+    const layoutWrites = setItem.mock.calls.filter(
+      ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+    );
+    expect(layoutWrites).toHaveLength(1);
+    const storedLayout = layoutWrites.at(0)?.[1];
+    expect(storedLayout).toBeDefined();
+    expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(390);
+  });
+
+  it("updates the live width without native pointer capture support", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+
+    fireEvent(divider, pointerEvent("pointerdown", 8, 340));
+    fireEvent(divider, pointerEvent("pointermove", 8, 360));
+
+    expect(divider).toHaveAttribute("aria-valuenow", "360");
+  });
+
+  it("persists keyboard divider resizes immediately", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+
+    const layoutWrites = setItem.mock.calls.filter(
+      ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+    );
+    expect(layoutWrites).toHaveLength(1);
+    const storedLayout = layoutWrites.at(0)?.[1];
+    expect(storedLayout).toBeDefined();
+    expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(356);
+  });
+
+  it.each(["pointercancel", "lostpointercapture"] as const)(
+    "persists a changed drag once on %s",
+    async (finishEvent) => {
+      mount("/", fakeClient());
+      const divider = await screen.findByRole("separator", {
+        name: "Resize list",
+      });
+      stubPointerCapture(divider, 11);
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+      fireEvent(divider, pointerEvent("pointerdown", 11, 340));
+      fireEvent(divider, pointerEvent("pointermove", 11, 360));
+      expect(
+        setItem.mock.calls.filter(([key]) => key === PANE_LAYOUT_STORAGE_KEY),
+      ).toHaveLength(0);
+      fireEvent(divider, pointerEvent(finishEvent, 11, 360));
+      if (finishEvent === "pointercancel") {
+        fireEvent(divider, pointerEvent("lostpointercapture", 11, 360));
+      }
+
+      const layoutWrites = setItem.mock.calls.filter(
+        ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+      );
+      expect(layoutWrites).toHaveLength(1);
+      const storedLayout = layoutWrites.at(0)?.[1];
+      expect(storedLayout).toBeDefined();
+      expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(360);
+    },
+  );
 });
 
 describe("shell: project navigation and real-data path", () => {

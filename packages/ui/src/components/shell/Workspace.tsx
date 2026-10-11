@@ -136,6 +136,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());
   const [navOpen, setNavOpen] = createSignal(false);
   let navOpener: HTMLElement | null = null;
+  let dragPointerId: number | null = null;
   let dragStartX = 0;
   let dragStartWidth = 0;
 
@@ -149,10 +150,20 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     for (const item of media) item.removeEventListener?.("change", updateMode);
   });
 
-  const dispatch = (action: Parameters<typeof reducePaneLayout>[1]) => {
+  const dispatch = (
+    action: Parameters<typeof reducePaneLayout>[1],
+    { persist = true }: { persist?: boolean } = {},
+  ) => {
     const next = reducePaneLayout(layoutState(), action);
     setLayoutState(next);
-    savePaneLayout(next);
+    if (persist) savePaneLayout(next);
+  };
+  const finishDividerDrag = (pointerId: number) => {
+    if (dragPointerId !== pointerId) return;
+    dragPointerId = null;
+    if (layoutState().listWidth !== dragStartWidth) {
+      savePaneLayout(layoutState());
+    }
   };
   const query = () => (typeof search.q === "string" ? search.q : "in:inbox");
   const queryInput = () => (typeof search.q === "string" ? search.q : "");
@@ -436,21 +447,27 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
               dispatch({ type: "set-list-width", width: DEFAULT_LIST_WIDTH })
             }
             onPointerDown={(event) => {
+              dragPointerId = event.pointerId;
               dragStartX = event.clientX;
               dragStartWidth = layoutState().listWidth;
-              event.currentTarget.setPointerCapture(event.pointerId);
+              if (typeof event.currentTarget.setPointerCapture === "function") {
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }
             }}
             onPointerMove={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId))
-                dispatch({
-                  type: "set-list-width",
-                  width: dragStartWidth + event.clientX - dragStartX,
-                });
+              if (dragPointerId === event.pointerId) {
+                dispatch(
+                  {
+                    type: "set-list-width",
+                    width: dragStartWidth + event.clientX - dragStartX,
+                  },
+                  { persist: false },
+                );
+              }
             }}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId))
-                event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
+            onPointerUp={(event) => finishDividerDrag(event.pointerId)}
+            onPointerCancel={(event) => finishDividerDrag(event.pointerId)}
+            onLostPointerCapture={(event) => finishDividerDrag(event.pointerId)}
           />
         </Show>
         <main

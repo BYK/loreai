@@ -26,7 +26,14 @@ const NotFound: Component = () => (
 
 /**
  * Dev/test-only screens: the design specimen and the UI-01 compatibility
- * smoke. Production builds drop them (and their chunks) from the route table.
+ * smoke. Production builds drop them (and their chunks) from the route table,
+ * so the shipped bundle contains product routes only; the Vite dev server
+ * and the unit/e2e suites still mount them.
+ *
+ * Both are `lazy()`: a static import here would put their modules in the
+ * product entry's graph, and any library they share with a product chunk
+ * (the virtualiser, the rendering engines) would then be hoisted into the
+ * entry rather than staying in that chunk.
  */
 const compatSmoke = () => import("./compat/CompatSmoke");
 const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
