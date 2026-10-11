@@ -33,6 +33,7 @@ export {
 } from "./references";
 export * as syncData from "./sync-data";
 export * as data from "./data";
+export * as prefixSnapshots from "./prefix-snapshots";
 export * as threadLinks from "./thread-links";
 export * as sourceAnchors from "./source-anchors";
 export * as anchoredNotes from "./anchored-notes";

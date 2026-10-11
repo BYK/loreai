@@ -519,12 +519,21 @@ export type CacheTurnAnalysis = {
    *  (date/time/uuid/...): the class a CacheAligner could move to a tail.
    *  Always false unless system0Bust is true. */
   relocatable: boolean;
+  /** The previous body is no longer a prefix of this one: its system, tools
+   *  or earlier messages were rewritten (not plain tail growth). */
+  prefixRewrite: boolean;
 };
 
 /** Per-session cache analytics state. */
 export type CacheAnalytics = {
   /** Deflate-compressed serialized request body from the last turn. */
   lastRequestBody: Uint8Array | null;
+  /** Model, wire protocol and send time of `lastRequestBody`. */
+  lastRequestMeta?: {
+    model: string;
+    wire: GatewayProtocol;
+    sentAt: number;
+  } | null;
   /**
    * zstd-compressed NORMALIZED form of `lastRequestBody`, memoized so the next
    * turn's divergence comparison can skip re-running `normalizeBodyForComparison`

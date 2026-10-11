@@ -630,6 +630,7 @@ export function analyzeCacheTurn(
   // system[0] cache-alignment measurement (issue #791).
   let system0Bust = false;
   let relocatable = false;
+  let prefixRewrite = false;
 
   // Normalize the current body for comparison: strip volatile client metadata
   // (e.g. Claude Code's per-turn `cch=XXXXX;` hash) so it doesn't pollute
@@ -696,6 +697,11 @@ export function analyzeCacheTurn(
           "returning-turn tail growth (previous messages are a prefix — " +
           "cache miss on resume, not a content edit)";
       }
+
+      prefixRewrite =
+        /^(system|tools|messages\[)/.test(divergencePoint) &&
+        !divergenceReason.startsWith("returning-turn tail growth") &&
+        !divergenceReason.startsWith("new conversation message");
 
       // system[0] cache-alignment measurement (issue #791): when the first
       // divergence lands in the agent-owned host prompt, decide whether the
@@ -848,6 +854,7 @@ export function analyzeCacheTurn(
     currSnippet,
     system0Bust,
     relocatable,
+    prefixRewrite,
   };
 
   // Log structured analysis

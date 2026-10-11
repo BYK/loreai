@@ -71,7 +71,7 @@ function code(fn: () => unknown): string | undefined {
   return undefined;
 }
 
-const REBUILT = { mode: "rebuilt", reason: "no_parent_body" } as const;
+const COLD = { mode: "cold", reason: "no_cached_body" } as const;
 
 function seeded(text = "hello world") {
   const p = project();
@@ -83,7 +83,7 @@ function seeded(text = "hello world") {
     anchors: [anchor(mid, text)],
     quote: "hell",
     agent: "claude-code",
-    prefix: REBUILT,
+    prefix: COLD,
   });
   return { p, session, mid, link };
 }
@@ -93,8 +93,8 @@ describe("thread links", () => {
     const { session, link } = seeded();
     expect(link).toMatchObject({
       parentSessionId: session,
-      prefixMode: "rebuilt",
-      prefixReason: "no_parent_body",
+      prefixMode: "cold",
+      prefixReason: "no_cached_body",
       state: "starting",
       anchorStatus: "current",
       revision: 1,
@@ -121,7 +121,7 @@ describe("thread links", () => {
           anchors: [bad],
           quote: "hell",
           agent: "claude-code",
-          prefix: REBUILT,
+          prefix: COLD,
         }),
       ),
     ).toBe("source_changed");
@@ -203,7 +203,7 @@ describe("thread links", () => {
         anchors: [anchor(mid, "hello world")],
         quote: "hell",
         agent: "opencode",
-        prefix: REBUILT,
+        prefix: COLD,
       });
     }
     const first = listThreadLinks({ projectId: p.id, limit: 2 });
@@ -248,7 +248,7 @@ describe("thread links", () => {
     expect(findThreadLink(link.id)).toBeNull();
   });
 
-  it("persists an inherited prefix byte-for-byte across a reload", () => {
+  it("persists a live prefix byte-for-byte across a reload", () => {
     const p = project();
     const session = `s-${seq++}`;
     const mid = message(p.id, session, "hello world");
@@ -260,7 +260,7 @@ describe("thread links", () => {
       quote: "hell",
       agent: "claude-code",
       prefix: {
-        mode: "inherited",
+        mode: "live",
         model: "claude-sonnet-4-5",
         account: "cred-a",
         wire: "anthropic",
@@ -268,7 +268,7 @@ describe("thread links", () => {
         bodyBytes: 4096,
       },
     });
-    expect(link).toMatchObject({ prefixMode: "inherited", prefixReason: null });
+    expect(link).toMatchObject({ prefixMode: "live", prefixReason: null });
     close();
     const stored = getThreadPrefix(p.id, link.id);
     if (!stored) throw new Error("prefix missing after reload");
@@ -305,7 +305,7 @@ describe("thread links", () => {
       createThreadLink({
         ...base,
         source: { kind: "session", id: "s" },
-        prefix: { mode: "rebuilt", reason: "knowledge_source" },
+        prefix: { mode: "cold", reason: "knowledge_source" },
       }),
     ).toThrow(/knowledge_source/);
     expect(() =>
@@ -313,7 +313,7 @@ describe("thread links", () => {
         ...base,
         source: { kind: "knowledge", id: "k" },
         prefix: {
-          mode: "inherited",
+          mode: "live",
           model: "m",
           account: "a",
           wire: "anthropic",
@@ -327,7 +327,7 @@ describe("thread links", () => {
         ...base,
         source: { kind: "session", id: "s" },
         prefix: {
-          mode: "inherited",
+          mode: "live",
           model: "m",
           account: "a",
           wire: "anthropic",

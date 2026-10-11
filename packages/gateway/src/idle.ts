@@ -11,6 +11,7 @@
  * to fire ~45s before cache TTL expiry, not after the idle timeout.
  */
 
+import { forgetPrefixSnapshots } from "./prefix-snapshots";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -1040,6 +1041,7 @@ export function evictIdleSessions(
     state.upstreamByProvider.clear();
     state.recallStore.clear();
 
+    forgetPrefixSnapshots(sessionID);
     // Remove from the main sessions map last
     sessions.delete(sessionID);
 

@@ -94,7 +94,7 @@ async function seed() {
     anchors: [anchor],
     quote: "hell",
     agent: "claude-code",
-    prefix: { mode: "rebuilt", reason: "no_parent_body" },
+    prefix: { mode: "cold", reason: "no_cached_body" },
   });
   return { projectId, session, anchor, link };
 }
@@ -113,8 +113,8 @@ describe("thread routes", () => {
     expect(one.thread).toMatchObject({
       parent_session_id: session,
       state: "starting",
-      prefix_mode: "rebuilt",
-      prefix_reason: "no_parent_body",
+      prefix_mode: "cold",
+      prefix_reason: "no_cached_body",
       child_session_id: null,
     });
     const stale = await send("PATCH", `${base}/${link.id}`, {

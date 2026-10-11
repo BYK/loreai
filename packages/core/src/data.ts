@@ -766,6 +766,9 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(pid);
+    database
+      .query("DELETE FROM session_prefix_snapshots WHERE project_id = ?")
+      .run(pid);
     // Match confirmed ownership before deleting the source rows. A different
     // project may have messages with the same globally keyed session ID, while
     // the owning project may have a state before its first temporal message.
@@ -937,6 +940,9 @@ export function deleteProject(projectId: string): ClearResult | null {
       throw new Error("project ownership changed during deletion");
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
+      .run(projectId);
+    database
+      .query("DELETE FROM session_prefix_snapshots WHERE project_id = ?")
       .run(projectId);
     deleteOwnedProjectSessionStates(database, projectId);
     database
@@ -1296,6 +1302,11 @@ export function deleteSession(
       .run(pid, sessionId);
     database
       .query(
+        "DELETE FROM session_prefix_snapshots WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query(
         "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",
       )
       .run(pid, sessionId);
@@ -1602,6 +1613,7 @@ export function moveSessions(
         ["tool_calls", "session_id"],
         ["session_rollup", "session_id"],
         ["session_prompt_deltas", "session_id"],
+        ["session_prefix_snapshots", "session_id"],
         ["knowledge_session_injections", "session_id"],
         ["knowledge_current", "source_session"],
       ] as const) {
@@ -1768,6 +1780,12 @@ export function moveSessions(
       database
         .query(
           `UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      database
+        .query(
+          `UPDATE session_prefix_snapshots SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
 

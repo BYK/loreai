@@ -30,17 +30,19 @@ import { currentTenantId } from "./tenant";
 export type ThreadState = "starting" | "running" | "idle" | "failed" | "closed";
 
 /**
- * How the child's prompt prefix was built. `inherited`: the parent's as-sent
- * body cut at the anchor, replayed byte-identically so the child reuses the
- * parent's prompt cache. `rebuilt`: a seed rebuilt from temporal storage.
+ * How the child's prompt prefix was built. `live`: the parent's latest
+ * as-sent body cut at the anchor. `snapshot`: the newest unexpired prefix
+ * snapshot containing the anchor. Both replay byte-identically, so the child
+ * reuses the parent's prompt cache. `cold`: the child's context is rebuilt
+ * from distillations and fresh LTM up to the anchor, like any cold start.
  */
-export type PrefixMode = "inherited" | "rebuilt";
+export type PrefixMode = "live" | "snapshot" | "cold";
 
 export const PREFIX_REASONS = [
-  /** The parent has no as-sent body (gateway restart or cache reset). */
-  "no_parent_body",
-  /** The anchored message was compressed into the distilled prefix. */
-  "anchor_not_in_body",
+  /** No live body and no unexpired snapshot (restart, cache reset, TTL). */
+  "no_cached_body",
+  /** No cached body contains the anchor, e.g. it was distilled away. */
+  "anchor_not_cached",
   "model_mismatch",
   "account_mismatch",
   /** Knowledge sources have no parent conversation to inherit. */
@@ -50,7 +52,7 @@ export type PrefixReason = (typeof PREFIX_REASONS)[number];
 
 export type ThreadPrefixInput =
   | {
-      mode: "inherited";
+      mode: "live" | "snapshot";
       /** Upstream model id the parent body was sent with. */
       model: string;
       /** Credential fingerprint of the parent's upstream account. */
@@ -62,7 +64,7 @@ export type ThreadPrefixInput =
       /** Uncompressed length in bytes. */
       bodyBytes: number;
     }
-  | { mode: "rebuilt"; reason: PrefixReason };
+  | { mode: "cold"; reason: PrefixReason };
 
 export interface ThreadPrefix {
   model: string;
@@ -91,7 +93,7 @@ export interface ThreadLink {
   /** Harness name from the gateway's agent registry (e.g. `claude-code`). */
   agent: string;
   prefixMode: PrefixMode;
-  /** Why the prefix was rebuilt; null when inherited. */
+  /** Why the child started cold; null when it inherited a prefix. */
   prefixReason: PrefixReason | null;
   /** The harness's own ACP session id. */
   acpSessionId: string | null;
@@ -337,9 +339,9 @@ export function createThreadLink(input: CreateThreadLinkInput): ThreadLink {
             ${session ? input.source.id : null}, ${input.source.kind},
             ${input.source.id}, ${JSON.stringify(anchors)}, ${quote},
             ${sourceHashOf(anchors)}, 'current', ${agent}, ${prefix.mode},
-            ${prefix.mode === "rebuilt" ? prefix.reason : null}, 'starting', 1, ${createdBy}, ${t}, ${t}, ${t})`,
+            ${prefix.mode === "cold" ? prefix.reason : null}, 'starting', 1, ${createdBy}, ${t}, ${t}, ${t})`,
     );
-    if (prefix.mode === "inherited") {
+    if (prefix.mode !== "cold") {
       sql.run(
         db(),
         sql`INSERT INTO thread_prefixes (thread_id, model, account, wire, body,
@@ -356,7 +358,7 @@ function validatePrefix(
   prefix: ThreadPrefixInput,
   kind: SourceKind,
 ): ThreadPrefixInput {
-  if (prefix.mode === "rebuilt") {
+  if (prefix.mode === "cold") {
     if (!PREFIX_REASONS.includes(prefix.reason)) {
       fail("invalid", "unknown prefix reason");
     }
@@ -390,7 +392,7 @@ function validatePrefix(
   return prefix;
 }
 
-/** The inherited prefix of a thread; null when its prefix was rebuilt. */
+/** The inherited prefix of a thread; null when it started cold. */
 export function getThreadPrefix(
   projectId: string,
   threadId: string,

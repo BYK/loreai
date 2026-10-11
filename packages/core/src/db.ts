@@ -2485,10 +2485,13 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- with the parent up to the anchor. The row keeps the selection (logical
   -- SourceAnchor JSON, the short UI quote, the source hash), the harness, the
   -- ACP and Lore child session ids, the lifecycle state and how the child's
-  -- prompt prefix was built (prefix_mode/prefix_reason). thread_prefixes
-  -- holds the inherited prefix: the parent's as-sent body cut at the anchor,
-  -- zstd-compressed, insert-only so every child turn replays the same bytes
-  -- across restarts (the session_prompt_deltas principle, v42).
+  -- prompt prefix was built (prefix_mode live|snapshot|cold, prefix_reason
+  -- for cold). thread_prefixes holds the inherited prefix: a parent as-sent
+  -- body cut at the anchor, zstd-compressed, insert-only so every child turn
+  -- replays the same bytes across restarts (the session_prompt_deltas
+  -- principle, v42). session_prefix_snapshots is each session's FIFO of
+  -- as-sent bodies pushed at prefix-rewrite boundaries, expiring with the
+  -- conversation TTL, so an anchor before a rewrite can still inherit.
   -- thread_permissions logs each permission request the gateway
   -- auto-approved for the thread. The child's turns live in
   -- temporal_messages like any other session; nothing here copies a
@@ -2505,7 +2508,7 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
     agent TEXT NOT NULL,
-    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('inherited', 'rebuilt')),
+    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('live', 'snapshot', 'cold')),
     prefix_reason TEXT,
     acp_session_id TEXT,
     child_session_id TEXT UNIQUE,
@@ -2522,7 +2525,7 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
     CHECK ((state = 'failed') = (error IS NOT NULL)),
     CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL)),
-    CHECK ((prefix_mode = 'inherited') = (prefix_reason IS NULL))
+    CHECK ((prefix_mode = 'cold') = (prefix_reason IS NOT NULL))
   );
   CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
     ON thread_links(project_id, last_activity_at DESC, id DESC);
@@ -2555,6 +2558,21 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     body_bytes INTEGER NOT NULL,
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS session_prefix_snapshots (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    wire TEXT NOT NULL,
+    body BLOB NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_prefix_snapshots_project
+    ON session_prefix_snapshots (project_id);
   `,
 ]);
 
@@ -5022,7 +5040,7 @@ function recoverMissingObjects(database: Database) {
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
     agent TEXT NOT NULL,
-    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('inherited', 'rebuilt')),
+    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('live', 'snapshot', 'cold')),
     prefix_reason TEXT,
     acp_session_id TEXT,
     child_session_id TEXT UNIQUE,
@@ -5039,7 +5057,7 @@ function recoverMissingObjects(database: Database) {
     CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
     CHECK ((state = 'failed') = (error IS NOT NULL)),
     CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL)),
-    CHECK ((prefix_mode = 'inherited') = (prefix_reason IS NULL))
+    CHECK ((prefix_mode = 'cold') = (prefix_reason IS NOT NULL))
   );
   CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
     ON thread_links(project_id, last_activity_at DESC, id DESC);
@@ -5072,6 +5090,21 @@ function recoverMissingObjects(database: Database) {
     body_bytes INTEGER NOT NULL,
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS session_prefix_snapshots (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    wire TEXT NOT NULL,
+    body BLOB NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_prefix_snapshots_project
+    ON session_prefix_snapshots (project_id);
   `);
   // Version 56: projects.last_refcheck_at (reference-validity rate gate, #627).
   {
@@ -5177,6 +5210,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "project_id_aliases",
   "project_path_aliases",
   "session_prompt_deltas",
+  "session_prefix_snapshots",
   "source_windows", // Disposable; source-project deletion cascades it away.
   "semantic_token_cache", // Disposable; source-project deletion cascades it away.
   "session_rollup",
