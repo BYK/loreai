@@ -275,11 +275,8 @@ const BudgetEditor: Component<{
                     headroom
                     <input
                       class={inputClass}
-                      type="number"
-                      min="0"
-                      max="50"
-                      step="1"
-                      inputMode="numeric"
+                      type="text"
+                      inputMode="decimal"
                       disabled={!current().windows[w].pace}
                       value={current().windows[w].headroom}
                       aria-label={`Pace headroom for the ${w} window (points)`}
@@ -304,10 +301,8 @@ const BudgetEditor: Component<{
                     cap
                     <input
                       class={inputClass}
-                      type="number"
-                      min="1"
-                      max="100"
-                      step="any"
+                      type="text"
+                      inputMode="decimal"
                       placeholder="none"
                       value={current().windows[w].cap}
                       aria-label={`Quota cap for the ${w} window (%)`}
@@ -343,9 +338,8 @@ const BudgetEditor: Component<{
                   {field.label}
                   <input
                     class={inputClass}
-                    type="number"
-                    min="0"
-                    step="any"
+                    type="text"
+                    inputMode="decimal"
                     placeholder="none"
                     value={current().caps[field.key]}
                     aria-label={field.label}

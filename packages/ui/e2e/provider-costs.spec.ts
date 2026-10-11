@@ -52,6 +52,11 @@ test.describe("provider cost cards", () => {
       .filter({ hasText: "OpenAI" });
 
     await openai.getByRole("button", { name: "Edit budgets" }).click();
+    // Typed key by key, a leading minus must survive and be rejected.
+    await openai.getByLabel("USD cap per day").pressSequentially("-1");
+    await expect(openai.getByLabel("USD cap per day")).toHaveValue("-1");
+    await openai.getByRole("button", { name: "Save budgets" }).click();
+    await expect(openai.getByRole("alert")).toContainText("positive");
     await openai.getByLabel("USD cap per day").fill("5");
     const saved = page.waitForResponse(
       (r) =>
