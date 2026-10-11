@@ -58,6 +58,7 @@ let stubState: {
   inAggregate: boolean;
   revision: number;
   deleted: boolean;
+  metricVersion: number;
 };
 
 function stubCounts(): { week: string; model: string; count: number }[] {
@@ -73,7 +74,7 @@ function stubReport(overrides: Record<string, unknown> = {}): object {
     published: stubState.published,
     inAggregate: stubState.inAggregate,
     revision: stubState.revision,
-    metricVersion: 2,
+    metricVersion: stubState.metricVersion,
     counts: stubCounts(),
     ...overrides,
   };
@@ -97,6 +98,7 @@ function resetStubState(): void {
     inAggregate: false,
     revision: 1,
     deleted: false,
+    metricVersion: 2,
   };
 }
 
@@ -378,6 +380,118 @@ describe("POST /api/v1/model-usage/upload", () => {
     expect(put!.headers["x-model-tides-expected-visibility"]).toBe("public");
     expect(put!.headers["x-model-tides-expected-aggregate"]).toBe("excluded");
     expect(put!.headers["x-model-tides-schema"]).toBe("weekly-v2");
+    core.modelUsage.deleteOwner();
+  });
+
+  it("v1 replace without reviewed_revision gets 400 before any PUT", async () => {
+    core.modelUsage.saveOwner({ id: OWNER_ID, token: OWNER_TOKEN });
+    resetStubState();
+    stubState.metricVersion = 1;
+    stubCalls = [];
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256 } = await get.json();
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.message).toBe(
+        "reviewed_revision is required to replace a v1 report.",
+      );
+      expect(stubCalls.filter((c) => c.method === "PUT")).toEqual([]);
+    } finally {
+      resetStubState();
+    }
+    core.modelUsage.deleteOwner();
+  });
+
+  it("create reports 'could not be confirmed' when the follow-up GET fails", async () => {
+    core.modelUsage.deleteOwner();
+    resetStubState();
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256 } = await get.json();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof URL
+          ? input.href
+          : typeof input === "string"
+            ? input
+            : input.url;
+      if (
+        url === `${stubBaseURL}/${OWNER_ID}` &&
+        (!init || !init.method || init.method === "GET")
+      ) {
+        return Promise.resolve(new Response("upstream down", { status: 500 }));
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.error.message).toBe(
+        "Upload succeeded, but the report state could not be confirmed. Reload before making further changes.",
+      );
+      expect(JSON.stringify(body)).not.toContain(OWNER_TOKEN);
+      // The credential was saved — a reload shows the uploaded report.
+      expect(ownerFromKV()).toEqual({ id: OWNER_ID, token: OWNER_TOKEN });
+    } finally {
+      globalThis.fetch = realFetch;
+      resetStubState();
+    }
+    core.modelUsage.deleteOwner();
+  });
+
+  it("replace reports 'could not be confirmed' when the follow-up GET fails", async () => {
+    core.modelUsage.saveOwner({ id: OWNER_ID, token: OWNER_TOKEN });
+    resetStubState();
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256 } = await get.json();
+    const realFetch = globalThis.fetch;
+    let reportGets = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof URL
+          ? input.href
+          : typeof input === "string"
+            ? input
+            : input.url;
+      if (
+        url === `${stubBaseURL}/${OWNER_ID}` &&
+        (!init || !init.method || init.method === "GET")
+      ) {
+        reportGets += 1;
+        if (reportGets > 1) {
+          // reportVisibility's GET passed; the post-write confirm fails.
+          return Promise.resolve(
+            new Response("upstream down", { status: 500 }),
+          );
+        }
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.error.message).toBe(
+        "Upload succeeded, but the report state could not be confirmed. Reload before making further changes.",
+      );
+      expect(JSON.stringify(body)).not.toContain(OWNER_TOKEN);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetStubState();
+    }
     core.modelUsage.deleteOwner();
   });
 

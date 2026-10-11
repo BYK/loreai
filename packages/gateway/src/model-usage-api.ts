@@ -280,6 +280,13 @@ export async function handlePostModelUsageUpload(
     if (owner) {
       const report = await reportVisibility(owner);
       if (report.metricVersion === 1) {
+        if (reviewedRevision === null) {
+          return errorResponse(
+            400,
+            "invalid_request",
+            "reviewed_revision is required to replace a v1 report.",
+          );
+        }
         if (reviewedRevision !== report.revision) {
           return errorResponse(
             409,
@@ -314,7 +321,15 @@ export async function handlePostModelUsageUpload(
       ) {
         return upstreamError(new Error("Invalid upload response."));
       }
-      return jsonResponse(reportPayload(await getOwnedReport(owner)));
+      const confirmed = await getOwnedReport(owner).catch(() => null);
+      if (!confirmed) {
+        return errorResponse(
+          502,
+          "upstream_error",
+          "Upload succeeded, but the report state could not be confirmed. Reload before making further changes.",
+        );
+      }
+      return jsonResponse(reportPayload(confirmed));
     }
     const result = await publishSnapshot(snapshot, null);
     if (
@@ -372,7 +387,16 @@ export async function handlePostModelUsageUpload(
         ),
       );
     }
-    return jsonResponse(reportPayload(await getOwnedReport(newOwner)));
+    const confirmed = await getOwnedReport(newOwner).catch(() => null);
+    if (!confirmed) {
+      // The credential is saved; a reload shows the uploaded report.
+      return errorResponse(
+        502,
+        "upstream_error",
+        "Upload succeeded, but the report state could not be confirmed. Reload before making further changes.",
+      );
+    }
+    return jsonResponse(reportPayload(confirmed));
   } catch (err) {
     if (
       err instanceof modelUsage.ModelUsageFilterError ||
