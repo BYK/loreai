@@ -13,6 +13,9 @@ function isCreate(url: string, method: string) {
   return method === "POST" && /\/api\/v1\/discussions(\?|$)/.test(url);
 }
 
+/** Project of each discussion a test started, for direct API calls. */
+const projectOf = new Map<string, string>();
+
 async function startThread(page: Page, text: string) {
   await page.getByTestId("start-thread").click();
   const composer = page.getByTestId("start-thread-composer");
@@ -23,7 +26,9 @@ async function startThread(page: Page, text: string) {
   await composer.getByTestId("composer-submit").click();
   const res = await created;
   expect(res.status()).toBe(201);
-  return (await res.json()).discussion.id as string;
+  const { discussion } = await res.json();
+  projectOf.set(discussion.id, discussion.project_id);
+  return discussion.id as string;
 }
 
 const indicator = (page: Page, id: string) =>
@@ -126,6 +131,27 @@ test.describe("reply to selection", () => {
     await expect(thread(page, id)).toHaveCount(0);
     await expect(indicator(page, id)).toBeFocused();
     await expect(indicator(page, id)).toHaveAttribute("aria-expanded", "false");
+
+    // Re-expanding refetches, so a reply posted elsewhere shows up.
+    const project = projectOf.get(id)!;
+    const { discussion } = await (
+      await page.request.get(`/api/v1/discussions/${id}?project=${project}`)
+    ).json();
+    const posted = await page.request.post(
+      `/api/v1/discussions/${id}/replies?project=${project}`,
+      {
+        data: {
+          expected_revision: discussion.revision,
+          body: "Posted elsewhere on 229",
+        },
+      },
+    );
+    expect(posted.status()).toBe(201);
+    await indicator(page, id).click();
+    await expect(thread(page, id)).toContainText("Posted elsewhere on 229");
+    await thread(page, id).getByRole("textbox").focus();
+    await page.keyboard.press("Escape");
+    await expect(thread(page, id)).toHaveCount(0);
 
     // The posted first reply is not left behind as a draft at its anchor.
     await selectInRow(page, "needle-229 ", "discusses needle-229");

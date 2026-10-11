@@ -115,4 +115,60 @@ describe("discussion state", () => {
     ]);
     expect(state.projectState("p1").next).toBeNull();
   });
+
+  it("retrying a failed first load keeps discussions created meanwhile", async () => {
+    let fail = true;
+    const client = {
+      listDiscussions: () =>
+        fail
+          ? Promise.reject(new Error("offline"))
+          : Promise.resolve(page("d1")),
+      createDiscussion: () =>
+        Promise.resolve({ discussion: { id: "new" }, reply: null }),
+    } as never;
+    const state = createDiscussionsState({
+      client,
+      tracked: (read) => read(),
+      db: () => Promise.resolve(null),
+    });
+    await state.loadProject("p1");
+    expect(state.projectState("p1").error).toBeDefined();
+    await state.create({
+      projectId: "p1",
+      kind: "note",
+      source: { kind: "session", id: "s1" },
+      anchors: [],
+      quote: "q",
+    });
+    fail = false;
+    await state.loadProject("p1");
+
+    expect(state.forProject("p1").map((d) => d.id)).toEqual(["new", "d1"]);
+  });
+
+  it("a reply posted while replies load stays in the list", async () => {
+    const list = deferred<{
+      replies: { id: string; seq: number }[];
+      next_after: null;
+    }>();
+    const client = {
+      listDiscussionReplies: () => list.promise,
+      addDiscussionReply: () =>
+        Promise.resolve({
+          reply: { id: "r2", seq: 2 },
+          discussion: { id: "d1", revision: 2 },
+        }),
+    } as never;
+    const state = createDiscussionsState({
+      client,
+      tracked: (read) => read(),
+      db: () => Promise.resolve(null),
+    });
+    const loading = state.loadReplies("p1", "d1");
+    await state.reply("p1", { id: "d1", revision: 1 } as never, "hi");
+    list.resolve({ replies: [{ id: "r1", seq: 1 }], next_after: null });
+    await loading;
+
+    expect(state.replies("d1")?.map((r) => r.id)).toEqual(["r1", "r2"]);
+  });
 });

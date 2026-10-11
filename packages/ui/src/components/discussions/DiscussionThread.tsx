@@ -143,14 +143,14 @@ export const DiscussionThread: Component<{
   const [folded, setFolded] = createSignal(false);
   const replies = () => state.replies(props.discussion.id);
 
+  // Cached replies render at once; every expand still refetches so replies
+  // posted elsewhere show up.
   onMount(() => {
-    if (!replies()) {
-      void state
-        .loadReplies(props.projectId, props.discussion.id)
-        .catch((err: unknown) =>
-          setError(err instanceof Error ? err.message : String(err)),
-        );
-    }
+    void state
+      .loadReplies(props.projectId, props.discussion.id)
+      .catch((err: unknown) =>
+        setError(err instanceof Error ? err.message : String(err)),
+      );
   });
 
   async function toggleResolved() {

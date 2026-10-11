@@ -167,8 +167,9 @@ export function createDiscussionsState(deps: {
       // activity only moves a discussion up, so the old tail and its
       // keyset cursor stay valid.
       const live = store.projects[projectId]?.ids ?? [];
-      const ids = more ? [...live] : live.filter((id) => !known.has(id));
       const refresh = !more && wasLoaded;
+      // Before the first successful load the list holds only local creations.
+      const ids = refresh ? live.filter((id) => !known.has(id)) : [...live];
       for (const id of [
         ...result.discussions.map((d) => d.id),
         ...(refresh ? before : []),
@@ -210,7 +211,13 @@ export function createDiscussionsState(deps: {
       after = result.next_after;
       if (after === null) break;
     }
-    setStore("replies", id, all);
+    // A reply posted while these pages were in flight stays visible.
+    const fetched = new Set(all.map((r) => r.id));
+    const lastSeq = all.at(-1)?.seq ?? 0;
+    setStore("replies", id, (rs) => [
+      ...all,
+      ...(rs ?? []).filter((r) => !fetched.has(r.id) && r.seq > lastSeq),
+    ]);
     return all;
   }
 
