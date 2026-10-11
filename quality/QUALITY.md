@@ -14,7 +14,7 @@ Lore is a **three-tier memory architecture** for AI coding agents. It intercepts
 - **`@loreai/opencode`** — OpenCode plugin adapter.
 - **`@loreai/pi`** — Pi coding-agent extension adapter.
 
-**Runtime:** Bun (development/tests) and Node.js >= 22.5 (production npm bundles). **Database:** SQLite with WAL mode, FTS5 full-text search.
+**Runtime:** Bun (development/tests) and Node.js >= 22.16, excluding 23.x (production npm bundles). **Database:** SQLite with WAL mode, FTS5 full-text search.
 
 ### What "correct" means for this project
 

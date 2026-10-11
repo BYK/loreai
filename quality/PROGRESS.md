@@ -21,7 +21,7 @@ Date: 2026-05-16
 ### Summary
 
 - **Domain:** Three-tier memory architecture for AI coding agents (temporal → distillation → knowledge)
-- **Stack:** TypeScript monorepo (Bun runtime dev, Node.js 22.5+ prod), SQLite WAL + FTS5, esbuild bundling
+- **Stack:** TypeScript monorepo (Bun runtime dev, Node.js 22.16+ excluding 23.x prod), SQLite WAL + FTS5, esbuild bundling
 - **Packages:** core (memory engine), gateway (LLM proxy + CLI), opencode (OpenCode plugin), pi (Pi plugin)
 - **Files explored:** 213 tracked files across 4 packages
 - **Exploration patterns applied:** 3 FULL (Fallback/Degradation, Cross-Implementation, Enumeration/Representation) + 1 FULL (API Surface)

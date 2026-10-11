@@ -419,9 +419,9 @@ const binScript = `#!/usr/bin/env node
 // Checks Node version, suppresses experimental warnings, runs CLI.
 {
   const v = process.versions.node.split(".").map(Number);
-  if (v[0] < 22 || (v[0] === 22 && v[1] < 15)) {
+  if (v[0] < 22 || (v[0] === 22 && v[1] < 16) || v[0] === 23) {
     console.error(
-      "Error: lore requires Node.js 22.15 or later (found " +
+      "Error: lore requires Node.js 22.16 or later, except 23.x (found " +
         process.version +
         ").\\n\\n" +
         "Either upgrade Node.js, or install the standalone binary instead:\\n" +

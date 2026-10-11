@@ -3931,7 +3931,7 @@ export function assertFts5Available(database: Database): void {
     if (!/fts5|no such module/i.test(detail)) throw e;
     throw new Error(
       `Lore requires SQLite with the FTS5 full-text search extension, but this runtime's SQLite was built without it (${detail}). ` +
-        "FTS5 powers Lore's memory search and cannot be disabled. Use the standalone `lore` binary, or a Node.js/Bun build whose bundled SQLite includes FTS5. " +
+        "FTS5 powers Lore's memory search and cannot be disabled. Use Node.js 22.16 or later, except 23.x (earlier Node 22 builds and tested Node 23 releases ship SQLite without FTS5), Bun, or the standalone `lore` binary. " +
         "See https://www.sqlite.org/fts5.html",
       { cause: e },
     );

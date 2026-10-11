@@ -43,7 +43,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.15"
+    "node": "^22.16.0 || >=24"
   },
   "repository": {
     "type": "git",
