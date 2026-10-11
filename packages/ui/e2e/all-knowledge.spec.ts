@@ -36,12 +36,12 @@ test.describe("cross-project knowledge", () => {
     await page.goto("/ui/knowledge");
     const allKnowledge = page.getByTestId("nav-all-knowledge");
     const projects = page.getByTestId("nav-projects");
-    await expect(allKnowledge).toHaveClass(/bg-accent-soft/);
-    await expect(projects).not.toHaveClass(/bg-accent-soft/);
+    await expect(allKnowledge).toHaveClass(/bg-selected/);
+    await expect(projects).not.toHaveClass(/bg-selected/);
 
     await page.goto("/ui");
-    await expect(projects).toHaveClass(/bg-accent-soft/);
-    await expect(allKnowledge).not.toHaveClass(/bg-accent-soft/);
+    await expect(projects).toHaveClass(/bg-selected/);
+    await expect(allKnowledge).not.toHaveClass(/bg-selected/);
   });
 
   test("workspace links highlight Entities on list and detail, and Costs", async ({
@@ -60,15 +60,15 @@ test.describe("cross-project knowledge", () => {
     await page.goto("/ui/entities");
     const entitiesLink = page.getByTestId("nav-entities");
     const costsLink = page.getByTestId("nav-costs");
-    await expect(entitiesLink).toHaveClass(/bg-accent-soft/);
+    await expect(entitiesLink).toHaveClass(/bg-selected/);
     await page.goto(`/ui/entities/${ada.id}`);
     await expect(page.getByTestId("entity-page")).toBeVisible();
-    await expect(entitiesLink).toHaveClass(/bg-accent-soft/);
+    await expect(entitiesLink).toHaveClass(/bg-selected/);
 
     await page.goto("/ui/costs");
     await expect(page.getByTestId("costs-page")).toBeVisible();
-    await expect(costsLink).toHaveClass(/bg-accent-soft/);
-    await expect(entitiesLink).not.toHaveClass(/bg-accent-soft/);
+    await expect(costsLink).toHaveClass(/bg-selected/);
+    await expect(entitiesLink).not.toHaveClass(/bg-selected/);
   });
 
   test("lists projects and shared knowledge, opens an entry, and filters category plus project", async ({

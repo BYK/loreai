@@ -49,14 +49,18 @@ function renderProjectList(
           const [query, setQuery] = createSignal("");
           return (
             <>
-              <input
-                data-testid="nav-project-filter"
-                value={query()}
-                onInput={(event) => setQuery(event.currentTarget.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setQuery("");
-                }}
-              />
+              <label>
+                <span class="sr-only">Search list</span>
+                <input
+                  aria-label="Search list"
+                  data-testid="nav-project-filter"
+                  value={query()}
+                  onInput={(event) => setQuery(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setQuery("");
+                  }}
+                />
+              </label>
               <ProjectListBody
                 projects={projects}
                 activeProjectId={activeProjectId}

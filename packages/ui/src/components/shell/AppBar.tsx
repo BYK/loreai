@@ -35,7 +35,7 @@ export const ThemeToggle: Component<{ class?: string }> = (props) => {
           <Button
             variant="ghost"
             size="sm"
-            class="h-7 px-2 aria-pressed:bg-surface aria-pressed:text-heading aria-pressed:shadow-sm"
+            class="h-7 px-2 text-text aria-pressed:bg-selected aria-pressed:text-selected-text aria-pressed:shadow-sm"
             aria-label={`${THEME_OPTIONS[choice].label} theme`}
             aria-pressed={t.choice() === choice}
             title={

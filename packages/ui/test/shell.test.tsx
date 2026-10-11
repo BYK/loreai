@@ -380,20 +380,18 @@ describe("shell: project navigation and real-data path", () => {
     await screen.findByTestId("nav-projects");
 
     await waitFor(() =>
-      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-accent-soft"),
+      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-selected"),
     );
     expect(screen.getByTestId("nav-all-knowledge")).not.toHaveClass(
-      "bg-accent-soft",
+      "bg-selected",
     );
 
     history.set({ value: "/ui/knowledge" });
     await waitFor(() => {
       expect(screen.getByTestId("nav-all-knowledge")).toHaveClass(
-        "bg-accent-soft",
+        "bg-selected",
       );
-      expect(screen.getByTestId("nav-projects")).not.toHaveClass(
-        "bg-accent-soft",
-      );
+      expect(screen.getByTestId("nav-projects")).not.toHaveClass("bg-selected");
     });
   });
 
@@ -416,11 +414,11 @@ describe("shell: project navigation and real-data path", () => {
     for (const [path, activeId] of activeRoutes) {
       history.set({ value: path });
       await waitFor(() =>
-        expect(screen.getByTestId(activeId)).toHaveClass("bg-accent-soft"),
+        expect(screen.getByTestId(activeId)).toHaveClass("bg-selected"),
       );
       for (const id of navIds) {
         if (id !== activeId) {
-          expect(screen.getByTestId(id)).not.toHaveClass("bg-accent-soft");
+          expect(screen.getByTestId(id)).not.toHaveClass("bg-selected");
         }
       }
     }
@@ -436,13 +434,13 @@ describe("shell: project navigation and real-data path", () => {
     expect(duplicates).toHaveAttribute("href", duplicatesPath);
     await waitFor(() => {
       expect(duplicates).toHaveAttribute("aria-current", "page");
-      expect(duplicates).toHaveClass("bg-accent-soft");
+      expect(duplicates).toHaveClass("bg-selected");
     });
 
     history.set({ value: `/ui/projects/${project.id}` });
     await waitFor(() => {
       expect(duplicates).not.toHaveAttribute("aria-current", "page");
-      expect(duplicates).not.toHaveClass("bg-accent-soft");
+      expect(duplicates).not.toHaveClass("bg-selected");
     });
     unmount();
 
@@ -451,7 +449,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
   });
 
-  it("loads projects into the list pane and shows the welcome document", async () => {
+  it("loads projects into the list and shows a concise empty document", async () => {
     const client = fakeClient();
     mount("/", client);
     const rows = await screen.findAllByTestId("nav-project");
@@ -461,6 +459,12 @@ describe("shell: project navigation and real-data path", () => {
     ]);
     expect(
       screen.getByRole("heading", { name: "Select an item" }),
+    ).toBeVisible();
+    const documentPane = screen.getByTestId("document-pane");
+    expect(documentPane).toHaveTextContent("Pick an item from the list.");
+    expect(documentPane.querySelector("a, ul")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Merge duplicate projects" }),
     ).toBeVisible();
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
@@ -639,6 +643,7 @@ describe("shell: project navigation and real-data path", () => {
     );
     expect(selectedProject).toBeDefined();
     expect(selectedProject).toHaveAttribute("aria-current", "page");
+    expect(selectedProject).toHaveClass("bg-selected");
     expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
     expect(client.calls[0]).toBe("projects");
     expect(client.calls).toContain("entry:k-wal");
@@ -1710,8 +1715,10 @@ describe("shell: empty, error, not-found and locked states", () => {
         },
       }),
     );
-    // Both the nav and the welcome document explain the empty state.
-    expect(await screen.findAllByText("No projects yet")).toHaveLength(2);
+    expect(await screen.findAllByText("No projects yet")).toHaveLength(1);
+    expect(screen.getByTestId("document-pane")).not.toHaveTextContent(
+      "No projects yet",
+    );
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
@@ -1895,6 +1902,7 @@ describe("shell: search entry, theme and fixture", () => {
       "aria-pressed",
       "false",
     );
+    expect(screen.getByTestId("theme-system")).toHaveClass("text-text");
 
     fireEvent.click(screen.getByTestId("theme-light"));
     await waitFor(() =>

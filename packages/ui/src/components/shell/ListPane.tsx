@@ -18,7 +18,7 @@ export const ListPane: Component<{
     aria-hidden={!props.visible}
     hidden={!props.visible}
     class={cn(
-      "flex min-h-0 flex-none flex-col overflow-hidden border-r border-line bg-surface",
+      "flex min-h-0 flex-none flex-col overflow-hidden border-r border-hairline bg-surface",
       !props.full && "w-full",
       props.maximized && "flex-1",
     )}
@@ -27,11 +27,11 @@ export const ListPane: Component<{
     }
   >
     {props.header}
-    <label class="mx-2 mb-2 flex h-8 items-center rounded-md bg-chrome px-2">
-      <span class="sr-only">Search projects</span>
+    <label class="mx-2 mb-2 flex h-8 items-center rounded-md border border-hairline bg-transparent px-2">
+      <span class="sr-only">Search list</span>
       <input
         type="search"
-        aria-label="Filter projects"
+        aria-label="Search list"
         placeholder="in:inbox"
         data-testid="nav-project-filter"
         class="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted"

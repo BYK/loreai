@@ -16,7 +16,6 @@ import {
 import {
   allKnowledgeHref,
   globalKnowledgeHref,
-  projectHref,
   workspaceSearchHref,
 } from "~/lib/href";
 import { isApiError } from "~/lib/api";
@@ -54,55 +53,6 @@ function decodeParam(segment: string | undefined) {
     return segment;
   }
 }
-
-const WelcomeDetail: Component<{
-  projects: readonly ProjectSummary[] | undefined;
-}> = (props) => (
-  <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
-    <div class="eyebrow mb-2">Memory browser</div>
-    <h1 class="mb-3 text-[25px] font-semibold">Select an item</h1>
-    <p class="mb-6 max-w-prose text-sm text-muted">
-      Lore keeps what your agents learned about each project. Pick a project on
-      the left to browse its knowledge.
-    </p>
-    <Show
-      when={props.projects}
-      fallback={<StateCard kind="loading" title="Loading projects" />}
-    >
-      {(projects) => (
-        <Show
-          when={projects().length > 0}
-          fallback={
-            <StateCard kind="empty" title="No projects yet">
-              Run <code>lore run</code> in a project to start.
-            </StateCard>
-          }
-        >
-          <ul class="grid list-none gap-2 p-0 sm:grid-cols-2">
-            <For each={projects()}>
-              {(project) => (
-                <li>
-                  <A
-                    href={projectHref(project.id)}
-                    class="block rounded-lg border border-line px-4 py-3 text-sm hover:bg-soft"
-                  >
-                    <div class="font-semibold">
-                      {project.name || project.path}
-                    </div>
-                    <div class="mt-1 text-xs text-muted">
-                      {pluralize(project.knowledge_count, "entry")} ·{" "}
-                      {pluralize(project.session_count, "session")}
-                    </div>
-                  </A>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
-      )}
-    </Show>
-  </div>
-);
 
 export const Browse: Component<{
   view:
@@ -271,12 +221,11 @@ export const Browse: Component<{
     switch (props.view) {
       case "welcome":
         return (
-          <>
-            <WelcomeDetail projects={ws.projects.data()} />
-            <div class="mx-auto max-w-[940px] px-5 pb-8 sm:px-7.5">
-              <MergeProjectsAction />
-            </div>
-          </>
+          <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
+            <h1 class="mb-3 text-[25px] font-semibold">Select an item</h1>
+            <p class="mb-6 text-sm text-muted">Pick an item from the list.</p>
+            <MergeProjectsAction />
+          </div>
         );
       case "project":
         if (!id) return projectFallback();

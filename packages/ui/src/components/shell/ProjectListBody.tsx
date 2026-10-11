@@ -51,7 +51,7 @@ export const ProjectListBody: Component<{
           class={cn(
             "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-3 py-1.5 text-sm text-text hover:bg-soft",
             project.id === props.activeProjectId &&
-              "bg-accent-soft font-semibold text-accent-soft-text",
+              "bg-selected font-semibold text-selected-text",
           )}
         >
           <span class="min-w-0 truncate">{label}</span>

@@ -54,6 +54,7 @@ test.describe("sidebar pinned / recent / filter", () => {
     const list = page.locator(LIST);
 
     const filter = list.getByTestId("nav-project-filter");
+    await expect(filter).toHaveAccessibleName("Search list");
     await filter.fill("arch");
     await expect(list.locator('[data-section="matches"]')).toHaveCount(matches);
     expect(matches).toBeGreaterThanOrEqual(5);

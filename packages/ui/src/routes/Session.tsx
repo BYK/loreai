@@ -151,42 +151,44 @@ export const Session: Component = () => {
         </div>
       </Match>
       <Match when={reader.loader.data()}>
-        <SessionWorkspace
-          transcript={
-            <SessionView
-              sessionId={sessionId() ?? ""}
-              messages={reader.messages()}
-              distillations={reader.distillations()}
-              messageCount={reader.messageCount()}
-              hasOlder={reader.hasOlder()}
-              loadingOlder={reader.loadingOlder()}
-              olderError={reader.olderError()}
-              onLoadOlder={reader.loadOlder}
-              onSearchWhole={reader.search}
-              status={reader.status()}
-              anchorParam={anchorParam()}
-              onAnchorChange={(encoded) =>
-                setSearch({ a: encoded ?? undefined }, { replace: true })
-              }
-              linkBase={() => window.location.href}
-              loadDistillation={(id) =>
-                ws.tracked(() => ws.client.getDistillation(id))
-              }
-              context={context.loader.data() ?? null}
-              knowledgeHref={hrefForKnowledge}
-              header={header()}
-            />
-          }
-          context={
-            <ContextWindowPane
-              context={context.loader.data()}
-              loading={context.loader.loading()}
-              error={context.loader.error()}
-              onRetry={context.loader.reload}
-              knowledgeHref={hrefForKnowledge}
-            />
-          }
-        />
+        <div class="h-full min-h-0 overflow-hidden [&>div]:h-full! [&>div]:min-h-0! [&>div]:overflow-hidden! [&>div>aside]:h-full! [&>div>div]:min-h-0!">
+          <SessionWorkspace
+            transcript={
+              <SessionView
+                sessionId={sessionId() ?? ""}
+                messages={reader.messages()}
+                distillations={reader.distillations()}
+                messageCount={reader.messageCount()}
+                hasOlder={reader.hasOlder()}
+                loadingOlder={reader.loadingOlder()}
+                olderError={reader.olderError()}
+                onLoadOlder={reader.loadOlder}
+                onSearchWhole={reader.search}
+                status={reader.status()}
+                anchorParam={anchorParam()}
+                onAnchorChange={(encoded) =>
+                  setSearch({ a: encoded ?? undefined }, { replace: true })
+                }
+                linkBase={() => window.location.href}
+                loadDistillation={(id) =>
+                  ws.tracked(() => ws.client.getDistillation(id))
+                }
+                context={context.loader.data() ?? null}
+                knowledgeHref={hrefForKnowledge}
+                header={header()}
+              />
+            }
+            context={
+              <ContextWindowPane
+                context={context.loader.data()}
+                loading={context.loader.loading()}
+                error={context.loader.error()}
+                onRetry={context.loader.reload}
+                knowledgeHref={hrefForKnowledge}
+              />
+            }
+          />
+        </div>
       </Match>
     </Switch>
   );

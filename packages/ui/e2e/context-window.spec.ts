@@ -26,7 +26,6 @@ test.describe("context window", () => {
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name.includes("mobile"), "desktop layout only");
-    await page.setViewportSize({ width: 1900, height: 1000 });
     await openReader(page);
 
     const pane = page.getByTestId("context-window");

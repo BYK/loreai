@@ -113,7 +113,7 @@ const RestorePopover: Component<{
       {props.label} ▾
     </PopoverPrimitive.Trigger>
     <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Content class="z-50 w-64 rounded-md border border-line bg-surface p-2">
+      <PopoverPrimitive.Content class="z-50 w-64 rounded-md border border-hairline bg-surface p-2">
         <div class="max-h-[70vh] overflow-y-auto">{props.children}</div>
         <PopoverPrimitive.CloseButton
           type="button"
@@ -363,7 +363,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           data-pane="nav"
           aria-hidden={!showLeft()}
           class={cn(
-            "flex min-h-0 w-[240px] flex-none flex-col overflow-hidden border-r border-line bg-nav",
+            "flex min-h-0 w-[240px] flex-none flex-col overflow-hidden border-r border-hairline bg-nav",
             !showLeft() && "hidden",
             (hiddenByMaximize("nav") || hiddenByMaximize("participants")) &&
               "w-full",
@@ -382,7 +382,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
             </section>
           </Show>
           <Show when={participantsVisibleOutsidePopover()}>
-            <section class="flex min-h-0 flex-1 flex-col border-t border-line">
+            <section class="flex min-h-0 max-h-[40%] flex-none flex-col overflow-y-auto border-t border-hairline">
               <PaneHeader
                 title="Participants"
                 pane="participants"
@@ -466,18 +466,27 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
           aria-label="Document"
           hidden={!showDocument()}
           class={cn(
-            "relative min-h-0 min-w-0 flex-1 overflow-auto bg-surface @container",
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface @container",
             !showDocument() && "hidden",
           )}
         >
-          <PaneHeader
-            title="Document"
-            pane="document"
-            layout={layoutState()}
-            setLayout={dispatch}
-            controls={full()}
-          />
-          {outlet()}
+          <Show
+            when={full()}
+            fallback={
+              <div class="flex h-9 flex-none items-center px-3 text-xs text-muted">
+                Document
+              </div>
+            }
+          >
+            <PaneHeader
+              title="Document"
+              pane="document"
+              layout={layoutState()}
+              setLayout={dispatch}
+              controls
+            />
+          </Show>
+          <div class="min-h-0 flex-1 overflow-auto">{outlet()}</div>
         </main>
       </div>
       <Show when={mode() === "single"}>

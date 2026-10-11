@@ -26,7 +26,7 @@ const NavItem: Component<{
     aria-current={props.active ? "page" : undefined}
     class={cn(
       "my-0.5 flex items-center justify-between gap-2 rounded-md px-3 py-1.5 text-sm text-text hover:bg-soft",
-      props.active && "bg-accent-soft font-semibold text-accent-soft-text",
+      props.active && "bg-selected font-semibold text-selected-text",
     )}
   >
     <span class="truncate">{props.children}</span>
@@ -185,7 +185,7 @@ export const Nav: Component<NavProps> = (props) => {
         Model usage
       </NavItem>
       <Show when={props.footer}>{(footer) => footer()}</Show>
-      <ConnectionStatus class="mt-auto border-t border-line px-3 pt-3" />
+      <ConnectionStatus class="mt-auto border-t border-hairline px-3 pt-3" />
     </nav>
   );
 };
