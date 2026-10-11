@@ -101,16 +101,24 @@ export const DiscussionRoute: Component = () => {
     return d && d.project_id === projectId() ? d : undefined;
   };
 
+  // The route instance is reused across discussions; only the latest load
+  // may report its outcome.
+  let generation = 0;
   const load = () => {
     const pid = projectId();
     const id = discussionId();
+    const gen = ++generation;
     if (!pid || !id) return;
     setLoading(true);
     setError(undefined);
     state
       .loadDiscussion(pid, id)
-      .catch((err: unknown) => setError(err))
-      .finally(() => setLoading(false));
+      .catch((err: unknown) => {
+        if (gen === generation) setError(err);
+      })
+      .finally(() => {
+        if (gen === generation) setLoading(false);
+      });
   };
   createEffect(on([projectId, discussionId], load));
 
