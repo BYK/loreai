@@ -251,6 +251,34 @@ test.describe("reply to selection", () => {
     await expect(page).toHaveURL(new RegExp(`/discussions/${id}$`));
   });
 
+  test("Save note creates one note however fast it is clicked", async ({
+    page,
+  }) => {
+    const creates: string[] = [];
+    page.on("request", (req) => {
+      if (isCreate(req.url(), req.method())) creates.push(req.url());
+    });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/v1\/discussions(\?|$)/, async (route) => {
+      if (route.request().method() === "POST") await held;
+      await route.continue();
+    });
+    await openReader(page);
+    const needle = isMobile() ? "discusses needle-220" : "discusses needle-221";
+    const marker = isMobile() ? "needle-220 " : "needle-221 ";
+    await selectInRow(page, marker, needle);
+    const save = page.getByTestId("save-note");
+    await save.dblclick();
+    await expect(save).toBeDisabled();
+    release();
+    await expect(
+      rowWith(page, marker).getByTestId("discussion-indicator"),
+    ).toHaveCount(1);
+    await page.unrouteAll();
+    expect(creates).toHaveLength(1);
+  });
+
   test("drafts persist across reload and are never sent", async ({ page }) => {
     const sent: string[] = [];
     page.on("request", (req) => {

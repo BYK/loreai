@@ -96,6 +96,7 @@ export function createDiscussionsState(deps: {
     const token = (sourceLoads.get(key) ?? 0) + 1;
     sourceLoads.set(key, token);
     const current = () => sourceLoads.get(key) === token;
+    const known = new Set(store.sources[key]?.ids ?? []);
     setStore("sources", key, (s) => ({
       ...(s ?? EMPTY_LIST),
       loading: true,
@@ -120,6 +121,10 @@ export function createDiscussionsState(deps: {
         if (!cursor) break;
       }
       if (!current()) return;
+      // Keep discussions created while this load was in flight.
+      for (const id of store.sources[key]?.ids ?? []) {
+        if (!known.has(id) && !ids.includes(id)) ids.push(id);
+      }
       setStore("sources", key, {
         ids,
         loaded: true,
@@ -141,6 +146,7 @@ export function createDiscussionsState(deps: {
     const current = store.projects[projectId] ?? EMPTY_LIST;
     if (current.loading) return;
     if (more && !current.next) return;
+    const known = new Set(current.ids);
     setStore("projects", projectId, {
       ...current,
       loading: true,
@@ -154,9 +160,14 @@ export function createDiscussionsState(deps: {
         }),
       );
       for (const d of result.discussions) upsert(d);
-      const fresh = result.discussions.map((d) => d.id);
+      // Keep discussions created while this page was in flight.
+      const live = store.projects[projectId]?.ids ?? [];
+      const ids = more ? [...live] : live.filter((id) => !known.has(id));
+      for (const d of result.discussions) {
+        if (!ids.includes(d.id)) ids.push(d.id);
+      }
       setStore("projects", projectId, {
-        ids: more ? [...current.ids, ...fresh] : fresh,
+        ids,
         loaded: true,
         loading: false,
         error: undefined,

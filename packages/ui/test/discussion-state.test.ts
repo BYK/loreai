@@ -43,4 +43,49 @@ describe("discussion state", () => {
     ]);
     expect(state.sourceState("p1", source).loading).toBe(false);
   });
+
+  it("keeps a discussion created while a project or source load is in flight", async () => {
+    const calls: ReturnType<typeof deferred<ReturnType<typeof page>>>[] = [];
+    const client = {
+      listDiscussions: () => {
+        const call = deferred<ReturnType<typeof page>>();
+        calls.push(call);
+        return call.promise;
+      },
+      createDiscussion: () =>
+        Promise.resolve({ discussion: { id: "new" }, reply: null }),
+    } as never;
+    const state = createDiscussionsState({
+      client,
+      tracked: (read) => read(),
+      db: () => Promise.resolve(null),
+    });
+    const source = { kind: "session", id: "s1" } as const;
+    const initial = Promise.all([
+      state.loadProject("p1"),
+      state.loadSource("p1", source),
+    ]);
+    calls[0]!.resolve(page("d1"));
+    calls[1]!.resolve(page("d1"));
+    await initial;
+
+    const project = state.loadProject("p1");
+    const sourceLoad = state.loadSource("p1", source);
+    await state.create({
+      projectId: "p1",
+      kind: "note",
+      source,
+      anchors: [],
+      quote: "q",
+    });
+    calls[2]!.resolve(page("d1"));
+    calls[3]!.resolve(page("d1"));
+    await Promise.all([project, sourceLoad]);
+
+    expect(state.forProject("p1").map((d) => d.id)).toEqual(["new", "d1"]);
+    expect(state.forSource("p1", source).map((d) => d.id)).toEqual([
+      "d1",
+      "new",
+    ]);
+  });
 });

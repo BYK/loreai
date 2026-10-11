@@ -39,6 +39,7 @@ export const SelectionActions: Component<{
 }> = (props) => {
   const ws = useWorkspace();
   const [composing, setComposing] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
   async function create(kind: "discussion" | "note", body: string) {
@@ -91,11 +92,17 @@ export const SelectionActions: Component<{
               size="sm"
               variant="outline"
               data-testid="save-note"
+              disabled={saving()}
+              aria-busy={saving()}
               onClick={() => {
+                if (saving()) return;
+                setSaving(true);
                 setError(null);
-                create("note", "").catch((err: unknown) =>
-                  setError(err instanceof Error ? err.message : String(err)),
-                );
+                create("note", "")
+                  .catch((err: unknown) =>
+                    setError(err instanceof Error ? err.message : String(err)),
+                  )
+                  .finally(() => setSaving(false));
               }}
             >
               Save note
