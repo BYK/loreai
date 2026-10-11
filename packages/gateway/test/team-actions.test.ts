@@ -537,7 +537,7 @@ describe("team action routes", () => {
     const malformed = await request(
       `/api/v1/orgs/${TEAM}/domains/claim`,
       "POST",
-      JSON.stringify({ domain: "gmail.com" }),
+      JSON.stringify({ domain: "bad..domain" }),
     );
     expect(malformed.status).toBe(400);
     teamMocks.claimOrgDomain.mockRejectedValueOnce(
