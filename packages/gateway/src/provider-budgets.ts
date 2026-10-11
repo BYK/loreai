@@ -50,6 +50,8 @@ export type PacingWindowInput = {
   windowMs: number;
   /** EWMA of observed Δu/Δt, or null with fewer than 2 samples. */
   observedRate: number | null;
+  /** Held integral delay `d_w` (ms); applies only with an observed rate. */
+  heldDelayMs: number;
 };
 
 export type PacingWindowStatus = {
@@ -168,6 +170,8 @@ type RateTrack = {
   lastAt: number;
   samples: number;
   rate: number | null;
+  /** Held integral-controller delay `d_w` (ms). */
+  held: number;
 };
 
 const rateTracks = new Map<string, RateTrack>();
@@ -225,15 +229,44 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
       lastAt: row.observedAt,
       samples: 1,
       rate: null,
+      held: 0,
     });
     return;
   }
   const dt = row.observedAt - track.lastAt;
   if (dt < MIN_SAMPLE_INTERVAL_MS) return;
-  track.rate = ewma(track.rate, (used - track.lastUsed) / dt);
+  const rate = ewma(track.rate, (used - track.lastUsed) / dt);
+  track.rate = rate;
   track.lastUsed = used;
   track.lastAt = row.observedAt;
   track.samples++;
+  const T = row.resetsAt === null ? 0 : row.resetsAt - row.observedAt;
+  if (used >= 100) {
+    track.held = MAX_PACING_DELAY_MS;
+  } else if (T > 0) {
+    const gap =
+      requestGaps.get(trackKey(row.provider, row.account))?.gap ?? null;
+    track.held = integrateHeldDelayMs(
+      track.held,
+      gap,
+      rate / ((100 - used) / T),
+    );
+  }
+}
+
+/**
+ * One integral-controller step, applied per accepted rate sample:
+ * `d_w ← clamp(d_w + g · (ρ − 1), 0, MAX)`. `g` already includes the delay
+ * being applied, so this settles where `r = s` (a stateless `g · (ρ − 1)`
+ * would settle only halfway). No gap estimate yet → unchanged; pure.
+ */
+export function integrateHeldDelayMs(
+  held: number,
+  gapMs: number | null,
+  ratio: number,
+): number {
+  if (gapMs === null || !Number.isFinite(ratio)) return held;
+  return clamp(held + gapMs * (ratio - 1), 0, MAX_PACING_DELAY_MS);
 }
 
 /** Record a foreground request start for the account's gap EWMA. */
@@ -286,8 +319,10 @@ export function evaluatePacingWindow(
     delay = MAX_PACING_DELAY_MS;
   } else if (rate !== null) {
     ratio = rate / sustainable;
-    if (rate > sustainable) {
-      throttling = true;
+    throttling = rate > sustainable;
+    if (input.observedRate !== null) {
+      delay = input.heldDelayMs;
+    } else if (throttling) {
       delay = gapMs === null ? 0 : gapMs * (ratio - 1);
     }
   }
@@ -345,16 +380,18 @@ function windowInputs(
       continue;
     }
     const track = rateTracks.get(trackKey(provider, account, row.window));
-    const observedRate =
+    const current =
       track && track.resetsAt === row.resetsAt && track.samples >= 2
-        ? track.rate
+        ? track
         : null;
+    const observedRate = current?.rate ?? null;
     out.push({
       window: row.window,
       used,
       resetsAt: row.resetsAt,
       windowMs: row.windowMinutes * 60_000,
       observedRate,
+      heldDelayMs: current?.held ?? 0,
     });
   }
   return out.sort((a, b) => a.window.localeCompare(b.window));

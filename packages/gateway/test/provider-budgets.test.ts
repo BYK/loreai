@@ -6,6 +6,7 @@ import {
   computePacingDelayMs,
   evaluatePacingWindow,
   evaluateProviderPacing,
+  integrateHeldDelayMs,
   getPacingSettings,
   isCurationPacingPaused,
   isPacingEnabled,
@@ -62,6 +63,7 @@ function windowAt(
   rho: number | null,
   window = "5h",
   windowMs = FIVE_H,
+  heldDelayMs = 0,
 ): PacingWindowInput {
   const s = (100 - used) / T;
   return {
@@ -70,6 +72,7 @@ function windowAt(
     resetsAt: NOW + T,
     windowMs,
     observedRate: rho === null ? null : rho * s,
+    heldDelayMs,
   };
 }
 
@@ -80,25 +83,36 @@ function gapOf(gap: number): void {
 }
 
 describe("pacing delay formula", () => {
+  // Average-rate fallback (< 2 samples): u = 60 after 2.5h of 5h → r = 24 %/h,
+  // s = 16 %/h, ρ = 1.5. u = 40 after 2.5h → r = 16, s = 24, ρ < 1.
   test("r ≤ s → no delay", () => {
-    expect(computePacingDelayMs([windowAt(50, 2 * HOUR, 1)], 10_000, NOW)).toBe(
-      0,
-    );
     expect(
-      computePacingDelayMs([windowAt(50, 2 * HOUR, 0.5)], 10_000, NOW),
+      computePacingDelayMs([windowAt(40, 2.5 * HOUR, null)], 10_000, NOW),
     ).toBe(0);
+    expect(integrateHeldDelayMs(0, 10_000, 1)).toBe(0);
+    expect(integrateHeldDelayMs(0, 10_000, 0.5)).toBe(0);
   });
 
   test("ρ = 2 with g = 10 s → 10 s", () => {
+    expect(integrateHeldDelayMs(0, 10_000, 2)).toBe(10_000);
+    // The held delay is what an observed-rate window applies.
     expect(
-      computePacingDelayMs([windowAt(50, 2 * HOUR, 2)], 10_000, NOW),
-    ).toBeCloseTo(10_000, 6);
+      computePacingDelayMs(
+        [windowAt(50, 2 * HOUR, 2, "5h", FIVE_H, 10_000)],
+        10_000,
+        NOW,
+      ),
+    ).toBe(10_000);
   });
 
   test("delay is capped at 60 s", () => {
-    expect(
-      computePacingDelayMs([windowAt(50, 2 * HOUR, 10)], 10_000, NOW),
-    ).toBe(MAX_PACING_DELAY_MS);
+    expect(integrateHeldDelayMs(0, 10_000, 10)).toBe(MAX_PACING_DELAY_MS);
+    expect(integrateHeldDelayMs(55_000, 10_000, 2)).toBe(MAX_PACING_DELAY_MS);
+    // Stateless fallback: u = 95 after 4h of 5h → r = 23.75, s = 5 %/h,
+    // ρ = 4.75; g = 20 s → 75 s, capped.
+    expect(computePacingDelayMs([windowAt(95, HOUR, null)], 20_000, NOW)).toBe(
+      MAX_PACING_DELAY_MS,
+    );
     expect(MAX_PACING_DELAY_MS).toBe(60_000);
   });
 
@@ -106,10 +120,16 @@ describe("pacing delay formula", () => {
     expect(computePacingDelayMs([windowAt(100, HOUR, null)], null, NOW)).toBe(
       MAX_PACING_DELAY_MS,
     );
+    expect(
+      computePacingDelayMs(
+        [windowAt(100, HOUR, 0.5, "5h", FIVE_H, 0)],
+        null,
+        NOW,
+      ),
+    ).toBe(MAX_PACING_DELAY_MS);
   });
 
-  test("fewer than 2 samples falls back to r = u / (L - T)", () => {
-    // u = 60 after 2.5h of a 5h window → r = 24 %/h; s = 40 / 2.5h = 16 %/h.
+  test("fewer than 2 samples falls back to r = u / (L - T) and the stateless g · (ρ − 1)", () => {
     const status = evaluatePacingWindow(
       windowAt(60, 2.5 * HOUR, null),
       10_000,
@@ -122,27 +142,39 @@ describe("pacing delay formula", () => {
     expect(status?.delay_ms).toBeCloseTo(5_000, 6);
   });
 
-  test("the larger of the two windows wins", () => {
-    const fiveHour = windowAt(50, 2 * HOUR, 2);
-    const sevenDay = windowAt(50, 3 * 24 * HOUR, 3, "7d", 7 * 24 * HOUR);
-    expect(computePacingDelayMs([fiveHour], 10_000, NOW)).toBeCloseTo(
+  test("an observed-rate window applies its held delay, whatever ρ is now", () => {
+    const below = evaluatePacingWindow(
+      windowAt(50, 2 * HOUR, 0.9, "5h", FIVE_H, 7_000),
       10_000,
-      6,
+      NOW,
     );
-    expect(computePacingDelayMs([fiveHour, sevenDay], 10_000, NOW)).toBeCloseTo(
+    expect(below).toMatchObject({ throttling: false, delay_ms: 7_000 });
+  });
+
+  test("the larger of the two windows wins", () => {
+    const fiveHour = windowAt(50, 2 * HOUR, 2, "5h", FIVE_H, 10_000);
+    const sevenDay = windowAt(
+      50,
+      3 * 24 * HOUR,
+      3,
+      "7d",
+      7 * 24 * HOUR,
       20_000,
-      6,
     );
-    expect(computePacingDelayMs([sevenDay, fiveHour], 10_000, NOW)).toBeCloseTo(
+    expect(computePacingDelayMs([fiveHour], 10_000, NOW)).toBe(10_000);
+    expect(computePacingDelayMs([fiveHour, sevenDay], 10_000, NOW)).toBe(
       20_000,
-      6,
+    );
+    expect(computePacingDelayMs([sevenDay, fiveHour], 10_000, NOW)).toBe(
+      20_000,
     );
   });
 
   test("no foreground gap yet → no delay below the limit", () => {
-    expect(computePacingDelayMs([windowAt(50, 2 * HOUR, 2)], null, NOW)).toBe(
-      0,
-    );
+    expect(
+      computePacingDelayMs([windowAt(60, 2.5 * HOUR, null)], null, NOW),
+    ).toBe(0);
+    expect(integrateHeldDelayMs(4_000, null, 3)).toBe(4_000);
   });
 
   test("a window that already reset is ignored", () => {
@@ -292,6 +324,138 @@ describe("rate tracker", () => {
       13_000,
       6,
     );
+  });
+});
+
+describe("integral controller (held d_w)", () => {
+  const T0 = 6 * 24 * HOUR;
+  const resetsAt = NOW + T0;
+  const row = (usedPercent: number, observedAt: number, reset = resetsAt) =>
+    quotaRow({
+      window: "7d",
+      windowMinutes: 7 * 24 * 60,
+      usedPercent,
+      resetsAt: reset,
+      observedAt,
+    });
+  function observe(r: ProviderQuotaRow): void {
+    upsertProviderQuota(r);
+    recordQuotaObservation(r);
+  }
+  const status = (now: number) => evaluateProviderPacing(now).at(0);
+
+  /**
+   * Closed loop: each request consumes `q` (the sustainable rate s times
+   * c = 20 s), the natural gap is g0 = 5 s, and requests arrive g0 + delay
+   * apart. One quota observation per simulated minute.
+   */
+  function simulate(
+    controller: (now: number) => number,
+    minutes: number,
+  ): { ratio: number; delay: number; gap: number } {
+    const c = 20_000;
+    const g0 = 5_000;
+    let used = 10;
+    const q = ((100 - used) / T0) * c;
+    let t = NOW;
+    let nextRequest = NOW;
+    let delay = 0;
+    observe(row(used, t));
+    for (let minute = 0; minute < minutes; minute++) {
+      const end = t + 60_000;
+      while (nextRequest < end) {
+        recordForegroundRequest(MATCH, nextRequest);
+        used += q;
+        delay = controller(nextRequest);
+        nextRequest += g0 + delay;
+      }
+      t = end;
+      observe(row(used, t));
+    }
+    const s = status(t);
+    return {
+      ratio: s?.windows[0]?.ratio ?? Number.NaN,
+      delay,
+      gap: s?.request_gap_ms ?? Number.NaN,
+    };
+  }
+
+  test("closed loop settles at r = s with delay ≈ c − g0", () => {
+    const result = simulate((now) => pacingDelayMs(MATCH, now), 30);
+    expect(Math.abs(result.ratio - 1)).toBeLessThan(0.1);
+    expect(Math.abs(result.delay - 15_000)).toBeLessThan(1_500);
+  });
+
+  test("the stateless g · (ρ − 1) would settle only halfway", () => {
+    const result = simulate((now) => {
+      const s = status(now);
+      const ratio = s?.windows[0]?.ratio ?? 0;
+      const gap = s?.request_gap_ms ?? null;
+      return gap === null || ratio <= 1
+        ? 0
+        : Math.min(MAX_PACING_DELAY_MS, gap * (ratio - 1));
+    }, 30);
+    // Total gap ≈ (g0 + c) / 2 = 12.5 s instead of c = 20 s → ρ ≈ 1.6.
+    expect(Math.abs(result.gap - 12_500)).toBeLessThan(1_250);
+    expect(result.ratio).toBeGreaterThan(1.4);
+  });
+
+  test("d_w only moves on accepted rate samples, not per request", () => {
+    gapOf(10_000);
+    observe(row(10, NOW - 10 * 60_000));
+    observe(row(12, NOW - 5 * 60_000));
+    const held = pacingDelayMs(MATCH, NOW);
+    expect(held).toBeGreaterThan(0);
+    for (let i = 1; i <= 20; i++) {
+      recordForegroundRequest(MATCH, NOW + i * 1_000);
+      expect(pacingDelayMs(MATCH, NOW + i * 1_000)).toBe(held);
+    }
+    // A sample under 60 s after the last one is not accepted either.
+    observe(row(13, NOW - 5 * 60_000 + 30_000));
+    expect(pacingDelayMs(MATCH, NOW + 21_000)).toBe(held);
+  });
+
+  test("d_w decays toward 0 while ρ < 1", () => {
+    gapOf(10_000);
+    const start = NOW - 25 * 60_000;
+    observe(row(10, NOW - 30 * 60_000));
+    observe(row(14, start));
+    const peak = pacingDelayMs(MATCH, start);
+    expect(peak).toBeGreaterThan(0);
+    let previous = peak;
+    for (let k = 1; k <= 40; k++) {
+      const at = start + k * 60_000;
+      observe(row(14, at)); // no further usage → r decays, ρ falls below 1
+      const held = pacingDelayMs(MATCH, at);
+      expect(held).toBeLessThanOrEqual(previous);
+      previous = held;
+    }
+    expect(previous).toBe(0);
+  });
+
+  test("d_w resets to 0 on a new resetsAt", () => {
+    gapOf(10_000);
+    observe(row(10, NOW - 10 * 60_000));
+    observe(row(14, NOW - 5 * 60_000));
+    expect(pacingDelayMs(MATCH, NOW)).toBeGreaterThan(0);
+    // New 7d window, 1h in, 0.1% used: the fallback rate is under s.
+    const next = NOW + 7 * 24 * HOUR - HOUR;
+    observe(row(0.1, NOW - 60_000, next));
+    expect(status(NOW)?.windows[0]).toMatchObject({
+      rate_source: "average",
+      delay_ms: 0,
+    });
+    // The first observed sample integrates from 0, not from the old d_w.
+    observe(row(0.1, NOW, next));
+    expect(status(NOW)?.windows[0]).toMatchObject({ rate_source: "observed" });
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+  });
+
+  test("u ≥ 100 holds the maximum", () => {
+    gapOf(10_000);
+    observe(row(99, NOW - 10 * 60_000));
+    observe(row(100, NOW - 5 * 60_000));
+    expect(pacingDelayMs(MATCH, NOW)).toBe(MAX_PACING_DELAY_MS);
   });
 });
 
