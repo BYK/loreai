@@ -163,8 +163,14 @@ export function createActivityLocalState(
         recordMap[key] = record;
         changed.set(key, record);
       }
-      const nextFolders = folderTransitions.reduce(
-        (current, transition) => transition(current),
+      const nextFolders = folderTransitions.reduce<ActivityFolderRecord[]>(
+        (current, transition) => {
+          try {
+            return transition(current);
+          } catch {
+            return current;
+          }
+        },
         folders,
       );
       if (db && (changed.size > 0 || folderTransitions.length > 0)) {
