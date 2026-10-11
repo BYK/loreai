@@ -431,6 +431,36 @@ describe("POST /api/v1/model-usage/upload", () => {
     core.modelUsage.deleteOwner();
   });
 
+  it("422s an empty-history upload without calling Model Tides", async () => {
+    // Empty the DB's usage rows; every other describe reseeds its own state.
+    core
+      .db()
+      .query(`DELETE FROM temporal_messages WHERE id IN ('muu-1', 'muu-2')`)
+      .run();
+    core.modelUsage.deleteOwner();
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256, snapshot } = await get.json();
+    expect(snapshot.weeks).toEqual([]);
+    let fetches = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      fetches += 1;
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(422);
+      expect((await res.json()).error.type).toBe("no_usage");
+      expect(fetches).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      seed(core.db());
+    }
+  });
+
   it("502s when the upstream upload fails", async () => {
     core.modelUsage.saveOwner({ id: OWNER_ID, token: OWNER_TOKEN });
     const get = await api("/api/v1/model-usage/upload");

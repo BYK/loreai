@@ -272,6 +272,10 @@ export async function handlePostModelUsageUpload(
         "Counts changed since you reviewed them",
       );
     }
+    // Empty history — reject before any remote call.
+    if (snapshot.weeks.length === 0) {
+      return errorResponse(422, "no_usage", "No model usage to upload yet.");
+    }
     const owner = modelUsage.loadOwner();
     if (owner) {
       const report = await reportVisibility(owner);
