@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "./idb-globals";
 
 import {
@@ -130,6 +130,65 @@ describe("activity local transitions", () => {
       read_total: 3,
       read_at: 10,
     });
+  });
+
+  it("persists actions arriving while hydration replay writes are pending", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("database did not open");
+    const firstKey = "knowledge:project-1:first";
+    const secondKey = "knowledge:project-1:second";
+    await db.put("activityState", { key: firstKey, pinned_at: 6 });
+    await db.put("activityState", { key: secondKey, archived_at: 7 });
+
+    const replayPutStarted = deferred<void>();
+    const releaseReplayPut = deferred<void>();
+    const transaction = db.transaction.bind(db);
+    let holdReplayPut = true;
+    vi.spyOn(db, "transaction").mockImplementation((...args) => {
+      const tx = transaction(...args);
+      if (!holdReplayPut || args[1] !== "readwrite") return tx;
+      holdReplayPut = false;
+      const store = tx.objectStore("activityState");
+      const activityStore = store as unknown as {
+        put: (record: { key: string }) => Promise<string>;
+      };
+      const put = activityStore.put.bind(activityStore);
+      activityStore.put = async (record) => {
+        const write = put(record);
+        replayPutStarted.resolve();
+        await releaseReplayPut.promise;
+        return write;
+      };
+      return tx;
+    });
+
+    const pendingDb = deferred<LoreUiDb | null>();
+    const state = createActivityLocalState(() => pendingDb.promise);
+    state.archive(firstKey, 11);
+    pendingDb.resolve(db);
+
+    await replayPutStarted.promise;
+    state.pin(secondKey, 20);
+    state.markRead(firstKey, 4, 30);
+    releaseReplayPut.resolve();
+    await state.flush();
+
+    const expectedFirst = {
+      archived_at: 11,
+      pinned_at: 6,
+      read_total: 4,
+      read_at: 30,
+    };
+    const expectedSecond = { archived_at: 7, pinned_at: 20 };
+    expect(state.record(firstKey)).toMatchObject(expectedFirst);
+    expect(state.record(secondKey)).toMatchObject(expectedSecond);
+    const records = await db.getAll("activityState");
+    expect(records.find((record) => record.key === firstKey)).toMatchObject(
+      expectedFirst,
+    );
+    expect(records.find((record) => record.key === secondKey)).toMatchObject(
+      expectedSecond,
+    );
   });
 
   it("replays a pre-hydration folder move over persisted folders", async () => {

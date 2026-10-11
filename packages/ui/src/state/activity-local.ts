@@ -173,31 +173,37 @@ export function createActivityLocalState(
         },
         folders,
       );
+      let replayWrite: Promise<void> | undefined;
       if (db && (changed.size > 0 || folderTransitions.length > 0)) {
         const tx = db.transaction(
           ["activityState", "activityFolders"],
           "readwrite",
         );
+        const ops: Promise<unknown>[] = [];
         for (const record of changed.values()) {
-          await tx.objectStore("activityState").put(record);
+          ops.push(tx.objectStore("activityState").put(record));
         }
         if (folderTransitions.length > 0) {
           const nextKeys = new Set(nextFolders.map((folder) => folder.key));
           for (const folder of folders) {
             if (!nextKeys.has(folder.key)) {
-              await tx.objectStore("activityFolders").delete(folder.key);
+              ops.push(tx.objectStore("activityFolders").delete(folder.key));
             }
           }
           for (const folder of nextFolders) {
-            await tx.objectStore("activityFolders").put(folder);
+            ops.push(tx.objectStore("activityFolders").put(folder));
           }
         }
-        await tx.done;
+        replayWrite = Promise.all([...ops, tx.done]).then(() => undefined);
       }
       setSnapshot({ records: recordMap, folders: nextFolders });
+      setLoaded(true);
       recordTransitions.clear();
       folderTransitions.length = 0;
-      setLoaded(true);
+      if (replayWrite) {
+        trackWrite(replayWrite);
+        await replayWrite;
+      }
       return db;
     })
     .catch(() => {
