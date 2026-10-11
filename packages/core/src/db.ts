@@ -5004,7 +5004,7 @@ function recoverMissingObjects(database: Database) {
       );
     }
   }
-  // Version 103: durable discussions (APP-01). Plain CREATE IF NOT EXISTS,
+  // Version 102: durable discussions (APP-01). Plain CREATE IF NOT EXISTS,
   // so recovery re-creates any table or index a partial apply lost.
   database.exec(`
   CREATE TABLE IF NOT EXISTS threads (
