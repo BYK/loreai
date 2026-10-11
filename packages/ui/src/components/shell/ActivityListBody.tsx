@@ -35,7 +35,10 @@ export const ActivityListBody: Component<{
 }> = (props) => {
   const ws = useWorkspace();
   const [items, setItems] = createSignal<ActivityItem[]>([]);
-  const [nextCursor, setNextCursor] = createSignal<string | null>(null);
+  const [nextPage, setNextPage] = createSignal<{
+    query: string;
+    cursor: string;
+  } | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [scrollTick, setScrollTick] = createSignal(0);
@@ -83,14 +86,16 @@ export const ActivityListBody: Component<{
     );
     if (currentGeneration !== generation) return;
     setItems((current) => (cursor ? [...current, ...page.items] : page.items));
-    setNextCursor(page.next_cursor);
+    setNextPage(
+      page.next_cursor ? { query: q, cursor: page.next_cursor } : null,
+    );
   };
 
   const loadFirst = async (q: string) => {
     generation += 1;
     const currentGeneration = generation;
     setItems([]);
-    setNextCursor(null);
+    setNextPage(null);
     setError(null);
     pageBudget = PAGE_BUDGET;
     if (errors().length > 0) {
@@ -113,9 +118,10 @@ export const ActivityListBody: Component<{
 
   const loadMore = async (filteredFill = false) => {
     const currentGeneration = generation;
-    const cursor = nextCursor();
+    const page = nextPage();
     if (
-      !cursor ||
+      !page ||
+      page.query !== props.query ||
       requestActive ||
       (filteredFill && pageBudget <= 0) ||
       errors().length > 0
@@ -126,7 +132,7 @@ export const ActivityListBody: Component<{
     if (filteredFill) pageBudget -= 1;
     setLoading(true);
     try {
-      await fetchPage(props.query, cursor, currentGeneration);
+      await fetchPage(page.query, page.cursor, currentGeneration);
     } catch (cause) {
       if (currentGeneration === generation) {
         setError(

@@ -1,6 +1,6 @@
 import { MemoryRouter, Route } from "@solidjs/router";
-import { render, screen, waitFor } from "@solidjs/testing-library";
-import { createSignal } from "solid-js";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { batch, createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ActivityListBody } from "~/components/shell/ActivityListBody";
@@ -160,6 +160,59 @@ describe("ActivityListBody", () => {
     mount("in:archive", fetchActivity);
 
     await waitFor(() => expect(fetchActivity).toHaveBeenCalledTimes(6));
+  });
+
+  it("never sends a page cursor with a different query", async () => {
+    const oldItems = Array.from({ length: 50 }, (_, index) => ({
+      ...PAGE.items[0]!,
+      id: `old-entry-${index}`,
+    }));
+    let resolveNewPage: ((page: ActivityPage) => void) | undefined;
+    const fetchActivity = vi.fn(
+      ({ q, cursor }: { q: string; cursor: string | null }) => {
+        if (q === "type:knowledge" && cursor === null) {
+          return Promise.resolve({ items: oldItems, next_cursor: "cursor-A" });
+        }
+        if (q === "in:archive" && cursor === null) {
+          return new Promise<ActivityPage>((resolve) => {
+            resolveNewPage = resolve;
+          });
+        }
+        return Promise.resolve(PAGE);
+      },
+    );
+    const [query, setQuery] = createSignal("type:knowledge");
+    mount(query, fetchActivity);
+
+    await waitFor(() => expect(fetchActivity).toHaveBeenCalledTimes(1));
+    expect(await screen.findAllByText("Workspace contract")).not.toHaveLength(
+      0,
+    );
+
+    const scroller = screen.getByTestId("activity-list-body");
+    batch(() => {
+      setQuery("in:archive");
+      scroller.scrollTop = scroller.scrollHeight;
+      fireEvent.scroll(scroller);
+    });
+    await waitFor(() =>
+      expect(fetchActivity).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "in:archive", cursor: null }),
+      ),
+    );
+    expect(screen.queryByText("Workspace contract")).toBeNull();
+    const cursorCalls = fetchActivity.mock.calls
+      .map(([request]) => request as { q: string; cursor: string | null })
+      .filter((request) => request.cursor !== null);
+    expect(
+      cursorCalls.every((request) => request.q === "type:knowledge"),
+    ).toBe(true);
+
+    if (!resolveNewPage) throw new Error("new query request did not start");
+    resolveNewPage(PAGE);
+    await waitFor(() =>
+      expect(screen.queryByText("Workspace contract")).toBeNull(),
+    );
   });
 
   it("ignores a failed page from an obsolete query while the new query loads", async () => {
