@@ -38,10 +38,11 @@ function project(
 }
 
 function renderProjectList(
-  projects: ProjectSummary[],
+  projects: ProjectSummary[] | undefined,
   activeProjectId: string | null = null,
 ) {
-  return render(() => (
+  const [currentProjects, setProjects] = createSignal(projects);
+  const rendered = render(() => (
     <MemoryRouter>
       <Route
         path="*"
@@ -62,7 +63,7 @@ function renderProjectList(
                 />
               </label>
               <ProjectListBody
-                projects={projects}
+                projects={currentProjects()}
                 activeProjectId={activeProjectId}
                 query={query()}
               />
@@ -72,6 +73,7 @@ function renderProjectList(
       />
     </MemoryRouter>
   ));
+  return { ...rendered, setProjects };
 }
 
 /** Labels of all project rows under a given data-section. */
@@ -251,6 +253,17 @@ describe("project list sections", () => {
 
     expect(all).toHaveAttribute("aria-expanded", "false");
     expect(document.querySelector('[data-section="all"]')).toBeNull();
+  });
+
+  it("expands All when an active project loads after activation", async () => {
+    const { setProjects } = renderProjectList(undefined, "delta");
+
+    expect(screen.queryByTestId("nav-all-projects")).toBeNull();
+    setProjects(SEVEN);
+
+    const all = await screen.findByTestId("nav-all-projects");
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
   });
 
   it("keeps search available without an All button for ≤5 projects", async () => {

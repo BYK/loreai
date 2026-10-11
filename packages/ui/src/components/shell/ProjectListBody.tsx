@@ -38,12 +38,15 @@ export const ProjectListBody: Component<{
   );
   createEffect(
     on(
-      () => props.activeProjectId,
-      (activeProjectId) => {
-        if (
-          activeProjectId &&
-          sections().rest.some((project) => project.id === activeProjectId)
-        ) {
+      () =>
+        [
+          props.activeProjectId,
+          sections().rest.some(
+            (project) => project.id === props.activeProjectId,
+          ),
+        ] as const,
+      ([activeProjectId, activeProjectInAll]) => {
+        if (activeProjectId && activeProjectInAll) {
           setShowAll(true);
         }
       },
