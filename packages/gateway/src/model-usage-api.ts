@@ -9,6 +9,18 @@
  */
 import { modelUsage, projectPath } from "@loreai/core";
 import { errorResponse, jsonResponse } from "./management-access";
+import {
+  deleteRemoteReport,
+  getOwnedReport,
+  MODEL_TIDES_ENDPOINT,
+  publishSnapshot,
+  publicUrlFor,
+  reportVisibility,
+  rotateRemoteReport,
+  setAggregate,
+  setSharing,
+  uploadOSForPlatform,
+} from "./model-tides-client";
 
 class ProjectNotFound extends Error {
   constructor(readonly projectId: string) {
@@ -91,18 +103,6 @@ export async function handleExportModelUsage(url: URL): Promise<Response> {
 // Consented Model Tides upload (#2026 PR3). Nothing uploads automatically —
 // every remote call here follows an explicit `confirm: "YES"` request.
 // ---------------------------------------------------------------------------
-import {
-  deleteRemoteReport,
-  getOwnedReport,
-  MODEL_TIDES_ENDPOINT,
-  publishSnapshot,
-  publicUrlFor,
-  reportVisibility,
-  rotateRemoteReport,
-  setAggregate,
-  setSharing,
-  uploadOSForPlatform,
-} from "./model-tides-client";
 
 const OWNER_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -343,7 +343,10 @@ export async function handlePostModelUsageUpload(
       );
     }
     try {
-      modelUsage.saveOwner(newOwner);
+      // Mirrors the CLI's writeFileSync(..., { flag: 'wx' }): a concurrent
+      // create must not overwrite an existing credential — createOwner throws
+      // on conflict and the rollback below removes the remote report.
+      modelUsage.createOwner(newOwner);
     } catch {
       const removed = await fetch(
         `${MODEL_TIDES_ENDPOINT}/${String(result.id)}`,

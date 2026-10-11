@@ -3,7 +3,12 @@
  * The gateway's global fetch is stubbed (and a local stub server is used for
  * the whole-journey cases) so no real network traffic happens.
  */
-import { createServer, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { brotliDecompressSync } from "node:zlib";
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -74,13 +79,13 @@ function stubReport(overrides: Record<string, unknown> = {}): object {
   };
 }
 
-async function readBody(req: NodeJS.IncomingMessage): Promise<Buffer> {
+async function readBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks);
 }
 
-function json(res: NodeJS.ServerResponse, body: unknown, status = 200): void {
+function json(res: ServerResponse, body: unknown, status = 200): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 }
@@ -101,8 +106,8 @@ async function startStub(): Promise<void> {
   });
 
   async function stubHandle(
-    req: NodeJS.IncomingMessage,
-    res: NodeJS.ServerResponse,
+    req: IncomingMessage,
+    res: ServerResponse,
   ): Promise<void> {
     const raw = await readBody(req);
     const url = req.url ?? "";
@@ -141,7 +146,8 @@ async function startStub(): Promise<void> {
     }
     if (req.method === "DELETE" && tail === "") {
       stubState.deleted = true;
-      return res.writeHead(200).end();
+      res.writeHead(200);
+      return void res.end();
     }
     if (req.method === "POST" && tail === "/rotate") {
       return json(res, { token: ROTATED_TOKEN });
@@ -372,6 +378,56 @@ describe("POST /api/v1/model-usage/upload", () => {
     expect(put!.headers["x-model-tides-expected-visibility"]).toBe("public");
     expect(put!.headers["x-model-tides-expected-aggregate"]).toBe("excluded");
     expect(put!.headers["x-model-tides-schema"]).toBe("weekly-v2");
+    core.modelUsage.deleteOwner();
+  });
+
+  it("create-race: an owner saved between load and create rolls the remote report back and is untouched", async () => {
+    core.modelUsage.deleteOwner();
+    const preexisting = {
+      id: "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5c",
+      token: "C".repeat(43),
+    };
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256 } = await get.json();
+    const realFetch = globalThis.fetch;
+    stubCalls = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof URL
+          ? input.href
+          : typeof input === "string"
+            ? input
+            : input.url;
+      if (
+        url.endsWith("/api/contributions/personal-v2") &&
+        init?.method === "POST"
+      ) {
+        // Simulate a concurrent upload storing a credential first.
+        core.modelUsage.saveOwner(preexisting);
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.error.message).toContain("Could not save your private key");
+      // Rollback DELETE went out with the NEW token, not the preexisting one.
+      const rollback = stubCalls.find(
+        (c) =>
+          c.method === "DELETE" && c.url === `/api/contributions/${OWNER_ID}`,
+      );
+      expect(rollback).toBeDefined();
+      expect(rollback!.headers.authorization).toBe(`Bearer ${OWNER_TOKEN}`);
+      // The earlier owner is unchanged.
+      expect(ownerFromKV()).toEqual(preexisting);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetStubState();
+    }
     core.modelUsage.deleteOwner();
   });
 

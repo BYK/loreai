@@ -537,3 +537,15 @@ export function saveOwner(owner: ModelTidesOwner): void {
 export function deleteOwner(): void {
   db().query("DELETE FROM kv_meta WHERE key = ?").run(ownerKey());
 }
+
+/**
+ * Plain INSERT — throws (SQLite UNIQUE constraint) when an owner already
+ * exists. Used only by the create path, mirroring the CLI's
+ * `writeFileSync(..., { flag: "wx" })`.
+ */
+export function createOwner(owner: ModelTidesOwner): void {
+  const parsed = parseOwner(owner);
+  db()
+    .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+    .run(ownerKey(), JSON.stringify(parsed));
+}

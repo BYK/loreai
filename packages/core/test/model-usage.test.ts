@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   buildDailyModelUsage,
   buildWeeklySnapshot,
+  createOwner,
   deleteOwner,
   loadOwner,
   parseOwnedReport,
@@ -450,6 +451,17 @@ describe("owner credential", () => {
       withTenant("other-tenant", () => expect(loadOwner()).toBeNull());
       deleteOwner();
       expect(loadOwner()).toBeNull();
+    });
+  });
+
+  test("createOwner inserts only once — a second create conflicts", () => {
+    withTenant(LOCAL_TENANT_ID, () => {
+      deleteOwner();
+      createOwner(owner);
+      expect(loadOwner()).toEqual(owner);
+      expect(() => createOwner({ ...owner, token: "B".repeat(43) })).toThrow();
+      expect(loadOwner()).toEqual(owner);
+      deleteOwner();
     });
   });
 
