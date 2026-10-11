@@ -526,4 +526,47 @@ describe("ModelTidesUpload", () => {
         .disabled,
     ).toBe(false);
   });
+
+  it("reopening a YES dialog resets the input and disables confirm", async () => {
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () => uploadState({ report: storedReport }),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete report" }),
+    );
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Delete Model Tides report",
+    });
+    const input = within(dialog).getByLabelText("Type YES to confirm");
+    fireEvent.input(input, { target: { value: "YES" } });
+    expect(
+      within(dialog).getByRole<HTMLButtonElement>("button", {
+        name: "Confirm",
+      }).disabled,
+    ).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("alertdialog", {
+          name: "Delete Model Tides report",
+        }),
+      ).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete report" }));
+    const reopened = await screen.findByRole("alertdialog", {
+      name: "Delete Model Tides report",
+    });
+    expect(
+      within(reopened).getByLabelText<HTMLInputElement>("Type YES to confirm")
+        .value,
+    ).toBe("");
+    expect(
+      within(reopened).getByRole<HTMLButtonElement>("button", {
+        name: "Confirm",
+      }).disabled,
+    ).toBe(true);
+  });
 });

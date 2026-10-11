@@ -352,16 +352,21 @@ export async function handlePostModelUsageUpload(
       // on conflict and the rollback below removes the remote report.
       modelUsage.createOwner(newOwner);
     } catch {
+      // A network rejection counts as "not removed" — this fetch must not
+      // throw past the rollback branch.
       const removed = await fetch(
         `${MODEL_TIDES_ENDPOINT}/${String(result.id)}`,
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${result.token}` },
         },
+      ).then(
+        (r) => r.ok,
+        () => false,
       );
       return upstreamError(
         new Error(
-          removed.ok
+          removed
             ? "Could not save your private key; the new contribution was removed."
             : "Could not save your private key or remove the new contribution.",
         ),

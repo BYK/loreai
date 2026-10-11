@@ -5,7 +5,15 @@
  * the hash/revision they just reviewed.
  */
 import type { Component, JSX } from "solid-js";
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  on,
+  Show,
+} from "solid-js";
 
 import type { WeeklyUsageSnapshot } from "~/contracts";
 import { isApiError } from "~/lib/api";
@@ -83,10 +91,15 @@ const YesDialog: Component<{
   onCancel: () => void;
 }> = (props) => {
   const [value, setValue] = createSignal("");
-  createMemo(() => {
-    // Reset the input whenever the dialog re-opens.
-    if (props.open) setValue("");
-  });
+  createEffect(
+    on(
+      () => props.open,
+      (open) => {
+        // Reset the input whenever the dialog re-opens.
+        if (open) setValue("");
+      },
+    ),
+  );
   return (
     <Dialog
       open={props.open}

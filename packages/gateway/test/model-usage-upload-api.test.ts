@@ -431,6 +431,59 @@ describe("POST /api/v1/model-usage/upload", () => {
     core.modelUsage.deleteOwner();
   });
 
+  it("rollback DELETE network failure reports the 'or remove' message, never the token", async () => {
+    core.modelUsage.deleteOwner();
+    const preexisting = {
+      id: "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5c",
+      token: "C".repeat(43),
+    };
+    const get = await api("/api/v1/model-usage/upload");
+    const { snapshot_sha256 } = await get.json();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof URL
+          ? input.href
+          : typeof input === "string"
+            ? input
+            : input.url;
+      if (
+        url.endsWith("/api/contributions/personal-v2") &&
+        init?.method === "POST"
+      ) {
+        // Save a conflicting credential so createOwner fails.
+        core.modelUsage.saveOwner(preexisting);
+      }
+      if (
+        url.endsWith(`/api/contributions/${OWNER_ID}`) &&
+        init?.method === "DELETE"
+      ) {
+        // The rollback fetch itself dies on the network.
+        return Promise.reject(new TypeError("fetch failed"));
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await api("/api/v1/model-usage/upload", {
+        method: "POST",
+        body: { confirm: "YES", snapshot_sha256 },
+      });
+      expect(res.status).toBe(502);
+      const body = await res.json();
+      expect(body.error.message).toBe(
+        "Could not save your private key or remove the new contribution.",
+      );
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain(OWNER_TOKEN);
+      expect(serialized).not.toContain(preexisting.token);
+      expect(ownerFromKV()).toEqual(preexisting);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetStubState();
+    }
+    core.modelUsage.deleteOwner();
+  });
+
   it("422s an empty-history upload without calling Model Tides", async () => {
     // Empty the DB's usage rows; every other describe reseeds its own state.
     core
