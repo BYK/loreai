@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectConnectionStatus, setTheme } from "./helpers";
 
 async function fixtureIds(page: Page) {
   const projects = await (await page.request.get("/api/v1/projects")).json();
@@ -51,9 +52,13 @@ test.describe("production route deep links", () => {
     ] as const;
     for (const [path, text, kind] of routes) {
       await page.goto(path);
+      const mobile = await page.getByTestId("open-nav").isVisible();
+      if (kind === "welcome" && mobile) await expectConnectionStatus(page);
       const target =
         kind === "welcome"
-          ? page.getByTestId("connection-status")
+          ? mobile
+            ? page.getByTestId("project-list-body")
+            : page.getByTestId("connection-status")
           : kind === "health"
             ? page
                 .locator("main:visible")
@@ -81,7 +86,9 @@ test.describe("production route deep links", () => {
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);
       } else {
-        await expect(target).toContainText(text);
+        await expect(target).toContainText(
+          kind === "welcome" && mobile ? "lore" : text,
+        );
       }
       const before = page.url();
       await page.reload();
@@ -90,7 +97,9 @@ test.describe("production route deep links", () => {
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);
       } else {
-        await expect(target).toContainText(text);
+        await expect(target).toContainText(
+          kind === "welcome" && mobile ? "lore" : text,
+        );
       }
     }
   });
@@ -132,26 +141,29 @@ test.describe("production route deep links", () => {
     ] as const;
     for (const [path, marker, kind = "testid"] of paths) {
       await page.goto(path);
+      const mobile = await page.getByTestId("open-nav").isVisible();
       const target =
         kind === "text"
           ? page
               .locator("main:visible")
               .getByText(marker, { exact: false })
               .first()
-          : page.getByTestId(marker).first();
+          : marker === "connection-status" && mobile
+            ? page.locator('[data-pane="list"]')
+            : page.getByTestId(marker).first();
       await expect(target).toBeVisible();
-      await page.getByTestId("theme-light").click();
+      await setTheme(page, "light");
       const light = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
-          document.querySelector("[data-pane='detail']") ?? document.body,
+          document.querySelector("[data-pane='document']") ?? document.body,
         ).backgroundColor,
       }));
-      await page.getByTestId("theme-dark").click();
+      await setTheme(page, "dark");
       const dark = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
-          document.querySelector("[data-pane='detail']") ?? document.body,
+          document.querySelector("[data-pane='document']") ?? document.body,
         ).backgroundColor,
       }));
       expect(light.dark).toBe(false);

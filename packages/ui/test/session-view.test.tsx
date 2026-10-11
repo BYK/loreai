@@ -7,7 +7,7 @@
  * stubbed to fixed sizes; that is enough to mount a window of rows and
  * exercise every state transition without measuring real pixels.
  */
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -746,11 +746,13 @@ describe("SessionView: in-session search", () => {
     fireEvent.click(screen.getByTestId("search-next"));
     await tick();
     expect(screen.getByTestId("search-summary")).toHaveTextContent("2 of 3");
-    marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
-    expect(marks).toHaveLength(1);
-    expect(
-      marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
-    ).toBe("m.old-47");
+    await waitFor(() => {
+      marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
+      expect(marks).toHaveLength(1);
+      expect(
+        marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
+      ).toBe("m.old-47");
+    });
     expect(mounted()).toContain("m.old-47");
 
     // Previous wraps from the first hit to the last.

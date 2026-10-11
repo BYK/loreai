@@ -56,15 +56,8 @@ export function sectionProjects(
   const pinnedSet = new Set(pinned.map((p) => p.id));
   const unpinned = sorted.filter((p) => !pinnedSet.has(p.id));
 
-  let recent = unpinned.slice(0, RECENT_LIMIT);
-  let rest = unpinned.slice(RECENT_LIMIT);
-  const active = activeId
-    ? rest.find((project) => project.id === activeId)
-    : undefined;
-  if (active) {
-    recent = [active, ...recent];
-    rest = rest.filter((project) => project.id !== active.id);
-  }
+  const recent = unpinned.slice(0, RECENT_LIMIT);
+  const rest = unpinned.slice(RECENT_LIMIT);
 
   const query = filter.trim();
   const activeProject = activeId ? byId.get(activeId) : undefined;

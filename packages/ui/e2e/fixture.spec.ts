@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { setTheme } from "./helpers";
 
 test.describe("/ui/fixture design specimen", () => {
   test("is labelled non-production and renders every specimen", async ({
@@ -33,7 +34,7 @@ test.describe("/ui/fixture design specimen", () => {
       path: testInfo.outputPath("fixture-light.png"),
       fullPage: true,
     });
-    await page.getByTestId("theme-dark").click();
+    await setTheme(page, "dark");
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.screenshot({
       path: testInfo.outputPath("fixture-dark.png"),

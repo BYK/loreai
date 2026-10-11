@@ -172,7 +172,13 @@ test.describe("project actions (UI-08)", () => {
     }
   });
 
-  test("merge duplicates reports none on the seeded data", async ({ page }) => {
+  test("merge duplicates reports none on the seeded data", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the welcome document pane is hidden on the mobile project list",
+    );
     await page.goto("/ui/");
     await expect(page.getByTestId("merge-projects")).toBeVisible();
     await page

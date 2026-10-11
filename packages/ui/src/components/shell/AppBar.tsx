@@ -22,35 +22,56 @@ const THEME_OPTIONS: Record<ThemeChoice, { icon: string; label: string }> = {
  */
 export const ThemeToggle: Component<{ class?: string }> = (props) => {
   const t = theme();
+  const nextChoice = () =>
+    THEME_CHOICES[
+      (THEME_CHOICES.indexOf(t.choice()) + 1) % THEME_CHOICES.length
+    ] ?? "system";
   return (
     <div
-      role="group"
-      aria-label="Colour theme"
       data-testid="theme-toggle"
       data-theme-choice={t.choice()}
-      class={`inline-flex items-center rounded-md border border-line bg-chrome p-0.5 ${props.class ?? ""}`}
+      class={`inline-flex items-center ${props.class ?? ""}`}
     >
-      <For each={THEME_CHOICES}>
-        {(choice) => (
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 aria-pressed:bg-surface aria-pressed:text-heading aria-pressed:shadow-sm"
-            aria-label={`${THEME_OPTIONS[choice].label} theme`}
-            aria-pressed={t.choice() === choice}
-            title={
-              choice === "system"
-                ? `Follow the system setting (currently ${t.resolved()})`
-                : `Always use ${choice} mode`
-            }
-            data-testid={`theme-${choice}`}
-            onClick={() => t.setChoice(choice)}
-          >
-            <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
-            <span class="hidden md:inline">{THEME_OPTIONS[choice].label}</span>
-          </Button>
-        )}
-      </For>
+      <div
+        role="group"
+        aria-label="Colour theme"
+        class="hidden items-center rounded-md border border-line bg-chrome p-0.5 min-[760px]:inline-flex"
+      >
+        <For each={THEME_CHOICES}>
+          {(choice) => (
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-text aria-pressed:bg-selected aria-pressed:text-selected-text aria-pressed:shadow-sm"
+              aria-label={`${THEME_OPTIONS[choice].label} theme`}
+              aria-pressed={t.choice() === choice}
+              title={
+                choice === "system"
+                  ? `Follow the system setting (currently ${t.resolved()})`
+                  : `Always use ${choice} mode`
+              }
+              data-testid={`theme-${choice}`}
+              onClick={() => t.setChoice(choice)}
+            >
+              <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
+              <span class="hidden md:inline">
+                {THEME_OPTIONS[choice].label}
+              </span>
+            </Button>
+          )}
+        </For>
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-7 w-8 px-1 min-[760px]:hidden"
+        aria-label={`Theme: ${THEME_OPTIONS[t.choice()].label}; next ${THEME_OPTIONS[nextChoice()].label}`}
+        title={`Theme: ${THEME_OPTIONS[t.choice()].label}; next ${THEME_OPTIONS[nextChoice()].label}`}
+        data-testid="theme-cycle"
+        onClick={() => t.setChoice(nextChoice())}
+      >
+        <span aria-hidden="true">{THEME_OPTIONS[t.choice()].icon}</span>
+      </Button>
     </div>
   );
 };
@@ -58,27 +79,36 @@ export const ThemeToggle: Component<{ class?: string }> = (props) => {
 export const AppBar: Component<{
   /** Mobile-only: rendered left of the logo (a back link). */
   leading?: JSX.Element;
+  /** Minimized pane controls. */
+  chips?: JSX.Element;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
   searchProjectId?: string;
 }> = (props) => (
-  <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
+  <header class="flex h-12 flex-none items-center gap-2 border-b border-line bg-surface px-3 sm:gap-4 sm:px-4">
     <Show when={props.leading}>
-      <span class="lg:hidden">{props.leading}</span>
+      <span class="min-[1100px]:hidden">{props.leading}</span>
     </Show>
-    <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
+    <A
+      href="/"
+      aria-label="Lore.AI — home"
+      class="shrink-0 min-[1100px]:min-w-[150px]"
+    >
       <Logo wordmark="sm" />
     </A>
+    <Show when={props.chips}>
+      {(chips) => <div class="shrink-0">{chips()}</div>}
+    </Show>
     <SearchEntry searchProjectId={props.searchProjectId} />
-    <div class="ml-auto flex items-center gap-2 sm:gap-4">
+    <div class="ml-auto flex items-center gap-2">
       <FolkStatus />
       <ThemeToggle />
-      <Avatar label="You" class="hidden sm:inline-flex" />
+      <Avatar label="You" />
       <Show when={props.onOpenNav}>
         <Button
           variant="outline"
           size="sm"
-          class="lg:hidden"
+          class="min-[760px]:hidden"
           aria-label="Open navigation"
           data-testid="open-nav"
           onClick={() => props.onOpenNav?.()}

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectConnectionStatus } from "./helpers";
 
 test.describe("contradictions (UI-08)", () => {
   test("shows a recorded pair and keeps both after explicit dismissal", async ({
@@ -10,10 +11,7 @@ test.describe("contradictions (UI-08)", () => {
     const titleA = `Prefer deterministic ids (${viewport} run ${testInfo.retry + 1})`;
     const titleB = `Regenerate ids on every read (${viewport} run ${testInfo.retry + 1})`;
     await page.goto("/ui/contradictions");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
 
     const row = page
       .getByTestId("contradiction-row")

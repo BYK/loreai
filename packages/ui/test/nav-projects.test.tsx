@@ -5,13 +5,13 @@
  */
 import { MemoryRouter, Route } from "@solidjs/router";
 import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Nav } from "~/components/shell/Nav";
+import { ProjectListBody } from "~/components/shell/ProjectListBody";
 import { byRecency, sectionProjects } from "~/components/shell/nav-projects";
 import type { ProjectSummary } from "~/contracts";
 import { closeLoreDb, resetCache } from "~/db";
-import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import {
   pins,
   PINNED_PROJECTS_STORAGE_KEY,
@@ -37,28 +37,46 @@ function project(
   };
 }
 
-function renderNav(
-  projects: ProjectSummary[],
-  activeProjectId: string | null = null,
+function renderProjectList(
+  projects: ProjectSummary[] | undefined,
+  initialActiveProjectId: string | null = null,
 ) {
-  return render(() => (
+  const [currentProjects, setProjects] = createSignal(projects);
+  const [activeProjectId, setActiveProjectId] = createSignal(
+    initialActiveProjectId,
+  );
+  const rendered = render(() => (
     <MemoryRouter>
       <Route
         path="*"
-        component={() => (
-          <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
-              projects={projects}
-              loading={false}
-              error={undefined}
-              activeProjectId={activeProjectId}
-              totalKnowledge={null}
-            />
-          </ConnectionContext.Provider>
-        )}
+        component={() => {
+          const [query, setQuery] = createSignal("");
+          return (
+            <>
+              <label>
+                <span class="sr-only">Search list</span>
+                <input
+                  aria-label="Search list"
+                  data-testid="nav-project-filter"
+                  value={query()}
+                  onInput={(event) => setQuery(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setQuery("");
+                  }}
+                />
+              </label>
+              <ProjectListBody
+                projects={currentProjects()}
+                activeProjectId={activeProjectId()}
+                query={query()}
+              />
+            </>
+          );
+        }}
       />
     </MemoryRouter>
   ));
+  return { ...rendered, setProjects, setActiveProjectId };
 }
 
 /** Labels of all project rows under a given data-section. */
@@ -74,7 +92,7 @@ beforeEach(async () => {
   await closeLoreDb();
 });
 
-describe("Nav project sections", () => {
+describe("project list sections", () => {
   const SEVEN: ProjectSummary[] = [
     // Shuffled created_at; order must come from last_activity.
     project("bravo", { created_at: 5_000, last_activity: 5_000 }),
@@ -87,7 +105,7 @@ describe("Nav project sections", () => {
   ];
 
   it("shows the 5 most recent under Recent and the rest behind All", async () => {
-    renderNav(SEVEN);
+    renderProjectList(SEVEN);
     await screen.findByTestId("nav-project-filter");
 
     expect(sectionLabels("recent")).toEqual([
@@ -109,7 +127,7 @@ describe("Nav project sections", () => {
   });
 
   it("pin moves a project out of Recent into Pinned and persists", async () => {
-    renderNav(SEVEN);
+    renderProjectList(SEVEN);
     await screen.findByTestId("nav-project-filter");
 
     const pin = screen.getByRole("button", { name: "Pin echo" });
@@ -146,14 +164,14 @@ describe("Nav project sections", () => {
     resetPinsStoreForTests();
     expect(pins().pinned()).toEqual(["echo"]);
 
-    renderNav(SEVEN);
+    renderProjectList(SEVEN);
     await screen.findByTestId("nav-project-filter");
     expect(sectionLabels("pinned")).toEqual(["echo0"]);
   });
 
   it("filter shows matches (pinned included), Escape clears", async () => {
     pins().toggle("delta");
-    renderNav(SEVEN);
+    renderProjectList(SEVEN);
     const input = await screen.findByTestId("nav-project-filter");
 
     fireEvent.input(input, { target: { value: "a" } });
@@ -173,7 +191,7 @@ describe("Nav project sections", () => {
 
   it("does not duplicate pinned projects in filtered matches", async () => {
     pins().toggle("delta");
-    renderNav(SEVEN);
+    renderProjectList(SEVEN);
     const input = await screen.findByTestId("nav-project-filter");
 
     fireEvent.input(input, { target: { value: "del" } });
@@ -191,14 +209,14 @@ describe("Nav project sections", () => {
     const projects = SEVEN.slice(0, 3);
     for (const item of projects) pins().toggle(item.id);
 
-    renderNav(projects);
+    renderProjectList(projects);
     await screen.findAllByTestId("nav-project");
 
     expect(screen.queryByRole("heading", { name: "Recent" })).toBeNull();
   });
 
-  it("keeps the filter available while all projects become pinned", async () => {
-    renderNav(SEVEN);
+  it("keeps the workspace query usable while all projects become pinned", async () => {
+    renderProjectList(SEVEN);
     const input = await screen.findByTestId("nav-project-filter");
 
     fireEvent.input(input, { target: { value: "a" } });
@@ -209,25 +227,70 @@ describe("Nav project sections", () => {
 
     expect(screen.queryByRole("heading", { name: "Matches" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Pinned" })).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
   });
 
-  it("keeps the active project visible while All projects is collapsed", async () => {
-    renderNav(SEVEN, "delta");
+  it("keeps an active All project in place and expands its section", async () => {
+    renderProjectList(SEVEN, "delta");
 
     const active = screen.getByRole("link", { name: /delta/ });
     expect(active).toHaveAttribute("aria-current", "page");
-    expect(active.closest('[data-section="recent"]')).not.toBeNull();
+    expect(active).toHaveAttribute("data-section", "all");
+    expect(active).toHaveAttribute("data-list-key", "all:delta");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
+    expect(screen.getAllByTestId("nav-project")).toHaveLength(7);
     expect(screen.getByTestId("nav-all-projects")).toHaveAttribute(
       "aria-expanded",
-      "false",
+      "true",
     );
   });
 
-  it("no filter box and no All button with ≤5 projects and no pins", async () => {
-    renderNav(SEVEN.slice(0, 3));
+  it("lets All collapse after expanding for an active project", async () => {
+    renderProjectList(SEVEN, "delta");
+
+    const all = screen.getByTestId("nav-all-projects");
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
+
+    fireEvent.click(all);
+
+    expect(all).toHaveAttribute("aria-expanded", "false");
+    expect(document.querySelector('[data-section="all"]')).toBeNull();
+  });
+
+  it("keeps All collapsed across project refreshes until the active id changes", async () => {
+    const { setProjects, setActiveProjectId } = renderProjectList(
+      SEVEN,
+      "delta",
+    );
+    const all = screen.getByTestId("nav-all-projects");
+
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(all);
+    expect(all).toHaveAttribute("aria-expanded", "false");
+
+    setProjects([...SEVEN]);
+    expect(all).toHaveAttribute("aria-expanded", "false");
+
+    setActiveProjectId("golf");
+    expect(all).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("expands All when an active project loads after activation", async () => {
+    const { setProjects } = renderProjectList(undefined, "delta");
+
+    expect(screen.queryByTestId("nav-all-projects")).toBeNull();
+    setProjects(SEVEN);
+
+    const all = await screen.findByTestId("nav-all-projects");
+    expect(all).toHaveAttribute("aria-expanded", "true");
+    expect(sectionLabels("all")).toEqual(["delta0", "golf0"]);
+  });
+
+  it("keeps search available without an All button for ≤5 projects", async () => {
+    renderProjectList(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
     expect(screen.queryByTestId("nav-all-projects")).toBeNull();
     expect(sectionLabels("recent")).toEqual(["alpha0", "bravo0", "delta0"]);
   });
@@ -255,21 +318,23 @@ describe("sectionProjects / byRecency", () => {
     expect(sections.pinned.map((p) => p.id)).toEqual(["b", "a"]);
   });
 
-  it("surfaces an active unpinned project without dropping recent entries", () => {
+  it("keeps the active unpinned project in its recency-derived section", () => {
     const list = Array.from({ length: 7 }, (_, index) =>
       project(`p${index}`, { last_activity: 7 - index }),
     );
 
     const active = sectionProjects(list, [], "", "p6");
     expect(active.recent.map((p) => p.id)).toEqual([
-      "p6",
       "p0",
       "p1",
       "p2",
       "p3",
       "p4",
     ]);
-    expect(active.rest.map((p) => p.id)).toEqual(["p5"]);
+    expect(active.rest.map((p) => p.id)).toEqual(["p5", "p6"]);
+    expect(
+      [...active.recent, ...active.rest].filter((p) => p.id === "p6"),
+    ).toHaveLength(1);
 
     const pinned = sectionProjects(list, ["p6"], "", "p6");
     expect(pinned.pinned.map((p) => p.id)).toEqual(["p6"]);
@@ -348,7 +413,7 @@ describe("sectionProjects / byRecency", () => {
       project("delta", { last_activity: 2 }),
       project("echo", { last_activity: 1 }),
     ];
-    renderNav(list);
+    renderProjectList(list);
     const input = await screen.findByTestId("nav-project-filter");
 
     fireEvent.input(input, { target: { value: "loreia" } });

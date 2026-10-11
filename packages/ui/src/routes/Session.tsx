@@ -13,11 +13,9 @@ import { StateCard } from "~/components/lore/StateCard";
 import { ContextWindowPane } from "~/components/reader/ContextWindow";
 import { SessionView } from "~/components/reader/SessionView";
 import { SessionWorkspace } from "~/components/reader/SessionWorkspace";
-import { Nav } from "~/components/shell/Nav";
-import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { knowledgeHref, projectHref } from "~/lib/href";
+import { knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
 
 function decodeParam(segment: string | undefined): string | undefined {
@@ -82,20 +80,6 @@ export const Session: Component = () => {
     const a = search.a;
     return typeof a === "string" && a !== "" ? a : null;
   };
-
-  const nav = () => (
-    <Nav
-      projects={ws.projects.data()}
-      loading={ws.projects.loading()}
-      error={ws.projects.error()}
-      activeProjectId={projectId()}
-      totalKnowledge={
-        ws.projects.data()?.reduce((n, p) => n + p.knowledge_count, 0) ?? null
-      }
-      onRetry={ws.projects.reload}
-      stale={ws.state.projects.status()}
-    />
-  );
 
   // Header title (#1921): the server's derived title once the page answer
   // carries one (title_source !== "id"), otherwise a cached list summary's
@@ -167,57 +151,47 @@ export const Session: Component = () => {
         </div>
       </Match>
       <Match when={reader.loader.data()}>
-        <SessionWorkspace
-          transcript={
-            <SessionView
-              sessionId={sessionId() ?? ""}
-              messages={reader.messages()}
-              distillations={reader.distillations()}
-              messageCount={reader.messageCount()}
-              hasOlder={reader.hasOlder()}
-              loadingOlder={reader.loadingOlder()}
-              olderError={reader.olderError()}
-              onLoadOlder={reader.loadOlder}
-              onSearchWhole={reader.search}
-              status={reader.status()}
-              anchorParam={anchorParam()}
-              onAnchorChange={(encoded) =>
-                setSearch({ a: encoded ?? undefined }, { replace: true })
-              }
-              linkBase={() => window.location.href}
-              loadDistillation={(id) =>
-                ws.tracked(() => ws.client.getDistillation(id))
-              }
-              context={context.loader.data() ?? null}
-              knowledgeHref={hrefForKnowledge}
-              header={header()}
-            />
-          }
-          context={
-            <ContextWindowPane
-              context={context.loader.data()}
-              loading={context.loader.loading()}
-              error={context.loader.error()}
-              onRetry={context.loader.reload}
-              knowledgeHref={hrefForKnowledge}
-            />
-          }
-        />
+        <div class="h-full min-h-0 overflow-hidden [&>div]:h-full! [&>div]:min-h-0! [&>div]:overflow-hidden! [&>div>aside]:h-full! [&>div>div]:min-h-0!">
+          <SessionWorkspace
+            transcript={
+              <SessionView
+                sessionId={sessionId() ?? ""}
+                messages={reader.messages()}
+                distillations={reader.distillations()}
+                messageCount={reader.messageCount()}
+                hasOlder={reader.hasOlder()}
+                loadingOlder={reader.loadingOlder()}
+                olderError={reader.olderError()}
+                onLoadOlder={reader.loadOlder}
+                onSearchWhole={reader.search}
+                status={reader.status()}
+                anchorParam={anchorParam()}
+                onAnchorChange={(encoded) =>
+                  setSearch({ a: encoded ?? undefined }, { replace: true })
+                }
+                linkBase={() => window.location.href}
+                loadDistillation={(id) =>
+                  ws.tracked(() => ws.client.getDistillation(id))
+                }
+                context={context.loader.data() ?? null}
+                knowledgeHref={hrefForKnowledge}
+                header={header()}
+              />
+            }
+            context={
+              <ContextWindowPane
+                context={context.loader.data()}
+                loading={context.loader.loading()}
+                error={context.loader.error()}
+                onRetry={context.loader.reload}
+                knowledgeHref={hrefForKnowledge}
+              />
+            }
+          />
+        </div>
       </Match>
     </Switch>
   );
 
-  return (
-    <Shell
-      nav={nav}
-      detail={detail()}
-      mobilePane="detail"
-      searchProjectId={projectId() ?? undefined}
-      back={
-        projectId()
-          ? { href: projectHref(projectId()!), label: projectLabel() }
-          : undefined
-      }
-    />
-  );
+  return <>{detail()}</>;
 };

@@ -1,17 +1,16 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expectConnectionStatus } from "./helpers";
 
 /**
- * #1916: the nav's tinted background must cover the whole scrolled project
- * list. `aside[data-pane="nav"]` is the scroll container (transparent); the
- * inner `<nav>` paints `bg-nav` — if it is shorter than the scroll content,
- * the page background shows below it.
+ * Project list scrolling must stay inside its surface without exposing the
+ * page background below the rows.
  */
 
-/** Resolved value of the --color-nav token under the current theme. */
-async function navColor(page: Page): Promise<string> {
+/** Resolved value of the --color-surface token under the current theme. */
+async function surfaceColor(page: Page): Promise<string> {
   return page.evaluate(() => {
     const el = document.createElement("div");
-    el.style.background = "var(--color-nav)";
+    el.style.background = "var(--color-surface)";
     document.body.append(el);
     const value = getComputedStyle(el).backgroundColor;
     el.remove();
@@ -20,11 +19,9 @@ async function navColor(page: Page): Promise<string> {
 }
 
 /**
- * Assert `scroller` overflows, that the inner Workspace nav reaches the
- * bottom of the scroll content, and that the pixel at the bottom of the
- * scrolled container belongs to the nav (not the page background).
+ * Assert the project body overflows and remains inside the list pane surface.
  */
-async function assertNavCoversScroll(page: Page, scroller: Locator) {
+async function assertListCoversScroll(page: Page, scroller: Locator) {
   const allProjects = scroller.getByTestId("nav-all-projects");
   await expect(allProjects).toBeVisible();
   // The sidebar shows only pinned+recent until "All projects" expands (#1929);
@@ -48,60 +45,57 @@ async function assertNavCoversScroll(page: Page, scroller: Locator) {
     .toBeLessThan(2);
 
   const probe = await scroller.evaluate((el) => {
-    const nav = el.querySelector('nav[aria-label="Workspace"]');
-    if (!(nav instanceof HTMLElement)) return null;
+    const pane = el.closest('section[data-pane="list"]');
+    if (!(pane instanceof HTMLElement)) return null;
     const rect = el.getBoundingClientRect();
     return {
       clientHeight: el.clientHeight,
       scrollHeight: el.scrollHeight,
-      navHeight: nav.offsetHeight,
-      navBg: getComputedStyle(nav).backgroundColor,
+      paneHeight: pane.offsetHeight,
+      paneBg: getComputedStyle(pane).backgroundColor,
       hit:
         document
           .elementFromPoint(rect.left + 4, rect.bottom - 4)
-          ?.closest('nav[aria-label="Workspace"]') !== null,
+          ?.closest('[data-testid="project-list-body"]') !== null,
     };
   });
   expect(probe).not.toBeNull();
   expect(probe!.scrollHeight).toBeGreaterThan(probe!.clientHeight);
-  expect(probe!.navHeight).toBeGreaterThanOrEqual(probe!.scrollHeight - 1);
+  expect(probe!.paneHeight).toBeGreaterThanOrEqual(probe!.clientHeight);
   expect(probe!.hit).toBe(true);
-  expect(probe!.navBg).toBe(await navColor(page));
+  expect(probe!.paneBg).toBe(await surfaceColor(page));
 }
 
-test.describe("nav background (#1916)", () => {
-  test("desktop nav background covers the whole scrolled project list (light + dark)", async ({
+test.describe("project list scrolling", () => {
+  test("list surface covers the scrolled project body (light + dark)", async ({
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
     test.skip(await page.getByTestId("open-nav").isVisible(), "desktop only");
 
-    const scroller = page.locator('aside[data-pane="nav"]');
-    await assertNavCoversScroll(page, scroller);
+    const scroller = page.getByTestId("project-list-body");
+    await assertListCoversScroll(page, scroller);
 
     await page.getByTestId("theme-dark").click();
-    await assertNavCoversScroll(page, scroller);
+    await assertListCoversScroll(page, scroller);
 
     await page.getByTestId("theme-light").click();
   });
 
-  test("mobile drawer keeps its tinted background to the bottom", async ({
+  test("mobile navigation drawer remains available separately from the list", async ({
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
     test.skip(!(await page.getByTestId("open-nav").isVisible()), "mobile only");
 
     await page.getByTestId("open-nav").click();
     const drawer = page.getByTestId("nav-drawer");
-    await assertNavCoversScroll(page, drawer);
+    await expect(
+      drawer.getByRole("navigation", { name: "Workspace" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("project-list-body")).toBeVisible();
     await page.keyboard.press("Escape");
   });
 });
