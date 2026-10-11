@@ -128,6 +128,7 @@ export const domainJoinRequestList = type({
     id: "string",
     domain: "string",
     user_id: "string",
+    label: "string | null",
     status: "string",
     requested_at: "string",
   }).array(),

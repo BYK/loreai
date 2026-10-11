@@ -350,7 +350,9 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
         },
       }),
     );
+    let policyWrites = 0;
     await page.route(`${sharingUrl}/policy`, async (route) => {
+      policyWrites += 1;
       const request = route.request().postDataJSON() as {
         policy: "manual" | "auto";
         expected_override: "manual" | "auto" | null;
@@ -388,6 +390,13 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(dialog).toContainText(
       "New team knowledge in this project is shared with Acme e2e on the next sync without review, because the team doesn't require review.",
     );
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).toBeChecked();
+    expect(policyWrites).toBe(0);
+
+    await toggle.focus();
+    await page.keyboard.press("Space");
     await dialog
       .getByRole("button", { name: "Turn off automatic sharing" })
       .click();
@@ -395,6 +404,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
       "policy: manual",
     );
     await expect(toggle).not.toBeChecked();
+    expect(policyWrites).toBe(1);
   });
 
   test("team page exposes parity actions and sends invite tokens only in bodies", async ({
@@ -436,6 +446,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
               id: "domain-request-1",
               domain: "example.test",
               user_id: "user-2",
+              label: "Ada Lovelace",
               status: "pending",
               requested_at: "2026-09-20T12:00:00.000Z",
             },
@@ -443,8 +454,25 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
               id: "domain-request-2",
               domain: "other.example.test",
               user_id: "user-3",
+              label: "@grace",
               status: "pending",
               requested_at: "2026-09-20T12:00:00.000Z",
+            },
+            {
+              id: "domain-request-approved",
+              domain: "approved.example.test",
+              user_id: "user-4",
+              label: "Katherine Johnson",
+              status: "approved",
+              requested_at: "2026-09-21T12:00:00.000Z",
+            },
+            {
+              id: "domain-request-rejected",
+              domain: "rejected.example.test",
+              user_id: "user-5",
+              label: null,
+              status: "rejected",
+              requested_at: "2026-09-22T12:00:00.000Z",
             },
           ],
         },
@@ -554,8 +582,12 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.getByRole("button", { name: "New team" }).click();
     await page.getByTestId("team-create-name").fill("New Acme");
     await page.getByRole("button", { name: "Create team" }).click();
-    await expect(page.getByTestId("team-require-review")).toBeChecked();
-    await page.getByTestId("team-require-review").uncheck();
+    const reviewToggle = page.getByTestId("team-require-review");
+    await expect(reviewToggle).toBeChecked();
+    await reviewToggle.click();
+    const reviewDialog = page.getByTestId("team-review-policy-confirmation");
+    await expect(reviewToggle).toBeChecked();
+    await reviewDialog.getByRole("button", { name: "Turn off review" }).click();
     await expect(page.getByTestId("team-require-review")).not.toBeChecked();
     await page.getByTestId("team-offline-invite").check();
     await page.getByRole("button", { name: "Create invite" }).click();
@@ -586,17 +618,74 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.getByRole("button", { name: "Load join requests" }).click();
     const firstRequest = page
       .getByTestId("domain-join-request")
-      .filter({ hasText: "example.test · user-2" });
-    await expect(firstRequest).toContainText("example.test");
+      .filter({ hasText: "example.test · Ada Lovelace" });
+    await expect(firstRequest).not.toContainText("user-2");
     await firstRequest.getByRole("button", { name: "Approve" }).click();
     const otherRequest = page
       .getByTestId("domain-join-request")
       .filter({ hasText: "other.example.test" });
     await otherRequest.getByRole("button", { name: "Reject" }).click();
+    const approvedRequest = page
+      .getByTestId("domain-join-request")
+      .filter({ hasText: "approved.example.test" });
+    await expect(approvedRequest).toContainText("Approved");
+    await expect(approvedRequest.getByRole("button")).toHaveCount(0);
+    const rejectedRequest = page
+      .getByTestId("domain-join-request")
+      .filter({ hasText: "rejected.example.test" });
+    await expect(rejectedRequest).toContainText("Rejected");
+    await expect(rejectedRequest).toContainText("Unknown requester");
+    await expect(rejectedRequest).not.toContainText("user-5");
+    await expect(rejectedRequest.getByRole("button")).toHaveCount(0);
     await page.getByLabel("Verified email domain").fill("example.test");
     await page.getByRole("button", { name: "Request to join" }).click();
     await page.getByLabel("Verified email domain").fill("example.test");
     await page.getByRole("button", { name: "Claim domain" }).click();
+  });
+
+  test("team review policy reload restores the server value after a stale response", async ({
+    page,
+  }) => {
+    await installSignedInTeamRoutes(page);
+    let reads = 0;
+    let writes = 0;
+    await page.route("**/api/v1/teams/team-1/review-policy", async (route) => {
+      if (route.request().method() === "PUT") {
+        writes += 1;
+        expect(route.request().postDataJSON()).toEqual({
+          policy: "required",
+          expected: "optional",
+        });
+        return route.fulfill({
+          status: 409,
+          json: {
+            type: "error",
+            error: {
+              type: "stale_policy",
+              message: "Team review policy changed; reload and try again.",
+            },
+          },
+        });
+      }
+      reads += 1;
+      return route.fulfill({ json: { policy: "optional" } });
+    });
+    await page.goto("/ui/team");
+
+    const toggle = page.getByTestId("team-require-review");
+    await expect(toggle).not.toBeChecked();
+    await toggle.click();
+    await expect(toggle).not.toBeChecked();
+    const dialog = page.getByTestId("team-review-policy-confirmation");
+    await dialog.getByRole("button", { name: "Require review" }).click();
+    await expect(dialog.getByRole("alert")).toContainText(
+      "Team review policy changed",
+    );
+    await dialog.getByRole("button", { name: "Reload review policy" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+    expect(reads).toBe(2);
+    expect(writes).toBe(1);
   });
 
   test("team page shows an inline create form when the account has no teams", async ({

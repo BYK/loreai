@@ -137,13 +137,20 @@ export const TeamParityActions: Component<Props> = (props) => {
     setJoinError("");
     try {
       await ws.tracked(() => ws.client.acceptTeamInvite(token));
-      setInviteToken("");
-      setJoinOpen(false);
+      closeJoinDialog(false);
       props.onChanged();
     } catch (error) {
       setJoinError(errorText(error));
     } finally {
       setJoining(false);
+    }
+  };
+
+  const closeJoinDialog = (open: boolean) => {
+    setJoinOpen(open);
+    if (!open) {
+      setInviteToken("");
+      setJoinError("");
     }
   };
 
@@ -266,6 +273,7 @@ export const TeamParityActions: Component<Props> = (props) => {
           variant="outline"
           data-testid="team-join"
           onClick={() => {
+            setInviteToken("");
             setJoinError("");
             setJoinOpen(true);
           }}
@@ -464,7 +472,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                   data-testid="domain-join-request"
                 >
                   <span>
-                    {request.domain} · {request.user_id}
+                    {request.domain} · {request.label ?? "Unknown requester"}
                   </span>
                   <Show when={request.status === "pending"}>
                     <div class="flex gap-2">
@@ -493,6 +501,12 @@ export const TeamParityActions: Component<Props> = (props) => {
                         Reject
                       </Button>
                     </div>
+                  </Show>
+                  <Show when={request.status === "approved"}>
+                    <span>Approved</span>
+                  </Show>
+                  <Show when={request.status === "rejected"}>
+                    <span>Rejected</span>
                   </Show>
                 </div>
               )}
@@ -622,7 +636,7 @@ export const TeamParityActions: Component<Props> = (props) => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={joinOpen()} onOpenChange={setJoinOpen}>
+      <Dialog open={joinOpen()} onOpenChange={closeJoinDialog}>
         <DialogContent data-testid="team-join-dialog">
           <DialogHeader>
             <DialogTitle>Join a team</DialogTitle>
@@ -652,7 +666,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                 type="button"
                 variant="outline"
                 disabled={joining()}
-                onClick={() => setJoinOpen(false)}
+                onClick={() => closeJoinDialog(false)}
               >
                 Cancel
               </Button>

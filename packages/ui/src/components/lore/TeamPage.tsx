@@ -113,7 +113,12 @@ export const TeamPage: Component = () => {
   const [removing, setRemoving] = createSignal(false);
   const [reviewPolicy, setReviewPolicy] =
     createSignal<TeamReviewPolicy["policy"]>();
-  const [reviewPolicyError, setReviewPolicyError] = createSignal("");
+  const [reviewPolicyDialogOpen, setReviewPolicyDialogOpen] =
+    createSignal(false);
+  const [nextReviewPolicy, setNextReviewPolicy] =
+    createSignal<TeamReviewPolicy["policy"]>("required");
+  const [reviewPolicyError, setReviewPolicyError] =
+    createSignal<MutationFailure | null>(null);
   const [savingReviewPolicy, setSavingReviewPolicy] = createSignal(false);
 
   const teams = () => folk.teams.data()?.teams ?? [];
@@ -153,7 +158,7 @@ export const TeamPage: Component = () => {
       );
       setMembers(response);
       setReviewPolicy(undefined);
-      setReviewPolicyError("");
+      setReviewPolicyError(null);
       if (response.remote === "ok") {
         try {
           const policy = await ws.tracked(() =>
@@ -161,7 +166,10 @@ export const TeamPage: Component = () => {
           );
           setReviewPolicy(policy.policy);
         } catch (error) {
-          setReviewPolicyError(actionMessage(error));
+          setReviewPolicyError({
+            cause: error,
+            message: actionMessage(error),
+          });
         }
       }
       if (response.remote === "anonymous") setPageState("anonymous");
@@ -313,7 +321,7 @@ export const TeamPage: Component = () => {
     if (!current || !members()?.can_manage || !team || savingReviewPolicy())
       return;
     setSavingReviewPolicy(true);
-    setReviewPolicyError("");
+    setReviewPolicyError(null);
     try {
       const updated = await ws.tracked(() =>
         ws.client.setTeamReviewPolicy(
@@ -323,24 +331,32 @@ export const TeamPage: Component = () => {
         ),
       );
       setReviewPolicy(updated.policy);
+      setReviewPolicyDialogOpen(false);
     } catch (error) {
-      setReviewPolicyError(actionMessage(error));
+      setReviewPolicyError({ cause: error, message: actionMessage(error) });
     } finally {
       setSavingReviewPolicy(false);
     }
   };
 
+  const closeReviewPolicyDialog = (open: boolean) => {
+    if (!open && savingReviewPolicy()) return;
+    setReviewPolicyDialogOpen(open);
+    if (!open) setReviewPolicyError(null);
+  };
+
   const reloadReviewPolicy = async () => {
     const team = members()?.team?.id ?? teamId();
     if (!team) return;
-    setReviewPolicyError("");
+    setReviewPolicyError(null);
     try {
       const current = await ws.tracked(() =>
         ws.client.getTeamReviewPolicy(team),
       );
       setReviewPolicy(current.policy);
+      if (reviewPolicyDialogOpen()) setReviewPolicyDialogOpen(false);
     } catch (error) {
-      setReviewPolicyError(actionMessage(error));
+      setReviewPolicyError({ cause: error, message: actionMessage(error) });
     }
   };
 
@@ -428,9 +444,13 @@ export const TeamPage: Component = () => {
     return "";
   };
 
-  const memberActionReason = (action: "remove" | "set_role") => {
+  const memberActionReason = (
+    action: "remove" | "set_role",
+    member?: TeamMember,
+  ) => {
     const capability = members()?.actions[action];
-    if (!members()?.can_manage || capability === "admin_only")
+    const selfLeave = action === "remove" && member?.me;
+    if (!selfLeave && (!members()?.can_manage || capability === "admin_only"))
       return "Only team admins can manage members.";
     if (capability === "unavailable")
       return "This action is unavailable while the team service is offline.";
@@ -604,9 +624,14 @@ export const TeamPage: Component = () => {
                         reviewPolicy() === undefined ||
                         !current().can_manage
                       }
-                      onChange={(event) =>
-                        void changeReviewPolicy(event.currentTarget.checked)
-                      }
+                      onChange={(event) => {
+                        const next = event.currentTarget.checked;
+                        event.currentTarget.checked =
+                          reviewPolicy() === "required";
+                        setNextReviewPolicy(next ? "required" : "optional");
+                        setReviewPolicyError(null);
+                        setReviewPolicyDialogOpen(true);
+                      }}
                     />
                     Require review
                     <span class="text-xs font-normal text-muted">
@@ -622,9 +647,9 @@ export const TeamPage: Component = () => {
                       Only team admins can change the review policy.
                     </p>
                   </Show>
-                  <Show when={reviewPolicyError()}>
+                  <Show when={reviewPolicyError() && !reviewPolicyDialogOpen()}>
                     <p class="mt-2 text-sm text-danger" role="alert">
-                      {reviewPolicyError()}
+                      {reviewPolicyError()?.message}
                     </p>
                     <Button
                       class="mt-2"
@@ -751,9 +776,12 @@ export const TeamPage: Component = () => {
                                           variant="outline"
                                           disabled={
                                             busy() ||
-                                            !current().can_manage ||
-                                            current().actions.remove !==
-                                              "available"
+                                            (row.original.me
+                                              ? current().actions.remove ===
+                                                "unavailable"
+                                              : !current().can_manage ||
+                                                current().actions.remove !==
+                                                  "available")
                                           }
                                           onClick={() =>
                                             setRemoveTarget(row.original)
@@ -764,10 +792,16 @@ export const TeamPage: Component = () => {
                                             : "Remove"}
                                         </Button>
                                         <Show
-                                          when={memberActionReason("remove")}
+                                          when={memberActionReason(
+                                            "remove",
+                                            row.original,
+                                          )}
                                         >
                                           <span class="ml-2 text-xs text-muted">
-                                            {memberActionReason("remove")}
+                                            {memberActionReason(
+                                              "remove",
+                                              row.original,
+                                            )}
                                           </span>
                                         </Show>
                                       </Match>
@@ -867,6 +901,77 @@ export const TeamPage: Component = () => {
           </Show>
         </Match>
       </Switch>
+
+      <Dialog
+        open={reviewPolicyDialogOpen()}
+        onOpenChange={closeReviewPolicyDialog}
+      >
+        <DialogContent data-testid="team-review-policy-confirmation">
+          <DialogHeader>
+            <DialogTitle>
+              {nextReviewPolicy() === "required"
+                ? "Require review?"
+                : "Turn off review?"}
+            </DialogTitle>
+            <DialogDescription>
+              {nextReviewPolicy() === "required"
+                ? "New team proposals will need approval before they are shared."
+                : "New team proposals will be approved automatically without review."}
+            </DialogDescription>
+          </DialogHeader>
+          <Show when={reviewPolicyError()}>
+            <p
+              class="text-sm text-danger"
+              role="alert"
+              tabIndex={-1}
+              data-testid="team-review-policy-error"
+              ref={(element) => queueMicrotask(() => element.focus())}
+            >
+              {reviewPolicyError()?.message}
+            </p>
+          </Show>
+          <Show
+            when={
+              reviewPolicyError() &&
+              requiresMutationReload(reviewPolicyError()?.cause)
+            }
+          >
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="team-review-policy-reload"
+              onClick={() => void reloadReviewPolicy()}
+            >
+              Reload review policy
+            </Button>
+          </Show>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={savingReviewPolicy()}
+              onClick={() => closeReviewPolicyDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={
+                savingReviewPolicy() ||
+                (reviewPolicyError() !== null &&
+                  requiresMutationReload(reviewPolicyError()?.cause))
+              }
+              onClick={() =>
+                void changeReviewPolicy(nextReviewPolicy() === "required")
+              }
+            >
+              {savingReviewPolicy()
+                ? "Saving…"
+                : nextReviewPolicy() === "required"
+                  ? "Require review"
+                  : "Turn off review"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={removeTarget() !== null}

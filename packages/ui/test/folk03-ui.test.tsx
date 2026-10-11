@@ -261,28 +261,82 @@ describe("TeamPage", () => {
     );
   });
 
-  it("lets admins change the team review policy using the current revision", async () => {
+  it("confirms both team review changes and makes cancel and Escape inert", async () => {
+    let policy: "required" | "optional" = "optional";
     const setTeamReviewPolicy = vi.fn<ApiClient["setTeamReviewPolicy"]>(
-      async (_teamId, policy) => ({ policy }),
+      async (_teamId, next) => {
+        policy = next;
+        return { policy };
+      },
     );
     mount(
       () => <TeamPage />,
       clientWith({
-        getTeamReviewPolicy: async () => ({ policy: "required" }),
+        getTeamReviewPolicy: async () => ({ policy }),
         setTeamReviewPolicy,
       }),
     );
     const toggle = await screen.findByRole("switch", {
       name: "Require review",
     });
-    expect(toggle).toBeChecked();
+    expect(toggle).not.toBeChecked();
     fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    const firstDialog = await screen.findByTestId(
+      "team-review-policy-confirmation",
+    );
+    expect(firstDialog).toHaveTextContent("Require review?");
+    expect(setTeamReviewPolicy).not.toHaveBeenCalled();
+    fireEvent.keyDown(firstDialog, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("team-review-policy-confirmation"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(toggle).not.toBeChecked();
+    expect(setTeamReviewPolicy).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    const enableDialog = await screen.findByTestId(
+      "team-review-policy-confirmation",
+    );
+    fireEvent.click(
+      within(enableDialog).getByRole("button", { name: "Require review" }),
+    );
+    await waitFor(() => expect(toggle).toBeChecked());
     await waitFor(() =>
       expect(setTeamReviewPolicy).toHaveBeenCalledWith(
         "team-1",
-        "optional",
         "required",
+        "optional",
       ),
+    );
+
+    fireEvent.click(toggle);
+    const disableDialog = await screen.findByTestId(
+      "team-review-policy-confirmation",
+    );
+    expect(toggle).toBeChecked();
+    expect(disableDialog).toHaveTextContent("Turn off review?");
+    fireEvent.click(
+      within(disableDialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(toggle).toBeChecked();
+    expect(setTeamReviewPolicy).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(toggle);
+    const confirmDisable = await screen.findByTestId(
+      "team-review-policy-confirmation",
+    );
+    fireEvent.click(
+      within(confirmDisable).getByRole("button", { name: "Turn off review" }),
+    );
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(setTeamReviewPolicy).toHaveBeenNthCalledWith(
+      2,
+      "team-1",
+      "optional",
+      "required",
     );
   });
 
@@ -290,7 +344,7 @@ describe("TeamPage", () => {
     let reads = 0;
     const getTeamReviewPolicy = vi.fn<ApiClient["getTeamReviewPolicy"]>(
       async () => ({
-        policy: reads++ === 0 ? "required" : "optional",
+        policy: reads++ === 0 ? "optional" : "optional",
       }),
     );
     const setTeamReviewPolicy = vi.fn<ApiClient["setTeamReviewPolicy"]>(
@@ -315,19 +369,24 @@ describe("TeamPage", () => {
       name: "Require review",
     });
     fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    const dialog = await screen.findByTestId("team-review-policy-confirmation");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Require review" }),
+    );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "Team review policy changed",
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Reload review policy" }),
+      within(dialog).getByRole("button", { name: "Reload review policy" }),
     );
     await waitFor(() => expect(toggle).not.toBeChecked());
     expect(getTeamReviewPolicy).toHaveBeenCalledTimes(2);
     expect(setTeamReviewPolicy).toHaveBeenCalledWith(
       "team-1",
-      "optional",
       "required",
+      "optional",
     );
   });
 
@@ -495,9 +554,9 @@ describe("TeamPage", () => {
     expect(await screen.findByTestId("team-only-admin-hint")).toHaveTextContent(
       "You're the only admin. Promote another member to admin first.",
     );
-    const selfRow = screen
-      .getAllByTestId("team-member-row")
-      .find((row) => row.getAttribute("data-user-id") === "user-me");
+    const selfRow = (await screen.findAllByTestId("team-member-row")).find(
+      (row) => row.getAttribute("data-user-id") === "user-me",
+    );
     if (!selfRow) throw new Error("current-user row missing");
     fireEvent.click(
       within(selfRow).getByRole("button", { name: "Leave team" }),
@@ -508,6 +567,62 @@ describe("TeamPage", () => {
     fireEvent.click(confirm);
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(message);
     expect(confirm).toBeEnabled();
+  });
+
+  it("lets an editor leave while keeping removal of others admin-only", async () => {
+    const editorResponse: TeamMembersResponse = {
+      ...memberResponse,
+      my_role: "editor",
+      can_manage: false,
+      actions: {
+        ...memberResponse.actions,
+        remove: "admin_only",
+        set_role: "admin_only",
+      },
+      members: memberResponse.members.map((member) =>
+        member.me ? { ...member, role: "editor" } : member,
+      ),
+    };
+    const removeTeamMember = vi.fn<ApiClient["removeTeamMember"]>(async () => ({
+      removed: "user-me",
+      new_epoch: 2,
+      rewrapped: 2,
+      skipped_count: 0,
+      unlinked_projects: 1,
+    }));
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamMembers: async () => editorResponse,
+        removeTeamMember,
+      }),
+    );
+
+    const selfRow = (await screen.findAllByTestId("team-member-row")).find(
+      (row) => row.getAttribute("data-user-id") === "user-me",
+    );
+    if (!selfRow) throw new Error("current-user row missing");
+    const leave = within(selfRow).getByRole("button", { name: "Leave team" });
+    expect(leave).toBeEnabled();
+    const otherRow = screen
+      .getAllByTestId("team-member-row")
+      .find((row) => row.getAttribute("data-user-id") !== "user-me");
+    if (!otherRow) throw new Error("other-member row missing");
+    expect(
+      within(otherRow).getByRole("button", { name: "Remove" }),
+    ).toBeDisabled();
+
+    fireEvent.click(leave);
+    const dialog = await screen.findByTestId("team-remove-confirmation");
+    expect(dialog).toHaveTextContent("Leave team?");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Leave team" }));
+    await waitFor(() =>
+      expect(removeTeamMember).toHaveBeenCalledWith(
+        "team-1",
+        "user-me",
+        "editor",
+      ),
+    );
   });
 
   it("confirms removal, supports offline invites, and keeps the token in its receipt", async () => {
@@ -985,6 +1100,12 @@ describe("TeamParityActions", () => {
       "Invitation expired.",
     );
     expect(acceptTeamInvite).toHaveBeenCalledWith("secret-body-token");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("team-join-dialog")).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    expect(await screen.findByTestId("team-invite-token")).toHaveValue("");
   });
 
   it("keeps Add by account ID errors in its open admin dialog", async () => {
@@ -1089,8 +1210,25 @@ describe("TeamParityActions", () => {
             id: "request-1",
             domain: "example.test",
             user_id: "user-2",
+            label: "Ada Lovelace",
             status: "pending",
             requested_at: "2026-01-01T00:00:00Z",
+          },
+          {
+            id: "request-2",
+            domain: "approved.test",
+            user_id: "user-3",
+            label: "@grace",
+            status: "approved",
+            requested_at: "2026-01-02T00:00:00Z",
+          },
+          {
+            id: "request-3",
+            domain: "rejected.test",
+            user_id: "user-4",
+            label: null,
+            status: "rejected",
+            requested_at: "2026-01-03T00:00:00Z",
           },
         ],
       }),
@@ -1118,9 +1256,15 @@ describe("TeamParityActions", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Load join requests" }),
     );
-    expect(await screen.findByTestId("domain-join-request")).toHaveTextContent(
-      "example.test",
-    );
+    const rows = await screen.findAllByTestId("domain-join-request");
+    expect(rows[0]).toHaveTextContent("example.test · Ada Lovelace");
+    expect(rows[0]).not.toHaveTextContent("user-2");
+    expect(rows[1]).toHaveTextContent("Approved");
+    expect(within(rows[1]!).queryByRole("button")).not.toBeInTheDocument();
+    expect(rows[2]).toHaveTextContent("rejected.test · Unknown requester");
+    expect(rows[2]).toHaveTextContent("Rejected");
+    expect(rows[2]).not.toHaveTextContent("user-4");
+    expect(within(rows[2]!).queryByRole("button")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() =>
       expect(decideDomainJoinRequest).toHaveBeenCalledWith(
@@ -1272,6 +1416,41 @@ describe("SharingPanel auto-share control", () => {
         screen.queryByTestId("sharing-policy-confirmation"),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("keeps the auto-share switch at the server value when cancelled", async () => {
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
+      async () => manualSharing,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ setProjectAutoShare }),
+    );
+
+    const toggle = await screen.findByRole("switch", {
+      name: "Share automatically",
+    });
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("sharing-policy-confirmation"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(toggle).toBeChecked();
+    expect(setProjectAutoShare).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    const cancelDialog = await screen.findByTestId(
+      "sharing-policy-confirmation",
+    );
+    fireEvent.click(
+      within(cancelDialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(toggle).toBeChecked();
+    expect(setProjectAutoShare).not.toHaveBeenCalled();
   });
 
   it("keeps stale policy errors in the dialog and reloads from there", async () => {

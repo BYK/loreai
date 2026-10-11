@@ -218,7 +218,9 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     checked={status().auto_share}
                     disabled={savingPolicy()}
                     onChange={(event) => {
-                      setNextAutoShare(event.currentTarget.checked);
+                      const next = event.currentTarget.checked;
+                      event.currentTarget.checked = status().auto_share;
+                      setNextAutoShare(next);
                       setPolicyError(null);
                       setConfirmAutoShare(true);
                     }}
