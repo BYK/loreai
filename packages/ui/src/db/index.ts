@@ -25,6 +25,8 @@ export {
   createPendingChangesStore,
   createReviewDecisionsStore,
   type DedupReviewMark,
+  type DiscussionDraft,
+  type KnowledgeDraft,
   type LocalDraft,
   type LocalStore,
   type PendingChange,

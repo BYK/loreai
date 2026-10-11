@@ -5,7 +5,7 @@
  */
 import type { Component } from "solid-js";
 import { createMemo, Match, Show, Switch } from "solid-js";
-import { useParams, useSearchParams } from "@solidjs/router";
+import { useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import { DocHeader } from "~/components/lore/Document";
 import { SessionIdChip } from "~/components/lore/SessionIdChip";
@@ -17,7 +17,7 @@ import { Nav } from "~/components/shell/Nav";
 import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { knowledgeHref, projectHref } from "~/lib/href";
+import { discussionHref, knowledgeHref, projectHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
 
 function decodeParam(segment: string | undefined): string | undefined {
@@ -61,6 +61,7 @@ export const Session: Component = () => {
   const raw = useParams<{ projectId: string; sessionId: string }>();
   const [search, setSearch] = useSearchParams<{ a?: string }>();
   const ws = useWorkspace();
+  const navigate = useNavigate();
 
   const projectId = () => decodeParam(raw.projectId) ?? null;
   const sessionId = () => decodeParam(raw.sessionId) ?? null;
@@ -185,6 +186,11 @@ export const Session: Component = () => {
                 setSearch({ a: encoded ?? undefined }, { replace: true })
               }
               linkBase={() => window.location.href}
+              discussions={ws.state.discussions}
+              projectId={projectId() ?? undefined}
+              onOpenDiscussion={(id) =>
+                navigate(discussionHref(projectId() ?? "", id))
+              }
               loadDistillation={(id) =>
                 ws.tracked(() => ws.client.getDistillation(id))
               }

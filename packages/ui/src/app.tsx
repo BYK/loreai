@@ -141,6 +141,22 @@ export const routes: RouteDefinition[] = [
     component: () => <Browse view="sessions" />,
   },
   {
+    path: "/projects/:projectId/discussions",
+    component: lazy(() =>
+      import("./routes/Discussion").then((m) => ({
+        default: m.DiscussionsRoute,
+      })),
+    ),
+  },
+  {
+    path: "/projects/:projectId/discussions/:discussionId",
+    component: lazy(() =>
+      import("./routes/Discussion").then((m) => ({
+        default: m.DiscussionRoute,
+      })),
+    ),
+  },
+  {
     path: "/projects/:projectId/imports",
     component: () => <Browse view="imports" />,
   },

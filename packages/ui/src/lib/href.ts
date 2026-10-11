@@ -91,3 +91,29 @@ export const entityHref = (id: string) => buildHref(["entities", id]);
 
 export const entitiesHref = (type?: string | null, cursor?: string | null) =>
   buildHref(["entities"], { type, cursor });
+
+export const discussionsHref = (projectId: string) =>
+  buildHref(["projects", projectId, "discussions"]);
+
+export const discussionHref = (projectId: string, discussionId: string) =>
+  buildHref(["projects", projectId, "discussions", discussionId]);
+
+/**
+ * "Back to source": the session reader or knowledge entry with `?a=` set to
+ * the discussion's first anchor (an encoded `SourceAnchor`), which restores
+ * the scroll position and the selection there.
+ */
+export const discussionSourceHref = (
+  projectId: string,
+  source: { kind: "session" | "knowledge"; id: string },
+  encodedAnchor: string | null,
+) =>
+  buildHref(
+    [
+      "projects",
+      projectId,
+      source.kind === "session" ? "sessions" : "knowledge",
+      source.id,
+    ],
+    { a: encodedAnchor },
+  );

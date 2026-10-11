@@ -41,6 +41,18 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  discussionCreated,
+  discussionPage,
+  discussionReplyCreated,
+  discussionReplyPage,
+  discussionResult,
+  type DiscussionAnchor,
+  type DiscussionCreated,
+  type DiscussionPage,
+  type DiscussionReplyCreated,
+  type DiscussionReplyPage,
+  type DiscussionResult,
+  type DiscussionSourceKind,
   knowledgeList,
   formatKnowledgeSort,
   knowledgeSearchResponse,
@@ -341,6 +353,106 @@ export function createApiClient(options: ApiClientOptions = {}) {
   return {
     listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
       return getJson("/projects", projectList, signal);
+    },
+    listDiscussions(
+      projectId: string,
+      opts: {
+        source?: { kind: DiscussionSourceKind; id: string };
+        state?: "open" | "resolved";
+        cursor?: string | null;
+        limit?: number;
+      } = {},
+      signal?: AbortSignal,
+    ): Promise<DiscussionPage> {
+      return getJson(
+        apiPath(["discussions"], {
+          project: projectId,
+          source_kind: opts.source?.kind,
+          source_id: opts.source?.id,
+          state: opts.state,
+          cursor: opts.cursor ?? undefined,
+          limit: opts.limit === undefined ? undefined : String(opts.limit),
+        }),
+        discussionPage,
+        signal,
+      );
+    },
+    getDiscussion(
+      projectId: string,
+      discussionId: string,
+      signal?: AbortSignal,
+    ): Promise<DiscussionResult> {
+      return getJson(
+        apiPath(["discussions", discussionId], { project: projectId }),
+        discussionResult,
+        signal,
+      );
+    },
+    createDiscussion(input: {
+      projectId: string;
+      kind: "discussion" | "note";
+      source: { kind: DiscussionSourceKind; id: string };
+      anchors: DiscussionAnchor[];
+      quote: string;
+      body?: string;
+    }): Promise<DiscussionCreated> {
+      return mutateJson(
+        "POST",
+        "/discussions",
+        {
+          project_id: input.projectId,
+          kind: input.kind,
+          source: input.source,
+          anchors: input.anchors,
+          quote: input.quote,
+          ...(input.body === undefined ? {} : { body: input.body }),
+        },
+        discussionCreated,
+      );
+    },
+    updateDiscussion(
+      projectId: string,
+      discussionId: string,
+      patch: { expected_revision: number; state?: "open" | "resolved" },
+    ): Promise<DiscussionResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["discussions", discussionId], { project: projectId }),
+        patch,
+        discussionResult,
+      );
+    },
+    listDiscussionReplies(
+      projectId: string,
+      discussionId: string,
+      opts: { after?: number | null } = {},
+      signal?: AbortSignal,
+    ): Promise<DiscussionReplyPage> {
+      return getJson(
+        apiPath(["discussions", discussionId, "replies"], {
+          project: projectId,
+          after:
+            opts.after === null || opts.after === undefined
+              ? undefined
+              : String(opts.after),
+        }),
+        discussionReplyPage,
+        signal,
+      );
+    },
+    addDiscussionReply(
+      projectId: string,
+      discussionId: string,
+      input: { expected_revision: number; body: string },
+    ): Promise<DiscussionReplyCreated> {
+      return mutateJson(
+        "POST",
+        apiPath(["discussions", discussionId, "replies"], {
+          project: projectId,
+        }),
+        input,
+        discussionReplyCreated,
+      );
     },
     listProjectKnowledge(
       projectId: string,

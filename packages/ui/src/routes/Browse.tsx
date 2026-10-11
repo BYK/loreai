@@ -15,6 +15,7 @@ import {
 } from "~/contracts";
 import {
   allKnowledgeHref,
+  discussionHref,
   globalKnowledgeHref,
   knowledgeHref,
   knowledgeListHref,
@@ -400,6 +401,14 @@ export const Browse: Component<{
                     loadDistillation={(id) =>
                       ws.tracked(() => ws.client.getDistillation(id))
                     }
+                    discussions={ws.state.discussions}
+                    anchorParam={
+                      typeof searchParams.a === "string" ? searchParams.a : null
+                    }
+                    onOpenDiscussion={(id) => {
+                      const pid = projectForEntry()?.id ?? value().project_id;
+                      if (pid) navigate(discussionHref(pid, id));
+                    }}
                   />
                   <PromotionPanel knowledgeId={value().id} client={ws.client} />
                 </>

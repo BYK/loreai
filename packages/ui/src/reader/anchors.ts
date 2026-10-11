@@ -82,7 +82,7 @@ export function decodeAnchor(
   if (!UINT.test(mappingRaw) || !HASH.test(hash)) return null;
   if (!UINT.test(startRaw) || !UINT.test(endRaw)) return null;
   if (partRaw !== "" && !UINT.test(partRaw)) return null;
-  if (!blockId || /\s/.test(blockId) || !/^[md]\./.test(blockId)) return null;
+  if (!blockId || /\s/.test(blockId) || !/^[mdk]\./.test(blockId)) return null;
   const start = Number(startRaw);
   const end = Number(endRaw);
   if (start > end || end > MAX_ANCHOR_OFFSET) return null;

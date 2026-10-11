@@ -41,6 +41,11 @@ import {
 } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 
+import {
+  DiscussionIndicator,
+  DiscussionThread,
+} from "~/components/discussions/DiscussionThread";
+import { SelectionActions } from "~/components/discussions/SelectionActions";
 import { StaleBadge } from "~/components/lore/StaleBadge";
 import {
   FUTURE_ACTIONS,
@@ -114,6 +119,12 @@ import {
   samePassage,
 } from "./SessionBlock";
 import { MarkerRowView } from "./MarkerRow";
+import {
+  discussionSpans,
+  discussionsAtBlock,
+  overlappingDiscussions,
+} from "~/reader/discussion-marks";
+import type { DiscussionsState } from "~/state/discussions";
 
 /** Older pages searched automatically for a deep-linked block. */
 export const DEEP_LINK_SEARCH_PAGES = 10;
@@ -164,6 +175,12 @@ export interface SessionViewProps {
   knowledgeHref?: (logicalId: string) => string;
   header?: JSX.Element;
   class?: string;
+  /** Discussion state and owning project (APP-02); absent → the
+   * discussion actions stay disabled placeholders. */
+  discussions?: DiscussionsState;
+  projectId?: string;
+  /** Opens the focused discussion route (used on narrow screens). */
+  onOpenDiscussion?: (discussionId: string) => void;
 }
 
 /** The reader's logical selection. */
@@ -353,6 +370,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copiedTimer));
 
+  const discussionsAt = (blockId: string) =>
+    discussionsAtBlock(sessionDiscussions(), blockId);
   const highlight = createMemo<PassageHighlight | null>(() => {
     const s = selection();
     if (!s || s.anchor.partIndex === undefined) return null;
@@ -363,6 +382,50 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       end: s.anchor.end,
     };
   });
+
+  // -- discussions (APP-02) -------------------------------------------------
+  const discussionSource = () => ({
+    kind: "session" as const,
+    id: props.sessionId,
+  });
+  const sessionDiscussions = () =>
+    props.discussions && props.projectId
+      ? props.discussions.forSource(props.projectId, discussionSource())
+      : [];
+  createEffect(
+    on(
+      () => [props.discussions, props.projectId, props.sessionId] as const,
+      ([state, projectId, sessionId]) => {
+        if (state && projectId && sessionId) {
+          void state.loadSource(projectId, { kind: "session", id: sessionId });
+        }
+      },
+    ),
+  );
+  const [expanded, setExpanded] = createSignal<string | null>(null);
+  const narrow = () =>
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(max-width: 639px)").matches === true;
+  /** Inline on wide screens; its own view on narrow ones. */
+  function revealDiscussion(id: string, toggle = false) {
+    if (narrow() && props.onOpenDiscussion) {
+      props.onOpenDiscussion(id);
+      return;
+    }
+    setExpanded((cur) => (toggle && cur === id ? null : id));
+  }
+  function collapseDiscussion() {
+    const id = expanded();
+    setExpanded(null);
+    if (!id) return;
+    queueMicrotask(() =>
+      scrollEl
+        ?.querySelector<HTMLElement>(
+          `[data-testid="discussion-indicator"][data-discussion-id="${CSS.escape(id)}"]`,
+        )
+        ?.focus(),
+    );
+  }
 
   /** The encoded anchor this reader last put in the URL (or saw there). */
   let publishedAnchor: string | null = null;
@@ -1206,6 +1269,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       }
       return;
     }
+    if (event.key === "Escape" && expanded()) {
+      event.preventDefault();
+      collapseDiscussion();
+      return;
+    }
     if (
       event.key === "Escape" &&
       (selection() || selectionHint() || linkState().kind !== "none")
@@ -1684,6 +1752,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         highlight,
         searchHit,
         searchHits: hitsFor,
+        discussionSpans: (blockId, partIndex) =>
+          discussionSpans(sessionDiscussions(), blockId, partIndex),
         onApplied: (mark, h) => {
           // A deep link or search hit scrolls to its passage once its own mark
           // exists; a selection mark on the same block must not consume it.
@@ -1707,7 +1777,17 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           class="relative min-h-0 flex-1 overflow-y-auto"
           data-testid="session-scroll"
           tabIndex={-1}
-          onPointerUp={() => queueMicrotask(selectFromDom)}
+          onPointerUp={(e) => {
+            const mark = (e.target as Element | null)?.closest?.<HTMLElement>(
+              "[data-discussion]",
+            );
+            const sel = document.getSelection();
+            if (mark?.dataset.discussion && (!sel || sel.isCollapsed)) {
+              revealDiscussion(mark.dataset.discussion, true);
+              return;
+            }
+            queueMicrotask(selectFromDom);
+          }}
           onKeyUp={(e) => {
             if (e.shiftKey || e.key === "Shift") queueMicrotask(selectFromDom);
           }}
@@ -2031,6 +2111,45 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                           onOpenDistillation={(id) => void openDistillation(id)}
                           knowledgeHref={props.knowledgeHref}
                         />
+                        <Show
+                          when={
+                            discussionsAt(row().key).length > 0 &&
+                            props.projectId
+                          }
+                        >
+                          <div
+                            class="mb-3 flex flex-col gap-1.5 sm:pl-[37px]"
+                            data-testid="discussion-anchor"
+                          >
+                            <div class="flex flex-wrap gap-1.5">
+                              <For each={discussionsAt(row().key)}>
+                                {(d) => (
+                                  <DiscussionIndicator
+                                    discussion={d}
+                                    expanded={expanded() === d.id}
+                                    onToggle={() =>
+                                      revealDiscussion(d.id, true)
+                                    }
+                                  />
+                                )}
+                              </For>
+                            </div>
+                            <For
+                              each={discussionsAt(row().key).filter(
+                                (d) => d.id === expanded(),
+                              )}
+                            >
+                              {(d) => (
+                                <DiscussionThread
+                                  projectId={props.projectId ?? ""}
+                                  discussion={d}
+                                  autofocus
+                                  onClose={collapseDiscussion}
+                                />
+                              )}
+                            </For>
+                          </div>
+                        </Show>
                       </div>
                     )}
                   </Show>
@@ -2108,11 +2227,37 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                   )}
                 </Show>
               </div>
-              <FutureActionRow
-                actions={FUTURE_ACTIONS}
-                primary="Ask agent"
-                class="mt-2"
-              />
+              <Show
+                when={props.discussions && props.projectId}
+                fallback={
+                  <FutureActionRow
+                    actions={FUTURE_ACTIONS}
+                    primary="Ask agent"
+                    class="mt-2"
+                  />
+                }
+              >
+                {(projectId) => (
+                  <SelectionActions
+                    projectId={projectId()}
+                    source={discussionSource()}
+                    anchor={s().anchor}
+                    quote={s().quote}
+                    overlapping={overlappingDiscussions(
+                      sessionDiscussions(),
+                      s().anchor,
+                    )}
+                    onReplyIn={(d) => {
+                      clearSelection();
+                      revealDiscussion(d.id);
+                    }}
+                    onCreated={(d) => {
+                      clearSelection();
+                      revealDiscussion(d.id);
+                    }}
+                  />
+                )}
+              </Show>
             </section>
           )}
         </Show>

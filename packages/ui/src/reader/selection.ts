@@ -129,6 +129,8 @@ export interface HighlightSpan {
   start: number;
   end: number;
   className: string;
+  /** Discussion the mark belongs to (`data-discussion`), if any. */
+  discussionId?: string;
 }
 
 /**
@@ -159,7 +161,9 @@ export function applyHighlights(
   spans: readonly HighlightSpan[],
 ): (HTMLElement | null)[] {
   clearHighlight(root);
-  return spans.map((s) => wrapSpan(root, s.start, s.end, s.className));
+  return spans.map((s) =>
+    wrapSpan(root, s.start, s.end, s.className, s.discussionId),
+  );
 }
 
 function wrapSpan(
@@ -167,6 +171,7 @@ function wrapSpan(
   start: number,
   end: number,
   className: string,
+  discussionId?: string,
 ): HTMLElement | null {
   if (end <= start || start < 0) return null;
   const walker = root.ownerDocument.createTreeWalker(
@@ -197,6 +202,7 @@ function wrapSpan(
     const mark = root.ownerDocument.createElement("mark");
     mark.setAttribute(HIGHLIGHT_ATTR, "");
     mark.className = className;
+    if (discussionId !== undefined) mark.dataset.discussion = discussionId;
     target.parentNode?.insertBefore(mark, target);
     mark.appendChild(target);
     first ??= mark;

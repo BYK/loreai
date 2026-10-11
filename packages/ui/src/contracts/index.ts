@@ -18,4 +18,5 @@ export * from "./dedup";
 export * from "./imports";
 export * from "./recall";
 export * from "./knowledge-query";
+export * from "./discussions";
 export * from "./url";
