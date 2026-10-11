@@ -926,6 +926,81 @@ for (const { id, gradient } of [
   );
 }
 
+// Model-usage page fixtures (#2026): deterministic assistant turns carrying
+// providerID/modelID metadata across two projects, three consecutive weeks
+// and three models. Counts are distinct (project, session) pairs per
+// (day, model). Pre-existing fixtures add `anthropic/m` (e2e-reader,
+// 2026-05-03) and `e2e/seed` (e2e-hostile, 2026-05-03) session-days.
+const modelUsageRows = [
+  // [projectPath, session, day, providerID, modelID]
+  [lore, "e2e-mu-a", "2026-05-04", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-a", "2026-05-11", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-a", "2026-05-18", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-b", "2026-05-04", "openai", "gpt-5"],
+  [lore, "e2e-mu-b", "2026-05-11", "openai", "gpt-5"],
+  [scratch, "e2e-mu-c", "2026-05-11", "anthropic", "claude-sonnet-4"],
+  [scratch, "e2e-mu-c", "2026-05-18", "google", "gemini-2.5-pro"],
+];
+for (const [
+  projectPath,
+  sessionId,
+  day,
+  providerID,
+  modelID,
+] of modelUsageRows) {
+  const created = Date.parse(`${day}T12:00:00Z`);
+  core.temporal.store({
+    projectPath,
+    info: {
+      id: `${sessionId}-${day}-user`,
+      sessionID: sessionId,
+      role: "user",
+      time: { created },
+      agent: "e2e",
+      model: { providerID: "e2e", modelID: "seed" },
+    },
+    parts: [
+      {
+        id: `${sessionId}-${day}-user-part`,
+        sessionID: sessionId,
+        messageID: `${sessionId}-${day}-user`,
+        type: "text",
+        text: "model usage seed question",
+      },
+    ],
+  });
+  core.temporal.store({
+    projectPath,
+    info: {
+      id: `${sessionId}-${day}-assistant`,
+      sessionID: sessionId,
+      role: "assistant",
+      time: { created: created + 60_000 },
+      parentID: `${sessionId}-${day}-user`,
+      modelID,
+      providerID,
+      mode: "e2e",
+      path: { cwd: "/", root: "/" },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    },
+    parts: [
+      {
+        id: `${sessionId}-${day}-assistant-part`,
+        sessionID: sessionId,
+        messageID: `${sessionId}-${day}-assistant`,
+        type: "text",
+        text: "model usage seed answer",
+      },
+    ],
+  });
+}
+
 // The disposable pa-* fixtures are created late in the seed, so their fresh
 // knowledge rows would otherwise outrank lore/scratch/hostile in the sidebar's
 // recency ordering (last_activity desc) and push them out of Recent. Backdate

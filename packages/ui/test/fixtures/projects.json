@@ -26,13 +26,25 @@
   {
     "id": "<uuid-2>",
     "path": "/tmp/<project-2>",
-    "name": "ui-contracts-dedup-other",
+    "name": "ui-contracts-model-usage",
     "git_remote": null,
     "created_at": 1700000004000,
+    "knowledge_count": 0,
+    "session_count": 2,
+    "message_count": 2,
+    "distillation_count": 0,
+    "last_activity": 1700000005000
+  },
+  {
+    "id": "<uuid-3>",
+    "path": "/tmp/<project-3>",
+    "name": "ui-contracts-dedup-other",
+    "git_remote": null,
+    "created_at": 1700000006000,
     "knowledge_count": 1,
     "session_count": 0,
     "message_count": 0,
     "distillation_count": 0,
-    "last_activity": 1700000005000
+    "last_activity": 1700000007000
   }
 ]

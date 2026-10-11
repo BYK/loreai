@@ -29,6 +29,7 @@ import {
   knowledgeList,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
+  modelUsageDocument,
   parseContract,
   projectClearResult,
   projectList,
@@ -101,6 +102,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
+  },
+  "model-usage.json": {
+    route: "/model-usage",
+    schema: modelUsageDocument,
   },
   "project-imports.json": {
     route: "/projects/p/imports",
