@@ -1689,7 +1689,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           // exists; a selection mark on the same block must not consume it.
           if (pendingMark && samePassage(h, pendingMark)) {
             pendingMark = null;
-            programmaticScroll(() => revealMark(mark));
+            // Runs inside the block's highlight effect: the reveal's signal
+            // reads must not subscribe it, or a toolbar resize would re-apply
+            // the marks and cut the hold short.
+            untrack(() => programmaticScroll(() => revealMark(mark)));
           }
         },
       }}
