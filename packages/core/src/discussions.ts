@@ -669,6 +669,12 @@ export function createDiscussion(input: CreateDiscussionInput): {
     if (input.threadId) threadRow(input.projectId, input.threadId);
     const live = loadSource(input.projectId, source, anchors);
     if (live.blocks.size === 0) fail("not_found", "source not found");
+    for (const a of anchors) {
+      const parts = live.blocks.get(a.blockId);
+      if (parts && a.partIndex !== undefined && a.partIndex >= parts.length) {
+        fail("invalid", "anchor.partIndex is past the end of its block");
+      }
+    }
     const status = anchorStatusOf(anchors, live);
     if (status === "source_missing")
       fail("not_found", "anchored block not found");

@@ -383,6 +383,17 @@ describe("discussions", () => {
       quote: "Second",
     });
     expect(discussion.anchorStatus).toBe("current");
+    // A part past the end of an existing block is a bad anchor, not a missing source.
+    expect(
+      code(() =>
+        createDiscussion({
+          projectId: p.id,
+          source: { kind: "knowledge", id: logicalId },
+          anchors: [{ ...anchor, partIndex: 2 }],
+          quote: "Second",
+        }),
+      ),
+    ).toBe("invalid");
     ltm.update(logicalId, {
       content: "First paragraph.\n\nSecond paragraph, edited.",
     });
