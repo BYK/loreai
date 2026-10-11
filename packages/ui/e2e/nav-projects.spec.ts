@@ -10,9 +10,12 @@ test.describe("activity search navigation", () => {
     await search.press("Enter");
 
     await expect(page).toHaveURL(/\/ui\/?\?q=type%3Asession$/);
-    await expect(page.getByTestId("activity-search-type")).toHaveClass(
-      /bg-selected/,
-    );
+    if (await page.getByTestId("open-nav").isVisible()) {
+      await page.getByTestId("open-nav").click();
+    }
+    await expect(
+      page.getByRole("link", { name: "Sessions", exact: true }),
+    ).toHaveClass(/bg-selected/);
     const rows = page.getByTestId("activity-item");
     await expect(rows).not.toHaveCount(0);
     await expect
@@ -64,7 +67,7 @@ test.describe("activity search navigation", () => {
     await search.fill("type:knowledge");
     await search.press("Escape");
     await expect(page).toHaveURL(/\/ui\/?$/);
-    await expect(search).toHaveValue("in:inbox");
+    await expect(search).toHaveValue("");
     await expect(page.getByTestId("activity-list-header")).toContainText(
       "Inbox",
     );

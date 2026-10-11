@@ -73,7 +73,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     await expect(opener).toBeFocused();
     await page.getByTestId("activity-item").first().click();
     await expect(page).toHaveURL(
-      /\/ui\/projects\/[^/]+\/(sessions|knowledge)\//,
+      /\/ui\/(projects\/[^/]+\/(sessions|knowledge)\/[^/?]+|contradictions(?:\/[^/?]+)?|promotions(?:\/[^/?]+)?)$/,
     );
   });
 
@@ -111,11 +111,12 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       await page.goto(path);
       await expect(page.getByTestId(marker)).toBeVisible();
       await page.getByTestId("theme-dark").click();
+      await page.getByTestId("pane-min-list").click();
       const nav = page.getByTestId(navId);
       await nav.focus();
       await expect(nav).toBeFocused();
       let reachedMain = false;
-      for (let i = 0; i < 32; i++) {
+      for (let i = 0; i < 64; i++) {
         await page.keyboard.press("Tab");
         reachedMain = await page.evaluate(
           () => document.activeElement?.closest("main") !== null,

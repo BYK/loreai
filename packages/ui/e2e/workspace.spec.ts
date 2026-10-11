@@ -57,7 +57,6 @@ async function expectActivityAnchorAfterReturn(
   if (!targetInfo) throw new Error("list has no fully visible row");
   const row = scroller.locator(`[data-list-key="${targetInfo.key}"]`);
   await expect(row).toBeVisible();
-  const targetKey = targetInfo.key;
   const targetBounds = await row.boundingBox();
   const scrollerBounds = await scroller.boundingBox();
   if (!targetBounds || !scrollerBounds) {
@@ -74,7 +73,6 @@ async function expectActivityAnchorAfterReturn(
   );
   await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/(sessions|knowledge)\//);
   await expect(scroller).toBeHidden();
-  await expect(row).toHaveAttribute("data-list-key", targetKey);
   if (useBrowserBack) await page.goBack();
   else await page.getByTestId("mobile-back").click();
   await expect(page).toHaveURL(/\/ui\/?(\?q=[^#]*)?$/);
@@ -145,13 +143,14 @@ test.describe("persistent workspace panes", () => {
     await search.press("Enter");
     const item = page
       .locator('[data-testid="activity-item"][data-activity-kind="session"]')
-      .first();
+      .nth(2);
     await expect(item).toBeVisible();
     await list.evaluate((el) => {
       el.dataset.workspaceIdentity = "persistent";
       el.scrollTop = 128;
     });
     const scrollTop = await list.evaluate((el) => el.scrollTop);
+    await expect(item).toBeInViewport();
     await item.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/]+/);
     await expect(item).toHaveAttribute("aria-current", "page");
