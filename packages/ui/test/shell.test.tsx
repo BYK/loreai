@@ -984,10 +984,6 @@ describe("shell: project navigation and real-data path", () => {
           : project,
       ),
     );
-    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
-      items: liveEntries.filter((entry) => entry.project_id === projectId),
-      next_cursor: null,
-    }));
     const getKnowledge = vi.fn(async (id: string) => {
       const entry = liveEntries.find((candidate) => candidate.id === id);
       if (!entry) {
@@ -1079,7 +1075,6 @@ describe("shell: project navigation and real-data path", () => {
     });
     const client = fakeClient({
       listProjects,
-      listProjectKnowledgePage,
       getKnowledge,
       listKnowledgeVersions,
       getKnowledgeEffects: async () => writeEffects(),
@@ -1088,8 +1083,10 @@ describe("shell: project navigation and real-data path", () => {
     });
     mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
 
-    const list = await screen.findByTestId("knowledge-list");
-    await within(list).findByText(target.title);
+    const doc = await screen.findByTestId("knowledge-document");
+    expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+      target.title,
+    );
     const projectCount = () => {
       const link = screen
         .getAllByTestId("nav-project")
@@ -1098,7 +1095,6 @@ describe("shell: project navigation and real-data path", () => {
     };
     await waitFor(() => expect(projectCount()).toBe("2"));
 
-    let pageCalls = listProjectKnowledgePage.mock.calls.length;
     let projectCalls = listProjects.mock.calls.length;
     const deleteButton = await screen.findByRole("button", { name: "Delete" });
     await waitFor(() => expect(deleteButton).toBeEnabled());
@@ -1107,18 +1103,11 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(
       within(deleteDialog).getByRole("button", { name: "Delete entry" }),
     );
-    await waitFor(() =>
-      expect(within(list).queryByText(target.title)).toBeNull(),
-    );
     await waitFor(() => expect(projectCount()).toBe("1"));
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
-    );
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
 
-    pageCalls = listProjectKnowledgePage.mock.calls.length;
     projectCalls = listProjects.mock.calls.length;
     const restoreButton = await screen.findByRole("button", {
       name: "Restore…",
@@ -1129,13 +1118,7 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(
       within(restoreDialog).getByRole("button", { name: "Restore version" }),
     );
-    await waitFor(() =>
-      expect(within(list).getByText(target.title)).toBeInTheDocument(),
-    );
     await waitFor(() => expect(projectCount()).toBe("2"));
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
-    );
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
@@ -1153,16 +1136,8 @@ describe("shell: project navigation and real-data path", () => {
           : project,
       ),
     );
-    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
-      items: ENTRIES.filter(
-        (entry) =>
-          entry.project_id === projectId && entry.id !== currentEntry.id,
-      ).concat(currentEntry.project_id === projectId ? [currentEntry] : []),
-      next_cursor: null,
-    }));
     const client = fakeClient({
       listProjects,
-      listProjectKnowledgePage,
       async getKnowledge(id: string) {
         if (id !== currentEntry.id) throw new Error(`unexpected entry ${id}`);
         return currentEntry;
@@ -1225,10 +1200,11 @@ describe("shell: project navigation and real-data path", () => {
     });
     mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
 
-    const list = await screen.findByTestId("knowledge-list");
-    await within(list).findByText(currentEntry.title);
+    const doc = await screen.findByTestId("knowledge-document");
+    expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+      currentEntry.title,
+    );
     const originalTitle = currentEntry.title;
-    const pageCalls = listProjectKnowledgePage.mock.calls.length;
     const projectCalls = listProjects.mock.calls.length;
     const editButton = await screen.findByRole("button", { name: "Edit" });
     await waitFor(() => expect(editButton).toBeEnabled());
@@ -1243,14 +1219,11 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() =>
-      expect(
-        within(list).getByText("Retitled knowledge entry"),
-      ).toBeInTheDocument(),
+      expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+        "Retitled knowledge entry",
+      ),
     );
-    expect(within(list).queryByText(originalTitle)).toBeNull();
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
-    );
+    expect(within(doc).queryByText(originalTitle)).toBeNull();
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );

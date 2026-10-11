@@ -1,11 +1,10 @@
 import type { Component } from "solid-js";
-import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { createMemo, createSignal, Match, Show, Switch } from "solid-js";
+import { useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type {
   AllKnowledgeQuery,
   KnowledgeVersion,
-  ProjectSummary,
   RecallScope,
 } from "~/contracts";
 import {
