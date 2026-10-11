@@ -18,7 +18,7 @@ export interface PrefixSnapshot {
   projectID: string;
   /** Upstream model id the body was sent with. */
   model: string;
-  /** Credential fingerprint of the upstream account. */
+  /** Stable upstream account (provider + cost-attribution account key), unchanged by OAuth token refreshes. */
   account: string;
   /** Wire protocol of the body (`anthropic`, `openai`, …). */
   wire: string;

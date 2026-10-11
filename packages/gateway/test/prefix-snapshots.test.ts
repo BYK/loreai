@@ -2,13 +2,20 @@
  * Prefix snapshots and inherited-prefix resolution for threads (#1809),
  * driven through the real recordCacheTurnUsage seam and core's durable FIFO.
  */
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, test } from "vitest";
 import { evictSession } from "@loreai/core";
+import { _resetAuthForTest, setSessionAuth } from "../src/auth";
+import {
+  _resetCostAttributionForTest,
+  resolveCostAttribution,
+} from "../src/cost-attribution";
 import { recordCacheTurnUsage } from "../src/pipeline";
 import { compressBody, decompressBody } from "../src/cache-analytics";
 import {
   capturePrefixSnapshot,
   forgetPrefixSnapshots,
+  prefixAccount,
   resolveParentPrefix,
   sessionPrefixSnapshots,
   type PrefixCut,
@@ -17,7 +24,10 @@ import type { SessionState } from "../src/translate/types";
 
 const MODEL = "claude-test";
 const PROJECT = "/tmp/test-prefix-snapshots";
-const CHILD = { model: MODEL, account: "cred-a" };
+const ORG = "org-prefix-test";
+const ACCOUNT = `anthropic:${createHash("sha256").update(ORG).digest("hex").slice(0, 12)}`;
+const CHILD = { model: MODEL, account: ACCOUNT };
+const UPSTREAM = { providerID: "anthropic", url: "https://api.anthropic.com" };
 const USAGE = Object.freeze({
   inputTokens: 3,
   outputTokens: 50,
@@ -42,6 +52,14 @@ let seq = 0;
 function session(prev: string, sentAt = Date.now()): SessionState {
   const sessionID = `prefix-snapshots-${seq++}-${Date.now()}`;
   sessions.push(sessionID);
+  const credential = { scheme: "bearer" as const, value: "sk-ant-oat01-a" };
+  setSessionAuth(sessionID, credential, "anthropic");
+  resolveCostAttribution({
+    sessionID,
+    providerID: "anthropic",
+    credential,
+    responseHeaders: new Headers({ "anthropic-organization-id": ORG }),
+  });
   return {
     sessionID,
     projectPath: PROJECT,
@@ -49,6 +67,7 @@ function session(prev: string, sentAt = Date.now()): SessionState {
     lastTurnWasIdle: false,
     resolvedConversationTTL: "5m",
     credentialFingerprint: "cred-a",
+    lastUpstream: UPSTREAM,
     cacheAnalytics: {
       lastRequestBody: compressBody(prev),
       lastRequestMeta: { model: MODEL, wire: "anthropic", sentAt },
@@ -73,6 +92,8 @@ afterEach(() => {
   for (const sid of sessions) evictSession(sid);
   sessions.length = 0;
   forgetPrefixSnapshots();
+  _resetAuthForTest();
+  _resetCostAttributionForTest();
 });
 
 const LAYER0 = body("You are a coding agent.", [
@@ -104,7 +125,7 @@ describe("prefix snapshots", () => {
     const snaps = sessionPrefixSnapshots(state.sessionID);
     expect(snaps).toHaveLength(1);
     expect(decompressBody(snaps[0].body)).toBe(LAYER0);
-    expect(snaps[0]).toMatchObject({ model: MODEL, account: "cred-a" });
+    expect(snaps[0]).toMatchObject({ model: MODEL, account: ACCOUNT });
     expect(snaps[0].expiresAt - snaps[0].sentAt).toBe(300_000);
     expect(state.cacheAnalytics.lastRequestMeta).toMatchObject({
       model: MODEL,
@@ -187,6 +208,34 @@ describe("prefix snapshots", () => {
     state.cacheAnalytics.lastRequestMeta = null;
     const prefix = resolveParentPrefix(state, CHILD, cutAt("ANCHOR-1"));
     expect(prefix.mode).toBe("snapshot");
+  });
+
+  test("an OAuth token refresh keeps the account, so snapshots stay warm", () => {
+    const state = session(LAYER0);
+    recordCacheTurnUsage(
+      state,
+      USAGE,
+      MODEL,
+      PROJECT,
+      LAYER1,
+      undefined,
+      undefined,
+      "anthropic",
+    );
+    setSessionAuth(
+      state.sessionID,
+      { scheme: "bearer", value: "sk-ant-oat01-refreshed" },
+      "anthropic",
+    );
+    state.credentialFingerprint = "cred-b";
+    expect(prefixAccount(state)).toBe(ACCOUNT);
+    const child = { model: MODEL, account: prefixAccount(state) };
+    expect(resolveParentPrefix(state, child, cutAt("ANCHOR-1")).mode).toBe(
+      "snapshot",
+    );
+    expect(resolveParentPrefix(state, child, cutAt("[distilled]")).mode).toBe(
+      "live",
+    );
   });
 
   test("an older matching snapshot wins over a newer mismatched one", () => {

@@ -8,6 +8,7 @@
  */
 import { ensureProject, prefixSnapshots, type threadLinks } from "@loreai/core";
 import { compressBody, decompressBody } from "./cache-analytics";
+import { sessionBudgetMatch } from "./provider-budgets";
 import type { GatewayProtocol, SessionState } from "./translate/types";
 
 const memory = new Map<string, prefixSnapshots.PrefixSnapshot[]>();
@@ -16,6 +17,18 @@ export function conversationTtlMs(
   state: Pick<SessionState, "resolvedConversationTTL">,
 ): number {
   return state.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+}
+
+/**
+ * The prompt-cache account of a session: provider plus the stable account key
+ * from cost attribution (organization / ChatGPT account for subscriptions),
+ * which survives OAuth token refreshes, unlike the credential fingerprint.
+ */
+export function prefixAccount(
+  state: Pick<SessionState, "sessionID" | "lastUpstream">,
+): string {
+  const match = sessionBudgetMatch(state.sessionID, state.lastUpstream);
+  return match ? `${match.provider}:${match.account}` : "";
 }
 
 /** Push the body sent before a prefix rewrite; its cache entry lapses one
@@ -35,7 +48,7 @@ export function capturePrefixSnapshot(
       sessionID: state.sessionID,
       projectID: ensureProject(state.projectPath),
       model: previous.model,
-      account: state.credentialFingerprint ?? "",
+      account: prefixAccount(state),
       wire: previous.wire,
       body: previous.body,
       bodyBytes: Buffer.byteLength(decompressBody(previous.body)),
@@ -92,7 +105,7 @@ export function resolveParentPrefix(
             mode: "live" as const,
             body: analytics.lastRequestBody,
             model: analytics.lastRequestMeta.model,
-            account: state.credentialFingerprint ?? "",
+            account: prefixAccount(state),
             wire: analytics.lastRequestMeta.wire,
           },
         ]
