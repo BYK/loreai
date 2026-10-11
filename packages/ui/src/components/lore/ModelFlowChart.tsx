@@ -357,6 +357,7 @@ export const ModelFlowChart = (props: ModelFlowChartProps) => {
           ref={(el) => (tooltipRef = el)}
           class="chart-tooltip pointer-events-none absolute z-10 max-w-[280px] rounded border border-line bg-soft px-2 py-1 text-[11px] shadow"
           role="tooltip"
+          hidden
         />
       </div>
     </section>

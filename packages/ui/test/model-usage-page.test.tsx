@@ -87,6 +87,10 @@ describe("ModelUsagePage", () => {
     expect(
       document.querySelector("svg.flow-svg")?.getAttribute("aria-label"),
     ).toBe("Your model usage over time");
+    // Tooltip stays hidden until the first pointer move (#2034).
+    expect(
+      document.querySelector<HTMLDivElement>(".chart-tooltip")?.hidden,
+    ).toBe(true);
     expect(screen.getByTestId("model-legend").textContent).toContain(
       "claude-sonnet-4",
     );
