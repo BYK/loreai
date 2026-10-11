@@ -222,6 +222,8 @@ export const MAX_WEEKS = 520;
 export const MAX_WEEKLY_CELLS = 2048;
 export const MAX_MODEL_COUNT = 10_000;
 export const MAX_REVIEW_CELLS = 8192;
+// Stored reports may predate the upload limits, which bound uploads only.
+export const MAX_REVIEW_WEEKS = 2048;
 const WEEK_MS = 7 * 86_400_000;
 const weekPattern = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -417,7 +419,7 @@ export function parseOwnedReport(input: unknown, id: string): OwnedReport {
           ),
         })),
     },
-    MAX_WEEKLY_CELLS,
+    MAX_REVIEW_WEEKS,
     MAX_REVIEW_CELLS,
   );
   return {

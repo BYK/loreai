@@ -418,6 +418,48 @@ describe("weekly snapshot", () => {
     );
   });
 
+  test("parseOwnedReport accepts review bounds past the upload limits", () => {
+    const id = "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b";
+    // 600 consecutive Mondays starting 2000-01-03 — over MAX_WEEKS (520)
+    // for uploads, under MAX_REVIEW_WEEKS (2048) for stored reports.
+    const counts = Array.from({ length: 600 }, (_, i) => ({
+      week: new Date(Date.UTC(2000, 0, 3) + i * 7 * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      model: "a/m",
+      count: 1,
+    }));
+    const report = parseOwnedReport(
+      { id, published: false, revision: 1, counts },
+      id,
+    );
+    expect(report.snapshot?.weeks).toHaveLength(600);
+    expect(() =>
+      parseSnapshot({
+        format: "model-tides-weekly",
+        version: 2,
+        weeks: counts.map(({ week, model, count }) => ({
+          week,
+          models: { [model]: count },
+        })),
+      }),
+    ).toThrow("Invalid weekly snapshot.");
+  });
+
+  test("parseOwnedReport rejects past MAX_REVIEW_WEEKS", () => {
+    const id = "7b2f9a3e-1c4d-7e5f-8a6b-0c1d2e3f4a5b";
+    const counts = Array.from({ length: 2049 }, (_, i) => ({
+      week: new Date(Date.UTC(1999, 11, 27) + i * 7 * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      model: "a/m",
+      count: 1,
+    }));
+    expect(() =>
+      parseOwnedReport({ id, published: false, revision: 1, counts }, id),
+    ).toThrow("Invalid weekly snapshot.");
+  });
+
   test("parseSnapshot/parseOwnedReport reject malformed input", () => {
     expect(() => parseSnapshot({ format: "x" })).toThrow(
       "Invalid weekly snapshot.",
