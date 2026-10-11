@@ -179,6 +179,52 @@ test.describe("persistent workspace panes", () => {
     await expect(list).toBeVisible();
   });
 
+  test("maximizes the list without hiding it and restores the document", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop pane controls",
+    );
+    await page.goto("/ui");
+    const list = page.locator(LIST);
+    const document = page.getByTestId("document-pane");
+    await expect(list).toBeVisible();
+    await expect(document).toBeVisible();
+
+    const maximize = page.getByTestId("pane-max-list");
+    await maximize.click();
+    await expect(list).toBeVisible();
+    await expect(document).toBeHidden();
+    await expect(page.getByTestId("pane-chip-list")).toHaveCount(0);
+    await expect(maximize).toHaveAttribute("aria-label", "Restore list");
+
+    await maximize.click();
+    await expect(list).toBeVisible();
+    await expect(document).toBeVisible();
+  });
+
+  test("restores the list from a chip while Navigation is maximized", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop pane controls",
+    );
+    await page.goto("/ui");
+    const list = page.locator(LIST);
+    await expect(list).toBeVisible();
+
+    await page.getByTestId("pane-max-nav").click();
+    await expect(list).toBeHidden();
+    const chip = page.getByTestId("pane-chip-list");
+    await expect(chip).toBeVisible();
+
+    await chip.click();
+    await expect(list).toBeVisible();
+    await expect(page.getByTestId("pane-chip-list")).toHaveCount(0);
+  });
+
   test("persists minimized panes and keyboard divider resizing across reload", async ({
     page,
   }, testInfo) => {

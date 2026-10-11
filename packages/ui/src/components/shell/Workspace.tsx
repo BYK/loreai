@@ -213,7 +213,6 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const showList = () =>
     layoutState().list === "open" &&
     !hiddenByMaximize("list") &&
-    !hiddenByMaximize("document") &&
     (full() || (!itemSelected() && mode() !== "full"));
   const showDocument = () =>
     layoutState().maximized === "document" ||
@@ -227,9 +226,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     hiddenByMaximize("participants") ||
     mode() !== "full";
   const listChip = () =>
-    layoutState().list === "min" ||
-    hiddenByMaximize("list") ||
-    hiddenByMaximize("document");
+    layoutState().list === "min" || hiddenByMaximize("list");
 
   const nav = () => (
     <Nav
@@ -340,7 +337,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
                 onClick={() => {
                   dispatch({ type: "restore", pane: "list" });
                   const maximized = layoutState().maximized;
-                  if (maximized === "list" || maximized === "document")
+                  if (maximized !== null && maximized !== "list")
                     dispatch({ type: "toggle-maximize", pane: maximized });
                 }}
               >
