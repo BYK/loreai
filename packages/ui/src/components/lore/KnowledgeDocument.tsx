@@ -224,17 +224,17 @@ export const KnowledgeDocument: Component<{
     }
     setExpanded((cur) => (toggle && cur === id ? null : id));
   }
+  function focusIndicator(id: string) {
+    document
+      .querySelector<HTMLElement>(
+        `[data-testid="discussion-indicator"][data-discussion-id="${CSS.escape(id)}"]`,
+      )
+      ?.focus();
+  }
   function collapse() {
     const id = expanded();
     setExpanded(null);
-    if (!id) return;
-    queueMicrotask(() =>
-      document
-        .querySelector<HTMLElement>(
-          `[data-testid="discussion-indicator"][data-discussion-id="${CSS.escape(id)}"]`,
-        )
-        ?.focus(),
-    );
+    if (id) queueMicrotask(() => focusIndicator(id));
   }
 
   // Marks are re-applied from logical anchors whenever anything they
@@ -440,7 +440,8 @@ export const KnowledgeDocument: Component<{
                         }}
                         onCreated={(d) => {
                           setSelected(null);
-                          reveal(d.id);
+                          // A new discussion starts as a collapsed indicator.
+                          requestAnimationFrame(() => focusIndicator(d.id));
                         }}
                       />
                     </>

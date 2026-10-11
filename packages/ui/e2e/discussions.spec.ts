@@ -72,10 +72,17 @@ test.describe("reply to selection", () => {
         page
           .getByTestId("selection-actions")
           .getByRole("button", { name: new RegExp(`^${label}`) }),
-      ).toBeDisabled();
+      ).toHaveAttribute("aria-disabled", "true");
     }
     const id = await startThread(page, "First thought on 229");
 
+    // A new discussion starts collapsed, with focus on its indicator.
+    await expect(indicator(page, id)).toBeFocused();
+    await expect(thread(page, id)).toHaveCount(0);
+    await expect(
+      indicator(page, id).getByTestId("discussion-reply-count"),
+    ).toHaveText("1");
+    await page.keyboard.press("Enter");
     await expect(thread(page, id)).toBeVisible();
     await expect(thread(page, id).getByTestId("discussion-reply")).toHaveCount(
       1,
@@ -164,6 +171,7 @@ test.describe("reply to selection", () => {
     const projectId = await openReader(page);
     await selectInRow(page, "needle-227 ", "discusses needle-227");
     const id = await startThread(page, "Thread to focus");
+    await indicator(page, id).click();
     await thread(page, id).getByTestId("discussion-open").click();
 
     await expect(page).toHaveURL(
@@ -190,6 +198,7 @@ test.describe("reply to selection", () => {
     await openReader(page);
     await selectInRow(page, "needle-226 ", "discusses needle-226");
     const id = await startThread(page, "Mobile thread");
+    await indicator(page, id).click();
 
     await expect(page).toHaveURL(new RegExp(`/discussions/${id}$`));
     await expect(page.getByTestId("discussion-focus")).toBeVisible();

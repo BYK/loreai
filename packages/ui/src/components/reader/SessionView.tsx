@@ -414,17 +414,17 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
     setExpanded((cur) => (toggle && cur === id ? null : id));
   }
+  function focusIndicator(id: string) {
+    scrollEl
+      ?.querySelector<HTMLElement>(
+        `[data-testid="discussion-indicator"][data-discussion-id="${CSS.escape(id)}"]`,
+      )
+      ?.focus();
+  }
   function collapseDiscussion() {
     const id = expanded();
     setExpanded(null);
-    if (!id) return;
-    queueMicrotask(() =>
-      scrollEl
-        ?.querySelector<HTMLElement>(
-          `[data-testid="discussion-indicator"][data-discussion-id="${CSS.escape(id)}"]`,
-        )
-        ?.focus(),
-    );
+    if (id) queueMicrotask(() => focusIndicator(id));
   }
 
   /** The encoded anchor this reader last put in the URL (or saw there). */
@@ -2253,7 +2253,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     }}
                     onCreated={(d) => {
                       clearSelection();
-                      revealDiscussion(d.id);
+                      // A new discussion starts as a collapsed indicator.
+                      requestAnimationFrame(() => focusIndicator(d.id));
                     }}
                   />
                 )}
