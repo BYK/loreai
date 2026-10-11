@@ -54,7 +54,7 @@ export function decodeCursorObject(token: string): Record<string, unknown> {
 export function assertCursorBinding(
   actual: unknown,
   expected: unknown,
-  what: "project" | "session",
+  what: "project" | "session" | "thread",
 ): void {
   if (actual !== expected) {
     throw new BadRequest(

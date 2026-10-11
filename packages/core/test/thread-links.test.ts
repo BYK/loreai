@@ -15,8 +15,11 @@ import {
   findThreadLink,
   findThreadLinkByChild,
   getThreadLink,
+  getThreadPrefix,
   listThreadLinks,
+  listPermissions,
   listThreadLinksByActivity,
+  recordPermission,
   touchThreadActivity,
   updateThreadLink,
 } from "../src/thread-links";
@@ -68,6 +71,8 @@ function code(fn: () => unknown): string | undefined {
   return undefined;
 }
 
+const REBUILT = { mode: "rebuilt", reason: "no_parent_body" } as const;
+
 function seeded(text = "hello world") {
   const p = project();
   const session = `s-${seq++}`;
@@ -78,17 +83,18 @@ function seeded(text = "hello world") {
     anchors: [anchor(mid, text)],
     quote: "hell",
     agent: "claude-code",
-    forkMode: "seeded",
+    prefix: REBUILT,
   });
   return { p, session, mid, link };
 }
 
 describe("thread links", () => {
-  it("derives parent session and fork point from the selection", () => {
-    const { session, mid, link } = seeded();
+  it("derives the parent session from the selection and records the prefix path", () => {
+    const { session, link } = seeded();
     expect(link).toMatchObject({
       parentSessionId: session,
-      forkPoint: mid,
+      prefixMode: "rebuilt",
+      prefixReason: "no_parent_body",
       state: "starting",
       anchorStatus: "current",
       revision: 1,
@@ -115,7 +121,7 @@ describe("thread links", () => {
           anchors: [bad],
           quote: "hell",
           agent: "claude-code",
-          forkMode: "native",
+          prefix: REBUILT,
         }),
       ),
     ).toBe("source_changed");
@@ -197,7 +203,7 @@ describe("thread links", () => {
         anchors: [anchor(mid, "hello world")],
         quote: "hell",
         agent: "opencode",
-        forkMode: "native",
+        prefix: REBUILT,
       });
     }
     const first = listThreadLinks({ projectId: p.id, limit: 2 });
@@ -205,7 +211,7 @@ describe("thread links", () => {
     const rest = listThreadLinks({
       projectId: p.id,
       limit: 2,
-      after: first.next!,
+      after: first.next ?? undefined,
     });
     expect(rest.threads).toHaveLength(1);
     expect(rest.next).toBeNull();
@@ -240,6 +246,162 @@ describe("thread links", () => {
     expect(getThreadLink(target.id, link.id).projectId).toBe(target.id);
     deleteProject(target.id);
     expect(findThreadLink(link.id)).toBeNull();
+  });
+
+  it("persists an inherited prefix byte-for-byte across a reload", () => {
+    const p = project();
+    const session = `s-${seq++}`;
+    const mid = message(p.id, session, "hello world");
+    const body = new Uint8Array([40, 181, 47, 253, 0, 7, 250, 1]);
+    const link = createThreadLink({
+      projectId: p.id,
+      source: { kind: "session", id: session },
+      anchors: [anchor(mid, "hello world")],
+      quote: "hell",
+      agent: "claude-code",
+      prefix: {
+        mode: "inherited",
+        model: "claude-sonnet-4-5",
+        account: "cred-a",
+        wire: "anthropic",
+        body,
+        bodyBytes: 4096,
+      },
+    });
+    expect(link).toMatchObject({ prefixMode: "inherited", prefixReason: null });
+    close();
+    const stored = getThreadPrefix(p.id, link.id);
+    if (!stored) throw new Error("prefix missing after reload");
+    expect(stored).toMatchObject({
+      model: "claude-sonnet-4-5",
+      account: "cred-a",
+      wire: "anthropic",
+      bodyBytes: 4096,
+    });
+    expect(Buffer.from(stored.body).equals(Buffer.from(body))).toBe(true);
+    expect(code(() => getThreadPrefix(project().id, link.id))).toBe(
+      "not_found",
+    );
+    const rebuilt = seeded();
+    expect(getThreadPrefix(rebuilt.p.id, rebuilt.link.id)).toBeNull();
+    deleteThreadLink(p.id, link.id, link.revision);
+    expect(
+      db()
+        .query("SELECT COUNT(*) AS n FROM thread_prefixes WHERE thread_id = ?")
+        .get(link.id),
+    ).toEqual({ n: 0 });
+  });
+
+  it("checks the prefix path against the source kind", () => {
+    const p = project();
+    const mid = message(p.id, "s", "hello world");
+    const base = {
+      projectId: p.id,
+      anchors: [anchor(mid, "hello world")],
+      quote: "hell",
+      agent: "claude-code",
+    };
+    expect(() =>
+      createThreadLink({
+        ...base,
+        source: { kind: "session", id: "s" },
+        prefix: { mode: "rebuilt", reason: "knowledge_source" },
+      }),
+    ).toThrow(/knowledge_source/);
+    expect(() =>
+      createThreadLink({
+        ...base,
+        source: { kind: "knowledge", id: "k" },
+        prefix: {
+          mode: "inherited",
+          model: "m",
+          account: "a",
+          wire: "anthropic",
+          body: new Uint8Array([1]),
+          bodyBytes: 1,
+        },
+      }),
+    ).toThrow(/no parent prefix/);
+    expect(() =>
+      createThreadLink({
+        ...base,
+        source: { kind: "session", id: "s" },
+        prefix: {
+          mode: "inherited",
+          model: "m",
+          account: "a",
+          wire: "anthropic",
+          body: new Uint8Array(),
+          bodyBytes: 1,
+        },
+      }),
+    ).toThrow(/inherited prefix needs/);
+  });
+
+  it("logs auto-approved permissions in order on open threads only", () => {
+    const { p, link } = seeded();
+    const a = recordPermission(p.id, link.id, {
+      toolCallId: "tc1",
+      title: "Edit a.ts",
+      toolKind: "edit",
+      locations: ["/wt/a.ts"],
+      optionId: "allow",
+      optionKind: "allow_once",
+    });
+    const b = recordPermission(p.id, link.id, {
+      toolCallId: "tc2",
+      optionId: "allow-always",
+      optionKind: "allow_always",
+    });
+    expect(a).toMatchObject({ title: "Edit a.ts", locations: ["/wt/a.ts"] });
+    expect(b).toMatchObject({ title: null, toolKind: null, locations: [] });
+    const touched = getThreadLink(p.id, link.id);
+    expect(touched.lastActivityAt).toBeGreaterThan(link.lastActivityAt);
+    expect(touched.revision).toBe(link.revision);
+    const first = listPermissions({
+      projectId: p.id,
+      threadId: link.id,
+      limit: 1,
+    });
+    expect(first.permissions).toEqual([a]);
+    const rest = listPermissions({
+      projectId: p.id,
+      threadId: link.id,
+      limit: 5,
+      after: first.next ?? undefined,
+    });
+    expect(rest).toEqual({ permissions: [b], next: null });
+    expect(
+      code(() =>
+        recordPermission(p.id, link.id, {
+          toolCallId: "tc3",
+          optionId: "reject",
+          optionKind: "reject_once",
+        }),
+      ),
+    ).toBe("invalid");
+    expect(
+      code(() =>
+        listPermissions({
+          projectId: project().id,
+          threadId: link.id,
+          limit: 5,
+        }),
+      ),
+    ).toBe("not_found");
+    updateThreadLink(p.id, link.id, {
+      expectedRevision: link.revision,
+      state: "closed",
+    });
+    expect(
+      code(() =>
+        recordPermission(p.id, link.id, {
+          toolCallId: "tc4",
+          optionId: "allow",
+          optionKind: "allow_once",
+        }),
+      ),
+    ).toBe("invalid");
   });
 
   it("deletes with an expected revision", () => {

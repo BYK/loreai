@@ -5,6 +5,7 @@
  *   GET    /api/v1/projects/:id/threads/:tid
  *   PATCH  /api/v1/projects/:id/threads/:tid      { expected_revision, state: "closed" }
  *   DELETE /api/v1/projects/:id/threads/:tid?expected_revision=N
+ *   GET    /api/v1/projects/:id/threads/:tid/permissions[?limit][&cursor]
  *   GET    /api/v1/projects/:id/notes?source_kind&source_id
  *   POST   /api/v1/projects/:id/notes             { source, anchors, quote, category, title, content }
  *
@@ -161,8 +162,8 @@ function threadOut(t: ThreadLink) {
     source_hash: t.sourceHash,
     anchor_status: t.anchorStatus,
     agent: t.agent,
-    fork_mode: t.forkMode,
-    fork_point: t.forkPoint,
+    prefix_mode: t.prefixMode,
+    prefix_reason: t.prefixReason,
     acp_session_id: t.acpSessionId,
     child_session_id: t.childSessionId,
     worktree: t.worktree,
@@ -283,13 +284,82 @@ async function threadRoute(
   return null;
 }
 
+const PERMISSION_LIST_LIMIT = 100;
+const PERMISSION_LIST_MAX = 500;
+
+function permissionOut(p: threadLinks.ThreadPermission) {
+  return {
+    id: p.id,
+    thread_id: p.threadId,
+    tool_call_id: p.toolCallId,
+    title: p.title,
+    tool_kind: p.toolKind,
+    locations: p.locations,
+    option_id: p.optionId,
+    option_kind: p.optionKind,
+    created_at: p.createdAt,
+  };
+}
+
+/** The thread's log of permission requests the gateway auto-approved. */
+function listThreadPermissions(
+  url: URL,
+  projectId: string,
+  threadId: string,
+): Response {
+  const limit = parseLimit(url, PERMISSION_LIST_LIMIT, PERMISSION_LIST_MAX);
+  const token = url.searchParams.get("cursor");
+  let after: { createdAt: number; id: string } | undefined;
+  if (token) {
+    const c = decodeCursorObject(token);
+    if (
+      c.kind !== "thread_permissions" ||
+      typeof c.project !== "string" ||
+      typeof c.thread !== "string" ||
+      typeof c.id !== "string" ||
+      typeof c.at !== "number" ||
+      !Number.isFinite(c.at)
+    ) {
+      throw new BadRequest("invalid_cursor", "Malformed cursor");
+    }
+    assertCursorBinding(c.project, projectId, "project");
+    assertCursorBinding(c.thread, threadId, "thread");
+    after = { createdAt: c.at, id: c.id };
+  }
+  const result = threadLinks.listPermissions({
+    projectId,
+    threadId,
+    limit,
+    after,
+  });
+  return jsonResponse({
+    permissions: result.permissions.map(permissionOut),
+    next_cursor: result.next
+      ? encodeCursor({
+          v: CURSOR_VERSION,
+          kind: "thread_permissions",
+          project: projectId,
+          thread: threadId,
+          at: result.next.createdAt,
+          id: result.next.id,
+        })
+      : null,
+  });
+}
+
 async function notesRoute(
   req: Request,
   url: URL,
   projectId: string,
 ): Promise<Response | null> {
   if (req.method === "GET") {
-    const source = sourceFilter(url, true)!;
+    const source = sourceFilter(url, true);
+    if (!source) {
+      throw new BadRequest(
+        "invalid_request",
+        "source_kind and source_id are required",
+      );
+    }
     return jsonResponse({
       notes: anchoredNotes
         .listAnchoredNotes({ projectId, source })
@@ -376,6 +446,11 @@ export async function handleThreadRequest(
       return req.method === "GET" ? listThreads(url, projectId) : null;
     }
     if (s.length === 6) return await threadRoute(req, url, projectId, s[5]);
+    if (s.length === 7 && s[6] === "permissions") {
+      return req.method === "GET"
+        ? listThreadPermissions(url, projectId, s[5])
+        : null;
+    }
     return null;
   } catch (err) {
     return toResponse(err);

@@ -2481,11 +2481,18 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   `,
   `
   -- Version 103: thread links (#1809). A thread started from a selection is
-  -- a forked agent session the gateway runs on the harness through ACP. The
-  -- row keeps the selection (logical SourceAnchor JSON, the short UI quote,
-  -- the source hash), the harness, the ACP and Lore child session ids and
-  -- the lifecycle state. The child's turns live in temporal_messages like any
-  -- other session; nothing here copies a transcript.
+  -- a new agent session the gateway runs on the harness through ACP, seeded
+  -- with the parent up to the anchor. The row keeps the selection (logical
+  -- SourceAnchor JSON, the short UI quote, the source hash), the harness, the
+  -- ACP and Lore child session ids, the lifecycle state and how the child's
+  -- prompt prefix was built (prefix_mode/prefix_reason). thread_prefixes
+  -- holds the inherited prefix: the parent's as-sent body cut at the anchor,
+  -- zstd-compressed, insert-only so every child turn replays the same bytes
+  -- across restarts (the session_prompt_deltas principle, v42).
+  -- thread_permissions logs each permission request the gateway
+  -- auto-approved for the thread. The child's turns live in
+  -- temporal_messages like any other session; nothing here copies a
+  -- transcript.
   CREATE TABLE IF NOT EXISTS thread_links (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -2498,8 +2505,8 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
     agent TEXT NOT NULL,
-    fork_mode TEXT NOT NULL CHECK (fork_mode IN ('native', 'seeded')),
-    fork_point TEXT,
+    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('inherited', 'rebuilt')),
+    prefix_reason TEXT,
     acp_session_id TEXT,
     child_session_id TEXT UNIQUE,
     worktree_path TEXT,
@@ -2514,7 +2521,8 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     last_activity_at INTEGER NOT NULL,
     CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
     CHECK ((state = 'failed') = (error IS NOT NULL)),
-    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL))
+    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL)),
+    CHECK ((prefix_mode = 'inherited') = (prefix_reason IS NULL))
   );
   CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
     ON thread_links(project_id, last_activity_at DESC, id DESC);
@@ -2524,6 +2532,29 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     ON thread_links(project_id, source_kind, source_id);
   CREATE INDEX IF NOT EXISTS idx_thread_links_parent
     ON thread_links(parent_session_id) WHERE parent_session_id IS NOT NULL;
+  CREATE TABLE IF NOT EXISTS thread_permissions (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    title TEXT,
+    tool_kind TEXT,
+    locations TEXT NOT NULL DEFAULT '[]',
+    option_id TEXT NOT NULL,
+    option_kind TEXT NOT NULL
+      CHECK (option_kind IN ('allow_once', 'allow_always')),
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_thread_permissions_thread
+    ON thread_permissions(thread_id, created_at, id);
+  CREATE TABLE IF NOT EXISTS thread_prefixes (
+    thread_id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    wire TEXT NOT NULL,
+    body BLOB NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
   `,
 ]);
 
@@ -4991,8 +5022,8 @@ function recoverMissingObjects(database: Database) {
     anchor_status TEXT NOT NULL DEFAULT 'current'
       CHECK (anchor_status IN ('current', 'stale_anchor', 'source_missing')),
     agent TEXT NOT NULL,
-    fork_mode TEXT NOT NULL CHECK (fork_mode IN ('native', 'seeded')),
-    fork_point TEXT,
+    prefix_mode TEXT NOT NULL CHECK (prefix_mode IN ('inherited', 'rebuilt')),
+    prefix_reason TEXT,
     acp_session_id TEXT,
     child_session_id TEXT UNIQUE,
     worktree_path TEXT,
@@ -5007,7 +5038,8 @@ function recoverMissingObjects(database: Database) {
     last_activity_at INTEGER NOT NULL,
     CHECK ((parent_session_id IS NULL) = (source_kind = 'knowledge')),
     CHECK ((state = 'failed') = (error IS NOT NULL)),
-    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL))
+    CHECK ((worktree_path IS NULL) = (worktree_branch IS NULL)),
+    CHECK ((prefix_mode = 'inherited') = (prefix_reason IS NULL))
   );
   CREATE INDEX IF NOT EXISTS idx_thread_links_project_activity
     ON thread_links(project_id, last_activity_at DESC, id DESC);
@@ -5017,6 +5049,29 @@ function recoverMissingObjects(database: Database) {
     ON thread_links(project_id, source_kind, source_id);
   CREATE INDEX IF NOT EXISTS idx_thread_links_parent
     ON thread_links(parent_session_id) WHERE parent_session_id IS NOT NULL;
+  CREATE TABLE IF NOT EXISTS thread_permissions (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    title TEXT,
+    tool_kind TEXT,
+    locations TEXT NOT NULL DEFAULT '[]',
+    option_id TEXT NOT NULL,
+    option_kind TEXT NOT NULL
+      CHECK (option_kind IN ('allow_once', 'allow_always')),
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_thread_permissions_thread
+    ON thread_permissions(thread_id, created_at, id);
+  CREATE TABLE IF NOT EXISTS thread_prefixes (
+    thread_id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    wire TEXT NOT NULL,
+    body BLOB NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
   `);
   // Version 56: projects.last_refcheck_at (reference-validity rate gate, #627).
   {

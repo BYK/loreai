@@ -1,9 +1,10 @@
 /**
- * Thread links (#1809): a thread started from a selection is a forked agent
- * session, run on the harness through ACP by the gateway. Core only stores
- * the link — parent source and anchor, the harness, the child session ids and
- * the lifecycle state — and never the child's turns, which reach
- * `temporal_messages` through the gateway like any other session.
+ * Thread links (#1809): a thread started from a selection is a new agent
+ * session the gateway runs on the harness through ACP, seeded with the parent
+ * transcript up to the anchor. Core only stores the link — parent source and
+ * anchor, the harness, the child session ids, the lifecycle state and the log
+ * of auto-approved permission requests — and never the child's turns, which
+ * reach `temporal_messages` through the gateway like any other session.
  *
  * Mutations take `expectedRevision`; a mismatch is a `revision_conflict`
  * AnchorError carrying the current revision.
@@ -27,8 +28,50 @@ import { sql, type SqlFragment } from "./sql";
 import { currentTenantId } from "./tenant";
 
 export type ThreadState = "starting" | "running" | "idle" | "failed" | "closed";
-/** `native`: ACP `session/fork` of the parent; `seeded`: `session/new` seeded with the parent up to the anchor. */
-export type ForkMode = "native" | "seeded";
+
+/**
+ * How the child's prompt prefix was built. `inherited`: the parent's as-sent
+ * body cut at the anchor, replayed byte-identically so the child reuses the
+ * parent's prompt cache. `rebuilt`: a seed rebuilt from temporal storage.
+ */
+export type PrefixMode = "inherited" | "rebuilt";
+
+export const PREFIX_REASONS = [
+  /** The parent has no as-sent body (gateway restart or cache reset). */
+  "no_parent_body",
+  /** The anchored message was compressed into the distilled prefix. */
+  "anchor_not_in_body",
+  "model_mismatch",
+  "account_mismatch",
+  /** Knowledge sources have no parent conversation to inherit. */
+  "knowledge_source",
+] as const;
+export type PrefixReason = (typeof PREFIX_REASONS)[number];
+
+export type ThreadPrefixInput =
+  | {
+      mode: "inherited";
+      /** Upstream model id the parent body was sent with. */
+      model: string;
+      /** Credential fingerprint of the parent's upstream account. */
+      account: string;
+      /** Wire protocol of the body (`anthropic`, `openai`, …). */
+      wire: string;
+      /** zstd-compressed as-sent body, cut at the anchor. */
+      body: Uint8Array;
+      /** Uncompressed length in bytes. */
+      bodyBytes: number;
+    }
+  | { mode: "rebuilt"; reason: PrefixReason };
+
+export interface ThreadPrefix {
+  model: string;
+  account: string;
+  wire: string;
+  body: Uint8Array;
+  bodyBytes: number;
+  createdAt: number;
+}
 
 export interface ThreadWorktree {
   path: string;
@@ -47,9 +90,9 @@ export interface ThreadLink {
   anchorStatus: AnchorStatus;
   /** Harness name from the gateway's agent registry (e.g. `claude-code`). */
   agent: string;
-  forkMode: ForkMode;
-  /** Parent temporal message the child forks after; null for knowledge. */
-  forkPoint: string | null;
+  prefixMode: PrefixMode;
+  /** Why the prefix was rebuilt; null when inherited. */
+  prefixReason: PrefixReason | null;
   /** The harness's own ACP session id. */
   acpSessionId: string | null;
   /** Lore session id of the child, bound on its first gateway request. */
@@ -95,8 +138,8 @@ interface ThreadLinkRow {
   source_hash: string;
   anchor_status: AnchorStatus;
   agent: string;
-  fork_mode: ForkMode;
-  fork_point: string | null;
+  prefix_mode: PrefixMode;
+  prefix_reason: PrefixReason | null;
   acp_session_id: string | null;
   child_session_id: string | null;
   worktree_path: string | null;
@@ -112,8 +155,8 @@ interface ThreadLinkRow {
 
 const COLS = sql.raw(
   `t.id, t.project_id, t.parent_session_id, t.source_kind, t.source_id,
-   t.anchors, t.quote, t.source_hash, t.anchor_status, t.agent, t.fork_mode,
-   t.fork_point, t.acp_session_id, t.child_session_id, t.worktree_path,
+   t.anchors, t.quote, t.source_hash, t.anchor_status, t.agent,
+   t.prefix_mode, t.prefix_reason, t.acp_session_id, t.child_session_id, t.worktree_path,
    t.worktree_branch, t.state, t.error, t.revision, t.created_by,
    t.created_at, t.updated_at, t.last_activity_at`,
 );
@@ -183,8 +226,8 @@ function hydrate(rows: ThreadLinkRow[]): ThreadLink[] {
     sourceHash: row.source_hash,
     anchorStatus: statuses.get(row.id) ?? row.anchor_status,
     agent: row.agent,
-    forkMode: row.fork_mode,
-    forkPoint: row.fork_point,
+    prefixMode: row.prefix_mode,
+    prefixReason: row.prefix_reason,
     acpSessionId: row.acp_session_id,
     childSessionId: row.child_session_id,
     worktree:
@@ -255,28 +298,25 @@ export interface CreateThreadLinkInput {
   anchors: unknown;
   quote: unknown;
   agent: unknown;
-  forkMode: unknown;
+  prefix: ThreadPrefixInput;
   createdBy?: unknown;
 }
 
 /**
- * Record a new thread in `starting` state. The parent session and fork point
- * derive from the selection: a session source is its own parent, and the
- * child forks after the last anchored message.
+ * Record a new thread in `starting` state. A session source is its own
+ * parent; the child is seeded with that session up to the last anchored
+ * message.
  */
 export function createThreadLink(input: CreateThreadLinkInput): ThreadLink {
   if (typeof input.agent !== "string" || !AGENT_RE.test(input.agent)) {
     fail("invalid", "agent must be a registered harness name");
   }
   const agent = input.agent;
-  if (input.forkMode !== "native" && input.forkMode !== "seeded") {
-    fail("invalid", "forkMode must be native or seeded");
-  }
-  const forkMode: ForkMode = input.forkMode;
   const createdBy = input.createdBy ?? "user";
   if (typeof createdBy !== "string" || !PARTICIPANT_RE.test(createdBy)) {
     fail("invalid", "createdBy must be user, lore or agent:<id>");
   }
+  const prefix = validatePrefix(input.prefix, input.source.kind);
   const id = uuidv7();
   return snapshot(() => {
     const { anchors, quote } = checkSelection(
@@ -286,21 +326,99 @@ export function createThreadLink(input: CreateThreadLinkInput): ThreadLink {
       input.quote,
     );
     const session = input.source.kind === "session";
-    const forkPoint = session ? anchors.at(-1)!.blockId.slice(2) : null;
     const t = now();
     sql.run(
       db(),
       sql`INSERT INTO thread_links (id, project_id, parent_session_id,
             source_kind, source_id, anchors, quote, source_hash, anchor_status,
-            agent, fork_mode, fork_point, state, revision, created_by,
+            agent, prefix_mode, prefix_reason, state, revision, created_by,
             created_at, updated_at, last_activity_at)
           VALUES (${id}, ${input.projectId},
             ${session ? input.source.id : null}, ${input.source.kind},
             ${input.source.id}, ${JSON.stringify(anchors)}, ${quote},
-            ${sourceHashOf(anchors)}, 'current', ${agent}, ${forkMode},
-            ${forkPoint}, 'starting', 1, ${createdBy}, ${t}, ${t}, ${t})`,
+            ${sourceHashOf(anchors)}, 'current', ${agent}, ${prefix.mode},
+            ${prefix.mode === "rebuilt" ? prefix.reason : null}, 'starting', 1, ${createdBy}, ${t}, ${t}, ${t})`,
     );
+    if (prefix.mode === "inherited") {
+      sql.run(
+        db(),
+        sql`INSERT INTO thread_prefixes (thread_id, model, account, wire, body,
+              body_bytes, created_at)
+            VALUES (${id}, ${prefix.model}, ${prefix.account}, ${prefix.wire},
+              ${prefix.body}, ${prefix.bodyBytes}, ${t})`,
+      );
+    }
     return hydrate([linkRow(input.projectId, id)])[0];
+  });
+}
+
+function validatePrefix(
+  prefix: ThreadPrefixInput,
+  kind: SourceKind,
+): ThreadPrefixInput {
+  if (prefix.mode === "rebuilt") {
+    if (!PREFIX_REASONS.includes(prefix.reason)) {
+      fail("invalid", "unknown prefix reason");
+    }
+    if ((prefix.reason === "knowledge_source") !== (kind === "knowledge")) {
+      fail(
+        "invalid",
+        "knowledge_source is the reason for knowledge sources only",
+      );
+    }
+    return prefix;
+  }
+  if (kind === "knowledge") {
+    fail("invalid", "a knowledge source has no parent prefix to inherit");
+  }
+  if (
+    !prefix.model ||
+    prefix.model.length > ID_MAX ||
+    !prefix.account ||
+    prefix.account.length > ID_MAX ||
+    !AGENT_RE.test(prefix.wire) ||
+    !(prefix.body instanceof Uint8Array) ||
+    prefix.body.length === 0 ||
+    !Number.isSafeInteger(prefix.bodyBytes) ||
+    prefix.bodyBytes <= 0
+  ) {
+    fail(
+      "invalid",
+      "an inherited prefix needs a model, account, wire and body",
+    );
+  }
+  return prefix;
+}
+
+/** The inherited prefix of a thread; null when its prefix was rebuilt. */
+export function getThreadPrefix(
+  projectId: string,
+  threadId: string,
+): ThreadPrefix | null {
+  return snapshot(() => {
+    linkRow(projectId, threadId);
+    const row = sql.get<{
+      model: string;
+      account: string;
+      wire: string;
+      body: Uint8Array;
+      body_bytes: number;
+      created_at: number;
+    }>(
+      db(),
+      sql`SELECT model, account, wire, body, body_bytes, created_at
+            FROM thread_prefixes WHERE thread_id = ${threadId}`,
+    );
+    return row
+      ? {
+          model: row.model,
+          account: row.account,
+          wire: row.wire,
+          body: new Uint8Array(row.body),
+          bodyBytes: row.body_bytes,
+          createdAt: row.created_at,
+        }
+      : null;
   });
 }
 
@@ -342,7 +460,7 @@ export function updateThreadLink(
       }
       sets.push(sql`state = ${input.state}`);
       sets.push(
-        sql`error = ${input.state === "failed" ? input.error!.trim().slice(0, ERROR_MAX) : null}`,
+        sql`error = ${input.state === "failed" ? (input.error?.trim().slice(0, ERROR_MAX) ?? null) : null}`,
       );
     }
     if (acpSessionId !== null) {
@@ -421,10 +539,173 @@ export function deleteThreadLink(
 ): void {
   withTransaction(() => {
     checkRevision(linkRow(projectId, id).revision, expectedRevision);
+    sql.run(db(), sql`DELETE FROM thread_permissions WHERE thread_id = ${id}`);
+    sql.run(db(), sql`DELETE FROM thread_prefixes WHERE thread_id = ${id}`);
     sql.run(
       db(),
       sql`DELETE FROM thread_links WHERE id = ${id} AND project_id = ${projectId}`,
     );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Permission log
+// ---------------------------------------------------------------------------
+
+export type PermissionOptionKind = "allow_once" | "allow_always";
+
+/** One `session/request_permission` the gateway answered on the thread's behalf. */
+export interface ThreadPermission {
+  id: string;
+  threadId: string;
+  /** ACP tool call the request was about. */
+  toolCallId: string;
+  title: string | null;
+  /** ACP tool kind (`edit`, `execute`, `fetch`, …). */
+  toolKind: string | null;
+  /** Paths the tool call said it touches. */
+  locations: string[];
+  optionId: string;
+  optionKind: PermissionOptionKind;
+  createdAt: number;
+}
+
+export interface RecordPermissionInput {
+  toolCallId: unknown;
+  title?: unknown;
+  toolKind?: unknown;
+  locations?: unknown;
+  optionId: unknown;
+  optionKind: unknown;
+}
+
+const TITLE_MAX = 500;
+const LOCATIONS_MAX = 64;
+
+interface ThreadPermissionRow {
+  id: string;
+  thread_id: string;
+  tool_call_id: string;
+  title: string | null;
+  tool_kind: string | null;
+  locations: string;
+  option_id: string;
+  option_kind: PermissionOptionKind;
+  created_at: number;
+}
+
+function permissionOut(row: ThreadPermissionRow): ThreadPermission {
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    toolCallId: row.tool_call_id,
+    title: row.title,
+    toolKind: row.tool_kind,
+    locations: JSON.parse(row.locations) as string[],
+    optionId: row.option_id,
+    optionKind: row.option_kind,
+    createdAt: row.created_at,
+  };
+}
+
+function requiredId(value: unknown, field: string): string {
+  const id = optionalId(value, field);
+  if (id === null) fail("invalid", `${field} is required`);
+  return id;
+}
+
+/**
+ * Log an auto-approved permission request and move the thread up the
+ * activity order. Only open threads take new entries.
+ */
+export function recordPermission(
+  projectId: string,
+  threadId: string,
+  input: RecordPermissionInput,
+): ThreadPermission {
+  const toolCallId = requiredId(input.toolCallId, "toolCallId");
+  const optionId = requiredId(input.optionId, "optionId");
+  if (
+    input.optionKind !== "allow_once" &&
+    input.optionKind !== "allow_always"
+  ) {
+    fail("invalid", "optionKind must be allow_once or allow_always");
+  }
+  const optionKind: PermissionOptionKind = input.optionKind;
+  const title =
+    typeof input.title === "string" && input.title.trim()
+      ? input.title.trim().slice(0, TITLE_MAX)
+      : null;
+  const toolKind = optionalId(input.toolKind, "toolKind");
+  const locations = input.locations ?? [];
+  if (
+    !Array.isArray(locations) ||
+    locations.length > LOCATIONS_MAX ||
+    !locations.every(
+      (l): l is string =>
+        typeof l === "string" && l.length > 0 && l.length <= 4096,
+    )
+  ) {
+    fail("invalid", "locations must be a list of paths");
+  }
+  const id = uuidv7();
+  return withTransaction(() => {
+    const row = linkRow(projectId, threadId);
+    if (row.state === "closed" || row.state === "failed") {
+      fail("invalid", `cannot log a permission on a ${row.state} thread`);
+    }
+    const t = now();
+    sql.run(
+      db(),
+      sql`INSERT INTO thread_permissions (id, thread_id, tool_call_id, title,
+            tool_kind, locations, option_id, option_kind, created_at)
+          VALUES (${id}, ${threadId}, ${toolCallId}, ${title}, ${toolKind},
+            ${JSON.stringify(locations)}, ${optionId}, ${optionKind}, ${t})`,
+    );
+    sql.run(
+      db(),
+      sql`UPDATE thread_links SET last_activity_at = MAX(${t}, last_activity_at + 1)
+           WHERE id = ${threadId}`,
+    );
+    const stored = sql.get<ThreadPermissionRow>(
+      db(),
+      sql`SELECT * FROM thread_permissions WHERE id = ${id}`,
+    );
+    if (!stored) fail("not_found", "permission not found");
+    return permissionOut(stored);
+  });
+}
+
+/** A thread's permission log, oldest first; keyset on `(created_at, id)`. */
+export function listPermissions(input: {
+  projectId: string;
+  threadId: string;
+  limit: number;
+  after?: { createdAt: number; id: string };
+}): {
+  permissions: ThreadPermission[];
+  next: { createdAt: number; id: string } | null;
+} {
+  return snapshot(() => {
+    linkRow(input.projectId, input.threadId);
+    const after = input.after
+      ? sql`AND (created_at > ${input.after.createdAt}
+             OR (created_at = ${input.after.createdAt} AND id > ${input.after.id}))`
+      : sql``;
+    const rows = sql.all<ThreadPermissionRow>(
+      db(),
+      sql`SELECT * FROM thread_permissions
+           WHERE thread_id = ${input.threadId} ${after}
+           ORDER BY created_at, id
+           LIMIT ${input.limit + 1}`,
+    );
+    const more = rows.length > input.limit;
+    const kept = more ? rows.slice(0, input.limit) : rows;
+    const last = kept.at(-1);
+    return {
+      permissions: kept.map(permissionOut),
+      next: more && last ? { createdAt: last.created_at, id: last.id } : null,
+    };
   });
 }
 

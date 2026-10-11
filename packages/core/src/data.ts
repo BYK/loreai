@@ -773,6 +773,13 @@ export function clearProject(projectPath: string): ClearResult {
     // session_meta is a derived cache — sweep the project's rows with the rest.
     database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
     // Thread links are project-owned application data (#1809).
+    for (const table of ["thread_permissions", "thread_prefixes"]) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE thread_id IN (SELECT id FROM thread_links WHERE project_id = ?)`,
+        )
+        .run(pid);
+    }
     database.query("DELETE FROM thread_links WHERE project_id = ?").run(pid);
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
@@ -936,6 +943,13 @@ export function deleteProject(projectId: string): ClearResult | null {
       .query("DELETE FROM session_meta WHERE project_id = ?")
       .run(projectId);
     // Thread links are project-owned application data (#1809).
+    for (const table of ["thread_permissions", "thread_prefixes"]) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE thread_id IN (SELECT id FROM thread_links WHERE project_id = ?)`,
+        )
+        .run(projectId);
+    }
     database
       .query("DELETE FROM thread_links WHERE project_id = ?")
       .run(projectId);
