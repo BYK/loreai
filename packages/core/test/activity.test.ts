@@ -12,7 +12,7 @@ import {
   logicalIdOf,
   recordContradiction,
 } from "../src/ltm";
-import { currentTenantId } from "../src/tenant";
+import { currentTenantId, withTenant } from "../src/tenant";
 
 const NOW = 1_700_000_000_000;
 
@@ -75,7 +75,6 @@ function query(
   const parsed = parseActivityQuery(q);
   return listActivity({
     parsed,
-    q: parsed.server.terms.join(" "),
     cursor,
     limit,
   });
@@ -163,6 +162,47 @@ describe("listActivity", () => {
         ).size,
       ).toBe(expected.length);
     }
+  });
+
+  test("refreshes session metadata after activity data changes", () => {
+    const project = createProject("Activity refresh project");
+    insertMessage(project.id, "before-search", "an unrelated session", NOW);
+    query("sqlite");
+
+    insertMessage(
+      project.id,
+      "after-search",
+      "SQLite gateway session",
+      NOW + 1,
+    );
+
+    expect(
+      query("sqlite").items.find(
+        (item) => item.kind === "session" && item.id === "after-search",
+      ),
+    ).toMatchObject({
+      title: "SQLite gateway session",
+      last_activity_at: NOW + 1,
+      total: 1,
+    });
+  });
+
+  test("refreshes each project-filtered session scope independently", () => {
+    const projectA = createProject("Activity refresh project A");
+    const projectB = createProject("Activity refresh project B");
+    insertMessage(projectA.id, "session-a", "SQLite project A session", NOW);
+    insertMessage(projectB.id, "session-b", "SQLite project B session", NOW);
+
+    expect(
+      query(`project:${projectA.id} type:session sqlite`).items.map(
+        ({ id }) => id,
+      ),
+    ).toEqual(["session-a"]);
+    expect(
+      query(`project:${projectB.id} type:session sqlite`).items.map(
+        ({ id }) => id,
+      ),
+    ).toEqual(["session-b"]);
   });
 
   test("resolves project names and IDs, unions project tokens, and returns empty for misses", () => {
@@ -329,5 +369,65 @@ describe("listActivity", () => {
       "Architecture guide",
     ]);
     expect(page.next).toBeNull();
+  });
+
+  test("fuzzy tail matches multi-word title queries", () => {
+    const project = createProject("Fuzzy Multiword Project");
+    createEntry(
+      project.path,
+      "SQLite Gateway guide",
+      "A note about the local database",
+      "user",
+    );
+
+    const single = query(`project:${project.id} type:knowledge sqlte`, 5);
+    expect(
+      single.items.map(({ title, match }) => [title, match]),
+    ).toContainEqual(["SQLite Gateway guide", "fuzzy"]);
+
+    const multi = query(`project:${project.id} type:knowledge sqlte gatewy`, 5);
+    expect(
+      multi.items.map(({ title, match }) => [title, match]),
+    ).toContainEqual(["SQLite Gateway guide", "fuzzy"]);
+    expect(multi.next).toBeNull();
+  });
+
+  test("tenant-scopes session activity and title refresh", () => {
+    const tenantA = "activity-session-tenant-a";
+    const tenantB = "activity-session-tenant-b";
+    const projectA = withTenant(tenantA, () =>
+      createProject("Tenant A Activity"),
+    );
+    const projectB = withTenant(tenantB, () =>
+      createProject("Tenant B Activity"),
+    );
+    const sessionA = crypto.randomUUID();
+    const sessionB = crypto.randomUUID();
+    withTenant(tenantA, () =>
+      insertMessage(projectA.id, sessionA, "shared needle", NOW),
+    );
+    withTenant(tenantB, () =>
+      insertMessage(projectB.id, sessionB, "shared needle", NOW),
+    );
+
+    const tenantBPage = withTenant(tenantB, () =>
+      query("type:session shared needle"),
+    );
+    expect(tenantBPage.items.map(({ id }) => id)).toEqual([sessionB]);
+    expect(
+      withTenant(tenantB, () =>
+        db()
+          .query(
+            "SELECT 1 FROM session_meta WHERE project_id = ? AND session_id = ?",
+          )
+          .get(projectA.id, sessionA),
+      ),
+    ).toBeNull();
+
+    expect(
+      withTenant(tenantA, () =>
+        query("type:session shared needle").items.map(({ id }) => id),
+      ),
+    ).toEqual([sessionA]);
   });
 });

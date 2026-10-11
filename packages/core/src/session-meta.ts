@@ -75,6 +75,7 @@ export function refreshSessionMeta(
   }
 
   const stale: SessionMetaInput[] = [];
+  const countUpdates: SessionMetaInput[] = [];
   for (const row of rows) {
     const meta = existing.get(row.session_id);
     const isStale =
@@ -86,13 +87,20 @@ export function refreshSessionMeta(
     if (isStale) {
       stale.push(row);
     } else {
+      if (
+        meta &&
+        (meta.message_count !== row.message_count ||
+          meta.distillation_count !== row.distillation_count)
+      ) {
+        countUpdates.push(row);
+      }
       result.set(row.session_id, {
         title: meta.title,
         title_source: meta.title_source,
       });
     }
   }
-  if (stale.length === 0) return result;
+  if (stale.length === 0 && countUpdates.length === 0) return result;
 
   const explicitStmt = database.query(
     "SELECT title FROM session_state WHERE session_id = ?",
@@ -120,9 +128,23 @@ export function refreshSessionMeta(
        distillation_count = excluded.distillation_count,
        computed_at = excluded.computed_at`,
   );
+  const updateCountsStmt = database.query(
+    `UPDATE session_meta
+        SET message_count = ?, distillation_count = ?, computed_at = ?
+      WHERE project_id = ? AND session_id = ?`,
+  );
 
   withSavepoint("refresh_session_meta", () => {
     const now = Date.now();
+    for (const row of countUpdates) {
+      updateCountsStmt.run(
+        row.message_count,
+        row.distillation_count,
+        now,
+        pid,
+        row.session_id,
+      );
+    }
     for (const row of stale) {
       const explicit =
         (explicitStmt.get(row.session_id) as { title: string | null } | null)

@@ -58,6 +58,7 @@ type LegFilters = {
   projectIds: string[] | null;
   with: ActivityParticipant["id"][];
   terms: string[];
+  excludeTerms?: boolean;
 };
 
 export type ActivityLeg = {
@@ -102,6 +103,15 @@ function termPredicate(textExpr: SqlFragment, terms: string[]): SqlFragment {
   );
 }
 
+function termFilter(
+  textExpr: SqlFragment,
+  filters: LegFilters,
+): SqlFragment | null {
+  if (filters.terms.length === 0) return null;
+  const predicate = termPredicate(textExpr, filters.terms);
+  return filters.excludeTerms ? sql`NOT (${predicate})` : predicate;
+}
+
 function participantPredicate(
   filters: LegFilters,
   predicates: Partial<Record<ActivityParticipant["id"], SqlFragment>>,
@@ -119,10 +129,34 @@ const SESSION_TEXT = sql.raw(
 );
 
 function sessionSelect(filters: LegFilters): SqlFragment {
-  const aggregateProjects =
-    filters.projectIds === null
-      ? sql.empty
-      : sql`WHERE project_id ${sql.inList(filters.projectIds)}`;
+  const sessionRows =
+    filters.terms.length > 0
+      ? sql`SELECT sm.project_id, sm.session_id,
+                   (SELECT t2.created_at FROM temporal_messages t2
+                     WHERE t2.project_id = sm.project_id
+                       AND t2.session_id = sm.session_id
+                     ORDER BY t2.created_at DESC, t2.id DESC LIMIT 1) AS last_at,
+                   sm.message_count AS n
+              FROM session_meta sm
+             WHERE ${whereWithAnd([
+               projectPredicate("sm", filters.projectIds),
+               filters.projectIds === null
+                 ? sql`sm.project_id IN (
+                     SELECT id FROM projects WHERE tenant_id = ${filters.tenant}
+                   )`
+                 : null,
+             ])}`
+      : sql`SELECT project_id, session_id, MAX(created_at) AS last_at,
+                   COUNT(*) AS n
+              FROM temporal_messages
+             WHERE ${
+               filters.projectIds === null
+                 ? sql`project_id IN (
+                     SELECT id FROM projects WHERE tenant_id = ${filters.tenant}
+                   )`
+                 : sql`project_id ${sql.inList(filters.projectIds)}`
+             }
+             GROUP BY project_id, session_id`;
   const withPredicates = participantPredicate(filters, {
     user: sql.raw("1"),
     "claude-code": sql`EXISTS (
@@ -156,19 +190,14 @@ function sessionSelect(filters: LegFilters): SqlFragment {
                   WHERE i.session_id = s.session_id AND i.project_id = s.project_id)
     )`,
   });
-  const terms = termPredicate(SESSION_TEXT, filters.terms);
-
   return sql`SELECT 'session' AS kind, s.session_id AS id, s.project_id AS project_id,
        COALESCE(p.name, s.project_id) AS project_name,
        COALESCE(m.title, s.session_id) AS title,
        s.last_at AS last_activity_at, s.n AS total
-  FROM (SELECT project_id, session_id, MAX(created_at) AS last_at, COUNT(*) AS n
-          FROM temporal_messages
-          ${aggregateProjects}
-         GROUP BY project_id, session_id) s
+  FROM (${sessionRows}) s
   LEFT JOIN projects p ON p.id = s.project_id
   LEFT JOIN session_meta m ON m.project_id = s.project_id AND m.session_id = s.session_id
- WHERE ${whereWithAnd([withPredicates, filters.terms.length ? terms : null])}`;
+ WHERE ${whereWithAnd([withPredicates, termFilter(SESSION_TEXT, filters)])}`;
 }
 
 function knowledgeWhere(
@@ -181,7 +210,7 @@ function knowledgeWhere(
     sql`k.tenant_id = ${filters.tenant}`,
     projectPredicate("k", filters.projectIds),
     withPredicates,
-    filters.terms.length ? termPredicate(textExpr, filters.terms) : null,
+    termFilter(textExpr, filters),
     extra,
   ]);
 }
@@ -247,16 +276,18 @@ function contradictionSelect(filters: LegFilters): SqlFragment {
        COALESCE(ka.title, c.logical_id_a) || ' ↔ ' || COALESCE(kb.title, c.logical_id_b) AS title,
        c.updated_at AS last_activity_at, 1 AS total
   FROM knowledge_contradictions c
-  LEFT JOIN knowledge_current ka ON ka.tenant_id = c.tenant_id AND ka.logical_id = c.logical_id_a
-  LEFT JOIN knowledge_current kb ON kb.tenant_id = c.tenant_id AND kb.logical_id = c.logical_id_b
+  LEFT JOIN knowledge ka
+    ON ka.tenant_id = c.tenant_id AND ka.logical_id = c.logical_id_a
+   AND ka.is_current = 1 AND ka.is_deleted = 0
+  LEFT JOIN knowledge kb
+    ON kb.tenant_id = c.tenant_id AND kb.logical_id = c.logical_id_b
+   AND kb.is_current = 1 AND kb.is_deleted = 0
   LEFT JOIN projects p ON p.id = c.project_id
  WHERE ${whereWithAnd([
    sql`c.tenant_id = ${filters.tenant}`,
    projectPredicate("c", filters.projectIds),
    withPredicates,
-   filters.terms.length
-     ? termPredicate(CONTRADICTION_TEXT, filters.terms)
-     : null,
+   termFilter(CONTRADICTION_TEXT, filters),
  ])}`;
 }
 
@@ -440,6 +471,8 @@ type ActivityFilters = LegFilters & {
   before: number | null;
 };
 
+const ACTIVITY_FUZZY_CANDIDATE_CAP = Math.min(FUZZY_CANDIDATE_CAP, 1_000);
+
 function selectedKinds(parsed: ParsedActivityQuery): ActivityKind[] {
   return parsed.server.types ?? [...ACTIVITY_KINDS];
 }
@@ -447,9 +480,22 @@ function selectedKinds(parsed: ParsedActivityQuery): ActivityKind[] {
 function unionFor(
   kinds: readonly ActivityKind[],
   filters: LegFilters,
+  after: number | null,
+  before: number | null,
+  cursor: ActivityCursor | null,
+  limit: number,
 ): SqlFragment {
   return sql.join(
-    kinds.map((kind) => ACTIVITY_LEGS[kind].select(filters)),
+    kinds.map((kind) => {
+      const leg = ACTIVITY_LEGS[kind].select(filters);
+      const legFilters = { ...filters, after, before };
+      return sql`SELECT * FROM (
+        SELECT * FROM (${leg}) leg
+          WHERE ${outerWhere(legFilters, cursor)}
+          ORDER BY leg.last_activity_at DESC, leg.kind ASC, leg.id ASC
+          LIMIT ${limit}
+      )`;
+    }),
     " UNION ALL ",
   );
 }
@@ -460,17 +506,17 @@ function outerWhere(
 ): SqlFragment {
   const predicates: SqlFragment[] = [];
   if (filters.after !== null) {
-    predicates.push(sql`u.last_activity_at >= ${filters.after}`);
+    predicates.push(sql`leg.last_activity_at >= ${filters.after}`);
   }
   if (filters.before !== null) {
-    predicates.push(sql`u.last_activity_at < ${filters.before}`);
+    predicates.push(sql`leg.last_activity_at < ${filters.before}`);
   }
   if (cursor) {
     predicates.push(
-      sql`(u.last_activity_at < ${cursor.t}
-        OR (u.last_activity_at = ${cursor.t}
-          AND (u.kind > ${cursor.k}
-            OR (u.kind = ${cursor.k} AND u.id > ${cursor.id}))))`,
+      sql`(leg.last_activity_at < ${cursor.t}
+        OR (leg.last_activity_at = ${cursor.t}
+          AND (leg.kind > ${cursor.k}
+            OR (leg.kind = ${cursor.k} AND leg.id > ${cursor.id}))))`,
     );
   }
   return whereWithAnd(predicates);
@@ -480,13 +526,19 @@ function activityRowsQuery(
   kinds: readonly ActivityKind[],
   filters: ActivityFilters,
   cursor: ActivityCursor | null,
-  limit: number | null,
+  limit: number,
 ): SqlFragment {
-  const union = unionFor(kinds, filters);
-  const ordered = sql`SELECT u.* FROM (${union}) u
-    WHERE ${outerWhere(filters, cursor)}
-    ORDER BY u.last_activity_at DESC, u.kind ASC, u.id ASC`;
-  return limit === null ? ordered : sql`${ordered} LIMIT ${limit}`;
+  const union = unionFor(
+    kinds,
+    filters,
+    filters.after,
+    filters.before,
+    cursor,
+    limit,
+  );
+  return sql`SELECT u.* FROM (${union}) u
+    ORDER BY u.last_activity_at DESC, u.kind ASC, u.id ASC
+    LIMIT ${limit}`;
 }
 
 function resolveProjects(
@@ -508,31 +560,108 @@ function resolveProjects(
   return [...ids];
 }
 
-function refreshSessionTitles(projectIds: string[] | null): void {
-  const projectRows = sql.all<{ project_id: string }>(
-    db(),
+function refreshSessionTitles(
+  projectIds: string[] | null,
+  tenant: string,
+): void {
+  const projectScope =
     projectIds === null
-      ? sql`SELECT DISTINCT project_id FROM temporal_messages ORDER BY project_id`
-      : sql`SELECT DISTINCT project_id FROM temporal_messages
-             WHERE project_id ${sql.inList(projectIds)}
-             ORDER BY project_id`,
+      ? sql`t.project_id IN (
+          SELECT id FROM projects WHERE tenant_id = ${tenant}
+        )`
+      : projectPredicate("t", projectIds);
+  const distillationScope =
+    projectIds === null
+      ? sql`d.project_id IN (
+          SELECT id FROM projects WHERE tenant_id = ${tenant}
+        )`
+      : projectPredicate("d", projectIds);
+  const staleRows = sql.all<SessionMetaInput & { project_id: string }>(
+    db(),
+    sql`SELECT t.project_id, t.session_id, COUNT(*) AS message_count,
+                COALESCE(d.distillation_count, 0) AS distillation_count
+           FROM temporal_messages t
+           LEFT JOIN (
+             SELECT d.project_id, d.session_id, COUNT(*) AS distillation_count
+               FROM distillations d
+              WHERE ${distillationScope}
+              GROUP BY d.project_id, d.session_id
+           ) d ON d.project_id = t.project_id AND d.session_id = t.session_id
+           LEFT JOIN session_meta m
+             ON m.project_id = t.project_id AND m.session_id = t.session_id
+          WHERE ${whereWithAnd([projectScope])}
+          GROUP BY t.project_id, t.session_id
+         HAVING m.session_id IS NULL
+             OR m.message_count <> COUNT(*)
+             OR m.distillation_count <> COALESCE(d.distillation_count, 0)`,
   );
-  for (const { project_id: projectId } of projectRows) {
-    const sessions = sql.all<SessionMetaInput>(
-      db(),
-      sql`SELECT t.session_id, COUNT(*) AS message_count,
-                  COALESCE(d.count, 0) AS distillation_count
-             FROM temporal_messages t
-             LEFT JOIN (
-               SELECT session_id, COUNT(*) AS count
-                 FROM distillations
-                WHERE project_id = ${projectId}
-                GROUP BY session_id
-             ) d ON d.session_id = t.session_id
-            WHERE t.project_id = ${projectId}
-            GROUP BY t.session_id`,
-    );
+  const byProject = new Map<string, SessionMetaInput[]>();
+  for (const { project_id: projectId, ...session } of staleRows) {
+    const sessions = byProject.get(projectId) ?? [];
+    sessions.push(session);
+    byProject.set(projectId, sessions);
+  }
+  for (const [projectId, sessions] of byProject)
     refreshSessionMeta(projectId, sessions);
+}
+
+type SessionRefreshVersion = {
+  dataVersion: number;
+  totalChanges: number;
+  scopeKey: string;
+};
+
+type SessionRefreshSnapshot = Omit<SessionRefreshVersion, "scopeKey">;
+
+const sessionRefreshVersions = new WeakMap<
+  object,
+  Map<string, SessionRefreshVersion>
+>();
+
+function readSessionRefreshVersion(database = db()): SessionRefreshSnapshot {
+  const dataVersion = database.query("PRAGMA data_version").get() as {
+    data_version: number;
+  };
+  const totalChanges = database
+    .query("SELECT total_changes() AS total_changes")
+    .get() as { total_changes: number };
+  return {
+    dataVersion: dataVersion.data_version,
+    totalChanges: totalChanges.total_changes,
+  };
+}
+
+function refreshSessionTitlesIfStale(
+  projectIds: string[] | null,
+  tenant: string,
+): void {
+  const database = db();
+  let versions = sessionRefreshVersions.get(database);
+  if (!versions) {
+    versions = new Map();
+    sessionRefreshVersions.set(database, versions);
+  }
+  const scopeKey = JSON.stringify([
+    tenant,
+    projectIds === null ? null : [...projectIds].sort(),
+  ]);
+  const before = readSessionRefreshVersion(database);
+  const previous = versions.get(tenant);
+  if (
+    previous &&
+    previous.dataVersion === before.dataVersion &&
+    previous.totalChanges === before.totalChanges &&
+    previous.scopeKey === scopeKey
+  ) {
+    return;
+  }
+
+  refreshSessionTitles(projectIds, tenant);
+  const after = readSessionRefreshVersion(database);
+  if (before.dataVersion === after.dataVersion) {
+    versions.set(tenant, { ...after, scopeKey });
+  } else {
+    versions.delete(tenant);
   }
 }
 
@@ -581,7 +710,6 @@ function hydrateRows(rows: ActivityRow[]): ActivityItem[] {
 
 export function listActivity(options: {
   parsed: ParsedActivityQuery;
-  q: string;
   cursor: ActivityCursor | null;
   limit: number;
 }): ActivityPage {
@@ -604,7 +732,7 @@ export function listActivity(options: {
     after: options.parsed.server.after,
     before: options.parsed.server.before,
   };
-  if (terms.length > 0) refreshSessionTitles(projectIds);
+  if (terms.length > 0) refreshSessionTitlesIfStale(projectIds, tenant);
 
   const exactRows = sql.all<ActivityRow>(
     db(),
@@ -630,22 +758,16 @@ export function listActivity(options: {
     terms.length > 0 &&
     normalizeFuzzy(terms.join(" ")).length >= FUZZY_MIN_QUERY
   ) {
-    const exactMatches = sql.all<{ kind: ActivityKind; id: string }>(
+    const candidateFilters = { ...filters, excludeTerms: true };
+    const candidates = sql.all<ActivityRow>(
       db(),
-      sql`SELECT u.kind, u.id
-            FROM (${unionFor(kinds, filters)}) u
-           WHERE ${outerWhere(filters, null)}`,
+      activityRowsQuery(
+        kinds,
+        candidateFilters,
+        null,
+        ACTIVITY_FUZZY_CANDIDATE_CAP,
+      ),
     );
-    const exactKeys = new Set(
-      exactMatches.map((row) => `${row.kind}:${row.id}`),
-    );
-    const candidateFilters = { ...filters, terms: [] };
-    const candidates = sql
-      .all<ActivityRow>(
-        db(),
-        activityRowsQuery(kinds, candidateFilters, null, FUZZY_CANDIDATE_CAP),
-      )
-      .filter((row) => !exactKeys.has(`${row.kind}:${row.id}`));
     const fuzzyRows = fuzzyRank(
       terms.join(" "),
       candidates,

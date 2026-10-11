@@ -2491,6 +2491,8 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
    WHERE origin IS NULL;
   CREATE INDEX IF NOT EXISTS idx_temporal_project_session_created
     ON temporal_messages(project_id, session_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_logical
+    ON knowledge(tenant_id, logical_id);
   `,
 ]);
 
@@ -4645,6 +4647,8 @@ function recoverMissingObjects(database: Database) {
     CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_current
       ON knowledge(logical_id) WHERE is_current = 1;
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_logical
+      ON knowledge(tenant_id, logical_id);
     CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
       ON knowledge(project_id) WHERE is_current = 1 AND is_deleted = 0;
   `);

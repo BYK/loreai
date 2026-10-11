@@ -317,11 +317,18 @@ describe("db", () => {
     expect(cols.some((c) => c.name === "created_at")).toBe(true);
   });
 
-  test("v103: knowledge.origin exists on a fresh DB", () => {
+  test("v103: knowledge.origin and tenant/logical index exist on a fresh DB", () => {
     const cols = db().query("PRAGMA table_info(knowledge)").all() as Array<{
       name: string;
     }>;
     expect(cols.some((c) => c.name === "origin")).toBe(true);
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_knowledge_tenant_logical'",
+        )
+        .get(),
+    ).not.toBeNull();
   });
 
   test("v103 upgrade backfills knowledge origins from legacy writer columns", () => {
@@ -361,7 +368,7 @@ describe("db", () => {
     ).toBe(MIGRATIONS.length);
   });
 
-  test("recoverMissingObjects restores knowledge.origin, backfills it, and restores the temporal index", () => {
+  test("recoverMissingObjects restores knowledge.origin and the v103 indexes", () => {
     const connection = db();
     connection.exec(`
       INSERT INTO knowledge
@@ -369,6 +376,7 @@ describe("db", () => {
       VALUES ('origin-recovery-user', 'pattern', 'User', 'body', 1, 1, 'alice');
       ALTER TABLE knowledge DROP COLUMN origin;
       DROP INDEX IF EXISTS idx_temporal_project_session_created;
+      DROP INDEX IF EXISTS idx_knowledge_tenant_logical;
       UPDATE schema_version SET version = ${MIGRATIONS.length};
     `);
     close();
@@ -383,6 +391,13 @@ describe("db", () => {
       recovered
         .query(
           "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_temporal_project_session_created'",
+        )
+        .get(),
+    ).not.toBeNull();
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_knowledge_tenant_logical'",
         )
         .get(),
     ).not.toBeNull();
