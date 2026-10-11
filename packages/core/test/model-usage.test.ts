@@ -375,6 +375,14 @@ describe("weekly snapshot", () => {
     });
   });
 
+  test("empty document yields an empty snapshot, not a TypeError", () => {
+    expect(buildWeeklySnapshot(doc([]))).toEqual({
+      format: "model-tides-weekly",
+      version: 2,
+      weeks: [],
+    });
+  });
+
   test("limit errors name the limit and the actual value", () => {
     const manyWeeks = Array.from({ length: MAX_WEEKS + 1 }, (_, i) => ({
       day: new Date(Date.UTC(2000, 0, 4) + i * 7 * 86_400_000)

@@ -459,6 +459,11 @@ export function buildWeeklySnapshot(doc: DailyUsageDocument): WeeklySnapshot {
       `Weekly snapshot has ${cells} model-week cells; Model Tides accepts at most ${MAX_WEEKLY_CELLS}`,
     );
   }
+  // No usage yet → an empty snapshot (parseSnapshot requires >=1 week, which
+  // is a server-side bound, not a reason to 500 on first-time users).
+  if (weeks.size === 0) {
+    return { format: WEEKLY_FORMAT, version: WEEKLY_VERSION, weeks: [] };
+  }
   const peak = Math.max(
     0,
     ...[...weeks.values()].flatMap((models) => [...models.values()]),
