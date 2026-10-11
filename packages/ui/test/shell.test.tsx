@@ -507,7 +507,7 @@ describe("shell: list divider persistence", () => {
   );
 });
 
-it("hides the left column when split mode has no visible left pane", async () => {
+it("hides the left column and limits restores to visible panes in split mode", async () => {
   vi.stubGlobal("matchMedia", (media: string) => ({
     media,
     matches: media === "(min-width: 760px)",
@@ -529,6 +529,43 @@ it("hides the left column when split mode has no visible left pane", async () =>
   expect(pane("nav")).toHaveAttribute("aria-hidden", "true");
   expect(pane("nav")).toHaveClass("hidden");
   expect(screen.getByTestId("pane-chip-nav")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTestId("pane-chip-participants"));
+  expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+
+  fireEvent.click(screen.getByTestId("pane-chip-nav"));
+  expect(
+    await screen.findByRole("button", { name: "Restore" }),
+  ).toBeInTheDocument();
+});
+
+it("offers restore controls for both chips in full mode", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: true,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  localStorage.setItem(
+    PANE_LAYOUT_STORAGE_KEY,
+    JSON.stringify({
+      ...DEFAULT_PANE_LAYOUT,
+      nav: "min",
+      participants: "min",
+    }),
+  );
+
+  mount("/", fakeClient());
+  await screen.findByTestId("pane-chip-nav");
+  await screen.findByTestId("pane-chip-participants");
+
+  fireEvent.click(screen.getByTestId("pane-chip-nav"));
+  fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+  await waitFor(() => expect(screen.queryByTestId("pane-chip-nav")).toBeNull());
+
+  fireEvent.click(screen.getByTestId("pane-chip-participants"));
+  expect(
+    await screen.findByRole("button", { name: "Restore" }),
+  ).toBeInTheDocument();
 });
 
 describe("shell: project navigation and real-data path", () => {

@@ -103,6 +103,7 @@ const RestorePopover: Component<{
   pane: "nav" | "participants";
   label: string;
   children: JSX.Element;
+  canRestore: boolean;
   onRestore: () => void;
 }> = (props) => (
   <PopoverPrimitive.Root>
@@ -115,14 +116,16 @@ const RestorePopover: Component<{
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content class="z-50 w-64 rounded-md border border-hairline bg-surface p-2">
         <div class="max-h-[70vh] overflow-y-auto">{props.children}</div>
-        <PopoverPrimitive.CloseButton
-          type="button"
-          aria-label="Restore"
-          class="mt-2 w-full rounded px-2 py-1 text-left text-xs text-accent hover:bg-soft"
-          onClick={props.onRestore}
-        >
-          Restore
-        </PopoverPrimitive.CloseButton>
+        <Show when={props.canRestore}>
+          <PopoverPrimitive.CloseButton
+            type="button"
+            aria-label="Restore"
+            class="mt-2 w-full rounded px-2 py-1 text-left text-xs text-accent hover:bg-soft"
+            onClick={props.onRestore}
+          >
+            Restore
+          </PopoverPrimitive.CloseButton>
+        </Show>
       </PopoverPrimitive.Content>
     </PopoverPrimitive.Portal>
   </PopoverPrimitive.Root>
@@ -319,6 +322,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
               <RestorePopover
                 pane="nav"
                 label="Navigation"
+                canRestore={full() || mode() === "split"}
                 onRestore={() => dispatch({ type: "restore", pane: "nav" })}
               >
                 {nav()}
@@ -328,6 +332,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
               <RestorePopover
                 pane="participants"
                 label="Participants"
+                canRestore={full()}
                 onRestore={() =>
                   dispatch({ type: "restore", pane: "participants" })
                 }
