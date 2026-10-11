@@ -22,35 +22,56 @@ const THEME_OPTIONS: Record<ThemeChoice, { icon: string; label: string }> = {
  */
 export const ThemeToggle: Component<{ class?: string }> = (props) => {
   const t = theme();
+  const nextChoice = () =>
+    THEME_CHOICES[
+      (THEME_CHOICES.indexOf(t.choice()) + 1) % THEME_CHOICES.length
+    ] ?? "system";
   return (
     <div
-      role="group"
-      aria-label="Colour theme"
       data-testid="theme-toggle"
       data-theme-choice={t.choice()}
-      class={`inline-flex items-center rounded-md border border-line bg-chrome p-0.5 ${props.class ?? ""}`}
+      class={`inline-flex items-center ${props.class ?? ""}`}
     >
-      <For each={THEME_CHOICES}>
-        {(choice) => (
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-text aria-pressed:bg-selected aria-pressed:text-selected-text aria-pressed:shadow-sm"
-            aria-label={`${THEME_OPTIONS[choice].label} theme`}
-            aria-pressed={t.choice() === choice}
-            title={
-              choice === "system"
-                ? `Follow the system setting (currently ${t.resolved()})`
-                : `Always use ${choice} mode`
-            }
-            data-testid={`theme-${choice}`}
-            onClick={() => t.setChoice(choice)}
-          >
-            <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
-            <span class="hidden md:inline">{THEME_OPTIONS[choice].label}</span>
-          </Button>
-        )}
-      </For>
+      <div
+        role="group"
+        aria-label="Colour theme"
+        class="hidden items-center rounded-md border border-line bg-chrome p-0.5 min-[760px]:inline-flex"
+      >
+        <For each={THEME_CHOICES}>
+          {(choice) => (
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-text aria-pressed:bg-selected aria-pressed:text-selected-text aria-pressed:shadow-sm"
+              aria-label={`${THEME_OPTIONS[choice].label} theme`}
+              aria-pressed={t.choice() === choice}
+              title={
+                choice === "system"
+                  ? `Follow the system setting (currently ${t.resolved()})`
+                  : `Always use ${choice} mode`
+              }
+              data-testid={`theme-${choice}`}
+              onClick={() => t.setChoice(choice)}
+            >
+              <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
+              <span class="hidden md:inline">
+                {THEME_OPTIONS[choice].label}
+              </span>
+            </Button>
+          )}
+        </For>
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-7 w-8 px-1 min-[760px]:hidden"
+        aria-label={`Theme: ${THEME_OPTIONS[t.choice()].label}; next ${THEME_OPTIONS[nextChoice()].label}`}
+        title={`Theme: ${THEME_OPTIONS[t.choice()].label}; next ${THEME_OPTIONS[nextChoice()].label}`}
+        data-testid="theme-cycle"
+        onClick={() => t.setChoice(nextChoice())}
+      >
+        <span aria-hidden="true">{THEME_OPTIONS[t.choice()].icon}</span>
+      </Button>
     </div>
   );
 };

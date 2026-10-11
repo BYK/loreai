@@ -83,6 +83,47 @@ async function expectFiller60AnchorAfterReturn(
 }
 
 test.describe("persistent workspace panes", () => {
+  test("keeps the mobile app bar within 360px and 400px viewports", async ({
+    page,
+  }) => {
+    for (const width of [360, 400]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/ui");
+      const appBar = page.getByRole("banner");
+      const menu = page.getByTestId("open-nav");
+      const themeCycle = page.getByTestId("theme-cycle");
+
+      await expect(menu).toBeVisible();
+      await expect(themeCycle).toBeVisible();
+      await expect(themeCycle).toHaveAttribute(
+        "aria-label",
+        "Theme: System; next Light",
+      );
+      await themeCycle.click();
+      await expect(themeCycle).toHaveAttribute(
+        "aria-label",
+        "Theme: Light; next Dark",
+      );
+      await themeCycle.click();
+      await expect(themeCycle).toHaveAttribute(
+        "aria-label",
+        "Theme: Dark; next System",
+      );
+      await themeCycle.click();
+
+      const appBarWidth = await appBar.evaluate((el) => ({
+        clientWidth: el.clientWidth,
+        scrollWidth: el.scrollWidth,
+      }));
+      expect(appBarWidth.scrollWidth).toBeLessThanOrEqual(
+        appBarWidth.clientWidth,
+      );
+      const menuBounds = await menu.boundingBox();
+      if (!menuBounds) throw new Error("navigation button has no bounding box");
+      expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(width);
+    }
+  });
+
   test("keeps the same list and selection while opening project and session routes", async ({
     page,
   }, testInfo) => {
