@@ -7,7 +7,7 @@ Integration test groups verifying end-to-end behavior across Lore's gateway, cor
 
 ## Prerequisites
 
-- Node.js >= 22.5 installed
+- Node.js >= 22.16 installed; 23.x is unsupported
 - All workspace dependencies installed (`pnpm install`)
 - No production database used — tests use `packages/core/test/setup.ts` preload for DB isolation
 - Environment: `NODE_ENV=test`, `LORE_HOSTED_MODE=0`

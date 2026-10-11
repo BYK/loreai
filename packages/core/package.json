@@ -57,7 +57,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": "^22.16.0 || >=24"
   },
   "repository": {
     "type": "git",

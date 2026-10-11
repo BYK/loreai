@@ -6,9 +6,10 @@
  * by running the binary against a local capture server, then scans the
  * binary for the seed that satisfies all oracle pairs.
  *
- * Runs under Node.js (>= 22.5) via built-in TypeScript type-stripping — no
- * bundler or `tsx` required. Relative imports use explicit `.ts` extensions
- * because native Node does not resolve extensionless module specifiers.
+ * Runs under Node.js (>= 22.16, excluding 23.x) via built-in TypeScript
+ * type-stripping — no bundler or `tsx` required. Relative imports use explicit
+ * `.ts` extensions because native Node does not resolve extensionless module
+ * specifiers.
  *
  * Usage:
  *   # Fully automated — download + generate oracles + extract

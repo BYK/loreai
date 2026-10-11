@@ -13,7 +13,7 @@
 
 **Why it matters:** Without persistent memory, AI agents lose all context between sessions: they re-discover the same gotchas, forget past decisions, and can't build on prior work. Lore's three-tier architecture (temporal storage → distillation → knowledge extraction) provides a principled solution that balances context freshness against token budget, cost against quality, and local privacy against remote hosting flexibility. Correctness in each tier directly affects the quality of AI assistance developers receive.
 
-**Runtime:** Bun (development/tests) and Node.js ≥ 22.5 (production npm bundles). TypeScript monorepo with four packages: `@loreai/core` (shared engine), `@loreai/gateway` (proxy + CLI), `@loreai/opencode` (OpenCode plugin), `@loreai/pi` (Pi plugin). SQLite with WAL mode and FTS5 full-text search.
+**Runtime:** Bun (development/tests) and Node.js ≥ 22.16, excluding 23.x (production npm bundles). TypeScript monorepo with four packages: `@loreai/core` (shared engine), `@loreai/gateway` (proxy + CLI), `@loreai/opencode` (OpenCode plugin), `@loreai/pi` (Pi plugin). SQLite with WAL mode and FTS5 full-text search.
 
 ---
 

@@ -279,7 +279,7 @@ describe("db", () => {
       expect(msg).toContain("FTS5");
       expect(msg).toContain("no such module: fts5");
       // Actionable guidance + preserved cause for debugging.
-      expect(msg).toMatch(/lore` binary|Node\.js\/Bun|sqlite\.org\/fts5/);
+      expect(msg).toContain("Node.js 22.16 or later, except 23.x");
       expect((thrown as Error).cause).toBe(cause);
     });
 
