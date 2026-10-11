@@ -943,15 +943,15 @@ describe("promotion request routes", () => {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          policy: "auto",
-          expected_policy: "manual",
+          policy: "optional",
+          expected: "required",
         }),
       }),
       url,
       makeConfig(),
     );
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ policy: "auto" });
+    expect(await response.json()).toEqual({ policy: "optional" });
     expect(rpcCalls).toContainEqual({
       name: "set_team_promotion_policy",
       args: {
@@ -972,14 +972,14 @@ describe("promotion request routes", () => {
     const invalid = await request(
       `/api/v1/teams/${TEAM}/review-policy`,
       "PUT",
-      JSON.stringify({ policy: "automatic", expected_policy: "manual" }),
+      JSON.stringify({ policy: "automatic", expected: "required" }),
     );
     expect(invalid.status).toBe(400);
 
     const hosted = await request(
       `/api/v1/teams/${TEAM}/review-policy`,
       "PUT",
-      JSON.stringify({ policy: "auto", expected_policy: "manual" }),
+      JSON.stringify({ policy: "optional", expected: "required" }),
       makeConfig({ hostedMode: true, remoteGateway: true }),
     );
     expect(hosted.status).toBe(403);
@@ -995,13 +995,13 @@ describe("promotion request routes", () => {
     const response = await request(
       `/api/v1/teams/${TEAM}/review-policy`,
       "PUT",
-      JSON.stringify({ policy: "manual", expected_policy: "manual" }),
+      JSON.stringify({ policy: "required", expected: "required" }),
     );
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       error: {
         type: "stale_policy",
-        current_policy: "auto",
+        current_policy: "optional",
       },
     });
   });
@@ -1044,6 +1044,7 @@ describe("promotion request routes", () => {
       ["POST", `/api/v1/promotions/${REQUEST}/reject`],
       ["POST", `/api/v1/promotions/${REQUEST}/withdraw`],
       ["PUT", `/api/v1/teams/${TEAM}/review-policy`],
+      ["GET", `/api/v1/teams/${TEAM}/review-policy`],
     ] as const;
     for (const [method, path] of paths) {
       const response = await loopbackRequest(
@@ -1061,6 +1062,17 @@ describe("promotion request routes", () => {
       expect(response.status, `${method} ${path}`).toBe(404);
     }
   });
+
+  it("reads the current team review policy from the server mirror", async () => {
+    signIn();
+    teamPolicy = "auto";
+    const response = await request(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "GET",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ policy: "optional" });
+  });
 });
 
 describe("autoProposePending", () => {
@@ -1076,8 +1088,28 @@ describe("autoProposePending", () => {
     expect(
       rpcCalls.filter((call) => call.name === "propose_promotion"),
     ).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
     expect(rows[0].logical_id).toBe(id);
     expect(rows[0].entry_version_id).toBe(id);
+  });
+
+  it("auto-approves auto-shared entries when team review is optional", async () => {
+    signIn();
+    const id = makeEntry();
+    enableAutoShare(id);
+    teamPolicy = "auto";
+    await unlockTeam();
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      logical_id: id,
+      status: "approved",
+      decision_note: expect.stringContaining("auto-approved"),
+    });
   });
 
   it("does not repropose a rejected request for the same version", async () => {
@@ -1113,9 +1145,26 @@ describe("autoProposePending", () => {
     expect(ltm.teamPromotionCandidate(id)?.approvalStatus).toBe("rejected");
   });
 
-  it("does not propose when the effective policy is manual", async () => {
+  it("does not propose when project auto-share is disabled", async () => {
     signIn();
     const id = makeEntry();
+    await unlockTeam();
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(ltm.teamPromotionCandidate(id)?.approvalStatus).toBe("pending");
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(0);
+  });
+
+  it("does not auto-share when only the team review policy is optional", async () => {
+    signIn();
+    const id = makeEntry();
+    teamPolicy = "auto";
+    db()
+      .query("UPDATE scopes SET promotion_policy='auto' WHERE id=?")
+      .run(TEAM);
     await unlockTeam();
 
     await autoProposePending(fakeClient as never, makeConfig());

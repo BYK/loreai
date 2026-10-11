@@ -1,12 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  crypto,
-  effectivePromotionPolicy,
-  keystore,
-  log,
-  ltm,
-} from "@loreai/core";
+import { crypto, projectAutoShare, keystore, log, ltm } from "@loreai/core";
 import { loadConfig, type GatewayConfig } from "./config";
 import {
   accessFor,
@@ -582,7 +576,7 @@ export async function autoProposePending(
           candidate.approvalStatus === "pending" &&
           candidate.projectId !== null &&
           candidate.scopeId !== null &&
-          effectivePromotionPolicy(candidate.projectId) === "auto" &&
+          projectAutoShare(candidate.projectId) &&
           eligibility(candidate, "ok", true).promotable,
       );
     if (candidates.length === 0) return;
@@ -942,6 +936,48 @@ export async function setTeamReviewPolicyService(
   };
 }
 
+export async function getTeamReviewPolicyService(
+  scopeId: string,
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ policy: "manual" | "auto" }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  if (!UUID.test(scopeId))
+    return serviceFailure(400, "invalid_request", "team must be a UUID");
+  const access = await accessFor(config);
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to view team review policy.",
+    );
+  try {
+    const result = await access.client
+      .from("scopes")
+      .select("promotion_policy")
+      .eq("id", scopeId)
+      .maybeSingle();
+    if (result.error) return postgresError(result.error);
+    if (!result.data) return serviceFailure(404, "not_found", "Team not found");
+    return {
+      ok: true,
+      value: {
+        policy: result.data.promotion_policy === "auto" ? "auto" : "manual",
+      },
+    };
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not read team review policy",
+    );
+  }
+}
+
 async function promote(
   req: Request,
   id: string,
@@ -1027,34 +1063,41 @@ async function setTeamReviewPolicy(
     );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
-  if (
-    Object.keys(body).some(
-      (key) => key !== "policy" && key !== "expected_policy",
-    )
-  ) {
+  if (Object.keys(body).some((key) => key !== "policy" && key !== "expected")) {
     return errorResponse(
       400,
       "invalid_request",
-      "Only policy and expected_policy are accepted",
+      "Only policy and expected are accepted",
     );
   }
   if (
-    (body.policy !== "manual" && body.policy !== "auto") ||
-    (body.expected_policy !== "manual" && body.expected_policy !== "auto")
+    (body.policy !== "required" && body.policy !== "optional") ||
+    (body.expected !== "required" && body.expected !== "optional")
   ) {
     return errorResponse(
       400,
       "invalid_request",
-      "policy and expected_policy must be manual or auto",
+      "policy and expected must be required or optional",
     );
   }
   const result = await setTeamReviewPolicyService(
     scopeId,
-    body.policy,
-    body.expected_policy,
+    body.policy === "optional" ? "auto" : "manual",
+    body.expected === "optional" ? "auto" : "manual",
     config,
   );
-  return result.ok ? json(result.value) : resultResponse(result);
+  if (result.ok)
+    return json({
+      policy: result.value.policy === "auto" ? "optional" : "required",
+    });
+  if (result.code === "stale_policy") {
+    return errorResponse(result.status, result.code, result.message, {
+      ...result.extra,
+      current_policy:
+        result.extra?.current_policy === "auto" ? "optional" : "required",
+    });
+  }
+  return resultResponse(result);
 }
 
 export async function handlePromotionRequest(
@@ -1079,6 +1122,17 @@ export async function handlePromotionRequest(
     }
   }
   if (req.method === "GET") {
+    match = /^\/api\/v1\/teams\/([^/]+)\/review-policy$/.exec(path);
+    if (match) {
+      const scopeId = routeId(match[1]);
+      if (isResponse(scopeId)) return scopeId;
+      const result = await getTeamReviewPolicyService(scopeId, config);
+      return result.ok
+        ? json({
+            policy: result.value.policy === "auto" ? "optional" : "required",
+          })
+        : resultResponse(result);
+    }
     match = /^\/api\/v1\/knowledge\/([^/]+)\/promotion$/.exec(path);
     if (match) {
       const id = routeId(match[1]);

@@ -5,7 +5,7 @@
 import { resolve } from "node:path";
 import {
   db,
-  effectivePromotionPolicy,
+  projectAutoShare,
   getGitRemote,
   keystore,
   ltm,
@@ -516,13 +516,13 @@ export async function commandTeam(
           return;
         }
         setProjectScope(pid, scope.id);
-        const policy = effectivePromotionPolicy(pid);
+        const autoShare = projectAutoShare(pid);
         console.log(
           `Linked this project to team "${scope.name ?? scope.id}" (${scope.id}).`,
         );
         console.log(
-          policy === "auto"
-            ? "Policy: AUTO SHARE — pending entries here are proposed automatically; the team's review policy controls approval."
+          autoShare
+            ? "Auto-share is per project. Pending entries here are proposed automatically; the team's review policy controls approval."
             : "Policy: MANUAL SHARE — pending team entries are not proposed automatically (`lore team propose <logical-id>`).",
         );
         break;
@@ -737,7 +737,7 @@ export async function commandTeam(
         }
         setProjectPromotionPolicy(pid, policy);
         console.log(
-          `Set this project's auto-share override to ${policy}. ${policy === "auto" ? "Pending team entries will be proposed automatically; the team's review policy controls approval." : "Team entries will not be proposed automatically."}`,
+          `Set this project's auto-share override to ${policy}. Auto-share is per project; the team's review policy controls approval. ${policy === "auto" ? "Pending team entries here will be proposed automatically." : "Team entries here will not be proposed automatically."}`,
         );
         break;
       }

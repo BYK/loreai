@@ -57,8 +57,8 @@ vi.mock("../src/cli/login", () => ({
 
 import {
   db,
-  effectivePromotionPolicy,
   ensureProject,
+  projectAutoShare,
   ltm,
   projectScope,
   setProjectScope,
@@ -1007,8 +1007,11 @@ describe("server-backed promotion review and project sharing policy", () => {
   it("policy sets the project override", async () => {
     await commandTeam(["policy", "auto"], { project: PROJECT });
     expect(process.exitCode).toBe(0);
-    expect(effectivePromotionPolicy(pid)).toBe("auto");
+    expect(projectAutoShare(pid)).toBe(true);
     expect(logs.join("\n")).toMatch(/auto-share override/);
+    expect(logs.join("\n")).toMatch(
+      /per project.*review policy controls approval/i,
+    );
   });
 
   it("policy with an invalid value → usage + exit 1", async () => {
