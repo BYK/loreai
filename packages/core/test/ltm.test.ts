@@ -14,6 +14,10 @@ import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
 import { currentTenantId } from "../src/tenant";
 import { config } from "../src/config";
+import {
+  KNOWLEDGE_HEADER_OVERHEAD_TOKENS,
+  knowledgeEntryTokenCost,
+} from "../src/prompt";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import { runReadJob } from "../src/read-job";
 import type {
@@ -1787,6 +1791,8 @@ describe("ltm.forProjectOffloaded (#1080)", () => {
 describe("ltm.forSession — vector-path set stability (regression #727)", () => {
   const PROJ = "/test/ltm/vector-churn";
   const SESSION = "vector-churn-session";
+  const VECTOR_ENTRY_CONTENT =
+    "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. Sphinx of black quartz judge my vow.";
   let availableSpy: ReturnType<typeof vi.spyOn>;
   let embedSpy: ReturnType<typeof vi.spyOn>;
   let vectorSpy: ReturnType<typeof vi.spyOn>;
@@ -1805,10 +1811,8 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
     ids.length = 0;
 
-    // 8 equal-confidence project entries, each ~30 tokens. A tight budget fits
-    // only ~4, so which 4 are selected is decided purely by the (shifting)
-    // vector scores. (~30 tok: title ~11 chars + content with ~30 BPE tokens →
-    // ~10 overhead ≈ 40; budget below tuned to fit exactly 4.)
+    // 8 equal-confidence project entries. The shared selector/renderer cost
+    // below fits exactly 4, so shifting vector scores decide the selected set.
     for (let i = 0; i < 8; i++) {
       ids.push(
         ltm.create({
@@ -1818,8 +1822,7 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
           // Varied English text whose BPE token count approximates the legacy
           // 90-char / 30-token budget. Avoids degenerate "C C C" tokenization
           // (single-char runs collapse to ~12 BPE tokens instead of 30).
-          content:
-            "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. Sphinx of black quartz judge my vow.",
+          content: VECTOR_ENTRY_CONTENT,
           scope: "project",
           crossProject: false,
         }),
@@ -1880,7 +1883,14 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
     return m;
   }
 
-  const TIGHT = 200;
+  const TIGHT =
+    KNOWLEDGE_HEADER_OVERHEAD_TOKENS +
+    4 *
+      knowledgeEntryTokenCost({
+        id: "present",
+        title: "Vec entry 0",
+        content: VECTOR_ENTRY_CONTENT,
+      });
 
   test("WITHOUT stickyIds: vector scores shifting across turns churn the set (the bug)", async () => {
     currentScores = scoresForTurn(0);

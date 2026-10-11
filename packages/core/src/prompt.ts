@@ -971,19 +971,14 @@ export function formatKnowledge(
 ): string {
   if (!entries.length) return "";
 
-  // Apply token budget: greedily include entries (already sorted by confidence
-  // DESC from the DB query) until the budget is exhausted. Overhead accounts for
-  // the section heading and per-entry markdown scaffolding (~50 chars each).
+  // Apply the same token costs as forSession() so selected entries survive
+  // rendering under the same budget. The caller supplies selection order.
   let included = entries;
   if (maxTokens !== undefined) {
-    const HEADER_OVERHEAD = 50; // "## Long-term Knowledge\n### Category\n"
-    let used = HEADER_OVERHEAD;
+    let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
     const fitting: typeof entries = [];
     for (const e of entries) {
-      const cost =
-        estimateTokens(e.title + e.content) +
-        (e.id ? ID_PREFIX_OVERHEAD : 0) +
-        10; // per-entry bullet overhead
+      const cost = knowledgeEntryTokenCost(e);
       if (used + cost > maxTokens) continue; // skip; keep trying smaller entries
       fitting.push(e);
       used += cost;
@@ -1043,11 +1038,23 @@ export function formatKnowledge(
   return serialize(root(...children));
 }
 
-/**
- * Per-entry char-cost overhead for the `[xxxxxxxx] ` ID prefix that
- * `formatKnowledge` emits when an entry has an `id`. Used by the budget
- * packer (above) to keep the token estimate honest.
- */
+/** Selection and rendering must charge the same header and entry costs. */
+export const KNOWLEDGE_HEADER_OVERHEAD_TOKENS = 50;
+
+/** Per-entry cost shared by forSession() and formatKnowledge(). */
+export function knowledgeEntryTokenCost(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): number {
+  return (
+    estimateTokens(entry.title + entry.content) +
+    (entry.id ? ID_PREFIX_OVERHEAD : 0) +
+    10
+  );
+}
+
+/** Overhead for the `[xxxxxxxx] ` ID prefix rendered by formatKnowledge(). */
 const ID_PREFIX_OVERHEAD = 12;
 
 /** First 8 chars of a UUID — the short, stable handle the delta channel references. */

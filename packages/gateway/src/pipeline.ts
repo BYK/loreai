@@ -3448,6 +3448,7 @@ export function buildKnowledgeDeltaMessage(
     category: string;
     title: string;
   }>,
+  outRenderedIds?: string[],
 ): GatewayMessage[] {
   // Emit ONLY when there is genuine new/changed knowledge to surface. A
   // removals-only diff (a pinned entry deleted/superseded by background
@@ -3470,6 +3471,7 @@ export function buildKnowledgeDeltaMessage(
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
     renderedIds,
   );
+  outRenderedIds?.push(...renderedIds);
   // If even the first entry exceeds the delta budget, surface its recall ID
   // below rather than injecting an arbitrary prefix of its content. The old
   // 900-code-unit fallback could split an emoji and persist invalid UTF-16 in
@@ -3710,6 +3712,8 @@ export function appendKnowledgePromptDelta(input: {
     content: string;
   }>;
   overflow?: Array<{ id: string; category: string; title: string }>;
+  /** Full-content IDs in the persisted block; recall hints never count. */
+  outRenderedIds?: string[];
 }): boolean {
   // Source ordinary deltas from DB mutations to the advancing surfaced set.
   // A task switch also admits newly selected entries. `previousKeys` is the
@@ -3870,6 +3874,7 @@ export function appendKnowledgePromptDelta(input: {
         content,
       });
     });
+    input.outRenderedIds?.push(...rendered.renderedIds);
     return true;
   }
   if (
@@ -3911,6 +3916,7 @@ export function appendKnowledgePromptDelta(input: {
       latest.seq,
       JSON.stringify(rendered.messages),
     );
+    input.outRenderedIds?.push(...rendered.renderedIds);
     log.info(
       `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${debouncedMut.changed.length} changed, ${debouncedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
     );
@@ -3928,6 +3934,7 @@ export function appendKnowledgePromptDelta(input: {
     }),
     content: JSON.stringify(current.messages),
   });
+  input.outRenderedIds?.push(...current.renderedIds);
   log.info(
     `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
   );
@@ -4041,7 +4048,7 @@ function renderCurrentDelta(
   overflow?: Array<{ id: string; category: string; title: string }>,
   retainedRemovedIds?: Set<string>,
   maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
-): { messages: GatewayMessage[]; mut: DeltaMutation } {
+): { messages: GatewayMessage[]; mut: DeltaMutation; renderedIds: string[] } {
   const removed = new Set(merged.removed);
   const changed: DeltaMutation["changed"] = [];
   const entries: Array<{
@@ -4109,14 +4116,17 @@ function renderCurrentDelta(
       if (visibleOverflow.length === OVERFLOW_TOC_MAX) break;
     }
   }
+  const renderedIds: string[] = [];
   return {
     messages: buildKnowledgeDeltaMessage(
       entries,
       persistedRemoved,
       loreSessionToken(sessionID),
       visibleOverflow,
+      renderedIds,
     ),
     mut: { changed, removed: persistedRemoved },
+    renderedIds,
   };
 }
 
@@ -21305,6 +21315,10 @@ async function handleConversationTurnPrepared(
         overflow?: Array<{ id: string; category: string; title: string }>;
       }
     | undefined;
+  // Candidate selection is not delivery: the durable delta has a smaller
+  // full-content budget and may include only recall hints for other entries.
+  const contextEffectCandidates = new Map<string, ltm.KnowledgeEntry>();
+  const contextEffectOwner: { projectID?: string } = {};
   // Step 6 may pin a new context selection before its durable delta is sent.
   // If a later required read fails, restore this committed baseline so a retry
   // reselects and emits the knowledge instead of treating it as already sent.
@@ -21593,17 +21607,14 @@ async function handleConversationTurnPrepared(
           } finally {
             if (optionalTimer) clearTimeout(optionalTimer);
           }
-          // Detached selection is read-only. Apply injection bookkeeping only
-          // for a live caller against the same project incarnation.
+          // Detached selection is read-only. Defer injection bookkeeping until
+          // the durable delta is on this live caller's outgoing message array.
           assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (ensureProject(projectPath) !== currentProjectID)
             throw new ReadPreparationUnavailableError("context", "pressure");
-          ltm.recordForSessionEffects(
-            projectPath,
-            sessionID,
-            contextEntries,
-            req.signal,
-          );
+          contextEffectOwner.projectID = currentProjectID;
+          for (const entry of contextEntries)
+            contextEffectCandidates.set(entry.id, entry);
           if (contextKey) contextLtmPreparation.consume(contextKey);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
@@ -22063,6 +22074,7 @@ async function handleConversationTurnPrepared(
           !!ltmPinnedText.get(sessionID) &&
           taskDigest(ltmSessionCache.get(sessionID)?.revision) !==
             taskDigest(refreshRevision));
+      const refreshProjectID = ensureProject(projectPath);
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -22076,9 +22088,16 @@ async function handleConversationTurnPrepared(
             ? { includeContextSources: cfg.knowledge.contextSources }
             : {}),
           overflowSink,
+          deferEffects: true,
         },
       );
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      if (ensureProject(projectPath) !== refreshProjectID)
+        throw new ReadPreparationUnavailableError("context", "pressure");
+      contextEffectOwner.projectID = refreshProjectID;
+      contextEffectCandidates.clear();
+      for (const entry of contextEntries)
+        contextEffectCandidates.set(entry.id, entry);
       const contextOverflow = overflowSink.map((e) => ({
         id: e.id,
         category: e.category,
@@ -22578,6 +22597,7 @@ async function handleConversationTurnPrepared(
     );
   }
 
+  const deliveredContextIds: string[] = [];
   if (pendingKnowledgeDelta) {
     // Place the durable delta near the tail, but never between an
     // assistant(tool_use) and its user(tool_result) — inserting there orphans
@@ -22595,6 +22615,7 @@ async function handleConversationTurnPrepared(
       insertAt,
       now: Date.now(),
       ...pendingKnowledgeDelta,
+      outRenderedIds: deliveredContextIds,
     });
   }
   // Track the layer that produced the current delta placement so the next turn
@@ -22604,6 +22625,22 @@ async function handleConversationTurnPrepared(
     modifiedReq.messages,
     sessionID,
   );
+  if (deliveredContextIds.length) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    if (ensureProject(projectPath) !== contextEffectOwner.projectID)
+      throw new ReadPreparationUnavailableError("context", "pressure");
+    // A selected entry gets decay/outcome credit only when its full content was
+    // persisted and added to this request. ID/title recall hints are not injection.
+    ltm.recordForSessionEffects(
+      projectPath,
+      sessionID,
+      deliveredContextIds.flatMap((id) => {
+        const entry = contextEffectCandidates.get(id);
+        return entry ? [entry] : [];
+      }),
+      req.signal,
+    );
+  }
   // Hard guarantee: deltas are spliced into the wire array AFTER the orphan
   // safety net (step 8) and persisted indices are replayed verbatim, so a
   // later turn whose layout differs from the delta's creation turn could place

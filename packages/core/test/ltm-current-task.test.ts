@@ -81,7 +81,7 @@ test("current task outranks stale observations and recent tool output", async ()
 
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
   try {
-    const selected = await ltm.forSession(projectPath, sessionID, 65, {
+    const selected = await ltm.forSession(projectPath, sessionID, 100, {
       contextHint: "Fix tenant-scoped gateway credential routing on requests.",
       deferEffects: true,
     });
@@ -145,7 +145,7 @@ test("tool results never become the fallback task query", async () => {
 
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
   try {
-    const selected = await ltm.forSession(projectPath, sessionID, 65, {
+    const selected = await ltm.forSession(projectPath, sessionID, 100, {
       deferEffects: true,
     });
     expect(selected.map((entry) => entry.id)).toContain(needed);
@@ -233,7 +233,7 @@ test("a mixed user message keeps its task text while excluding its tool output",
   expect(stored.metadata.length).toBeLessThan(1_024);
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
   try {
-    const selected = await ltm.forSession(projectPath, sessionID, 40, {
+    const selected = await ltm.forSession(projectPath, sessionID, 100, {
       deferEffects: true,
     });
     expect(selected.map((entry) => entry.id)).toContain(needed);

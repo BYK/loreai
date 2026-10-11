@@ -2830,6 +2830,117 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("credits only the entries whose full text reaches the durable knowledge delta", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const projectPath = `/tmp/lore-delta-credit-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `delta-credit-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(
+        validResponsesSSE(`delta_credit_${upstreamBodies.length}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const request = (task: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: task }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      if (!sessionID) throw new Error("Gateway session was not created");
+
+      const fixtures = [
+        {
+          title: "Gateway delta rule alpha",
+          content:
+            "AlphaFullContext Gateway validates delta routing before dispatch. ".repeat(
+              20,
+            ),
+        },
+        {
+          title: "Gateway delta rule beta",
+          content:
+            "BetaFullContext Gateway validates delta routing before dispatch. ".repeat(
+              20,
+            ),
+        },
+      ];
+      const ids = fixtures.map((entry) =>
+        ltm.create({
+          projectPath,
+          category: "gotcha",
+          scope: "project",
+          ...entry,
+        }),
+      );
+      const inDelta: string[] = [];
+      core.formatKnowledge(
+        fixtures.map((entry, index) => ({
+          ...entry,
+          id: ids[index],
+          category: "gotcha",
+        })),
+        400,
+        inDelta,
+      );
+      expect(inDelta).toHaveLength(1); // The second entry becomes a recall hint.
+
+      const selected = await ltm.forSession(projectPath, sessionID, 2_000, {
+        contextHint: "gateway delta routing",
+        excludeCategories: ["preference"],
+        deferEffects: true,
+      });
+      expect(new Set(selected.map((entry) => entry.id))).toEqual(new Set(ids));
+
+      const response = await handleRequest(
+        request("Fix gateway delta routing"),
+        loadLocalConfig(),
+      );
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(upstreamBodies).toHaveLength(2);
+      const wire = upstreamBodies.at(-1);
+      if (!wire) throw new Error("No upstream request was sent");
+      expect(wire.includes("Lore knowledge update")).toBe(true);
+      const fullyDelivered = fixtures.flatMap((entry, index) =>
+        wire.includes(entry.content.trim()) ? [ids[index]] : [],
+      );
+      expect(fullyDelivered).toHaveLength(1);
+      const hinted = ids.find((id) => !fullyDelivered.includes(id));
+      if (!hinted) throw new Error("No entry was withheld from full delivery");
+      expect(wire).toContain(`k:${hinted}`);
+
+      const injected = db()
+        .query(
+          "SELECT logical_id FROM knowledge_session_injections WHERE session_id = ?",
+        )
+        .all(sessionID) as Array<{ logical_id: string }>;
+      expect(injected.map((row) => row.logical_id)).toEqual(fullyDelivered);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
   it("commits idle-warmed preferences on a real foreground cache hit and restores them after restart", async () => {
     const projectPath = `/tmp/lore-idle-pref-${Date.now()}`;
     const sessionHeaders = {
