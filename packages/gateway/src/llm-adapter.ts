@@ -4352,6 +4352,7 @@ export function createGatewayLLMClient(
                     upstreamURL: target.url,
                     credential: cred,
                     responseHeaders: response.headers,
+                    requestHeaders: req.headers,
                   });
                   recordWorkerCost(
                     opts?.sessionID,

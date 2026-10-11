@@ -260,7 +260,12 @@ export function parseProviderQuotaHeaders(
   }
   for (const entry of codexWindows.values()) {
     const base = `x-${entry.prefix}-${entry.slot}`;
-    const minutes = nonneg(num(headers.get(`${base}-window-minutes`)));
+    const parsedMinutes = num(headers.get(`${base}-window-minutes`));
+    const minutes =
+      parsedMinutes !== null && parsedMinutes > 0 ? parsedMinutes : null;
+    const usedPercent = percent(num(headers.get(`${base}-used-percent`)));
+    const resetsAt = epochMs(num(headers.get(`${base}-reset-at`)));
+    if (minutes === null && resetsAt === null) continue;
     const windowId =
       minutes === 300
         ? "5h"
@@ -275,10 +280,10 @@ export function parseProviderQuotaHeaders(
         window,
         label: codexLabel(`x-${entry.prefix}`),
         windowMinutes: minutes,
-        usedPercent: percent(num(headers.get(`${base}-used-percent`))),
+        usedPercent,
         remaining: null,
         limit: null,
-        resetsAt: epochMs(num(headers.get(`${base}-reset-at`))),
+        resetsAt,
         source: "codex",
       }),
     );

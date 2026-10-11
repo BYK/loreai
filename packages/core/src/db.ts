@@ -2466,6 +2466,11 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- with no time.
   ALTER TABLE session_prompt_deltas ADD COLUMN created_at INTEGER;
   `,
+  `
+  -- Version 101: remove subscription quota snapshots keyed by rotating
+  -- credentials; they will be repopulated with stable account IDs (#2022).
+  DELETE FROM provider_quotas WHERE auth_kind = 'subscription';
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
