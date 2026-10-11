@@ -122,13 +122,14 @@ describe("activity local transitions", () => {
       read_total: 3,
       read_at: 10,
     });
-    expect((await db.getAll("activityState")).find((record) => record.key === key))
-      .toMatchObject({
-        archived_at: 5,
-        pinned_at: 6,
-        read_total: 3,
-        read_at: 10,
-      });
+    expect(
+      (await db.getAll("activityState")).find((record) => record.key === key),
+    ).toMatchObject({
+      archived_at: 5,
+      pinned_at: 6,
+      read_total: 3,
+      read_at: 10,
+    });
   });
 
   it("replays a pre-hydration folder move over persisted folders", async () => {

@@ -338,18 +338,20 @@ test.describe("persistent workspace panes", () => {
     await expect(page.getByTestId("costs-page")).toBeVisible();
     await expect
       .poll(() =>
-        page.locator(
-          '[data-testid="activity-item"] [data-testid="activity-unread-chip"]',
-        ).count(),
+        page
+          .locator(
+            '[data-testid="activity-item"] [data-testid="activity-unread-chip"]',
+          )
+          .count(),
       )
       .toBeGreaterThan(0);
 
     expect(await dispatchSpace(page)).toBe(false);
     await expect(page).toHaveURL(/\/ui\/costs$/);
 
-    const session = page.locator(
-      '[data-testid="activity-item"][data-activity-kind="session"]',
-    ).first();
+    const session = page
+      .locator('[data-testid="activity-item"][data-activity-kind="session"]')
+      .first();
     await expect(session).toBeVisible();
     await session.locator("a").click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/sessions\/[^/?]+/);
