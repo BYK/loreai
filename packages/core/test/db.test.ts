@@ -310,7 +310,7 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
-  test("v102: discussion tables exist and enforce the reply XOR", () => {
+  test("v103: discussion tables exist and enforce the reply XOR", () => {
     const tables = (
       db()
         .query(
@@ -336,7 +336,7 @@ describe("db", () => {
     );
   });
 
-  test("v102 recovery re-creates dropped discussion tables", () => {
+  test("v103 recovery re-creates dropped discussion tables", () => {
     db().exec(
       "DROP TABLE discussion_replies; DROP TABLE response_bindings; DROP TABLE discussions; DROP TABLE threads;",
     );
