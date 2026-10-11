@@ -19,7 +19,7 @@
     "@astrojs/rss": "^4.0.19",
     "@astrojs/starlight": "^0.41.11",
     "astro": "^7.3.2",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "svgo": "^3.3.2",
     "typescript": "^5.8.0"
   }
