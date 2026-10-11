@@ -169,7 +169,6 @@ function handleListActivity(url: URL): Response {
 
   const page = listActivity({
     parsed,
-    q: parsed.server.terms.join(" "),
     cursor,
     limit,
   });
