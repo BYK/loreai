@@ -148,7 +148,15 @@ describe("pacing delay formula", () => {
       10_000,
       NOW,
     );
-    expect(below).toMatchObject({ throttling: false, delay_ms: 7_000 });
+    // Still throttling: the held delay is being applied.
+    expect(below).toMatchObject({ throttling: true, delay_ms: 7_000 });
+    expect(
+      evaluatePacingWindow(
+        windowAt(50, 2 * HOUR, 0.95, "5h", FIVE_H, 0),
+        10_000,
+        NOW,
+      ),
+    ).toMatchObject({ throttling: false, delay_ms: 0 });
   });
 
   test("the larger of the two windows wins", () => {
@@ -449,6 +457,61 @@ describe("integral controller (held d_w)", () => {
     observe(row(0.1, NOW, next));
     expect(status(NOW)?.windows[0]).toMatchObject({ rate_source: "observed" });
     expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+  });
+
+  test("no integral windup while pacing is disabled", () => {
+    gapOf(10_000);
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: false,
+    });
+    observe(row(10, NOW - 15 * 60_000));
+    observe(row(12, NOW - 10 * 60_000)); // ρ ≫ 1
+    observe(row(14, NOW - 5 * 60_000));
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: true,
+    });
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+    expect(status(NOW)?.windows[0]?.delay_ms).toBe(0);
+    // Integration resumes from 0 on the next accepted sample.
+    observe(row(16, NOW));
+    const next = pacingDelayMs(MATCH, NOW);
+    expect(next).toBeGreaterThan(0);
+    expect(next).toBeLessThanOrEqual(integrateHeldDelayMs(0, 10_000, 1e9));
+  });
+
+  test("a held delay keeps curation paused while ρ dips below 1", () => {
+    gapOf(10_000);
+    const s = (100 - 10) / T0; // ≈ constant over the 2h below
+    const hour = 60 * 60_000;
+    observe(row(10, NOW - 2 * hour));
+    observe(row(10 + 1.2 * s * hour, NOW - hour)); // ρ ≈ 1.2 → d_w ≈ 2 s
+    // EWMA 0.3·x + 0.7·1.2s = 0.95s → x ≈ 0.367s.
+    const x = ((0.95 - 0.7 * 1.2) / 0.3) * s;
+    observe(row(10 + 1.2 * s * hour + x * hour, NOW));
+    const w = status(NOW)?.windows[0];
+    expect(w?.ratio).toBeGreaterThan(0.9);
+    expect(w?.ratio).toBeLessThan(1);
+    expect(w?.delay_ms).toBeGreaterThan(0);
+    expect(w?.throttling).toBe(true);
+    expect(isCurationPacingPaused(MATCH, NOW)).toBe(true);
+  });
+
+  test("no held delay and ρ < 1 → curation runs", () => {
+    gapOf(10_000);
+    const s = (100 - 10) / T0;
+    const hour = 60 * 60_000;
+    observe(row(10, NOW - hour));
+    observe(row(10 + 0.5 * s * hour, NOW));
+    expect(status(NOW)?.windows[0]).toMatchObject({
+      throttling: false,
+      delay_ms: 0,
+    });
+    expect(isCurationPacingPaused(MATCH, NOW)).toBe(false);
   });
 
   test("u ≥ 100 holds the maximum", () => {

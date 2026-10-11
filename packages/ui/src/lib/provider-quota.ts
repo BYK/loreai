@@ -227,5 +227,8 @@ export function pacingStateText(
   if (!enabled) return "pacing off";
   if (window.used >= 100) return "limit reached — Lore is slowing requests";
   if (!window.throttling) return "on pace";
+  if ((window.ratio ?? 0) <= 1) {
+    return "holding pace — Lore is slowing requests";
+  }
   return `${(window.ratio ?? 0).toFixed(1)}× the sustainable rate — Lore is slowing requests`;
 }

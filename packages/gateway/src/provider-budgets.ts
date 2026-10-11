@@ -241,7 +241,10 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
   track.lastAt = row.observedAt;
   track.samples++;
   const T = row.resetsAt === null ? 0 : row.resetsAt - row.observedAt;
-  if (used >= 100) {
+  if (!isPacingEnabled(row.provider, row.account)) {
+    // No integral windup while nothing is being delayed.
+    track.held = 0;
+  } else if (used >= 100) {
     track.held = MAX_PACING_DELAY_MS;
   } else if (T > 0) {
     const gap =
@@ -313,19 +316,19 @@ export function evaluatePacingWindow(
         : "unknown";
   let delay = 0;
   let ratio: number | null = null;
-  let throttling = false;
   if (u >= 100) {
-    throttling = true;
     delay = MAX_PACING_DELAY_MS;
   } else if (rate !== null) {
     ratio = rate / sustainable;
-    throttling = rate > sustainable;
     if (input.observedRate !== null) {
       delay = input.heldDelayMs;
-    } else if (throttling) {
+    } else if (ratio > 1) {
       delay = gapMs === null ? 0 : gapMs * (ratio - 1);
     }
   }
+  delay = Math.min(MAX_PACING_DELAY_MS, delay);
+  // A held delay counts too: at equilibrium ρ hovers around 1 while d_w > 0.
+  const throttling = u >= 100 || delay > 0 || (ratio !== null && ratio > 1);
   return {
     window: input.window,
     used: u,
@@ -335,7 +338,7 @@ export function evaluatePacingWindow(
     rate_source: source,
     ratio,
     throttling,
-    delay_ms: Math.min(MAX_PACING_DELAY_MS, delay),
+    delay_ms: delay,
   };
 }
 
