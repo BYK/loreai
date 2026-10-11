@@ -212,6 +212,9 @@ describe("pacing helpers", () => {
     expect(pacingStateText(window, true)).toBe(
       "2.0× the sustainable rate — Lore is slowing requests",
     );
+    expect(pacingStateText({ ...window, ratio: 0.95 }, true)).toBe(
+      "holding pace — Lore is slowing requests",
+    );
     expect(pacingStateText({ ...window, used: 100 }, true)).toBe(
       "limit reached — Lore is slowing requests",
     );
