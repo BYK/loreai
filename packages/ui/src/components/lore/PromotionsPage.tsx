@@ -109,7 +109,7 @@ export const PromotionsPage: Component = () => {
       id: "team",
       header: "Team",
     }),
-    helper.accessor((row) => row.proposer.label ?? row.proposer.id, {
+    helper.accessor((row) => row.proposer.label ?? "Former member", {
       id: "proposer",
       header: "Proposer",
     }),
@@ -428,7 +428,6 @@ export const PromotionsPage: Component = () => {
                                         when={cell.column.id === "proposer"}
                                       >
                                         <PromotionIdentity
-                                          id={row.original.proposer.id}
                                           label={row.original.proposer.label}
                                         />
                                       </Match>

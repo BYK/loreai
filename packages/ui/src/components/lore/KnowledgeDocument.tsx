@@ -370,7 +370,11 @@ export const KnowledgeDocument: Component<{
                     />
                     <Meta
                       label="Source user"
-                      value={head()?.source_refs.user_id}
+                      value={
+                        head()?.source_refs.user_id
+                          ? "Identity unavailable"
+                          : undefined
+                      }
                     />
                     <Meta
                       label="Source entry"

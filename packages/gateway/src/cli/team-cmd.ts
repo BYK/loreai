@@ -28,6 +28,7 @@ import {
   createTeam,
   createTeamInvite,
   discoverGitHubContributors,
+  identityLabel,
   isEmailAddress,
   listDomainJoinRequests,
   listTeams,
@@ -37,6 +38,7 @@ import {
   sendInviteEmail,
   setTeamRole,
   teamMembers,
+  teamMemberProfiles,
 } from "../team";
 import {
   decidePromotionService,
@@ -56,6 +58,23 @@ function reportPromotionFailure(result: {
 }): void {
   console.error(`lore team: ${result.code}: ${result.message}`);
   process.exitCode = 1;
+}
+
+async function memberLabels(
+  client: Parameters<typeof teamMembers>[0],
+  scopeId: string,
+): Promise<Map<string, string>> {
+  try {
+    const profiles = await teamMemberProfiles(client, scopeId);
+    return new Map(
+      profiles.map(
+        (profile) =>
+          [profile.user_id, identityLabel(profile) ?? "Former member"] as const,
+      ),
+    );
+  } catch {
+    return new Map();
+  }
 }
 
 export async function commandTeam(
@@ -113,8 +132,9 @@ export async function commandTeam(
       case "members": {
         const scope = positionals[1];
         if (!scope) return usage();
+        const labels = await memberLabels(client, scope);
         for (const m of await teamMembers(client, scope))
-          console.log(`${m.userId}  ${m.role}`);
+          console.log(`${labels.get(m.userId) ?? "Former member"}  ${m.role}`);
         break;
       }
       case "discover": {
@@ -295,14 +315,15 @@ export async function commandTeam(
       case "remove": {
         const [, scope, userId] = positionals;
         if (!scope || !userId) return usage();
+        const labels = await memberLabels(client, scope);
         const { newEpoch, rewrapped, skipped, unlinkedProjects } =
           await removeTeamMember(client, scope, userId);
         console.log(
-          `Removed ${userId} and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
+          `Removed ${labels.get(userId) ?? userId} and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
         );
         if (skipped.length > 0)
           console.log(
-            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.join(", ")}`,
+            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.map((id) => labels.get(id) ?? "Former member").join(", ")}`,
           );
         if (unlinkedProjects > 0)
           console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
@@ -327,6 +348,7 @@ export async function commandTeam(
           process.exitCode = 1;
           return;
         }
+        const labels = await memberLabels(client, team.scopeId);
         const { newEpoch, rewrapped, skipped, unlinkedProjects } =
           await removeTeamMember(client, team.scopeId, user.user_id);
         console.log(
@@ -334,7 +356,7 @@ export async function commandTeam(
         );
         if (skipped.length > 0)
           console.log(
-            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.join(", ")}`,
+            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.map((id) => labels.get(id) ?? "Former member").join(", ")}`,
           );
         if (unlinkedProjects > 0)
           console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
@@ -345,8 +367,9 @@ export async function commandTeam(
         if (!scope || !userId || !role) return usage();
         if (role !== "admin" && role !== "editor" && role !== "viewer")
           return usage();
+        const labels = await memberLabels(client, scope);
         await setTeamRole(client, scope, userId, role);
-        console.log(`Set ${userId} to ${role}.`);
+        console.log(`Set ${labels.get(userId) ?? userId} to ${role}.`);
         break;
       }
       case "invite": {

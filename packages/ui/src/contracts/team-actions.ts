@@ -50,6 +50,7 @@ export const teamRoleReceipt = type({
   member: {
     user_id: "string",
     role: "'admin' | 'editor' | 'viewer'",
+    "label?": "string | null",
   },
 });
 

@@ -122,10 +122,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.goto("/ui/team");
 
     await expect(page.getByTestId("team-members")).toBeVisible();
-    await expect(page.getByText("Former member")).toHaveAttribute(
-      "title",
-      "user-member-12345678",
-    );
+    await expect(page.getByText("Former member")).not.toHaveAttribute("title");
     await page.getByRole("button", { name: "Create invite" }).click();
     const receipt = page.getByTestId("team-invite-receipt");
     await expect(receipt).toContainText("e2e-invite-token");

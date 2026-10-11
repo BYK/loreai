@@ -241,10 +241,7 @@ describe("TeamPage", () => {
     mount(() => <TeamPage />, clientWith({ setTeamMemberRole }));
 
     await screen.findByTestId("team-members");
-    expect(screen.getByText("Jordan")).toHaveAttribute(
-      "title",
-      "user-12345678-90ab-cdef",
-    );
+    expect(screen.getByText("Jordan")).not.toHaveAttribute("title");
     expect(
       screen.getByText("Jordan").closest("[data-user-id]"),
     ).toHaveAttribute("data-user-id", "user-12345678-90ab-cdef");
@@ -252,7 +249,7 @@ describe("TeamPage", () => {
       name: "Role for Jordan",
     });
     fireEvent.change(role, { target: { value: "editor" } });
-    await screen.findByText("user-12345678-90ab-cdef is now editor.");
+    await screen.findByText("Jordan is now editor.");
     expect(setTeamMemberRole).toHaveBeenCalledWith(
       "team-1",
       "user-12345678-90ab-cdef",
@@ -423,10 +420,34 @@ describe("TeamPage", () => {
       clientWith({ getTeamMembers: async () => members }),
     );
 
-    expect(await screen.findByText("Former member")).toBeVisible();
+    const unknownMember = await screen.findByText("Former member");
+    expect(unknownMember).toBeVisible();
+    expect(unknownMember).not.toHaveAttribute("title");
     expect(
       screen.getByRole("combobox", { name: "Role for Former member" }),
     ).toBeVisible();
+  });
+
+  it("reports a role change with the member label instead of the account ID", async () => {
+    const userId = "user-12345678-90ab-cdef";
+    const setTeamMemberRole = vi.fn<ApiClient["setTeamMemberRole"]>(
+      async () => ({
+        member: { user_id: userId, role: "editor" },
+      }),
+    );
+    mount(() => <TeamPage />, clientWith({ setTeamMemberRole }));
+
+    const identity = await screen.findByText("Jordan");
+    expect(identity).not.toHaveAttribute("title", userId);
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Role for Jordan" }),
+      { target: { value: "editor" } },
+    );
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Jordan is now editor.",
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(userId);
   });
 
   it("restores the server-known role after a failed role change", async () => {
@@ -535,6 +556,9 @@ describe("TeamPage", () => {
       ),
     );
     expect(role).toHaveValue("viewer");
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "You are now viewer.",
+    );
   });
 
   it("keeps sole-admin leave available and shows the server last-admin message", async () => {

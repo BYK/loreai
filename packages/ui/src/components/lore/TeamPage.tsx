@@ -123,7 +123,7 @@ export const TeamPage: Component = () => {
 
   const teams = () => folk.teams.data()?.teams ?? [];
   const columns = helper.columns([
-    helper.accessor((row) => row.user_id, {
+    helper.accessor(memberLabel, {
       id: "member",
       header: "Member",
     }),
@@ -235,6 +235,19 @@ export const TeamPage: Component = () => {
       return `${teammate}'s team membership changed since you loaded the team. The list has been reloaded.`;
     const role = member.role.charAt(0).toUpperCase() + member.role.slice(1);
     return `${teammate}'s role changed to ${role} since you loaded the team. The list has been reloaded.`;
+  };
+
+  const roleChangeMessage = (receipt: TeamRoleReceipt): string => {
+    const member = members()?.members.find(
+      (row) => row.user_id === receipt.member.user_id,
+    );
+    if (member?.me) return `You are now ${receipt.member.role}.`;
+    const receiptMember: TeamMember = {
+      ...receipt.member,
+      label: receipt.member.label ?? member?.label ?? null,
+      me: false,
+    };
+    return `${memberLabel(receiptMember)} is now ${receipt.member.role}.`;
   };
 
   const changeRole = async (
@@ -673,7 +686,7 @@ export const TeamPage: Component = () => {
                 <Show when={roleReceipt()}>
                   {(receipt) => (
                     <p class="mb-4 text-sm text-muted" role="status">
-                      {receipt().member.user_id} is now {receipt().member.role}.
+                      {roleChangeMessage(receipt())}
                     </p>
                   )}
                 </Show>
@@ -718,9 +731,7 @@ export const TeamPage: Component = () => {
                                     <Switch>
                                       <Match when={cell.column.id === "member"}>
                                         <PromotionIdentity
-                                          id={row.original.user_id}
                                           label={row.original.label}
-                                          showId
                                         />
                                         <Show when={row.original.me}>
                                           <span class="ml-2 text-xs text-muted">

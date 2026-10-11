@@ -466,6 +466,23 @@ describe("KnowledgeDocument", () => {
     expect(screen.getByText("worker-model")).toBeInTheDocument();
   });
 
+  it("does not render a source user account ID", () => {
+    const userId = "11111111-2222-3333-4444-555555555555";
+    renderDocument({
+      versions: loader({
+        id: "k",
+        current_version_id: "v2",
+        versions: [
+          version(2, {
+            source_refs: { ...version(2).source_refs, user_id: userId },
+          }),
+        ],
+      }),
+    });
+    expect(screen.getByText("Identity unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(userId)).not.toBeInTheDocument();
+  });
+
   it("treats a projectless entry as shared", () => {
     renderDocument({
       entry: {
