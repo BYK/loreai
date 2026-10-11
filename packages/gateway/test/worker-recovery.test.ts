@@ -19,6 +19,11 @@ import {
 import type { SessionState } from "../src/translate/types";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+const budgetPause = vi.hoisted(() => ({ paused: false }));
+vi.mock("../src/provider-budgets", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/provider-budgets")>()),
+  isBackgroundBudgetPaused: () => budgetPause.paused,
+}));
 
 const projectPath = "/tmp/lore-worker-recovery";
 let sessionID: string;
@@ -176,6 +181,27 @@ test.each(["usable", "malformed", "no-work"])(
     );
   },
 );
+
+test("urgent distillation still runs while background work is budget-paused", async () => {
+  budgetPause.paused = true;
+  try {
+    seed();
+    vi.mocked(upstreamFetch).mockImplementation(async () =>
+      response(
+        "<observations>Pace pauses leave urgent work alone.</observations>",
+      ),
+    );
+    const run = vi.spyOn(distillation, "run");
+    const curate = vi.spyOn(curator, "run");
+    scheduleBackgroundWork(state(), loadConfig());
+    expect(run).toHaveBeenCalledOnce();
+    await run.mock.results[0].value;
+    expect(run.mock.calls[0][0]).toMatchObject({ urgent: true });
+    expect(curate).not.toHaveBeenCalled();
+  } finally {
+    budgetPause.paused = false;
+  }
+});
 
 test.each([
   "not JSON",

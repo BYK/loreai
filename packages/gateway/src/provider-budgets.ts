@@ -607,12 +607,14 @@ export function evaluateProviderBudgets(
 }
 
 /**
- * Max pressure over the budgets covering an attribution, with the budget
- * that produced it. Quota windows are evaluated for the attribution's own
- * account.
+ * Max pressure over one kind of budget covering an attribution, with the
+ * budget that produced it. Quota windows are evaluated for the attribution's
+ * own account. `cap` pressure (explicit user caps) may slow the user's own
+ * requests; `pace` pressure only ever throttles Lore's background work.
  */
 export function providerBudgetPressure(
   match: BudgetMatch | null,
+  kind: "cap" | "pace",
   now = Date.now(),
 ): BudgetPressure {
   if (!match) return { pressure: 0, budget: null };
@@ -627,7 +629,7 @@ export function providerBudgetPressure(
     ]),
   ];
   for (const [budget, implicit] of candidates) {
-    if (budget.mode === "off" || !covers(budget, match)) continue;
+    if (budget.mode !== kind || !covers(budget, match)) continue;
     const status = statusOf(budget, implicit, rows, now, match.account);
     if (status.pressure > best.pressure) {
       best = { pressure: status.pressure, budget: status };
@@ -670,19 +672,30 @@ export function sessionBudgetMatch(
 }
 
 /**
- * Whether a budget covering the session's attribution is at pressure 1 —
- * background workers pause for it the same way they do for quota. Never
- * throws: a DB failure must not break the caller.
+ * Whether non-urgent background work (curation, warmer pings, incremental
+ * distillation) should be skipped for an attribution: usage ahead of pace on
+ * any pace budget, or a cap at full pressure.
  */
-export function isSessionBudgetPaused(
+export function backgroundBudgetPaused(
+  match: BudgetMatch | null,
+  now = Date.now(),
+): boolean {
+  return (
+    providerBudgetPressure(match, "pace", now).pressure > 0 ||
+    providerBudgetPressure(match, "cap", now).pressure >= 1
+  );
+}
+
+/**
+ * {@link backgroundBudgetPaused} for a session's last upstream. Never throws:
+ * a DB failure must not break the caller.
+ */
+export function isBackgroundBudgetPaused(
   sessionID: string,
   upstream?: { providerID?: string; url?: string },
 ): boolean {
   try {
-    return (
-      providerBudgetPressure(sessionBudgetMatch(sessionID, upstream))
-        .pressure >= 1
-    );
+    return backgroundBudgetPaused(sessionBudgetMatch(sessionID, upstream));
   } catch {
     return false;
   }

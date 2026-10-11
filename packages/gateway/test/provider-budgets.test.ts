@@ -11,6 +11,7 @@ import {
   setProviderBudgets,
   parseProviderBudgets,
   evaluateProviderBudgets,
+  backgroundBudgetPaused,
   providerBudgetPressure,
   ledgerWindowBounds,
   type ProviderBudgetStatus,
@@ -647,7 +648,7 @@ describe("providerBudgetPressure", () => {
         amount: 100,
       },
     ]);
-    const result = providerBudgetPressure(MATCH, NOW);
+    const result = providerBudgetPressure(MATCH, "pace", NOW);
     expect(result.pressure).toBeCloseTo(0.5);
     expect(result.budget).toMatchObject({
       mode: "pace",
@@ -658,17 +659,20 @@ describe("providerBudgetPressure", () => {
 
   test("other accounts, auth kinds and providers are unaffected", () => {
     upsertProviderQuota(quotaRow({ usedPercent: 100 }));
-    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(1);
+    expect(providerBudgetPressure(MATCH, "pace", NOW).pressure).toBe(1);
     expect(
-      providerBudgetPressure({ ...MATCH, account: "acct2" }, NOW).pressure,
+      providerBudgetPressure({ ...MATCH, account: "acct2" }, "pace", NOW)
+        .pressure,
     ).toBe(0);
     expect(
-      providerBudgetPressure({ ...MATCH, auth_kind: "api_key" }, NOW).pressure,
+      providerBudgetPressure({ ...MATCH, auth_kind: "api_key" }, "pace", NOW)
+        .pressure,
     ).toBe(0);
     expect(
-      providerBudgetPressure({ ...MATCH, provider: "openai" }, NOW).pressure,
+      providerBudgetPressure({ ...MATCH, provider: "openai" }, "pace", NOW)
+        .pressure,
     ).toBe(0);
-    expect(providerBudgetPressure(null, NOW)).toEqual({
+    expect(providerBudgetPressure(null, "pace", NOW)).toEqual({
       pressure: 0,
       budget: null,
     });
@@ -680,9 +684,10 @@ describe("providerBudgetPressure", () => {
     setProviderBudgets([
       { ...SUB, account: null, mode: "pace", window: "5h", headroom: 10 },
     ]);
-    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(1);
+    expect(providerBudgetPressure(MATCH, "pace", NOW).pressure).toBe(1);
     expect(
-      providerBudgetPressure({ ...MATCH, account: "acct2" }, NOW).pressure,
+      providerBudgetPressure({ ...MATCH, account: "acct2" }, "pace", NOW)
+        .pressure,
     ).toBe(0);
     // The snapshot reports the worst account.
     expect(only(evaluateProviderBudgets(NOW), { mode: "pace" })).toMatchObject({
@@ -696,12 +701,56 @@ describe("providerBudgetPressure", () => {
     setProviderBudgets([
       { ...SUB, account: "acct1", mode: "off", window: "5h" },
     ]);
-    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(0);
+    expect(providerBudgetPressure(MATCH, "pace", NOW).pressure).toBe(0);
+  });
+
+  test("pace far ahead throttles background work, never the foreground", () => {
+    // Monday morning: 25% of the week used with 5% elapsed → 10 pts ahead.
+    upsertProviderQuota(
+      quotaRow({
+        window: "7d",
+        windowMinutes: 10_080,
+        usedPercent: 25,
+        resetsAt: NOW + 0.95 * 7 * 24 * HOUR,
+      }),
+    );
+    expect(providerBudgetPressure(MATCH, "pace", NOW).pressure).toBe(1);
+    expect(providerBudgetPressure(MATCH, "cap", NOW)).toEqual({
+      pressure: 0,
+      budget: null,
+    });
+    expect(backgroundBudgetPaused(MATCH, NOW)).toBe(true);
+  });
+
+  test("a USD cap over its rate slows the foreground; pauses background only at 1", () => {
+    const API = { ...MATCH, auth_kind: "api_key" as const };
+    setProviderBudgets([
+      {
+        provider: "anthropic",
+        auth_kind: "api_key",
+        account: null,
+        mode: "cap",
+        unit: "usd",
+        window: "day",
+        amount: 5,
+      },
+    ]);
+    addProviderCost(costRow({ authKind: "api_key", cost: 4 }));
+    const cap = providerBudgetPressure(API, "cap", NOW);
+    expect(cap.pressure).toBeGreaterThan(0);
+    expect(cap.pressure).toBeLessThan(1);
+    expect(cap.budget).toMatchObject({ mode: "cap", unit: "usd" });
+    expect(providerBudgetPressure(API, "pace", NOW).pressure).toBe(0);
+    expect(backgroundBudgetPaused(API, NOW)).toBe(false);
+
+    addProviderCost(costRow({ authKind: "api_key", cost: 2 }));
+    expect(providerBudgetPressure(API, "cap", NOW).pressure).toBe(1);
+    expect(backgroundBudgetPaused(API, NOW)).toBe(true);
   });
 
   test("a leftover global daily_budget KV row has no effect", () => {
     setKV("daily_budget", "0.01");
     addProviderCost(costRow({ cost: 500 }));
-    expect(providerBudgetPressure(MATCH, NOW).pressure).toBe(0);
+    expect(providerBudgetPressure(MATCH, "pace", NOW).pressure).toBe(0);
   });
 });

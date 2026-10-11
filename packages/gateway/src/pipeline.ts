@@ -17,7 +17,7 @@ import { detectHarness } from "./harness";
 import { resolveCostAttribution } from "./cost-attribution";
 import {
   describeProviderBudget,
-  isSessionBudgetPaused,
+  isBackgroundBudgetPaused,
   providerBudgetPressure,
   sessionBudgetMatch,
 } from "./provider-budgets";
@@ -17210,11 +17210,11 @@ function scheduleBackgroundWorkForTenant(
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
   // Urgent distillation is exempt (it unblocks the next user turn).
-  // A provider budget at full pressure (quota far ahead of pace, or a cap
-  // exhausted) pauses the same work.
+  // Provider budgets pause the same work when quota usage runs ahead of
+  // pace or a cap is exhausted (isBackgroundBudgetPaused).
   const quotaPaused =
     isQuotaPaused(resolveAuth(sessionID)) ||
-    isSessionBudgetPaused(sessionID, sessionState.lastUpstream);
+    isBackgroundBudgetPaused(sessionID, sessionState.lastUpstream);
 
   // Worker circuit breaker: when background workers have been failing for a
   // sustained period, stop hammering the upstream every turn — allow only a
@@ -22659,9 +22659,10 @@ async function handleConversationTurnPrepared(
   modifiedReq.signal = foregroundAbort.signal;
 
   // --- Provider budget throttle (#1927) ---
-  // Apply an invisible proxy-level sleep to slow the agent when a budget
-  // covering this request's attribution is under pressure (subscription
-  // quota ahead of pace, or a cap filling up too fast). The sleep is capped
+  // Apply an invisible proxy-level sleep to slow the agent when a user cap
+  // covering this request's attribution is filling up too fast. Only caps:
+  // pace budgets never delay the user's own requests, they only throttle
+  // Lore's background work. The sleep is capped
   // to avoid causing cache busts (which would be self-defeating — costing
   // more than the throttle saved). A DB failure must never break the request.
   let budgetPressure: ReturnType<typeof providerBudgetPressure> = {
@@ -22671,6 +22672,7 @@ async function handleConversationTurnPrepared(
   try {
     budgetPressure = providerBudgetPressure(
       sessionBudgetMatch(sessionID, sessionState.lastUpstream),
+      "cap",
     );
   } catch (err) {
     log.info(`provider-budget: evaluation failed: ${String(err)}`);

@@ -113,7 +113,7 @@ import {
   deleteSessionCosts,
 } from "./cost-tracker";
 import { deleteBillingPrefix } from "./cch";
-import { isSessionBudgetPaused } from "./provider-budgets";
+import { isBackgroundBudgetPaused } from "./provider-budgets";
 import {
   maybeFetchQuota,
   isQuotaPaused,
@@ -699,11 +699,11 @@ export function startIdleScheduler(
       if (isWorkerCreditPaused(sessionID)) continue;
 
       // Skip background work for OAuth accounts near quota exhaustion, or
-      // when a provider budget covering the session is at full pressure —
+      // when quota usage is ahead of pace / a cap is exhausted —
       // preserve remaining entitlement for user-facing conversation turns.
       if (
         isQuotaPaused(resolveAuth(sessionID)) ||
-        isSessionBudgetPaused(sessionID, state.lastUpstream)
+        isBackgroundBudgetPaused(sessionID, state.lastUpstream)
       )
         continue;
 
