@@ -105,6 +105,7 @@ export const Nav: Component<NavProps> = (props) => {
   const parsedDraft = createMemo(() => parseActivityQuery(queryDraft()));
   const validationError = () =>
     parsedDraft().errors[0]?.message ??
+    (!queryDraft().trim() ? "Query is required" : null) ??
     (!title().trim() ? "Title is required" : null);
 
   const openSearchDialog = (search?: SavedSearch) => {
@@ -116,7 +117,7 @@ export const Nav: Component<NavProps> = (props) => {
   const saveSearch = () => {
     const nextTitle = title().trim();
     const nextQuery = queryDraft().trim();
-    if (!nextTitle || parsedDraft().errors.length > 0) return;
+    if (!nextTitle || !nextQuery || parsedDraft().errors.length > 0) return;
     const existing = editing();
     if (existing) {
       saved.update(existing.id, { title: nextTitle, query: nextQuery });

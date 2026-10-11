@@ -125,4 +125,28 @@ describe("workspace activity navigation", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.getByTestId("saved-search-submit")).toBeDisabled();
   });
+
+  it.each(["", "   "])(
+    "requires a non-empty query before saving (%j)",
+    async (query) => {
+      mount();
+      fireEvent.click(screen.getByTestId("save-search-open"));
+      fireEvent.input(await screen.findByTestId("saved-search-title"), {
+        target: { value: "Empty search" },
+      });
+      fireEvent.input(screen.getByTestId("saved-search-query"), {
+        target: { value: query },
+      });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Query is required",
+      );
+      const save = screen.getByTestId("saved-search-submit");
+      expect(save).toBeDisabled();
+      const form = save.closest("form");
+      if (!form) throw new Error("Save search form is missing");
+      fireEvent.submit(form);
+      expect(savedSearches().list()).toEqual([]);
+    },
+  );
 });
