@@ -4,7 +4,13 @@
  * Ctrl/Cmd+Enter) and the draft is dropped only after the server accepted it.
  */
 import type { Component } from "solid-js";
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import {
+  createComputed,
+  createSignal,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 
 import { Button } from "~/components/ui/button";
 import { useWorkspace } from "~/routes/workspace";
@@ -31,20 +37,27 @@ export const Composer: Component<{
   let input: HTMLTextAreaElement | undefined;
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let pending: string | null = null;
+  // Props can come from a parent `<Show>` accessor that throws once the
+  // parent unmounts (e.g. a successful submit clears the selection), so
+  // draft writes after that use the last values seen while mounted.
+  let draft = { key: "", projectId: "", target: null as string | null };
+  createComputed(() => {
+    draft = {
+      key: props.draftKey,
+      projectId: props.projectId,
+      target: props.target,
+    };
+  });
 
   const flush = () => {
     clearTimeout(saveTimer);
     if (pending === null) return Promise.resolve();
     const value = pending;
     pending = null;
+    const { key, projectId, target } = draft;
     return value.trim() === ""
-      ? drafts.delete(props.draftKey)
-      : drafts.put({
-          key: props.draftKey,
-          projectId: props.projectId,
-          target: props.target,
-          body: { text: value },
-        });
+      ? drafts.delete(key)
+      : drafts.put({ key, projectId, target, body: { text: value } });
   };
 
   onMount(() => {
@@ -73,9 +86,10 @@ export const Composer: Component<{
     setError(null);
     try {
       await flush();
+      const { key } = draft;
       await props.onSubmit(value);
       pending = null;
-      await drafts.delete(props.draftKey);
+      await drafts.delete(key);
       setText("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
