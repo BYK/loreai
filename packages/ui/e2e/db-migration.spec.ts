@@ -147,7 +147,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await createV1(page);
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
+    await expectDatabaseVersion(page, 5);
     const info = await openInfo(page);
     expect(info.version).toBe(5);
     expect(info.stores.sort()).toEqual([...STORES].sort());
@@ -293,7 +293,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expectConnectionStatus(page);
-    await expectDatabaseVersion(page, 4);
+    await expectDatabaseVersion(page, 5);
     expect((await openInfo(page)).stores.sort()).toEqual([...STORES].sort());
   });
 
