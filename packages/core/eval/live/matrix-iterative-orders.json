@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "tasks": [
+    "task-pref-xlong.json",
+    "task-pref-combined.json",
+    "task-iterative-orders.json"
+  ],
+  "capContext": 200000,
+  "capOutput": 64000,
+  "repetitions": 3,
+  "arms": ["nolore", "lore"],
+  "runtimes": ["opencode", "pi"],
+  "models": [
+    {
+      "name": "sonnet-5",
+      "model": "openrouter/anthropic/claude-sonnet-5",
+      "workerModel": "openrouter/anthropic/claude-sonnet-5",
+      "authProvider": "openrouter"
+    },
+    {
+      "name": "deepseek-v4-flash",
+      "model": "openrouter/deepseek/deepseek-v4-flash",
+      "workerModel": "openrouter/deepseek/deepseek-v4-flash",
+      "authProvider": "openrouter"
+    },
+    {
+      "name": "m3-minimax-subscription",
+      "model": "minimax/MiniMax-M3",
+      "workerModel": "minimax/MiniMax-M3",
+      "authProvider": "minimax-coding-plan"
+    },
+    {
+      "name": "gpt-5.6-luna",
+      "model": "openrouter/openai/gpt-5.6-luna",
+      "workerModel": "openrouter/openai/gpt-5.6-luna",
+      "authProvider": "openrouter"
+    },
+    {
+      "name": "gpt-5.6-terra",
+      "model": "openrouter/openai/gpt-5.6-terra",
+      "workerModel": "openrouter/openai/gpt-5.6-terra",
+      "authProvider": "openrouter"
+    }
+  ]
+}

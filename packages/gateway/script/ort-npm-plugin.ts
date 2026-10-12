@@ -70,6 +70,8 @@ export function ortNpmDualPlugin(opts: OrtNpmPluginOptions): esbuild.Plugin {
   // absolute path so it doesn't re-trigger the `^onnxruntime-node$` intercept.
   const require2 = createRequire(join(opts.repoRoot, "packages/core/"));
   const realOrtNodeEntry = require2.resolve("onnxruntime-node");
+  const realOrtCommonEntry =
+    createRequire(realOrtNodeEntry).resolve("onnxruntime-common");
 
   return {
     name: "ort-npm-dual",
@@ -105,6 +107,13 @@ export function ortNpmDualPlugin(opts: OrtNpmPluginOptions): esbuild.Plugin {
       // only uses it in the unreachable browser branch under Node).
       build.onResolve({ filter: /^onnxruntime-web$/ }, () => ({
         path: ortWebMainEntry,
+      }));
+
+      // transformers.js also imports the ONNX Runtime common API. Resolve and
+      // bundle it explicitly: pnpm does not expose this transitive dependency
+      // beside the emitted worker artifact.
+      build.onResolve({ filter: /^onnxruntime-common$/ }, () => ({
+        path: realOrtCommonEntry,
       }));
 
       // 4: rewrite the real onnxruntime-node binding.js addon require.

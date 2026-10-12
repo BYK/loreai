@@ -376,7 +376,7 @@ export function formatReport(reports: readonly RotABReport[]): string {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  let dir = join(import.meta.dir, "results");
+  let dir = join(import.meta.dirname, "results");
   let threshold = DEFAULT_DEGRADED_COMPOSITE_MAX;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--results" && args[i + 1]) dir = args[++i];

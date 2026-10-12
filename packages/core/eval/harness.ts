@@ -14,6 +14,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type {
   FixtureEntry,
@@ -42,7 +43,11 @@ import {
 import { judge } from "./judge";
 import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
-import { createEvalLLMClient, resolveBackend } from "./llm-backend";
+import {
+  createEvalLLMClient,
+  resolveBackend,
+  resolveJudgeBackend,
+} from "./llm-backend";
 import { createOwnedRoot, removeOwnedPath } from "../test/helpers/owned-path";
 
 // ---------------------------------------------------------------------------
@@ -75,6 +80,19 @@ export interface LiveGatewayDependencies {
   loadConfig?: () => unknown;
   closeDB?: () => void;
   resetPipelineState?: () => Promise<void>;
+}
+
+/** Route replayed Anthropic-format turns to the chosen answering provider. */
+export function applyUpstreamOverride(
+  requestBody: Record<string, unknown>,
+  model: string,
+): { body: Record<string, unknown>; headers: Record<string, string> } {
+  const headers: Record<string, string> = {};
+  const project = process.env.EVAL_PROJECT;
+  if (project) headers["x-lore-project"] = project;
+  const upstream = process.env.EVAL_UPSTREAM_URL;
+  if (upstream) headers["x-lore-upstream-url"] = upstream;
+  return { body: upstream ? { ...requestBody, model } : requestBody, headers };
 }
 
 /**
@@ -134,15 +152,23 @@ export async function connectGateway(
     return {
       baseURL,
       async chat(requestBody, headers, signal) {
+        const override = applyUpstreamOverride(
+          requestBody as Record<string, unknown>,
+          config.model,
+        );
         return fetch(`${baseURL}/v1/messages`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "x-api-key": process.env.ANTHROPIC_API_KEY ?? "eval-key",
             "anthropic-version": "2023-06-01",
+            ...(process.env.EVAL_PROVIDER
+              ? { "x-lore-provider": process.env.EVAL_PROVIDER }
+              : {}),
+            ...override.headers,
             ...headers,
           },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify(override.body),
           signal,
         });
       },
@@ -153,7 +179,7 @@ export async function connectGateway(
   // start an isolated gateway. Otherwise, skip the gateway entirely —
   // questions will be answered via direct LLM calls without Lore processing.
   if (process.env.ANTHROPIC_API_KEY) {
-    return startLiveGateway(undefined, config.signal);
+    return startLiveGateway(undefined, config.signal, config.model);
   }
 
   // No gateway available — return a stub that logs warnings
@@ -223,6 +249,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
 export async function startLiveGateway(
   dependencies: LiveGatewayDependencies = {},
   signal?: AbortSignal,
+  model?: string,
 ): Promise<GatewayHandle> {
   const previousEnvironment = {
     LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
@@ -356,6 +383,10 @@ export async function startLiveGateway(
       dependencies.resetPipelineState ?? importedPipeline!.resetPipelineState;
 
     signal?.throwIfAborted();
+    if (process.env.EVAL_DISABLE_EMBEDDINGS === "1") {
+      const core = importedCore ?? (await import("@loreai/core"));
+      core.embedding._markLocalProviderUnavailable();
+    }
     closeDB();
     await resetPipelineState();
     server = await startServer(loadConfig());
@@ -387,15 +418,23 @@ export async function startLiveGateway(
     baseURL,
     isReal: true,
     async chat(requestBody, headers, signal) {
+      const override = applyUpstreamOverride(
+        requestBody as Record<string, unknown>,
+        model ?? (requestBody as { model?: string }).model ?? "",
+      );
       return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-api-key": process.env.ANTHROPIC_API_KEY ?? "eval-key",
           "anthropic-version": "2023-06-01",
+          ...(process.env.EVAL_PROVIDER
+            ? { "x-lore-provider": process.env.EVAL_PROVIDER }
+            : {}),
+          ...override.headers,
           ...headers,
         },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(override.body),
         signal,
       });
     },
@@ -697,10 +736,12 @@ async function getBaselineContext(
       return tailWindowBaseline(turns);
     case "compaction": {
       if (!llm) return tailWindowBaseline(turns); // fallback in fixture mode
-      return compactionBaseline(turns, 80_000, llm, 200_000, signal);
+      return compactionBaseline(turns, llm, 200_000, 32_000, signal);
     }
     case "raw":
       return rawBaseline(turns);
+    case "no-memory":
+      return "";
     // Gateway-based baselines (lore, context-only, memory-only) use the
     // gateway's own context management — we don't build a context string.
     // Instead, the question is sent through the gateway which applies
@@ -717,6 +758,30 @@ async function getBaselineContext(
 // Question answering
 // ---------------------------------------------------------------------------
 
+const MAX_TOOL_ROUNDS = 4;
+const TOOL_STUB_RESULT =
+  "This tool is not available in the evaluation environment and produced no " +
+  "output. Do not call tools again; answer the question directly and " +
+  "concisely using the information already provided in the conversation.";
+
+interface AnthropicBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+}
+
+interface AnthropicResponse {
+  content?: AnthropicBlock[];
+  error?: { type?: string; message?: string };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
 /**
  * Ask a question through the gateway so it gets Lore's full processing:
  * LTM injection in the system prompt, recall tool availability, and
@@ -725,11 +790,12 @@ async function getBaselineContext(
  * Includes retry logic for rate limit errors (Anthropic 429s) and
  * inter-call delays to stay under the 30K tokens/min org limit.
  */
-async function askQuestionViaGateway(
+export async function askQuestionViaGateway(
   question: string,
   gateway: GatewayHandle,
   model: string,
   loreContext?: string,
+  noMemory = false,
   signal?: AbortSignal,
 ): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
   const waitForDelay = (delayMs: number): Promise<void> => {
@@ -756,83 +822,131 @@ async function askQuestionViaGateway(
   const contextPreamble = loreContext
     ? `Here are distilled observations and conversation context from previous coding sessions:\n\n${loreContext}\n\n`
     : "";
-  const requestBody = {
-    model,
-    system: QA_SYSTEM,
-    messages: [
-      {
-        role: "user",
-        content: `${contextPreamble}Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
-      },
-    ],
-    tools: STANDARD_TOOLS,
-    max_tokens: 2048,
-    stream: false,
+  const messages: Array<{ role: string; content: unknown }> = [
+    {
+      role: "user",
+      content: `${contextPreamble}Answer this question about our previous coding sessions. Be specific and factual. If you don't have enough information, say so.\n\nQuestion: ${question}`,
+    },
+  ];
+  const noMemorySessionID = noMemory
+    ? `eval-no-memory-${randomUUID()}`
+    : undefined;
+  const tokens: TokenUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalCost: 0,
+  };
+  let recallInvoked = false;
+
+  const callOnce = async (withTools: boolean): Promise<AnthropicResponse> => {
+    const body = {
+      model,
+      system: QA_SYSTEM,
+      messages,
+      ...(withTools ? { tools: STANDARD_TOOLS } : {}),
+      max_tokens: 2048,
+      stream: false,
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      if (attempt > 0) {
+        const backoff = 30_000 * 2 ** (attempt - 1);
+        console.warn(
+          `  Gateway rate limited, retrying in ${backoff / 1000}s...`,
+        );
+        await waitForDelay(backoff);
+      }
+      const resp = await gateway.chat(
+        body,
+        {
+          "x-lore-no-store": "true",
+          ...(noMemory ? { "x-lore-no-memory": "true" } : {}),
+          ...(noMemorySessionID
+            ? { "x-lore-session-id": noMemorySessionID }
+            : {}),
+        },
+        signal,
+      );
+      if (resp.headers.get("x-lore-recall-invoked") === "true") {
+        recallInvoked = true;
+      }
+      const data = (await resp.json()) as AnthropicResponse;
+      const transient =
+        resp.status === 429 ||
+        resp.status === 503 ||
+        resp.status === 529 ||
+        data.error?.type === "rate_limit_error" ||
+        data.error?.type === "overloaded_error" ||
+        /\b(429|529|503)\b|overloaded/i.test(data.error?.message ?? "");
+      if (transient && attempt < 2) continue;
+      tokens.input += data.usage?.input_tokens ?? 0;
+      tokens.output += data.usage?.output_tokens ?? 0;
+      tokens.cacheRead += data.usage?.cache_read_input_tokens ?? 0;
+      tokens.cacheWrite += data.usage?.cache_creation_input_tokens ?? 0;
+      return data;
+    }
+    return {
+      error: { message: "[Gateway rate limit exceeded after retries]" },
+    };
   };
 
-  // Retry with backoff for rate limit errors
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // Delay between calls to stay under token-per-minute limits.
-    // Anthropic's org limit is often 30K-80K tokens/min; each QA call
-    // with LTM-injected system prompt can be 8K+ tokens.
-    if (attempt > 0) {
-      signal?.throwIfAborted();
-      const backoff = 30_000 * 2 ** (attempt - 1);
-      console.warn(`  Gateway rate limited, retrying in ${backoff / 1000}s...`);
-      await waitForDelay(backoff);
-    }
-
-    const resp = await gateway.chat(
-      requestBody,
-      { "x-lore-no-store": "true" },
-      signal,
-    );
-    const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
-    const data = (await resp.json()) as {
-      content?: Array<{ type: string; text?: string }>;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_read_input_tokens?: number;
-        cache_creation_input_tokens?: number;
+  let lastText = "";
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    signal?.throwIfAborted();
+    const withTools = round < MAX_TOOL_ROUNDS;
+    const data = await callOnce(withTools);
+    const content = data.content ?? [];
+    const text = content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
+      .join("");
+    if (text) lastText = text;
+    const toolUses = content.filter((part) => part.type === "tool_use");
+    if (!withTools || toolUses.length === 0) {
+      return {
+        hypothesis:
+          text ||
+          lastText ||
+          data.error?.message ||
+          "[No response from gateway]",
+        recallInvoked,
+        tokens,
       };
-      error?: { type?: string; message?: string };
-    };
-
-    // Check for rate limit in response
-    const text =
-      data.content
-        ?.filter((b) => b.type === "text")
-        .map((b) => b.text ?? "")
-        .join("") ?? "";
-
-    if (
-      text.includes("rate limit") ||
-      text.includes("exceed") ||
-      data.error?.type === "rate_limit_error"
-    ) {
-      if (attempt < 2) continue; // retry
-      // Last attempt — return the error as the hypothesis so the judge scores it low
     }
-
-    return {
-      hypothesis: text || data.error?.message || "[No response from gateway]",
-      recallInvoked,
-      tokens: {
-        input: data.usage?.input_tokens ?? 0,
-        output: data.usage?.output_tokens ?? 0,
-        cacheRead: data.usage?.cache_read_input_tokens ?? 0,
-        cacheWrite: data.usage?.cache_creation_input_tokens ?? 0,
-        totalCost: 0,
-      },
-    };
+    messages.push({ role: "assistant", content });
+    messages.push({
+      role: "user",
+      content: toolUses.map((tool) => ({
+        type: "tool_result",
+        tool_use_id: tool.id,
+        content: TOOL_STUB_RESULT,
+      })),
+    });
   }
 
   return {
-    hypothesis: "[Gateway rate limit exceeded after retries]",
-    recallInvoked: false,
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalCost: 0 },
+    hypothesis: lastText || "[No response from gateway]",
+    recallInvoked,
+    tokens,
   };
+}
+
+export function usesGatewayQuestionPath(
+  mode: BaselineMode,
+  isGatewayBaseline: boolean,
+): boolean {
+  return isGatewayBaseline || mode === "no-memory";
+}
+
+export function requiresRealGateway(mode: BaselineMode): boolean {
+  return (
+    mode === "lore" ||
+    mode === "lore-context-only" ||
+    mode === "lore-memory-only" ||
+    mode === "no-memory"
+  );
 }
 
 async function askQuestion(
@@ -1065,6 +1179,9 @@ export async function runScenario(
   const baselines = config.baselines.filter((b) =>
     scenario.applicableBaselines.includes(b),
   );
+  const judgeLLM = llm
+    ? createEvalLLMClient(resolveJudgeBackend(llm.config))
+    : undefined;
 
   // Setup hook (e.g., seeding cross-project knowledge)
   let cleanup: (() => Promise<void>) | undefined;
@@ -1140,12 +1257,7 @@ export async function runScenario(
       // Gateway-based baselines require a real gateway with Lore processing.
       // Without it, distillation/LTM/recall haven't run, so testing "lore"
       // mode would just test an empty memory — not useful.
-      if (
-        gateway.isReal === false &&
-        (mode === "lore" ||
-          mode === "lore-context-only" ||
-          mode === "lore-memory-only")
-      ) {
+      if (gateway.isReal === false && requiresRealGateway(mode)) {
         console.log(
           `  Skipping baseline '${mode}' — requires gateway (no ANTHROPIC_API_KEY)`,
         );
@@ -1187,14 +1299,15 @@ export async function runScenario(
             cacheWrite: 0,
             totalCost: 0,
           };
-        } else if (isGatewayBaseline) {
+        } else if (usesGatewayQuestionPath(mode, isGatewayBaseline)) {
           // Gateway-based baselines: send the question through the gateway
           // so it gets Lore's LTM injection, recall tool, and distilled context.
           const answer = await askQuestionViaGateway(
             q.question,
             gateway,
             config.model,
-            loreContext,
+            mode === "no-memory" ? "" : loreContext,
+            mode === "no-memory",
             config.signal,
           );
           hypothesis = answer.hypothesis;
@@ -1214,7 +1327,7 @@ export async function runScenario(
         }
 
         // Score with the judge (end-task quality)
-        const judgeResult = await judge(q, hypothesis, llm, {
+        const judgeResult = await judge(q, hypothesis, judgeLLM, {
           recallInvoked,
           signal: config.signal,
         });
@@ -1339,6 +1452,8 @@ async function loadScenarios(
         scenarios.push(...mod.scenarios);
         const mega = await import("./scenarios/mega-session");
         scenarios.push(mega.default);
+        const real = await import("./scenarios/real-session");
+        scenarios.push(...real.scenarios);
         break;
       }
       case "recall": {
@@ -1346,6 +1461,8 @@ async function loadScenarios(
         scenarios.push(...mod.scenarios);
         const decision = await import("./scenarios/decision-recall");
         scenarios.push(...decision.scenarios);
+        const realMulti = await import("./scenarios/real-multisession");
+        scenarios.push(...realMulti.scenarios);
         break;
       }
       case "preferences": {
