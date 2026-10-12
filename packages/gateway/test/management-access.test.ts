@@ -168,6 +168,39 @@ describe("management route access control", () => {
     await expect(response.json()).resolves.toEqual(expect.any(Array));
   });
 
+  test.each([
+    ["team creation", "/api/v1/teams"],
+    [
+      "member role changes",
+      "/api/v1/teams/00000000-0000-0000-0000-000000000001/members/00000000-0000-0000-0000-000000000002/role",
+    ],
+    [
+      "organization domain changes",
+      "/api/v1/orgs/00000000-0000-0000-0000-000000000003/domains/claim",
+    ],
+    [
+      "project team links",
+      "/api/v1/projects/00000000-0000-0000-0000-000000000004/sharing/link",
+    ],
+  ] as const)(
+    "hides remote %s despite a valid gateway token and spoofed local headers",
+    async (_label, path) => {
+      const response = await fetch(urlFor(remoteManagementPeer, path), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          "content-type": "application/json",
+          forwarded: "for=127.0.0.1",
+          "x-forwarded-for": "127.0.0.1",
+        },
+        body: "not-json",
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    },
+  );
+
   test("allows a CORS preflight for Authorization without exposing the API", async () => {
     const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
     const origin = `https://${host}`;

@@ -3,6 +3,7 @@
  * Gated behind LORE_INTEGRATION=1 (needs Docker).
  */
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
@@ -462,6 +463,88 @@ describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
       keyCount: 3,
       inviteCount: 1,
     });
+  });
+
+  it("upgrades an already-applied 0054 removal RPC with the target row lock", async () => {
+    const migrationSql = readFileSync(
+      new URL(
+        "../../../supabase/migrations/0057_member_removal_upgrade_lock.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const { rows } = await h.client.query<{ definition: string }>(
+      `select pg_get_functiondef(
+         'public.remove_scope_member_rotating(uuid, uuid, integer, text, jsonb)'::regprocedure
+       ) as definition`,
+    );
+    const currentDefinition = rows[0]?.definition;
+    if (!currentDefinition) throw new Error("removal RPC definition missing");
+    const preUpgradeDefinition = currentDefinition.replace(
+      /(where scope_id = p_scope and user_id = p_user)\s+for update/i,
+      "$1",
+    );
+    expect(preUpgradeDefinition).not.toBe(currentDefinition);
+
+    try {
+      // Model a deployment that already applied the old 0054 body, which lacked this lock.
+      await h.client.query(preUpgradeDefinition);
+      const oldFunction = await h.client
+        .query<{ definition: string }>(
+          `select pg_get_functiondef(
+             'public.remove_scope_member_rotating(uuid, uuid, integer, text, jsonb)'::regprocedure
+           ) as definition`,
+        )
+        .then((result) => result.rows[0]?.definition ?? "");
+      expect(
+        /where scope_id = p_scope and user_id = p_user\s+for update/i.test(
+          oldFunction,
+        ),
+      ).toBe(false);
+
+      await h.client.query(migrationSql);
+      const upgradedFunction = await h.client
+        .query<{ definition: string }>(
+          `select pg_get_functiondef(
+             'public.remove_scope_member_rotating(uuid, uuid, integer, text, jsonb)'::regprocedure
+           ) as definition`,
+        )
+        .then((result) => result.rows[0]?.definition ?? "");
+      const targetLock =
+        /where scope_id = p_scope and user_id = p_user\s+for update/i.exec(
+          upgradedFunction,
+        );
+      const expectedRoleCheck = upgradedFunction
+        .toLowerCase()
+        .indexOf("if v_target_role is distinct from p_expected_role");
+      expect(targetLock).not.toBeNull();
+      expect(expectedRoleCheck).toBeGreaterThanOrEqual(0);
+      expect(targetLock?.index).toBeLessThan(expectedRoleCheck);
+
+      const fixture = await makeRemovalFixture();
+      const github = await configureGithubTeam(fixture.scope);
+      const error = await raceGithubAdminPromotion(fixture, github, (client) =>
+        client.query(
+          "select public.remove_scope_member_rotating($1, $2, 0, 'viewer', $3::jsonb)",
+          [
+            fixture.scope,
+            fixture.target,
+            JSON.stringify([wrap(fixture.owner), wrap(fixture.secondAdmin)]),
+          ],
+        ),
+      );
+
+      expect(error.code).toBe("P0001");
+      expect(error.message).toContain(
+        "team member role changed; reload the team",
+      );
+      expect(await snapshot(fixture.scope, fixture.target)).toMatchObject({
+        membership: "admin",
+        epoch: 0,
+      });
+    } finally {
+      await h.client.query(migrationSql);
+    }
   });
 
   it("rejects role changes through the retired three-argument RPC", async () => {

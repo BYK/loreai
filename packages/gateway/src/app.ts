@@ -144,6 +144,17 @@ function debugLog(config: GatewayConfig, message: string): void {
   if (config.debug && !log.isStderrSilenced()) console.error(message);
 }
 
+function isGatewayOperatorMutation(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS")
+    return false;
+  return (
+    path === "/api/v1/teams" ||
+    path.startsWith("/api/v1/teams/") ||
+    /^\/api\/v1\/orgs\/[^/]+\/domains(?:\/|$)/.test(path) ||
+    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path)
+  );
+}
+
 /**
  * Management authorization (`/`, `/api*`, `/ui*`). Authorizes from node:http's
  * socket metadata, never from Forwarded, X-Forwarded-For, Host, or another
@@ -159,10 +170,8 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     c.set("allowedManagementOrigin", null);
     if (!managementPath) return next();
 
-    if (
-      !config.allowRemoteManagement &&
-      !isLoopbackAddress(c.env.peerAddress)
-    ) {
+    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
+    if (!config.allowRemoteManagement && remotePeer) {
       return hiddenManagementResponse();
     }
 
@@ -174,11 +183,16 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     if (origin === false) return hiddenManagementResponse();
     c.set("allowedManagementOrigin", origin);
 
+    // The gateway Bearer token authenticates access to this process; it does not
+    // identify the caller represented by the gateway's persisted Supabase session.
+    if (remotePeer && isGatewayOperatorMutation(c.req.method, c.req.path)) {
+      return withManagementCors(hiddenManagementResponse(), origin);
+    }
+
     if (c.req.method === "OPTIONS") {
       return withManagementCors(new Response(null, { status: 204 }), origin);
     }
 
-    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
     const managementApiPath =
       c.req.path === "/api" || c.req.path.startsWith("/api/");
     if (
