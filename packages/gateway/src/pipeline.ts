@@ -11,6 +11,10 @@
  *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
+import {
+  capturePrefixSnapshot,
+  forgetPrefixSnapshots,
+} from "./prefix-snapshots";
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
@@ -2139,7 +2143,10 @@ export function evictLiveSessionForTest(
     );
     if (sid) {
       const removed = sessions.delete(sid);
-      if (removed) evictPipelineSessionState(sid);
+      if (removed) {
+        evictPipelineSessionState(sid);
+        forgetPrefixSnapshots(sid);
+      }
       return removed;
     }
   }
@@ -16587,6 +16594,8 @@ export function recordCacheTurnUsage(
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
   endSpan?: () => void,
+  /** Wire protocol of `requestBody`, recorded for prefix snapshots. */
+  wire?: GatewayProtocol,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -16607,6 +16616,8 @@ export function recordCacheTurnUsage(
     const cacheStrategy = econResult?.result.confident
       ? econResult.result.strategy
       : undefined;
+    const previous = sessionState.cacheAnalytics.lastRequestBody;
+    const previousMeta = sessionState.cacheAnalytics.lastRequestMeta;
     const turnAnalysis = analyzeCacheTurn(
       sessionState.cacheAnalytics,
       requestBody,
@@ -16616,6 +16627,20 @@ export function recordCacheTurnUsage(
       cacheStrategy,
     );
     bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
+    if (turnAnalysis.prefixRewrite && previous && previousMeta) {
+      try {
+        capturePrefixSnapshot(sessionState, {
+          body: previous,
+          ...previousMeta,
+        });
+      } catch (e) {
+        // Losing a snapshot only makes an older anchor start cold.
+        log.warn("prefix snapshot capture failed:", e);
+      }
+    }
+    sessionState.cacheAnalytics.lastRequestMeta = wire
+      ? { model, wire, sentAt: sessionState.lastRequestTime || Date.now() }
+      : null;
     if (genAiSpan) {
       setCacheAnalyticsAttributes(
         genAiSpan,
@@ -16844,6 +16869,7 @@ function postResponseForTenant(
       suppressTemporalStorage ? undefined : requestBody,
       genAiSpan,
       endSpan,
+      req.protocol,
     );
     // Admin credentials are authorized at dispatch time and never retained in
     // session snapshots. The idle warmer still receives gateway-global extras,

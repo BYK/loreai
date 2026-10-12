@@ -1132,6 +1132,7 @@ describe("categorizeBust", () => {
       currSnippet: undefined,
       system0Bust: false,
       relocatable: false,
+      prefixRewrite: false,
       ...overrides,
     };
   }

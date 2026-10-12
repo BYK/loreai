@@ -766,12 +766,24 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(pid);
+    database
+      .query("DELETE FROM session_prefix_snapshots WHERE project_id = ?")
+      .run(pid);
     // Match confirmed ownership before deleting the source rows. A different
     // project may have messages with the same globally keyed session ID, while
     // the owning project may have a state before its first temporal message.
     deleteOwnedProjectSessionStates(database, pid);
     // session_meta is a derived cache — sweep the project's rows with the rest.
     database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
+    // Thread links are project-owned application data (#1809).
+    for (const table of ["thread_permissions", "thread_prefixes"]) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE thread_id IN (SELECT id FROM thread_links WHERE project_id = ?)`,
+        )
+        .run(pid);
+    }
+    database.query("DELETE FROM thread_links WHERE project_id = ?").run(pid);
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
@@ -929,9 +941,23 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(projectId);
+    database
+      .query("DELETE FROM session_prefix_snapshots WHERE project_id = ?")
+      .run(projectId);
     deleteOwnedProjectSessionStates(database, projectId);
     database
       .query("DELETE FROM session_meta WHERE project_id = ?")
+      .run(projectId);
+    // Thread links are project-owned application data (#1809).
+    for (const table of ["thread_permissions", "thread_prefixes"]) {
+      database
+        .query(
+          `DELETE FROM ${table} WHERE thread_id IN (SELECT id FROM thread_links WHERE project_id = ?)`,
+        )
+        .run(projectId);
+    }
+    database
+      .query("DELETE FROM thread_links WHERE project_id = ?")
       .run(projectId);
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
@@ -1276,6 +1302,11 @@ export function deleteSession(
       .run(pid, sessionId);
     database
       .query(
+        "DELETE FROM session_prefix_snapshots WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query(
         "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",
       )
       .run(pid, sessionId);
@@ -1582,6 +1613,7 @@ export function moveSessions(
         ["tool_calls", "session_id"],
         ["session_rollup", "session_id"],
         ["session_prompt_deltas", "session_id"],
+        ["session_prefix_snapshots", "session_id"],
         ["knowledge_session_injections", "session_id"],
         ["knowledge_current", "source_session"],
       ] as const) {
@@ -1698,6 +1730,13 @@ export function moveSessions(
           `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
+      // A thread link lives in its source session's project, so links
+      // anchored in a moving session move with it.
+      database
+        .query(
+          `UPDATE thread_links SET project_id = ?, revision = revision + 1, updated_at = MAX(?, updated_at + 1) WHERE project_id = ? AND source_kind = 'session' AND source_id IN (${placeholders})`,
+        )
+        .run(toId, Date.now(), fromProjectId, ...allIds);
       // Clear both projects' fair cursors within this write transaction whenever
       // moving; queued rows remain durable even if ownership changed before
       // the transaction began.
@@ -1741,6 +1780,12 @@ export function moveSessions(
       database
         .query(
           `UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      database
+        .query(
+          `UPDATE session_prefix_snapshots SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
         )
         .run(toId, fromProjectId, ...allIds);
 

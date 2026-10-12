@@ -35,6 +35,7 @@ import { defaultModelForProvider } from "./worker-model";
 import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
+import { handleThreadRequest } from "./api-threads";
 import { handlePromotionRequest } from "./promotions";
 import { handleTeamActionRequest } from "./team-actions";
 import { handleSyncConflictRequest } from "./sync-conflicts";
@@ -933,6 +934,9 @@ export async function handleAPIRequest(
   const { pathname } = url;
   const method = req.method;
   let params: RouteParams | null;
+
+  const thread = await handleThreadRequest(req, url);
+  if (thread) return thread;
 
   // -----------------------------------------------------------------------
   // Data read endpoints

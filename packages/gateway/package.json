@@ -31,6 +31,7 @@
     "@stricli/auto-complete": "1.2.8",
     "@stricli/core": "1.2.8",
     "@supabase/supabase-js": "^2.58.0",
+    "arktype": "2.2.3",
     "google-auth-library": "^10.9.0",
     "hono": "4.13.7",
     "jsonc-parser": "3.3.1",
