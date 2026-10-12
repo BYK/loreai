@@ -7,6 +7,7 @@ import {
   onMount,
   Show,
   Switch,
+  untrack,
 } from "solid-js";
 import {
   createColumnHelper,
@@ -85,6 +86,7 @@ export const TeamPage: Component = () => {
   const folk = ws.state.folk;
   const [pageState, setPageState] = createSignal<PageState>("loading");
   const [teamId, setTeamId] = createSignal("");
+  const [memberLoadGeneration, setMemberLoadGeneration] = createSignal(0);
   const [members, setMembers] = createSignal<TeamMembersResponse>();
   const [loadingMembers, setLoadingMembers] = createSignal(false);
   const [pageError, setPageError] = createSignal<unknown>();
@@ -141,7 +143,12 @@ export const TeamPage: Component = () => {
 
   const loadMembers = async (selectedTeam: string) => {
     if (!selectedTeam) return;
+    const generation = untrack(() => memberLoadGeneration() + 1);
+    setMemberLoadGeneration(generation);
     if (selectedTeam !== teamId()) {
+      setMembers(undefined);
+      setReviewPolicy(undefined);
+      setReviewPolicyError(null);
       setStaleMemberId(null);
       setRemoveReceipt(null);
       setRoleReceipt(null);
@@ -156,6 +163,7 @@ export const TeamPage: Component = () => {
       const response = await ws.tracked(() =>
         ws.client.getTeamMembers(selectedTeam),
       );
+      if (generation !== memberLoadGeneration()) return;
       setMembers(response);
       setReviewPolicy(undefined);
       setReviewPolicyError(null);
@@ -164,23 +172,27 @@ export const TeamPage: Component = () => {
           const policy = await ws.tracked(() =>
             ws.client.getTeamReviewPolicy(selectedTeam),
           );
+          if (generation !== memberLoadGeneration()) return;
           setReviewPolicy(policy.policy);
         } catch (error) {
+          if (generation !== memberLoadGeneration()) return;
           setReviewPolicyError({
             cause: error,
             message: actionMessage(error),
           });
         }
       }
+      if (generation !== memberLoadGeneration()) return;
       if (response.remote === "anonymous") setPageState("anonymous");
       else if (response.remote === "hosted") setPageState("hosted");
       else if (response.remote === "unreachable") setPageState("unreachable");
       else setPageState("ready");
     } catch (error) {
+      if (generation !== memberLoadGeneration()) return;
       setPageError(error);
       setPageState(pageStateForError(error));
     } finally {
-      setLoadingMembers(false);
+      if (generation === memberLoadGeneration()) setLoadingMembers(false);
     }
   };
 

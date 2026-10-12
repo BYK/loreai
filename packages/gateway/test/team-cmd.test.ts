@@ -99,6 +99,9 @@ beforeEach(() => {
     errs.push(a.join(" "));
   });
   vi.mocked(getAuthedClient).mockResolvedValue(FAKE_CLIENT);
+  vi.mocked(team.teamMembers).mockResolvedValue([
+    { userId: "u", role: "viewer" },
+  ]);
   vi.mocked(team.teamMemberProfiles).mockResolvedValue([]);
   vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
     ok: true,
@@ -412,6 +415,7 @@ describe("set-role", () => {
       "s",
       "u",
       "admin",
+      "viewer",
     );
     expect(logs.join("\n")).toContain("Set Jordan to admin.");
     expect(logs.join("\n")).not.toContain("Set u to admin.");

@@ -209,7 +209,70 @@ function mount(component: () => JSX.Element, client: ApiClient) {
   ));
 }
 
+function deferred<T>() {
+  let resolvePromise: (value: T) => void = () => {
+    throw new Error("deferred promise was not initialized");
+  };
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: (value: T) => resolvePromise(value) };
+}
+
 describe("TeamPage", () => {
+  it("hides prior members when a team reload fails and ignores late responses", async () => {
+    const firstTeamResponse: TeamMembersResponse = {
+      ...memberResponse,
+      team: { id: "team-1", name: "Acme" },
+      members: memberResponse.members.map((member) => ({
+        ...member,
+        label: member.me ? "Admin A" : "Alice",
+      })),
+    };
+    const firstRequest = deferred<TeamMembersResponse>();
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockImplementationOnce(() => firstRequest.promise)
+      .mockRejectedValueOnce(new Error("Beta is unavailable"));
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeams: async () => ({
+          hosted: false,
+          teams: [
+            { id: "team-1", name: "Acme", role: "admin", member_count: 2 },
+            { id: "team-2", name: "Beta", role: "admin", member_count: 2 },
+          ],
+        }),
+        getTeamMembers,
+      }),
+    );
+
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledWith("team-1"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Team" }), {
+      target: { value: "team-2" },
+    });
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledWith("team-2"));
+    expect(
+      await screen.findByText("The team could not be loaded"),
+    ).toBeVisible();
+    expect(screen.queryByText("Alice")).toBeNull();
+    expect(screen.queryByText("Admin A")).toBeNull();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+
+    firstRequest.resolve(firstTeamResponse);
+    await firstRequest.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(screen.getByRole("combobox", { name: "Team" })).toHaveValue(
+      "team-2",
+    );
+    expect(screen.queryByText("Alice")).toBeNull();
+    expect(screen.queryByText("Admin A")).toBeNull();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+  });
+
   it("shows hosted mode before the anonymous state", async () => {
     mount(
       () => <TeamPage />,

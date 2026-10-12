@@ -1,5 +1,5 @@
 /**
- * Integration coverage for migration 0054's atomic member removal and key rotation.
+ * Integration coverage for atomic team-role updates, member removal, and key rotation.
  * Gated behind LORE_INTEGRATION=1 (needs Docker).
  */
 import { execFileSync } from "node:child_process";
@@ -60,12 +60,19 @@ const addMember = (admin: string, scope: string, user: string, role: string) =>
     ]),
   );
 
-const setRole = (admin: string, scope: string, user: string, role: string) =>
+const setRole = (
+  admin: string,
+  scope: string,
+  user: string,
+  role: string,
+  expectedRole: string,
+) =>
   h.asUser(admin, (client) =>
-    client.query("select public.set_scope_role($1, $2, $3)", [
+    client.query("select public.set_scope_role($1, $2, $3, $4)", [
       scope,
       user,
       role,
+      expectedRole,
     ]),
   );
 
@@ -248,7 +255,13 @@ describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
 
   it("rejects a stale expected role after a concurrent promotion", async () => {
     const fixture = await makeRemovalFixture();
-    await setRole(fixture.owner, fixture.scope, fixture.target, "editor");
+    await setRole(
+      fixture.owner,
+      fixture.scope,
+      fixture.target,
+      "editor",
+      "viewer",
+    );
     const before = await snapshot(fixture.scope, fixture.target);
     const error = await expectPgError(() =>
       h.asUser(fixture.owner, (client) =>
@@ -269,6 +282,60 @@ describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
     expect(await snapshot(fixture.scope, fixture.target)).toEqual(before);
   });
 
+  it("rejects a role update whose expected role changed after its read", async () => {
+    const fixture = await makeRemovalFixture();
+
+    // The first request reads this role before it pauses. A competing request then promotes the
+    // target, so the first request's stale expected role must fail inside the role-update RPC.
+    const observedRole = await h.client
+      .query(
+        "select role from public.scope_members where scope_id=$1 and user_id=$2",
+        [fixture.scope, fixture.target],
+      )
+      .then((result) => result.rows[0].role as string);
+    expect(observedRole).toBe("viewer");
+
+    await setRole(
+      fixture.owner,
+      fixture.scope,
+      fixture.target,
+      "admin",
+      observedRole,
+    );
+    const staleError = await expectPgError(() =>
+      setRole(
+        fixture.owner,
+        fixture.scope,
+        fixture.target,
+        "viewer",
+        observedRole,
+      ),
+    );
+
+    expect(staleError.code).toBe("P0001");
+    expect(await snapshot(fixture.scope, fixture.target)).toMatchObject({
+      membership: "admin",
+    });
+  });
+
+  it("rejects role changes through the retired three-argument RPC", async () => {
+    const fixture = await makeRemovalFixture();
+    const error = await expectPgError(() =>
+      h.asUser(fixture.owner, (client) =>
+        client.query("select public.set_scope_role($1, $2, $3)", [
+          fixture.scope,
+          fixture.target,
+          "admin",
+        ]),
+      ),
+    );
+
+    expect(error.code).toBe("42883");
+    expect(await snapshot(fixture.scope, fixture.target)).toMatchObject({
+      membership: "viewer",
+    });
+  });
+
   it("protects last-admin self-removal and demotion with the specified messages", async () => {
     const admin = await h.createUser();
     const scope = await createTeam(admin);
@@ -282,7 +349,7 @@ describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
     );
 
     const demotionError = await expectPgError(() =>
-      setRole(admin, scope, admin, "editor"),
+      setRole(admin, scope, admin, "editor", "admin"),
     );
     expect(demotionError.code).toBe("23514");
     expect(demotionError.message).toContain(

@@ -83,9 +83,20 @@ const removeMember = (
       [scope, user, expectedRole],
     ),
   );
-const setRole = (admin: string, scope: string, user: string, role: string) =>
+const setRole = (
+  admin: string,
+  scope: string,
+  user: string,
+  role: string,
+  expectedRole: string,
+) =>
   h.asUser(admin, (c) =>
-    c.query("select public.set_scope_role($1,$2,$3)", [scope, user, role]),
+    c.query("select public.set_scope_role($1,$2,$3,$4)", [
+      scope,
+      user,
+      role,
+      expectedRole,
+    ]),
   );
 const addKnowledge = (uid: string, scope: string, id: string) =>
   h.asUser(uid, (c) =>
@@ -233,13 +244,13 @@ describe.skipIf(gate())("0029 team lifecycle RPCs (E-4c, #827)", () => {
     expect(
       (await expectError(() => removeMember(a, scope, a, "admin"))).code,
     ).toBe("23514");
-    expect((await expectError(() => setRole(a, scope, a, "editor"))).code).toBe(
-      "23514",
-    );
+    expect(
+      (await expectError(() => setRole(a, scope, a, "editor", "admin"))).code,
+    ).toBe("23514");
     // With a second admin, demoting the first is allowed.
     const b = await h.createUser();
     await addMember(a, scope, b, "admin");
-    await setRole(a, scope, a, "editor"); // now b is the remaining admin
+    await setRole(a, scope, a, "editor", "admin"); // now b is the remaining admin
     expect(
       await h.client
         .query(

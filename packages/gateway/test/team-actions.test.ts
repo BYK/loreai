@@ -746,6 +746,7 @@ describe("team action routes", () => {
       TEAM,
       USER,
       "viewer",
+      "admin",
     );
 
     const selfRemoval = await request(
@@ -784,6 +785,31 @@ describe("team action routes", () => {
     expect(await stale.json()).toMatchObject({
       error: { type: "stale_member", current_role: "editor" },
     });
+  });
+
+  it("returns stale_member when the role changes after the gateway read", async () => {
+    enableWrites();
+    teamMocks.setTeamRole.mockRejectedValueOnce(
+      new TeamRpcError("team member role changed; reload the team", "P0001"),
+    );
+
+    const response = await request(
+      `/api/v1/teams/${TEAM}/members/${OTHER}/role`,
+      "POST",
+      JSON.stringify({ role: "viewer", expected_role: "editor" }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { type: "stale_member" },
+    });
+    expect(teamMocks.setTeamRole).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      OTHER,
+      "viewer",
+      "editor",
+    );
   });
 
   it("rejects non-admin role changes and removals before cloud calls", async () => {
