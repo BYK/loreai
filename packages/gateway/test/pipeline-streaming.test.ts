@@ -2941,6 +2941,381 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("reinforces selected knowledge when its full-text delta is replayed", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const projectPath = `/tmp/lore-delta-replay-credit-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `delta-replay-credit-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(
+        validResponsesSSE(`delta_replay_${upstreamBodies.length}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const request = (task: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: task }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      if (!sessionID) throw new Error("Gateway session was not created");
+      const content =
+        "ReplayFullContext Gateway delta routing must keep the selected rule.";
+      const id = ltm.create({
+        projectPath,
+        category: "gotcha",
+        scope: "project",
+        title: "Gateway delta routing replay rule",
+        content,
+      });
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing replay"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).toContain(content);
+      const initialDeltaCount = listSessionPromptDeltas(sessionID).length;
+      expect(initialDeltaCount).toBeGreaterThan(0);
+      const oldTime = Date.now() - 8 * 24 * 60 * 60 * 1_000;
+      db()
+        .query(
+          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
+        )
+        .run(oldTime, ltm.logicalIdOf(id));
+
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing replay for the next task"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).toContain(content);
+      expect(listSessionPromptDeltas(sessionID)).toHaveLength(
+        initialDeltaCount,
+      );
+      const row = db()
+        .query(
+          "SELECT last_reinforced_at FROM knowledge_meta WHERE logical_id = ?",
+        )
+        .get(ltm.logicalIdOf(id)) as { last_reinforced_at: number };
+      expect(row.last_reinforced_at).toBeGreaterThan(oldTime);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
+  it("does not credit an edited version whose exact text was never replayed", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const projectPath = `/tmp/lore-delta-edited-credit-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `delta-edited-credit-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(
+        validResponsesSSE(`delta_edited_${upstreamBodies.length}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const request = (task: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: task }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      if (!sessionID) throw new Error("Gateway session was not created");
+      const original =
+        "Gateway delta routing must preserve US regional formatting.";
+      const edited = original.replace("US", "us");
+      const id = ltm.create({
+        projectPath,
+        category: "gotcha",
+        scope: "project",
+        title: "Gateway delta routing regional formatting",
+        content: original,
+      });
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing formatting"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).toContain(original);
+      const initialDeltaCount = listSessionPromptDeltas(sessionID).length;
+      ltm.update(id, { content: edited });
+      expect(ltm.getByLogical(ltm.logicalIdOf(id))?.content).toBe(edited);
+      const oldTime = Date.now() - 8 * 24 * 60 * 60 * 1_000;
+      db()
+        .query(
+          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
+        )
+        .run(oldTime, ltm.logicalIdOf(id));
+
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing formatting on the next task"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).toContain(original);
+      expect(upstreamBodies.at(-1)).not.toContain(edited);
+      expect(listSessionPromptDeltas(sessionID)).toHaveLength(
+        initialDeltaCount,
+      );
+      const row = db()
+        .query(
+          "SELECT last_reinforced_at FROM knowledge_meta WHERE logical_id = ?",
+        )
+        .get(ltm.logicalIdOf(id)) as { last_reinforced_at: number };
+      expect(row.last_reinforced_at).toBe(oldTime);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
+  it("does not credit a manifest when the replayed payload lacks the entry", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const projectPath = `/tmp/lore-delta-payload-credit-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `delta-payload-credit-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(
+        validResponsesSSE(`delta_payload_${upstreamBodies.length}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const request = (task: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: task }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      if (!sessionID) throw new Error("Gateway session was not created");
+      const content =
+        "Gateway delta routing requires PayloadFullText validation.";
+      const id = ltm.create({
+        projectPath,
+        category: "gotcha",
+        scope: "project",
+        title: "Gateway delta routing payload validation",
+        content,
+      });
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing payload"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).toContain(content);
+      const delta = listSessionPromptDeltas(sessionID).at(-1);
+      if (!delta) throw new Error("Full-text delta was not persisted");
+      db()
+        .query(
+          "UPDATE session_prompt_deltas SET content = ? WHERE session_id = ? AND seq = ?",
+        )
+        .run(
+          JSON.stringify([
+            {
+              role: "user",
+              content: [{ type: "text", text: "[memory refreshed]" }],
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "[memory refreshed]" }],
+            },
+          ]),
+          sessionID,
+          delta.seq,
+        );
+      const oldTime = Date.now() - 8 * 24 * 60 * 60 * 1_000;
+      db()
+        .query(
+          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
+        )
+        .run(oldTime, ltm.logicalIdOf(id));
+
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing payload again"),
+          loadLocalConfig(),
+        )
+      ).text();
+      expect(upstreamBodies.at(-1)).not.toContain(content);
+      const row = db()
+        .query(
+          "SELECT last_reinforced_at FROM knowledge_meta WHERE logical_id = ?",
+        )
+        .get(ltm.logicalIdOf(id)) as { last_reinforced_at: number };
+      expect(row.last_reinforced_at).toBe(oldTime);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
+  it("credits an edited hint only when its full text is delivered under the old ID", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const projectPath = `/tmp/lore-delta-version-credit-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `delta-version-credit-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(
+        validResponsesSSE(`delta_version_${upstreamBodies.length}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const request = (task: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: task }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      if (!sessionID) throw new Error("Gateway session was not created");
+      const entries = [
+        {
+          title: "Gateway delta routing alpha",
+          content:
+            "AlphaFullContext Gateway delta routing must validate input. ".repeat(
+              20,
+            ),
+        },
+        {
+          title: "Gateway delta routing beta",
+          content:
+            "BetaFullContext Gateway delta routing must validate output. ".repeat(
+              20,
+            ),
+        },
+      ];
+      const ids = entries.map((entry) =>
+        ltm.create({
+          projectPath,
+          category: "gotcha",
+          scope: "project",
+          ...entry,
+        }),
+      );
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing"),
+          loadLocalConfig(),
+        )
+      ).text();
+      const firstWire = upstreamBodies.at(-1);
+      if (!firstWire) throw new Error("No upstream request was sent");
+      const hinted = ids.find(
+        (id, index) => !firstWire.includes(entries[index].content.trim()),
+      );
+      if (!hinted) throw new Error("No entry was withheld from full delivery");
+      expect(firstWire).toContain(`k:${hinted}`);
+      const logicalId = ltm.logicalIdOf(hinted);
+      const injection = () =>
+        db()
+          .query(
+            "SELECT logical_id FROM knowledge_session_injections WHERE session_id = ? AND logical_id = ?",
+          )
+          .get(sessionID, logicalId);
+      expect(injection()).toBeNull();
+
+      const changedContent =
+        "EditedFullContext Gateway delta routing now requires an output guard.";
+      ltm.update(hinted, { content: changedContent });
+      const current = ltm.getByLogical(logicalId);
+      if (!current) throw new Error("Edited knowledge was not found");
+      expect(current.id).not.toBe(hinted);
+      await (
+        await handleRequest(
+          request("Fix gateway delta routing with the updated output guard"),
+          loadLocalConfig(),
+        )
+      ).text();
+      const secondWire = upstreamBodies.at(-1);
+      expect(secondWire).toContain(changedContent);
+      expect(secondWire).toContain(hinted.slice(0, 8));
+      expect(injection()).not.toBeNull();
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
   it("commits idle-warmed preferences on a real foreground cache hit and restores them after restart", async () => {
     const projectPath = `/tmp/lore-idle-pref-${Date.now()}`;
     const sessionHeaders = {

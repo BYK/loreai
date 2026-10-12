@@ -3650,6 +3650,77 @@ function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
   }
 }
 
+/** Delivery accounting uses exact bytes, never the normalized delta-churn key. */
+function exactKnowledgeDigest(
+  category: string,
+  title: string,
+  content: string,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([category, title, content]))
+    .digest("hex");
+}
+
+function deltaPayloadDigest(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/** Count only current selections whose full text is present in a replayed block. */
+function deliveredContextEntries(
+  sessionID: string,
+  projectID: string,
+  candidates: Map<string, ltm.KnowledgeEntry>,
+): ltm.KnowledgeEntry[] {
+  const byLogical = new Map(
+    [...candidates.values()].map((entry) => [entry.logical_id, entry]),
+  );
+  const delivered = new Map<string, ltm.KnowledgeEntry>();
+  const resolved = new Map<string, string>();
+  for (const block of listSessionPromptDeltas(sessionID)) {
+    if (block.projectID !== projectID) continue;
+    if (!parseMessageInsertSelector(block.selector)) continue;
+    if (!parseDeltaMessages(block.content).length) continue;
+    const mutation = parseDeltaMutation(block.selector);
+    if (!mutation) continue;
+    const selector = JSON.parse(block.selector) as {
+      full?: unknown;
+      payloadHash?: unknown;
+    };
+    // `mut.changed` also contains recall hints. Older blocks have no full-text
+    // manifest, so they cannot prove delivery and must not earn credit.
+    // Bind that manifest to the *persisted* payload before trusting its IDs.
+    if (
+      !Array.isArray(selector.full) ||
+      selector.full.length > 128 ||
+      selector.payloadHash !== deltaPayloadDigest(block.content)
+    )
+      continue;
+    const hashes = new Map(mutation.changed.map(({ id, h }) => [id, h]));
+    for (const item of selector.full) {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.id !== "string" ||
+        typeof item.h !== "string"
+      )
+        continue;
+      const { id, h } = item;
+      const logicalId = resolved.get(id) ?? ltm.logicalIdOf(id);
+      resolved.set(id, logicalId);
+      const entry = candidates.get(id) ?? byLogical.get(logicalId);
+      if (
+        !entry ||
+        entry.logical_id !== logicalId ||
+        hashes.get(id) !== surfaceSignature(entry.title, entry.content) ||
+        h !== exactKnowledgeDigest(entry.category, entry.title, entry.content)
+      )
+        continue;
+      delivered.set(logicalId, entry);
+    }
+  }
+  return [...delivered.values()];
+}
+
 /**
  * Reconstruct the ADVANCING surfaced set: the frozen system[2] pin baseline
  * (`baseline` = `id:hash` keys) advanced through every already-appended block's
@@ -3869,6 +3940,8 @@ export function appendKnowledgePromptDelta(input: {
           target: "messages",
           insertAt: input.insertAt,
           mut: rendered.mut,
+          full: rendered.full,
+          payloadHash: deltaPayloadDigest(content),
           debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
         }),
         content,
@@ -3901,6 +3974,7 @@ export function appendKnowledgePromptDelta(input: {
       ]),
     );
     if (!rendered.messages.length) return false;
+    const content = JSON.stringify(rendered.messages);
     updateSessionPromptDeltaSelector(
       input.sessionID,
       latest.seq,
@@ -3908,14 +3982,12 @@ export function appendKnowledgePromptDelta(input: {
         target: "messages",
         insertAt: input.insertAt,
         mut: rendered.mut,
+        full: rendered.full,
+        payloadHash: deltaPayloadDigest(content),
         debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
       }),
     );
-    updateSessionPromptDeltaContent(
-      input.sessionID,
-      latest.seq,
-      JSON.stringify(rendered.messages),
-    );
+    updateSessionPromptDeltaContent(input.sessionID, latest.seq, content);
     input.outRenderedIds?.push(...rendered.renderedIds);
     log.info(
       `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${debouncedMut.changed.length} changed, ${debouncedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
@@ -3923,6 +3995,7 @@ export function appendKnowledgePromptDelta(input: {
     return true;
   }
 
+  const content = JSON.stringify(current.messages);
   appendSessionPromptDelta({
     sessionID: input.sessionID,
     projectID,
@@ -3930,9 +4003,11 @@ export function appendKnowledgePromptDelta(input: {
       target: "messages",
       insertAt: input.insertAt,
       mut: current.mut,
+      full: current.full,
+      payloadHash: deltaPayloadDigest(content),
       debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
     }),
-    content: JSON.stringify(current.messages),
+    content,
   });
   input.outRenderedIds?.push(...current.renderedIds);
   log.info(
@@ -4048,7 +4123,12 @@ function renderCurrentDelta(
   overflow?: Array<{ id: string; category: string; title: string }>,
   retainedRemovedIds?: Set<string>,
   maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
-): { messages: GatewayMessage[]; mut: DeltaMutation; renderedIds: string[] } {
+): {
+  messages: GatewayMessage[];
+  mut: DeltaMutation;
+  renderedIds: string[];
+  full: Array<{ id: string; h: string }>;
+} {
   const removed = new Set(merged.removed);
   const changed: DeltaMutation["changed"] = [];
   const entries: Array<{
@@ -4117,16 +4197,33 @@ function renderCurrentDelta(
     }
   }
   const renderedIds: string[] = [];
+  const messages = buildKnowledgeDeltaMessage(
+    entries,
+    persistedRemoved,
+    loreSessionToken(sessionID),
+    visibleOverflow,
+    renderedIds,
+  );
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
   return {
-    messages: buildKnowledgeDeltaMessage(
-      entries,
-      persistedRemoved,
-      loreSessionToken(sessionID),
-      visibleOverflow,
-      renderedIds,
-    ),
+    messages,
     mut: { changed, removed: persistedRemoved },
     renderedIds,
+    full: renderedIds.flatMap((id) => {
+      const entry = byId.get(id);
+      return entry
+        ? [
+            {
+              id,
+              h: exactKnowledgeDigest(
+                entry.category,
+                entry.title,
+                entry.content,
+              ),
+            },
+          ]
+        : [];
+    }),
   };
 }
 
@@ -22597,7 +22694,6 @@ async function handleConversationTurnPrepared(
     );
   }
 
-  const deliveredContextIds: string[] = [];
   if (pendingKnowledgeDelta) {
     // Place the durable delta near the tail, but never between an
     // assistant(tool_use) and its user(tool_result) — inserting there orphans
@@ -22615,7 +22711,6 @@ async function handleConversationTurnPrepared(
       insertAt,
       now: Date.now(),
       ...pendingKnowledgeDelta,
-      outRenderedIds: deliveredContextIds,
     });
   }
   // Track the layer that produced the current delta placement so the next turn
@@ -22625,21 +22720,25 @@ async function handleConversationTurnPrepared(
     modifiedReq.messages,
     sessionID,
   );
-  if (deliveredContextIds.length) {
+  if (contextEffectOwner.projectID && contextEffectCandidates.size) {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
     if (ensureProject(projectPath) !== contextEffectOwner.projectID)
       throw new ReadPreparationUnavailableError("context", "pressure");
-    // A selected entry gets decay/outcome credit only when its full content was
-    // persisted and added to this request. ID/title recall hints are not injection.
-    ltm.recordForSessionEffects(
-      projectPath,
+    // Replayed full-text blocks count on later selections too. Correlate old
+    // surfaced IDs with current versions by tenant-scoped logical identity, and
+    // require matching content hashes. Recall hints never count as injection.
+    const delivered = deliveredContextEntries(
       sessionID,
-      deliveredContextIds.flatMap((id) => {
-        const entry = contextEffectCandidates.get(id);
-        return entry ? [entry] : [];
-      }),
-      req.signal,
+      contextEffectOwner.projectID,
+      contextEffectCandidates,
     );
+    if (delivered.length)
+      ltm.recordForSessionEffects(
+        projectPath,
+        sessionID,
+        delivered,
+        req.signal,
+      );
   }
   // Hard guarantee: deltas are spliced into the wire array AFTER the orphan
   // safety net (step 8) and persisted indices are replayed verbatim, so a
