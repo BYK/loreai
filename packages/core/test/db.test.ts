@@ -1338,6 +1338,52 @@ describe("db", () => {
     expect(indexes.length).toBe(1);
   });
 
+  test("v103 bounds tenant-scoped knowledge handle scans through the ID index", () => {
+    const plan = db()
+      .query(
+        "EXPLAIN QUERY PLAN SELECT id FROM knowledge INDEXED BY idx_knowledge_tenant_id WHERE tenant_id = ? AND id >= ? AND id < ? LIMIT 1025",
+      )
+      .all("tenant", "01900000", "01900000\uffff") as Array<{
+      detail: string;
+    }>;
+    expect(
+      plan.some(({ detail }) => detail.includes("idx_knowledge_tenant_id")),
+    ).toBe(true);
+    expect(
+      plan.some(({ detail }) =>
+        detail.includes("tenant_id=? AND id>? AND id<?"),
+      ),
+    ).toBe(true);
+  });
+
+  test("recovers the v103 replay index before an existing database serves requests", () => {
+    const connection = db();
+    expect(
+      connection.query("SELECT version FROM schema_version").get(),
+    ).toEqual({
+      version: MIGRATIONS.length,
+    });
+    connection.exec("DROP INDEX idx_knowledge_tenant_id");
+    close();
+
+    const recovered = db();
+    const plan = recovered
+      .query(
+        "EXPLAIN QUERY PLAN SELECT id FROM knowledge INDEXED BY idx_knowledge_tenant_id WHERE tenant_id = ? AND id >= ? AND id < ? LIMIT 1025",
+      )
+      .all("tenant", "01900000", "01900000\uffff") as Array<{
+      detail: string;
+    }>;
+    expect(
+      plan.some(({ detail }) => detail.includes("idx_knowledge_tenant_id")),
+    ).toBe(true);
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+  });
+
   test("ensureProject stores git_remote as null for non-git paths", () => {
     const id = ensureProject("/test/non-git/project-v14");
     const row = db()

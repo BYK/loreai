@@ -52,6 +52,19 @@ describe("LoreConfig — agentsFile schema", () => {
 });
 
 describe("LoreConfig — knowledge schema", () => {
+  test("architecture injection defaults to ranked and rejects unknown modes", () => {
+    expect(LoreConfig.parse({}).knowledge.architectureInjection).toBe("ranked");
+    for (const mode of ["ranked", "reserved"] as const) {
+      expect(
+        LoreConfig.parse({ knowledge: { architectureInjection: mode } })
+          .knowledge.architectureInjection,
+      ).toBe(mode);
+    }
+    expect(() =>
+      LoreConfig.parse({ knowledge: { architectureInjection: "off" } }),
+    ).toThrow();
+  });
+
   test("knowledge defaults: enabled=true", () => {
     const cfg = LoreConfig.parse({});
     expect(cfg.knowledge.enabled).toBe(true);

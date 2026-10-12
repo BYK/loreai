@@ -2479,6 +2479,12 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- a damaged database (it is recreated later by recovery).
   SELECT 1;
   `,
+  `
+  -- Version 103: bound replayed knowledge-handle ownership scans by tenant
+  -- and ID prefix. A tenant/project index cannot bound a prefix scan across
+  -- projects, including historical versions.
+  CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4611,6 +4617,9 @@ function recoverMissingObjects(database: Database) {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);
     CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
+    -- Foreground delta replay requires this exact index via INDEXED BY. Recover
+    -- it even when the schema version is already current and the index was lost.
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_current
       ON knowledge(logical_id) WHERE is_current = 1;
     CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
