@@ -1,4 +1,4 @@
-import { db, keystore, syncData } from "@loreai/core";
+import { db, keystore, ltm, syncData } from "@loreai/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the network + sync layers so cmdEnable is testable (bootstrapEncryption tests
@@ -42,6 +42,7 @@ vi.mock("../src/sync", () => ({
 import {
   bootstrapEncryption,
   cmdEnable,
+  commandSync,
   type EncryptionPrompts,
   generateRecoveryCode,
   makeSyncProgress,
@@ -55,7 +56,7 @@ const confirmed = () => Promise.resolve({ confirmed: true });
 
 beforeEach(() => {
   db().exec(
-    "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM sync_outbox;",
+    "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM sync_outbox; DELETE FROM sync_conflicts;",
   );
   keystore.lock();
   if (syncData.isSyncEnabled()) syncData.disableSync();
@@ -64,6 +65,92 @@ beforeEach(() => {
   escrowError = null;
   pullOnceMock.mockClear();
   syncOnceMock.mockClear();
+});
+
+function addKnowledgeConflict() {
+  const id = ltm.create({
+    scope: "global",
+    category: "pattern",
+    title: "Current title",
+    content: "Current content",
+  });
+  syncData.recordConflict("knowledge", id, "remote_upsert_wins", {
+    title: "Local title",
+    content: "Local content",
+    category: "pattern",
+  });
+  const conflictId = syncData.listSyncConflicts(1)[0].id;
+  const current = db()
+    .query("SELECT id FROM knowledge_current WHERE logical_id = ?")
+    .get(id) as { id: string };
+  return { id, conflictId, versionId: current.id };
+}
+
+describe("lore sync conflicts", () => {
+  it("lists conflicts through the local sync-conflict store", async () => {
+    const { conflictId } = addKnowledgeConflict();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await commandSync(["conflicts"], {});
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(`${conflictId}  knowledge`),
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("keeps a local conflict snapshot through the shared action function", async () => {
+    const { id, conflictId, versionId } = addKnowledgeConflict();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await commandSync(["conflicts", "keep", String(conflictId)], {
+        "expected-version": versionId,
+      });
+      expect(log).toHaveBeenCalledWith(
+        `Kept local snapshot for sync conflict ${conflictId}.`,
+      );
+      expect(ltm.getByLogical(id)).toMatchObject({
+        title: "Local title",
+        content: "Local content",
+      });
+      expect(syncData.getSyncConflict(conflictId)).toBeNull();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("discards a conflict and rejects missing expected versions", async () => {
+    const { conflictId } = addKnowledgeConflict();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await commandSync(["conflicts", "discard", String(conflictId)], {});
+      expect(log).toHaveBeenCalledWith(
+        `Discarded sync conflict ${conflictId}.`,
+      );
+      expect(syncData.getSyncConflict(conflictId)).toBeNull();
+
+      await commandSync(["conflicts", "keep", "1"], {});
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(
+        "keep requires --expected-version <version-id>",
+      );
+
+      process.exitCode = undefined;
+      await commandSync(["conflicts", "discard", "999999"], {});
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenLastCalledWith(
+        "not_found: Sync conflict 999999 not found",
+      );
+    } finally {
+      error.mockRestore();
+      log.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+  });
 });
 
 function prompts(over: Partial<EncryptionPrompts> = {}): EncryptionPrompts {

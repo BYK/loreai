@@ -56,6 +56,7 @@ const SKIP = !RUN
 let h: PgHarness;
 let admin: string; // @acme.dev verified — org owner + domain claimant
 let coworker: string; // @acme.dev verified — eligible to request
+let orgMember: string; // plain org member, not an approver
 let outsider: string; // @other.dev verified — NOT eligible
 let unverified: string; // @acme.dev but email NOT confirmed — NOT eligible
 let freemailAdmin: string; // @gmail.com verified — cannot claim gmail.com
@@ -106,6 +107,7 @@ beforeAll(async () => {
   h = await startPgHarness({ postgrest: true });
   admin = await h.createUser("boss@acme.dev");
   coworker = await h.createUser("dev@acme.dev");
+  orgMember = await h.createUser("staff@acme.dev");
   outsider = await h.createUser("stranger@other.dev");
   unverified = await h.createUser("ghost@acme.dev", false); // email NOT confirmed
   freemailAdmin = await h.createUser("someone@gmail.com");
@@ -143,6 +145,57 @@ describe.skipIf(SKIP)("domain auto-join (E-5-b, Model B)", () => {
     expect((await listDomainJoinRequests(clientFor(admin), org)).length).toBe(
       0,
     );
+  });
+
+  it("domain join-request profiles are approver-only and include pending requester identities", async () => {
+    const { org } = await freshOrg("Acme");
+    await claimOrgDomain(clientFor(admin), org, "acme.dev", "member");
+    const requestId = await requestDomainJoin(
+      clientFor(coworker),
+      org,
+      "acme.dev",
+    );
+    await h.client.query(
+      "insert into public.org_members (org_id, user_id, role) values ($1, $2, 'member')",
+      [org, orgMember],
+    );
+    await h.client.query(
+      "insert into public.domain_join_requests (org_id, domain, user_id, status) values ($1, 'acme.dev', $2, 'rejected'), ($1, 'acme.dev', $3, 'approved')",
+      [org, unverified, outsider],
+    );
+
+    const { data, error } = await clientFor(admin).rpc(
+      "domain_join_request_profiles",
+      { p_org: org },
+    );
+    expect(error).toBeNull();
+    expect(data).toHaveLength(1);
+    expect(data).toEqual([
+      expect.objectContaining({
+        request_id: requestId,
+        user_id: coworker,
+        email: "dev@acme.dev",
+      }),
+    ]);
+
+    const listed = await listDomainJoinRequests(clientFor(admin), org);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      id: requestId,
+      userId: coworker,
+      label: "dev@acme.dev",
+    });
+
+    const memberRead = await clientFor(orgMember).rpc(
+      "domain_join_request_profiles",
+      { p_org: org },
+    );
+    expect(memberRead.error?.code).toBe("42501");
+    const outsiderRead = await clientFor(outsider).rpc(
+      "domain_join_request_profiles",
+      { p_org: org },
+    );
+    expect(outsiderRead.error?.code).toBe("42501");
   });
 
   it("a non-admin cannot claim a domain (42501)", async () => {

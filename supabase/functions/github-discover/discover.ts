@@ -70,6 +70,24 @@ export function parseRepoRef(input: string): RepoRef | null {
   return { owner, name };
 }
 
+export function isValidInviteLogins(
+  value: unknown,
+  inviteScope: unknown,
+  maxInvites = 200,
+): value is string[] | undefined {
+  return (
+    value === undefined ||
+    (typeof inviteScope === "string" &&
+      Array.isArray(value) &&
+      value.length <= maxInvites &&
+      value.every(
+        (login) =>
+          typeof login === "string" &&
+          /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(login),
+      ))
+  );
+}
+
 /**
  * List the AUTHENTICATED user's repos (owner + collaborator affiliations) using their OWN token.
  * v1: first page only (per_page=100); pagination is a follow-up. Returns "owner/name" refs.

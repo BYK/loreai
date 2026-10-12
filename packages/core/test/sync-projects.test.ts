@@ -9,7 +9,9 @@ import {
   convergeProjectsByRemote,
   db,
   deleteTeamConfig,
+  projectScope,
   reinstallSyncCapture,
+  setProjectScope,
 } from "../src/db";
 import {
   applyRemoteProject,
@@ -17,6 +19,8 @@ import {
   enableSync,
   readOutbox,
   reconcile,
+  reconcileRemovedTeamProjects,
+  replaceRegistryTable,
   reseedProjectContent,
   setSyncState,
 } from "../src/sync-data";
@@ -125,6 +129,8 @@ beforeEach(() => {
   db().exec("DELETE FROM knowledge");
   db().exec("DELETE FROM entities");
   db().exec("DELETE FROM profiles");
+  db().exec("DELETE FROM scope_members");
+  db().exec("DELETE FROM scopes");
   db().exec(
     "DELETE FROM projects WHERE path LIKE '/local/%' OR path LIKE '/real/%' OR path LIKE 'lore:project/%'",
   );
@@ -314,6 +320,40 @@ describe("content git_remote gate — P2a (#1246)", () => {
     reseedProjectContent("p");
     expect(outboxRowIds("knowledge").sort()).toEqual(["k-cross", "k1", "k2"]);
     expect(outboxRowIds("entities")).toEqual(["e1"]);
+  });
+
+  test("reconciles a removed team member's project scope and requeues content", () => {
+    insertProject("p-removed-member", "R");
+    insertKnowledge("k-removed-member", "p-removed-member");
+    db()
+      .query(
+        "INSERT INTO scopes (id, kind, name) VALUES ('team-scope', 'team', 'Team')",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('team-scope', 'departed-user', 'editor', ?, ?)",
+      )
+      .run(now(), now());
+    setProjectScope("p-removed-member", "team-scope");
+    enableSync("basic");
+    replaceRegistryTable("scope_members", [
+      {
+        scope_id: "team-scope",
+        user_id: "remaining-user",
+        role: "admin",
+        created_at: now(),
+        updated_at: now(),
+      },
+    ]);
+    const before = readOutbox(0, 1000).length;
+
+    expect(reconcileRemovedTeamProjects("departed-user")).toBe(1);
+
+    expect(projectScope("p-removed-member")).toBeNull();
+    expect(readOutbox(0, 1000).length).toBeGreaterThan(before);
+    expect(outboxRowIds("knowledge")).toContain("k-removed-member");
+    expect(reconcileRemovedTeamProjects("departed-user")).toBe(0);
   });
 
   test("reseedProjectContent: no-op when sync is disabled", () => {

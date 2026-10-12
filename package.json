@@ -25,6 +25,8 @@
     "site:build": "pnpm --filter '@loreai/website' build",
     "site:preview": "pnpm --filter '@loreai/website' preview",
     "generate:docs": "tsx scripts/generate-config-docs.ts && tsx scripts/generate-env-docs.ts",
+    "generate:env-docs": "tsx scripts/generate-env-docs.ts",
+    "check:env-docs": "tsx scripts/generate-env-docs.ts --check",
     "check:patches": "tsx scripts/check-patches.ts",
     "check:docs": "tsx scripts/generate-config-docs.ts --check && tsx scripts/generate-env-docs.ts --check",
     "check:links": "node scripts/check-docs-links.mjs",

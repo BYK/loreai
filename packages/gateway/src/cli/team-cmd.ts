@@ -5,7 +5,7 @@
 import { resolve } from "node:path";
 import {
   db,
-  effectivePromotionPolicy,
+  projectAutoShare,
   getGitRemote,
   keystore,
   ltm,
@@ -28,6 +28,7 @@ import {
   createTeam,
   createTeamInvite,
   discoverGitHubContributors,
+  identityLabel,
   isEmailAddress,
   listDomainJoinRequests,
   listTeams,
@@ -37,6 +38,7 @@ import {
   sendInviteEmail,
   setTeamRole,
   teamMembers,
+  teamMemberProfiles,
 } from "../team";
 import {
   decidePromotionService,
@@ -48,7 +50,7 @@ import {
 } from "../promotions";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] [--team <team>] | propose <knowledge-id> | approve <request-id> [--note <text>] | reject <request-id> [--note <text>] | withdraw <request-id> | review-policy <team> <required|optional> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | leave <team> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] [--team <team>] | propose <knowledge-id> | approve <request-id> [--note <text>] | reject <request-id> [--note <text>] | withdraw <request-id> | review-policy <team> <required|optional> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 function reportPromotionFailure(result: {
   code: string;
@@ -56,6 +58,23 @@ function reportPromotionFailure(result: {
 }): void {
   console.error(`lore team: ${result.code}: ${result.message}`);
   process.exitCode = 1;
+}
+
+async function memberLabels(
+  client: Parameters<typeof teamMembers>[0],
+  scopeId: string,
+): Promise<Map<string, string>> {
+  try {
+    const profiles = await teamMemberProfiles(client, scopeId);
+    return new Map(
+      profiles.map(
+        (profile) =>
+          [profile.user_id, identityLabel(profile) ?? "Former member"] as const,
+      ),
+    );
+  } catch {
+    return new Map();
+  }
 }
 
 export async function commandTeam(
@@ -76,6 +95,7 @@ export async function commandTeam(
     "create",
     "add",
     "remove",
+    "leave",
     "set-role",
     "invite",
     "accept",
@@ -112,8 +132,9 @@ export async function commandTeam(
       case "members": {
         const scope = positionals[1];
         if (!scope) return usage();
+        const labels = await memberLabels(client, scope);
         for (const m of await teamMembers(client, scope))
-          console.log(`${m.userId}  ${m.role}`);
+          console.log(`${labels.get(m.userId) ?? "Former member"}  ${m.role}`);
         break;
       }
       case "discover": {
@@ -294,18 +315,51 @@ export async function commandTeam(
       case "remove": {
         const [, scope, userId] = positionals;
         if (!scope || !userId) return usage();
-        const { newEpoch, rewrapped, skipped } = await removeTeamMember(
-          client,
-          scope,
-          userId,
-        );
+        const labels = await memberLabels(client, scope);
+        const { newEpoch, rewrapped, skipped, unlinkedProjects } =
+          await removeTeamMember(client, scope, userId);
         console.log(
-          `Removed ${userId} and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
+          `Removed ${labels.get(userId) ?? userId} and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
         );
         if (skipped.length > 0)
           console.log(
-            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.join(", ")}`,
+            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.map((id) => labels.get(id) ?? "Former member").join(", ")}`,
           );
+        if (unlinkedProjects > 0)
+          console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
+        break;
+      }
+      case "leave": {
+        const teamRef = positionals[1];
+        if (!teamRef) return usage();
+        const user = await getCurrentUser();
+        if (!user) {
+          console.error("Not logged in — run `lore login` first.");
+          process.exitCode = 1;
+          return;
+        }
+        const team = (await listTeams(client)).find(
+          (item) =>
+            item.scopeId === teamRef ||
+            item.name.toLocaleLowerCase() === teamRef.toLocaleLowerCase(),
+        );
+        if (!team) {
+          console.error(`Team not found: ${teamRef}`);
+          process.exitCode = 1;
+          return;
+        }
+        const labels = await memberLabels(client, team.scopeId);
+        const { newEpoch, rewrapped, skipped, unlinkedProjects } =
+          await removeTeamMember(client, team.scopeId, user.user_id);
+        console.log(
+          `Left team "${team.name}" and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
+        );
+        if (skipped.length > 0)
+          console.log(
+            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.map((id) => labels.get(id) ?? "Former member").join(", ")}`,
+          );
+        if (unlinkedProjects > 0)
+          console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
         break;
       }
       case "set-role": {
@@ -313,8 +367,9 @@ export async function commandTeam(
         if (!scope || !userId || !role) return usage();
         if (role !== "admin" && role !== "editor" && role !== "viewer")
           return usage();
+        const labels = await memberLabels(client, scope);
         await setTeamRole(client, scope, userId, role);
-        console.log(`Set ${userId} to ${role}.`);
+        console.log(`Set ${labels.get(userId) ?? userId} to ${role}.`);
         break;
       }
       case "invite": {
@@ -484,13 +539,13 @@ export async function commandTeam(
           return;
         }
         setProjectScope(pid, scope.id);
-        const policy = effectivePromotionPolicy(pid);
+        const autoShare = projectAutoShare(pid);
         console.log(
           `Linked this project to team "${scope.name ?? scope.id}" (${scope.id}).`,
         );
         console.log(
-          policy === "auto"
-            ? "Policy: AUTO SHARE — pending entries here are proposed automatically; the team's review policy controls approval."
+          autoShare
+            ? "Auto-share is per project. Pending entries here are proposed automatically; the team's review policy controls approval."
             : "Policy: MANUAL SHARE — pending team entries are not proposed automatically (`lore team propose <logical-id>`).",
         );
         break;
@@ -705,7 +760,7 @@ export async function commandTeam(
         }
         setProjectPromotionPolicy(pid, policy);
         console.log(
-          `Set this project's auto-share override to ${policy}. ${policy === "auto" ? "Pending team entries will be proposed automatically; the team's review policy controls approval." : "Team entries will not be proposed automatically."}`,
+          `Set this project's auto-share override to ${policy}. Auto-share is per project; the team's review policy controls approval. ${policy === "auto" ? "Pending team entries here will be proposed automatically." : "Team entries here will not be proposed automatically."}`,
         );
         break;
       }
@@ -749,7 +804,9 @@ export async function commandTeam(
               break;
             }
             for (const r of reqs)
-              console.log(`${r.id}  ${r.userId}  @${r.domain}`);
+              console.log(
+                `${r.id}  ${r.label ?? "Unknown requester"}  @${r.domain}`,
+              );
             break;
           }
           case "approve": {

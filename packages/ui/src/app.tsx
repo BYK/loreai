@@ -1,13 +1,13 @@
 import type { Component, ParentProps } from "solid-js";
-import { lazy } from "solid-js";
+import { createSignal, lazy, Show } from "solid-js";
 import { A, type RouteDefinition, Router } from "@solidjs/router";
 
 import { Browse } from "./routes/Browse";
-import { WorkspaceProvider } from "./routes/workspace";
-import type { ApiClient } from "./lib/api";
+import { Workspace } from "./components/shell/Workspace";
+import { WorkspaceProvider, useWorkspace } from "./routes/workspace";
+import { setGatewayAuthToken, type ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
 import { theme } from "./lib/theme";
-import { Workspace } from "./components/shell/Workspace";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
 export const ROUTER_BASE = "/ui";
@@ -136,6 +136,22 @@ export const routes: RouteDefinition[] = [
         ),
       },
       {
+        path: "/team",
+        component: lazy(() =>
+          import("./routes/FolkManagement").then((m) => ({
+            default: m.TeamRoute,
+          })),
+        ),
+      },
+      {
+        path: "/conflicts",
+        component: lazy(() =>
+          import("./routes/FolkManagement").then((m) => ({
+            default: m.ConflictsRoute,
+          })),
+        ),
+      },
+      {
         path: "/projects/:projectId/knowledge/:knowledgeId",
         component: () => <Browse view="entry" />,
       },
@@ -181,6 +197,61 @@ export const routes: RouteDefinition[] = [
   ...devOnlyRoutes,
 ];
 
+const RemoteGatewayAuthGate: Component<ParentProps> = (props) => {
+  const workspace = useWorkspace();
+  const [token, setToken] = createSignal("");
+
+  const connect = (event: SubmitEvent) => {
+    event.preventDefault();
+    const value = token().trim();
+    if (!value) return;
+    setGatewayAuthToken(value);
+    setToken("");
+    workspace.state.projects.list.reload();
+  };
+
+  return (
+    <Show
+      when={workspace.connection.state() === "unauthorized"}
+      fallback={props.children}
+    >
+      <main
+        class="mx-auto max-w-xl p-8 text-sm"
+        data-testid="gateway-auth-gate"
+      >
+        <h1 class="text-lg font-semibold">Connect to your gateway</h1>
+        <p class="mt-2 text-muted">
+          Enter the LORE_GATEWAY_AUTH_TOKEN configured on this gateway to open
+          its dashboard.
+        </p>
+        <form class="mt-6 grid gap-3" onSubmit={connect}>
+          <label class="grid gap-2" for="gateway-token">
+            <span>Gateway token</span>
+            <input
+              id="gateway-token"
+              class="rounded border border-default bg-panel px-3 py-2"
+              type="password"
+              autocomplete="current-password"
+              value={token()}
+              onInput={(event) => setToken(event.currentTarget.value)}
+              required
+            />
+          </label>
+          <button
+            class="w-fit rounded border border-default px-3 py-2"
+            type="submit"
+          >
+            Connect
+          </button>
+          <p class="text-muted" role="status">
+            {workspace.connection.detail()}
+          </p>
+        </form>
+      </main>
+    </Show>
+  );
+};
+
 /**
  * Router root: provides the workspace data context to every route.
  */
@@ -190,7 +261,7 @@ export function createAppRoot(
 ): Component<ParentProps> {
   return (props) => (
     <WorkspaceProvider client={client} db={db}>
-      {props.children}
+      <RemoteGatewayAuthGate>{props.children}</RemoteGatewayAuthGate>
     </WorkspaceProvider>
   );
 }

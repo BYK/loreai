@@ -186,7 +186,7 @@ export {
   projectScope,
   setProjectScope,
   setProjectPromotionPolicy,
-  effectivePromotionPolicy,
+  projectAutoShare,
   resolveWritableScope,
   scopeMemberRole,
   resolveProjectByRemoteOrPath,

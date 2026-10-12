@@ -26,6 +26,7 @@ const account: AccountStatus = {
 };
 
 const teams: TeamList = {
+  hosted: false,
   teams: [{ id: "team-1", name: "Acme", role: "admin", member_count: 3 }],
 };
 
@@ -101,6 +102,8 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
         project_override: null,
         team_default: null,
       },
+      auto_share: false,
+      review_required: null,
       state: "not_linked",
       detail: null,
     }),
