@@ -52,6 +52,7 @@ import {
 import { parseBooleanParam } from "./query-bool";
 import { handleSessionContext } from "./session-context-api";
 import { handleCheckedDeleteKnowledge } from "./knowledge-edit-api";
+import { handleKnowledgeFiles } from "./knowledge-files";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -999,6 +1000,15 @@ export async function handleAPIRequest(
     if (params) {
       return handleKnowledgeVersions(
         url,
+        params.id,
+        data.resolveId("knowledge", params.id) ?? params.id,
+      );
+    }
+
+    // GET /api/v1/knowledge/:id/files
+    params = matchRoute(pathname, "/api/v1/knowledge/:id/files");
+    if (params) {
+      return handleKnowledgeFiles(
         params.id,
         data.resolveId("knowledge", params.id) ?? params.id,
       );

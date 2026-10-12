@@ -26,6 +26,7 @@ import {
   isApiError,
   isContractError,
   knowledgeEntry,
+  knowledgeFiles,
   knowledgeList,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
@@ -165,6 +166,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "cursor/knowledge-versions.json": {
     route: "/knowledge/k/versions",
     schema: knowledgeVersionHistory,
+  },
+  "knowledge-files.json": {
+    route: "/knowledge/k/files",
+    schema: knowledgeFiles,
   },
 };
 

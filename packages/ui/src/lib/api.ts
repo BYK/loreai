@@ -49,6 +49,7 @@ import {
   knowledgeDeleteResult,
   knowledgeEditResult,
   knowledgeEffects,
+  knowledgeFiles,
   knowledgeList,
   formatKnowledgeSort,
   knowledgeRestoreResult,
@@ -119,6 +120,7 @@ import {
   type KnowledgeDeleteResult,
   type KnowledgeEditResult,
   type KnowledgeEffects,
+  type KnowledgeFiles,
   type KnowledgeSearchResponse,
   type KnowledgeVersionHistory,
   type KnowledgeRestoreResult,
@@ -637,6 +639,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
         }),
         undefined,
         knowledgeDeleteResult,
+        signal,
+      );
+    },
+    getKnowledgeFiles(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeFiles> {
+      return getJson(
+        apiPath(["knowledge", id, "files"]),
+        knowledgeFiles,
         signal,
       );
     },

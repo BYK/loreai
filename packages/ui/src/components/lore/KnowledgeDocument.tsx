@@ -16,6 +16,7 @@ import type {
   DistillationDetail,
   KnowledgeEntry,
   KnowledgeVersion,
+  KnowledgeFiles as KnowledgeFilesData,
   ProjectSummary,
 } from "~/contracts";
 import type { EvidenceResult } from "~/state/sessions";
@@ -25,6 +26,7 @@ import { errorStateFor } from "./ErrorState";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
 import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
+import { KnowledgeFiles } from "./KnowledgeFiles";
 import { RetainedSummary } from "./RetainedSummary";
 import { VersionHistory } from "./VersionHistory";
 
@@ -68,6 +70,7 @@ export const KnowledgeDocument: Component<{
   entry: KnowledgeEntry;
   project: ProjectSummary | undefined;
   versions?: Loader<KnowledgeVersionHistory>;
+  files?: Loader<KnowledgeFilesData>;
   evidence?: Loader<EvidenceResult>;
   loadDistillation?: (id: string) => Promise<DistillationDetail>;
   actions?: JSX.Element;
@@ -285,6 +288,9 @@ export const KnowledgeDocument: Component<{
                     </Show>
                   )}
                 </Show>
+              </Show>
+              <Show when={props.files}>
+                {(files) => <KnowledgeFiles loader={files()} />}
               </Show>
             </div>
             <div class="space-y-2">

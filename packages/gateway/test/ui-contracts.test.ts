@@ -28,6 +28,7 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  knowledgeFiles,
   knowledgeList,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
@@ -648,6 +649,37 @@ describe("ui contracts against the real gateway", () => {
       v1(["knowledge", SEEDED.knowledgeId, "versions"]),
       knowledgeVersionHistory,
     );
+  });
+
+  it("GET knowledge files", async () => {
+    const { db, ltm } = await import("@loreai/core");
+    const logicalId = ltm.logicalIdOf(SEEDED.knowledgeId);
+    db()
+      .query(
+        "UPDATE knowledge SET metadata = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(
+        JSON.stringify({
+          gitHead: "0123456789abcdef0123456789abcdef01234567",
+        }),
+        logicalId,
+      );
+    ltm.setFileRefs(logicalId, ["src/contracts.ts"]);
+    try {
+      await contractRoute(
+        "knowledge-files.json",
+        `/knowledge/${SEEDED.knowledgeId}/files`,
+        v1(["knowledge", SEEDED.knowledgeId, "files"]),
+        knowledgeFiles,
+      );
+    } finally {
+      db()
+        .query(
+          "UPDATE knowledge SET metadata = NULL WHERE logical_id = ? AND is_current = 1",
+        )
+        .run(logicalId);
+      ltm.setFileRefs(logicalId, []);
+    }
   });
 
   it("GET /projects/:id/sessions", async () => {
