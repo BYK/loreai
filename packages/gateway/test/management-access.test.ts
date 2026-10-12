@@ -182,6 +182,23 @@ describe("management route access control", () => {
       "project team links",
       "/api/v1/projects/00000000-0000-0000-0000-000000000004/sharing/link",
     ],
+    ["remote sync execution", "/api/v1/sync/run"],
+    [
+      "knowledge promotions",
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000005/promote",
+    ],
+    [
+      "promotion approvals",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000006/approve",
+    ],
+    [
+      "promotion rejections",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000007/reject",
+    ],
+    [
+      "promotion withdrawals",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000008/withdraw",
+    ],
   ] as const)(
     "hides remote %s despite a valid gateway token and spoofed local headers",
     async (_label, path) => {

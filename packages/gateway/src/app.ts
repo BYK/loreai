@@ -147,11 +147,19 @@ function debugLog(config: GatewayConfig, message: string): void {
 function isGatewayOperatorMutation(method: string, path: string): boolean {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS")
     return false;
+  // These actions consume the gateway operator's persisted Supabase session;
+  // a remote gateway token must never confer that operator's identity.
   return (
     path === "/api/v1/teams" ||
     path.startsWith("/api/v1/teams/") ||
     /^\/api\/v1\/orgs\/[^/]+\/domains(?:\/|$)/.test(path) ||
-    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path)
+    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path) ||
+    (method === "POST" &&
+      (path === "/api/v1/sync/run" ||
+        /^\/api\/v1\/knowledge\/[^/]+\/promote$/.test(path) ||
+        /^\/api\/v1\/promotions\/[^/]+\/(?:approve|reject|withdraw)$/.test(
+          path,
+        )))
   );
 }
 
