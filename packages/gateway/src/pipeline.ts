@@ -3675,6 +3675,17 @@ function deliveredContextEntries(
   const byLogical = new Map(
     [...candidates.values()].map((entry) => [entry.logical_id, entry]),
   );
+  const textOwners = new Map<string, string>();
+  const ambiguousText = new Set<string>();
+  for (const entry of byLogical.values()) {
+    const text = JSON.stringify([entry.category, entry.title, entry.content]);
+    const owner = textOwners.get(text);
+    // An editable selector cannot assign identical full text to one of two
+    // selected logical entries. Fail closed even if their short IDs differ:
+    // an older surfaced version may have used either short handle.
+    if (owner && owner !== entry.logical_id) ambiguousText.add(text);
+    else textOwners.set(text, entry.logical_id);
+  }
   const delivered = new Map<string, ltm.KnowledgeEntry>();
   const resolved = new Map<string, string>();
   for (const block of listSessionPromptDeltas(sessionID)) {
@@ -3716,6 +3727,9 @@ function deliveredContextEntries(
       if (
         !entry ||
         entry.logical_id !== logicalId ||
+        ambiguousText.has(
+          JSON.stringify([entry.category, entry.title, entry.content]),
+        ) ||
         hashes.get(id) !== surfaceSignature(entry.title, entry.content) ||
         h !== exactKnowledgeDigest(entry.category, entry.title, entry.content)
       )
@@ -3724,7 +3738,9 @@ function deliveredContextEntries(
       // the persisted user payload; a hint or an added selector ID is not delivery.
       // Count duplicates so one rendered bullet cannot credit two claimed IDs
       // with identical short handles and text.
-      const line = `\n${formatKnowledgeEntry(entry)}\n`;
+      // An edited entry retains its surfaced ID in the delta even though its
+      // full text comes from the current version. Match the actual old handle.
+      const line = `\n${formatKnowledgeEntry({ ...entry, id })}\n`;
       const nextCount = (claimedLines.get(line) ?? 0) + 1;
       if (payload.split(line).length - 1 < nextCount) continue;
       claimedLines.set(line, nextCount);
