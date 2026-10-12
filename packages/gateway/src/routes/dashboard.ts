@@ -175,11 +175,11 @@ export const dashboardRoutes: RouteModule = {
       ),
     );
     app.put(
-      "/api/v1/costs/budgets",
+      "/api/v1/costs/pacing",
       ctx.declaredMethodsOnly(
         ["PUT"],
         wrapOperations((ops, req) =>
-          ops.handlePutProviderBudgets(req, ctx.config.hostedMode),
+          ops.handlePutProviderPacing(req, ctx.config.hostedMode),
         ),
       ),
     );

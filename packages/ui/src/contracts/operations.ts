@@ -158,25 +158,28 @@ export const historicalCosts = type({
   worker_breakdown: workerBreakdown,
 });
 
-/** One provider budget with its live status (#1927). */
-export const providerBudgetStatus = type({
+/** One quota window of a subscription account's automatic pacing (#2045). */
+export const pacingWindowStatus = type({
+  window: "string",
+  used: "number",
+  resets_at: "number",
+  sustainable_rate: "number",
+  current_rate: "number | null",
+  rate_source: "'observed' | 'average' | 'unknown'",
+  ratio: "number | null",
+  throttling: "boolean",
+  delay_ms: "number",
+});
+
+/** Automatic pacing status of one subscription account (#2045). */
+export const providerPacingStatus = type({
   provider: "string",
-  auth_kind: "'api_key' | 'subscription'",
-  account: "string | null",
-  mode: "'pace' | 'cap' | 'off'",
-  window: "'5h' | '7d' | 'day' | 'week'",
-  "headroom?": "number",
-  "unit?": "'usd' | 'tokens' | 'percent'",
-  "amount?": "number",
-  used: "number | null",
-  target: "number | null",
-  ahead: "number | null",
-  fraction: "number | null",
-  pressure: "number",
-  resets_at: "number | null",
-  stale: "boolean",
-  implicit: "boolean",
-  status: "'ok' | 'throttling' | 'paused' | 'stale' | 'unknown' | 'off'",
+  account: "string",
+  enabled: "boolean",
+  throttling: "boolean",
+  delay_ms: "number",
+  request_gap_ms: "number | null",
+  windows: pacingWindowStatus.array(),
 });
 
 export const costsSnapshot = type({
@@ -223,31 +226,21 @@ export const costsSnapshot = type({
     observed_at: "number",
     stale: "boolean",
   }).array(),
-  provider_budgets: providerBudgetStatus.array(),
-  can_edit_budgets: "boolean",
+  provider_pacing: providerPacingStatus.array(),
+  can_edit_pacing: "boolean",
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;
 
-/** `PUT /costs/budgets` body entry: one explicit (stored) provider budget. */
-export type ProviderBudgetInput = {
+/** `PUT /costs/pacing` body: one subscription account's pacing switch. */
+export type ProviderPacingInput = {
   provider: string;
-  auth_kind: "api_key" | "subscription";
-  account: string | null;
-} & (
-  | { mode: "pace"; window: "5h" | "7d"; headroom: number }
-  | { mode: "off"; window: "5h" | "7d" }
-  | { mode: "cap"; unit: "percent"; window: "5h" | "7d"; amount: number }
-  | {
-      mode: "cap";
-      unit: "usd" | "tokens";
-      window: "day" | "week";
-      amount: number;
-    }
-);
+  account: string;
+  enabled: boolean;
+};
 
-export const providerBudgetsResult = type({
-  provider_budgets: providerBudgetStatus.array(),
+export const providerPacingResult = type({
+  provider_pacing: providerPacingStatus.array(),
 });
 
 /**

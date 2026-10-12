@@ -6,6 +6,7 @@
 
 import { upsertProviderQuota, log } from "@loreai/core";
 import type { CostAttribution } from "./cost-attribution";
+import { recordQuotaObservation } from "./provider-budgets";
 
 export type ParsedQuotaWindow = {
   window: string;
@@ -432,7 +433,7 @@ export function observeProviderQuotaHeaders(
   try {
     const windows = parseProviderQuotaHeaders(headers, observedAt);
     for (const w of windows) {
-      upsertProviderQuota({
+      const row = {
         provider: attribution.provider,
         authKind: attribution.authKind,
         account: attribution.account,
@@ -445,7 +446,9 @@ export function observeProviderQuotaHeaders(
         resetsAt: w.resetsAt,
         source: w.source,
         observedAt,
-      });
+      };
+      upsertProviderQuota(row);
+      recordQuotaObservation(row);
     }
   } catch (error) {
     log.info("provider quota capture failed", {
