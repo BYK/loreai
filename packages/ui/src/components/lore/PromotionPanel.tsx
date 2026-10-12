@@ -171,19 +171,13 @@ export const PromotionPanel: Component<{
                   <div class="font-medium">{requestStatus(current())}</div>
                   <p class="mt-2 text-sm">
                     Proposed by{" "}
-                    <PromotionIdentity
-                      id={current().proposer.id}
-                      label={current().proposer.label}
-                    />
+                    <PromotionIdentity label={current().proposer.label} />
                   </p>
                   <Show when={current().decided_by}>
                     {(reviewer) => (
                       <p class="mt-1 text-sm">
                         Reviewed by{" "}
-                        <PromotionIdentity
-                          id={reviewer().id}
-                          label={reviewer().label}
-                        />
+                        <PromotionIdentity label={reviewer().label} />
                       </p>
                     )}
                   </Show>

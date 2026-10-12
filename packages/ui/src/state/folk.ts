@@ -26,6 +26,9 @@ export function createFolkState({ client }: { client: ApiClient }) {
     account,
     sync,
     teams,
+    loadTeams() {
+      if (!teamsWanted()) setTeamsWanted(true);
+    },
     /** Re-read account, sync and (once requested) teams; current data stays visible. */
     refresh() {
       account.reload();

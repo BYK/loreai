@@ -2075,9 +2075,9 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     `,
   // Version 71 (#827 E-5-F3): scope selection & team-promotion policy plumbing (producer side).
   // `projects.scope_id` = the team scope a project is ASSOCIATED with (promotion TARGET; NULL =
-  // personal). `projects.promotion_policy` = per-project override of the auto/manual promotion
-  // policy (NULL = inherit the team default). `scopes.promotion_policy` = the team-level default,
-  // pulled from remote (0034). All behavior-preserving until F3-3 wires push scope resolution.
+  // personal). `projects.promotion_policy` = the local per-project auto-share override (`auto`
+  // opts in; `manual`/NULL disable it). `scopes.promotion_policy` = the team-level review policy
+  // mirrored from remote (0034); it never enables project auto-share.
   `
    ALTER TABLE projects ADD COLUMN scope_id TEXT;
    ALTER TABLE projects ADD COLUMN promotion_policy TEXT;
@@ -6219,10 +6219,7 @@ export function setProjectScope(id: string, scopeId: string | null): void {
     .run(scopeId, currentTenantId(), id);
 }
 
-/**
- * Set (or clear, with null) a project-level override of the team-promotion policy. Null ⇒ inherit
- * the bound team scope's default (see effectivePromotionPolicy).
- */
+/** Set or clear the project-local auto-share override. Null disables auto-share. */
 export function setProjectPromotionPolicy(
   id: string,
   policy: "manual" | "auto" | null,
@@ -6234,30 +6231,16 @@ export function setProjectPromotionPolicy(
     .run(policy, currentTenantId(), id);
 }
 
-/**
- * Effective team-promotion policy for a project: the project override if set, else the bound team
- * scope's default (from the pulled scopes mirror), else 'manual' — never auto-promote to a team
- * without review unless explicitly opted in.
- */
-export function effectivePromotionPolicy(id: string): "manual" | "auto" {
+/** Whether this project explicitly opted into automatic sharing. */
+export function projectAutoShare(id: string): boolean {
   const p = db()
     .query(
-      "SELECT scope_id, promotion_policy FROM projects WHERE tenant_id = ? AND id = ?",
+      "SELECT promotion_policy FROM projects WHERE tenant_id = ? AND id = ?",
     )
     .get(currentTenantId(), id) as {
-    scope_id: string | null;
     promotion_policy: string | null;
   } | null;
-  if (p?.promotion_policy === "auto" || p?.promotion_policy === "manual") {
-    return p.promotion_policy;
-  }
-  if (p?.scope_id) {
-    const s = db()
-      .query("SELECT promotion_policy FROM scopes WHERE id = ?")
-      .get(p.scope_id) as { promotion_policy: string | null } | null;
-    if (s?.promotion_policy === "auto") return "auto";
-  }
-  return "manual";
+  return p?.promotion_policy === "auto";
 }
 
 /**

@@ -33,8 +33,9 @@ export const teamStatus = type({
 
 export type TeamStatus = typeof teamStatus.infer;
 
-/** `GET /api/v1/teams` wraps the rows in `{ teams: [...] }`. */
+/** `GET /api/v1/teams` reports the gateway mode and locally mirrored teams. */
 export const teamList = type({
+  hosted: "boolean",
   teams: teamStatus.array(),
 });
 
@@ -57,6 +58,8 @@ export const sharingStatus = type({
     project_override: promotionPolicy.or("null"),
     team_default: promotionPolicy.or("null"),
   }),
+  auto_share: "boolean",
+  review_required: "boolean | null",
   state: sharingState,
   detail: "string | null",
 });
@@ -72,3 +75,17 @@ export const syncStatus = type({
 });
 
 export type SyncStatus = typeof syncStatus.infer;
+
+export const syncRunReceipt = type({
+  pushed: nonNegInt,
+  pulled: nonNegInt,
+  conflicts: nonNegInt,
+  skipped: nonNegInt,
+  "quotaHit?": type({
+    table: "string",
+    message: "string",
+  }),
+  "notAuthed?": "boolean",
+});
+
+export type SyncRunReceipt = typeof syncRunReceipt.infer;

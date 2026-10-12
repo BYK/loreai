@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch, createMemo } from "solid-js";
+import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import * as PopoverPrimitive from "@kobalte/core/popover";
 
 import type { AccountStatus } from "~/contracts";
@@ -29,12 +29,31 @@ function expiresLabel(account: AccountStatus): string | null {
 }
 
 /**
- * Shell account/sync badge (FOLK-01). Read-only: it reports what the
- * gateway's status routes say and links to nothing that writes.
+ * Shell account/sync badge with an explicit, single-flight sync action.
  */
 export const FolkStatus: Component = () => {
   const ws = useWorkspace();
   const folk = ws.state.folk;
+  const [syncing, setSyncing] = createSignal(false);
+  const [syncError, setSyncError] = createSignal<string | null>(null);
+  const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
+  const runSync = async () => {
+    if (syncing()) return;
+    setSyncing(true);
+    setSyncError(null);
+    setSyncReceipt(null);
+    try {
+      const result = await ws.client.runSync();
+      setSyncReceipt(
+        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
+      );
+      folk.refresh();
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : "Sync failed.");
+    } finally {
+      setSyncing(false);
+    }
+  };
   const summary = createMemo(() =>
     summarizeFolkStatus({
       connection: ws.connection.state(),
@@ -99,6 +118,37 @@ export const FolkStatus: Component = () => {
           </Show>
 
           <div class="mt-3 border-t border-line pt-3">
+            <div class="flex items-center justify-between gap-3">
+              <div class="eyebrow">Sync</div>
+              <Show when={folk.sync.data()?.enabled}>
+                <button
+                  type="button"
+                  data-testid="sync-now"
+                  disabled={syncing()}
+                  onClick={() => void runSync()}
+                  class="rounded-md border border-line px-2 py-1 text-xs font-medium text-heading hover:bg-chrome focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                >
+                  {syncing() ? "Syncing…" : "Sync now"}
+                </button>
+              </Show>
+            </div>
+            <Show when={syncReceipt()}>
+              {(receipt) => (
+                <p class="mt-2 text-xs text-muted" role="status">
+                  {receipt()}
+                </p>
+              )}
+            </Show>
+            <Show when={syncError()}>
+              {(error) => (
+                <p class="mt-2 text-xs text-danger" role="alert">
+                  {error()}
+                </p>
+              )}
+            </Show>
+          </div>
+
+          <div class="mt-3 border-t border-line pt-3">
             <div class="eyebrow mb-1">Teams</div>
             <Switch
               fallback={<div class="text-xs text-muted">Loading teams…</div>}
@@ -140,8 +190,7 @@ export const FolkStatus: Component = () => {
             </Switch>
           </div>
           <p class="mt-3 text-xs text-muted">
-            Read-only. Sign-in, sync and team changes happen through the{" "}
-            <code>lore</code> CLI.
+            Sign-in and sync enablement use the <code>lore</code> CLI.
           </p>
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>

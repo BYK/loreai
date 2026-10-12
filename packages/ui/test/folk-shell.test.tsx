@@ -1,10 +1,10 @@
 import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import type { AccountStatus, SyncStatus, TeamList } from "~/contracts";
-import { ApiError, type ApiClient } from "~/lib/api";
+import { ApiError, clearGatewayAuthToken, type ApiClient } from "~/lib/api";
 
 const ANONYMOUS: AccountStatus = {
   signed_in: false,
@@ -20,7 +20,7 @@ const IDLE: SyncStatus = {
   pending_changes: 2,
 };
 
-const NO_TEAMS: TeamList = { teams: [] };
+const NO_TEAMS: TeamList = { hosted: false, teams: [] };
 
 type ClientOverrides = Partial<ApiClient>;
 
@@ -56,6 +56,43 @@ function mount(apiClient: ApiClient) {
 }
 
 describe("Folk shell status", () => {
+  it("lets a remote dashboard session enter its gateway token and retry", async () => {
+    sessionStorage.clear();
+    const listProjects = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(
+          "unauthorized",
+          "/api/v1/projects",
+          "Gateway hid this route from the current peer",
+          404,
+        ),
+      )
+      .mockResolvedValue([]);
+    mount(client({ listProjects }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to your gateway" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/LORE_GATEWAY_AUTH_TOKEN/)).toBeInTheDocument();
+    const tokenInput = screen.getByLabelText("Gateway token");
+    expect(tokenInput).toHaveAttribute("type", "password");
+    fireEvent.input(tokenInput, { target: { value: "server-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Connect to your gateway" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(sessionStorage.length).toBeGreaterThan(0);
+    expect(sessionStorage.getItem("lore.gateway-auth-token")).toBe(
+      "server-token",
+    );
+    clearGatewayAuthToken();
+  });
+
   it("shows anonymous status and lazily loads teams when opened", async () => {
     mount(client());
 
@@ -94,6 +131,7 @@ describe("Folk shell status", () => {
         },
         async getTeams() {
           return {
+            hosted: false,
             teams: [
               {
                 id: "team-acme",
@@ -121,6 +159,69 @@ describe("Folk shell status", () => {
     );
     expect(await screen.findByTestId("folk-teams")).toHaveTextContent(
       "editor · 2 members",
+    );
+  });
+
+  it("runs a guarded sync from the status popover and shows its receipt", async () => {
+    const runSync = vi.fn(async () => ({
+      pushed: 2,
+      pulled: 3,
+      conflicts: 0,
+      skipped: 1,
+    }));
+    mount(
+      client({
+        async getAccount() {
+          return {
+            signed_in: true,
+            user: { id: "user-1", email: null, display_name: "Ada" },
+            provider: "github",
+            expires_at: null,
+            state: "signed_in",
+          };
+        },
+        async getSyncStatus() {
+          return IDLE;
+        },
+        runSync,
+      }),
+    );
+
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByTestId("sync-now"));
+    expect(
+      await screen.findByText("Sync complete: pushed 2, pulled 3.", {
+        exact: true,
+      }),
+    ).toBeInTheDocument();
+    expect(runSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Sync now errors visible inside the status popover", async () => {
+    mount(
+      client({
+        async getAccount() {
+          return {
+            signed_in: true,
+            user: null,
+            provider: null,
+            expires_at: null,
+            state: "signed_in",
+          };
+        },
+        async getSyncStatus() {
+          return IDLE;
+        },
+        async runSync() {
+          throw new Error("Sync service is unavailable.");
+        },
+      }),
+    );
+
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByTestId("sync-now"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sync service is unavailable.",
     );
   });
 

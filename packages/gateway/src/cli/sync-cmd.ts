@@ -14,10 +14,11 @@ import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { keystore, syncData, getKV } from "@loreai/core";
 import type { SyncProgressFn } from "../sync";
+import { discardSyncConflict, keepSyncConflictLocal } from "../sync-conflicts";
 
 export async function commandSync(
   positionals: string[],
-  _values: Record<string, unknown>,
+  values: Record<string, unknown>,
 ): Promise<void> {
   const sub = positionals[0] ?? "status";
 
@@ -34,12 +35,79 @@ export async function commandSync(
     case "now":
       await cmdNow();
       break;
+    case "conflicts":
+      cmdConflicts(positionals.slice(1), values);
+      break;
     default:
       console.error(
-        `Unknown sync subcommand "${sub}".\nUsage: lore sync [enable|disable|status|now]`,
+        `Unknown sync subcommand "${sub}".\nUsage: lore sync [enable|disable|status|now|conflicts]`,
       );
       process.exitCode = 1;
   }
+}
+
+function cmdConflicts(args: string[], values: Record<string, unknown>): void {
+  const action = args[0] ?? "list";
+  if (action === "list" && args.length <= 1) {
+    const conflicts = syncData.listSyncConflicts(100);
+    if (conflicts.length === 0) {
+      console.log("No sync conflicts.");
+      return;
+    }
+    for (const conflict of conflicts) {
+      console.log(
+        `${conflict.id}  ${conflict.table_name}  ${conflict.row_id}  ${conflict.resolution ?? "unknown"}  ${new Date(conflict.detected_at).toISOString()}`,
+      );
+    }
+    return;
+  }
+  const idText = args[1];
+  if (
+    !idText ||
+    !/^[1-9]\d*$/.test(idText) ||
+    !Number.isSafeInteger(Number(idText))
+  ) {
+    console.error(
+      "Usage: lore sync conflicts [list | keep <id> --expected-version <version-id> | discard <id>]",
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const id = Number(idText);
+  if (action === "keep" && args.length === 2) {
+    const expectedVersionId =
+      values["expected-version"] ?? values.expectedVersion;
+    if (
+      typeof expectedVersionId !== "string" ||
+      expectedVersionId.length === 0
+    ) {
+      console.error("keep requires --expected-version <version-id>");
+      process.exitCode = 1;
+      return;
+    }
+    const result = keepSyncConflictLocal(id, expectedVersionId);
+    if (!result.ok) {
+      console.error(`${result.code}: ${result.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Kept local snapshot for sync conflict ${id}.`);
+    return;
+  }
+  if (action === "discard" && args.length === 2) {
+    const result = discardSyncConflict(id);
+    if (!result.ok) {
+      console.error(`${result.code}: ${result.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Discarded sync conflict ${id}.`);
+    return;
+  }
+  console.error(
+    "Usage: lore sync conflicts [list | keep <id> --expected-version <version-id> | discard <id>]",
+  );
+  process.exitCode = 1;
 }
 
 export async function cmdEnable(

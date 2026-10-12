@@ -50,6 +50,7 @@ import {
   collectGithubIds,
   fetchRepoContributors,
   fetchUserRepos,
+  isValidInviteLogins,
   parseRepoRef,
   type RepoContributors,
 } from "./discover.ts";
@@ -129,20 +130,73 @@ Deno.serve(
 
     const jwtGithubId = resolveJwtGithubId(user);
 
-    const body = (await req.json().catch(() => ({}))) as {
-      provider_token?: string;
-      repos?: string[];
-      invite_to_scope?: string;
-      invite_role?: "editor" | "viewer";
-    };
-    const providerToken = body.provider_token;
-    if (!providerToken) return json({ error: "missing provider_token" }, 400);
-    const inviteToScope =
-      typeof body.invite_to_scope === "string"
-        ? body.invite_to_scope
-        : undefined;
+    const body = await req.json().catch(() => null);
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      Object.keys(body).some(
+        (key) =>
+          ![
+            "provider_token",
+            "repos",
+            "invite_to_scope",
+            "invite_role",
+            "invite_logins",
+          ].includes(key),
+      )
+    ) {
+      return json({ error: "invalid request body" }, 400);
+    }
+    const input = body as Record<string, unknown>;
+    const providerToken = input.provider_token;
+    if (
+      typeof providerToken !== "string" ||
+      providerToken.trim().length === 0 ||
+      providerToken.length > 4096
+    ) {
+      return json({ error: "missing or invalid provider_token" }, 400);
+    }
+    if (
+      input.repos !== undefined &&
+      (!Array.isArray(input.repos) ||
+        input.repos.length > MAX_REPOS ||
+        input.repos.some(
+          (repo) => typeof repo !== "string" || !parseRepoRef(repo),
+        ))
+    ) {
+      return json({ error: "invalid repos" }, 400);
+    }
+    if (
+      input.invite_to_scope !== undefined &&
+      (typeof input.invite_to_scope !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          input.invite_to_scope,
+        ))
+    ) {
+      return json({ error: "invalid invite_to_scope" }, 400);
+    }
+    if (
+      input.invite_role !== undefined &&
+      input.invite_role !== "editor" &&
+      input.invite_role !== "viewer"
+    ) {
+      return json({ error: "invalid invite_role" }, 400);
+    }
+    if (
+      !isValidInviteLogins(
+        input.invite_logins,
+        input.invite_to_scope,
+        MAX_INVITES,
+      )
+    ) {
+      return json({ error: "invalid invite_logins" }, 400);
+    }
+    const reposInput = input.repos;
+    const inviteToScope = input.invite_to_scope;
     const inviteRole: "editor" | "viewer" =
-      body.invite_role === "viewer" ? "viewer" : "editor";
+      input.invite_role === "viewer" ? "viewer" : "editor";
+    const inviteLogins = input.invite_logins;
 
     const apiUrl = Deno.env.get("GITHUB_API_URL") ?? undefined;
 
@@ -162,11 +216,12 @@ Deno.serve(
     // Resolve the repo set: explicit list (validated) or the caller's own repos (first page).
     let repos: Array<{ owner: string; name: string }>;
     try {
-      if (Array.isArray(body.repos) && body.repos.length > 0) {
+      if (reposInput && reposInput.length > 0) {
         repos = [];
-        for (const r of body.repos) {
+        for (const r of reposInput) {
           const ref = parseRepoRef(r);
-          if (ref) repos.push(ref);
+          if (!ref) return json({ error: "invalid repos" }, 400);
+          repos.push(ref);
         }
       } else {
         repos = await fetchUserRepos(providerToken, { apiUrl });
@@ -247,9 +302,17 @@ Deno.serve(
           byLogin.set(c.login, { login: c.login, githubId: c.github_id });
       }
     }
-    const contributors = Array.from(byLogin.values()).sort((a, b) =>
+    let contributors = Array.from(byLogin.values()).sort((a, b) =>
       a.login.localeCompare(b.login),
     );
+    if (inviteLogins) {
+      const selected = new Set(
+        inviteLogins.map((login) => login.toLocaleLowerCase()),
+      );
+      contributors = contributors.filter((contributor) =>
+        selected.has(contributor.login.toLocaleLowerCase()),
+      );
+    }
     const capped = contributors.slice(0, MAX_INVITES);
     const overCap = contributors.length - capped.length;
 

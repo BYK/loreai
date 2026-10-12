@@ -15,7 +15,7 @@
  *   - `invalid`      2xx whose body failed validation (`ContractError`)
  *   - `http`         any other non-2xx
  */
-import { type Type } from "arktype";
+import { type as schema, type Type } from "arktype";
 
 import {
   modelTidesMutationResult,
@@ -64,6 +64,20 @@ import {
   promotionListResponse,
   promotionPreview,
   promotionReceipt,
+  teamMembersResponse,
+  teamInviteReceipt,
+  teamRoleReceipt,
+  teamRemovalReceipt,
+  teamCreateReceipt,
+  teamAddReceipt,
+  teamAcceptReceipt,
+  teamDiscoveryResult,
+  organizationList,
+  domainJoinRequestList,
+  teamReviewPolicy,
+  syncConflictList,
+  syncConflictKeepReceipt,
+  syncConflictDiscardReceipt,
   query,
   sessionsMoveResult,
   recallResponse,
@@ -75,6 +89,7 @@ import {
   sessionPage,
   sessionSearchPage,
   sharingStatus,
+  syncRunReceipt,
   syncStatus,
   teamList,
   warmingSettingsResult,
@@ -113,6 +128,21 @@ import {
   type PromotionListResponse,
   type PromotionPreview,
   type PromotionReceipt,
+  type TeamMembersResponse,
+  type TeamInviteReceipt,
+  type TeamRoleReceipt,
+  type TeamRemovalReceipt,
+  type TeamCreateReceipt,
+  type TeamAddReceipt,
+  type TeamAcceptReceipt,
+  type TeamDiscoveryResult,
+  type OrganizationList,
+  type DomainJoinRequestList,
+  type TeamReviewPolicy,
+  type SyncConflictList,
+  type SyncConflictKeepReceipt,
+  type SyncConflictDiscardReceipt,
+  type SyncRunReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -164,6 +194,36 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   /** Path prefix, defaults to `/api/v1` (same-origin; the Vite dev server proxies it). */
   base?: string;
+  /** Injected for tests; production keeps this browser-local in sessionStorage. */
+  getGatewayAuthToken?: () => string | null;
+  /** Injected for tests; production removes a rejected token from sessionStorage. */
+  clearGatewayAuthToken?: () => void;
+}
+
+const GATEWAY_AUTH_STORAGE_KEY = "lore.gateway-auth-token";
+
+function storedGatewayAuthToken(): string | null {
+  try {
+    return globalThis.sessionStorage?.getItem(GATEWAY_AUTH_STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setGatewayAuthToken(token: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(GATEWAY_AUTH_STORAGE_KEY, token);
+  } catch {
+    // Keep the token in the browser's available storage only; never send it elsewhere.
+  }
+}
+
+export function clearGatewayAuthToken(): void {
+  try {
+    globalThis.sessionStorage?.removeItem(GATEWAY_AUTH_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in privacy-restricted browser contexts.
+  }
 }
 
 async function readErrorDetails(res: Response): Promise<{
@@ -214,6 +274,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   const base = options.base ?? API_BASE;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const getGatewayAuthToken =
+    options.getGatewayAuthToken ?? storedGatewayAuthToken;
+  const clearRejectedGatewayAuthToken =
+    options.clearGatewayAuthToken ?? clearGatewayAuthToken;
 
   /**
    * Shared transport + error classifier for GET (getJson) and the write
@@ -227,6 +291,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
+    const gatewayAuthToken = getGatewayAuthToken();
+    if (gatewayAuthToken) {
+      headers.set("authorization", `Bearer ${gatewayAuthToken}`);
+    }
     let res: Response;
     try {
       res = await doFetch(`${base}${path}`, {
@@ -242,6 +310,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (res.status === 401) {
       const details = await readErrorDetails(res);
+      clearRejectedGatewayAuthToken();
       throw new ApiError(
         "unauthorized",
         path,
@@ -267,6 +336,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         );
       }
       if (details.message === null) {
+        clearRejectedGatewayAuthToken();
         throw new ApiError(
           "unauthorized",
           path,
@@ -302,6 +372,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
         if (details.message === null) {
+          clearRejectedGatewayAuthToken();
           throw new ApiError(
             "unauthorized",
             path,
@@ -728,8 +799,191 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getTeams(signal?: AbortSignal): Promise<TeamList> {
       return getJson("/teams", teamList, signal);
     },
+    getTeamMembers(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamMembersResponse> {
+      return getJson(
+        apiPath(["teams", teamId, "members"]),
+        teamMembersResponse,
+        signal,
+      );
+    },
+    inviteTeamMember(
+      teamId: string,
+      input: {
+        role: "editor" | "viewer";
+        email?: string;
+        offline?: boolean;
+      },
+      signal?: AbortSignal,
+    ): Promise<TeamInviteReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "invites"]),
+        input,
+        teamInviteReceipt,
+        signal,
+      );
+    },
+    createTeam(name: string, signal?: AbortSignal): Promise<TeamCreateReceipt> {
+      return mutateJson("POST", "/teams", { name }, teamCreateReceipt, signal);
+    },
+    addTeamMemberById(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer" = "editor",
+      signal?: AbortSignal,
+    ): Promise<TeamAddReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members"]),
+        { user_id: userId, role },
+        teamAddReceipt,
+        signal,
+      );
+    },
+    acceptTeamInvite(
+      token: string,
+      signal?: AbortSignal,
+    ): Promise<TeamAcceptReceipt> {
+      return mutateJson(
+        "POST",
+        "/teams/accept",
+        { token },
+        teamAcceptReceipt,
+        signal,
+      );
+    },
+    getOrganizations(signal?: AbortSignal): Promise<OrganizationList> {
+      return getJson("/orgs", organizationList, signal);
+    },
+    discoverTeamContributors(
+      teamId: string,
+      input: {
+        repos?: string[];
+        invite_role?: "editor" | "viewer";
+        invite_logins?: string[];
+      },
+      signal?: AbortSignal,
+    ): Promise<TeamDiscoveryResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "discover"]),
+        input,
+        teamDiscoveryResult,
+        signal,
+      );
+    },
+    getDomainJoinRequests(
+      orgId: string,
+      signal?: AbortSignal,
+    ): Promise<DomainJoinRequestList> {
+      return getJson(
+        apiPath(["orgs", orgId, "domains", "requests"]),
+        domainJoinRequestList,
+        signal,
+      );
+    },
+    claimOrganizationDomain(
+      orgId: string,
+      domain: string,
+      role: "manager" | "billing" | "member" = "member",
+      signal?: AbortSignal,
+    ): Promise<{ claimed: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "claim"]),
+        { domain, role },
+        schema({ claimed: "string" }),
+        signal,
+      );
+    },
+    requestOrganizationJoin(
+      orgId: string,
+      domain: string,
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "request"]),
+        { domain },
+        schema({ request_id: "string" }),
+        signal,
+      );
+    },
+    decideDomainJoinRequest(
+      orgId: string,
+      requestId: string,
+      decision: "approve" | "reject",
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string; status: "approved" | "rejected" }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "requests", requestId, decision]),
+        {},
+        schema({ request_id: "string", status: "'approved' | 'rejected'" }),
+        signal,
+      );
+    },
+    getTeamReviewPolicy(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return getJson(
+        apiPath(["teams", teamId, "review-policy"]),
+        teamReviewPolicy,
+        signal,
+      );
+    },
+    setTeamReviewPolicy(
+      teamId: string,
+      policy: "required" | "optional",
+      expected: "required" | "optional",
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return mutateJson(
+        "PUT",
+        apiPath(["teams", teamId, "review-policy"]),
+        { policy, expected },
+        teamReviewPolicy,
+        signal,
+      );
+    },
+    setTeamMemberRole(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer",
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRoleReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "role"]),
+        { role, expected_role: expectedRole },
+        teamRoleReceipt,
+        signal,
+      );
+    },
+    removeTeamMember(
+      teamId: string,
+      userId: string,
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRemovalReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "remove"]),
+        { expected_role: expectedRole },
+        teamRemovalReceipt,
+        signal,
+      );
+    },
     getSyncStatus(signal?: AbortSignal): Promise<SyncStatus> {
       return getJson("/sync/status", syncStatus, signal);
+    },
+    runSync(signal?: AbortSignal): Promise<SyncRunReceipt> {
+      return mutateJson("POST", "/sync/run", {}, syncRunReceipt, signal);
     },
     getProjectSharing(
       projectId: string,
@@ -738,6 +992,62 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
+        signal,
+      );
+    },
+    setProjectAutoShare(
+      projectId: string,
+      policy: "manual" | "auto",
+      expectedOverride: "manual" | "auto" | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "policy"]),
+        { policy, expected_override: expectedOverride },
+        sharingStatus,
+        signal,
+      );
+    },
+    linkProjectToTeam(
+      projectId: string,
+      scopeId: string | null,
+      expectedScopeId: string | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "link"]),
+        { scope_id: scopeId, expected_scope_id: expectedScopeId },
+        sharingStatus,
+        signal,
+      );
+    },
+    listSyncConflicts(signal?: AbortSignal): Promise<SyncConflictList> {
+      return getJson("/sync/conflicts", syncConflictList, signal);
+    },
+    keepSyncConflictLocal(
+      id: number,
+      expectedVersionId: string,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictKeepReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "keep-local"]),
+        { expected_version_id: expectedVersionId },
+        syncConflictKeepReceipt,
+        signal,
+      );
+    },
+    discardSyncConflict(
+      id: number,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictDiscardReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "discard"]),
+        {},
+        syncConflictDiscardReceipt,
         signal,
       );
     },
