@@ -9,6 +9,7 @@ security definer
 set search_path = pg_catalog, public
 as $$
 begin
+  -- Serialize client role changes with other scope membership and key-rotation operations.
   perform pg_advisory_xact_lock(hashtextextended(p_scope::text, 0));
   if public.scope_role(p_scope) is distinct from 'admin' then
     raise exception 'only a scope admin may change roles' using errcode = '42501';
@@ -51,6 +52,7 @@ declare
   v_wrap_members text[] := array[]::text[];
   v_field_count integer;
 begin
+  -- Serialize client removals with role changes and other key-rotation operations.
   perform pg_advisory_xact_lock(hashtextextended(p_scope::text, 0));
   if public.scope_role(p_scope) is distinct from 'admin' then
     raise exception 'only a scope admin may remove team members'
@@ -60,9 +62,11 @@ begin
     raise exception 'invalid expected team-member role' using errcode = '22023';
   end if;
 
+  -- GitHub provisioning uses row writes without this advisory lock; lock before checking the role.
   select role into v_target_role
     from public.scope_members
-   where scope_id = p_scope and user_id = p_user;
+   where scope_id = p_scope and user_id = p_user
+   for update;
   if not found then
     raise exception 'team member not found' using errcode = 'P0002';
   end if;

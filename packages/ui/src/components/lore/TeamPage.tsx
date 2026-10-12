@@ -222,6 +222,11 @@ export const TeamPage: Component = () => {
     }
     if (!teamList) return;
     if (teamList.teams.length === 0) {
+      // Membership loss invalidates pending loads and forces a fresh fetch after rejoining.
+      setMemberLoadGeneration((generation) => generation + 1);
+      setMembers(undefined);
+      setTeamId("");
+      setLoadingMembers(false);
       setPageState("no_team");
       return;
     }

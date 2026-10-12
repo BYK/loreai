@@ -3,6 +3,7 @@
  * Gated behind LORE_INTEGRATION=1 (needs Docker).
  */
 import { execFileSync } from "node:child_process";
+import type { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
@@ -106,30 +107,26 @@ async function seedScopeKeys(
 }
 
 async function snapshot(scope: string, target: string) {
-  const [membership, epoch, keyCount, inviteCount] = await Promise.all([
-    h.client
-      .query(
-        "select role from public.scope_members where scope_id=$1 and user_id=$2",
-        [scope, target],
-      )
-      .then((result) => result.rows[0]?.role ?? null),
-    h.client
-      .query("select key_epoch from public.scopes where id=$1", [scope])
-      .then((result) => result.rows[0]?.key_epoch ?? null),
-    h.client
-      .query(
-        "select count(*)::int as count from public.scope_keys where scope_id=$1",
-        [scope],
-      )
-      .then((result) => result.rows[0].count as number),
-    h.client
-      .query(
-        "select count(*)::int as count from public.pending_invites where scope_id=$1",
-        [scope],
-      )
-      .then((result) => result.rows[0].count as number),
-  ]);
-  return { membership, epoch, keyCount, inviteCount };
+  const { rows } = await h.client.query(
+    `select
+       (select role from public.scope_members where scope_id = $1 and user_id = $2) as membership,
+       (select key_epoch from public.scopes where id = $1) as epoch,
+       (select count(*)::int from public.scope_keys where scope_id = $1) as key_count,
+       (select count(*)::int from public.pending_invites where scope_id = $1) as invite_count`,
+    [scope, target],
+  );
+  const row = rows[0] as {
+    membership: string | null;
+    epoch: number | null;
+    key_count: number;
+    invite_count: number;
+  };
+  return {
+    membership: row.membership,
+    epoch: row.epoch,
+    keyCount: row.key_count,
+    inviteCount: row.invite_count,
+  };
 }
 
 async function remove(
@@ -167,6 +164,107 @@ const wrap = (memberUserId: string, wrappedDek = "next-wrap") => ({
   member_user_id: memberUserId,
   wrapped_dek: wrappedDek,
 });
+
+async function configureGithubTeam(scope: string) {
+  const githubOrgId = Number.parseInt(
+    scope.replaceAll("-", "").slice(0, 8),
+    16,
+  );
+  const githubTeamId = githubOrgId + 1;
+  const githubLogin = `atomic-${githubOrgId}`;
+  const githubTeamSlug = `atomic-${githubTeamId}`;
+  await h.client.query(
+    `update public.orgs
+        set github_org_id = $2, github_login = $3
+      where id = (select org_id from public.scopes where id = $1)`,
+    [scope, githubOrgId, githubLogin],
+  );
+  await h.client.query(
+    `update public.scopes
+        set github_team_id = $2, github_team_slug = $3
+      where id = $1`,
+    [scope, githubTeamId, githubTeamSlug],
+  );
+  return { githubOrgId, githubTeamId, githubLogin, githubTeamSlug };
+}
+
+async function raceGithubAdminPromotion(
+  fixture: Awaited<ReturnType<typeof makeRemovalFixture>>,
+  github: Awaited<ReturnType<typeof configureGithubTeam>>,
+  mutation: (client: Client) => Promise<unknown>,
+): Promise<{ code?: string; message: string }> {
+  const [serviceClient, userClient] = await Promise.all([
+    h.connect(),
+    h.connect(),
+  ]);
+  try {
+    await serviceClient.query("begin");
+    await serviceClient.query("set local role service_role");
+    await serviceClient.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ role: "service_role" })],
+    );
+    await serviceClient.query(
+      "select public.provision_github_membership($1, $2::jsonb, $3::jsonb)",
+      [
+        fixture.target,
+        JSON.stringify([
+          {
+            github_org_id: github.githubOrgId,
+            login: github.githubLogin,
+            role: "manager",
+          },
+        ]),
+        JSON.stringify([
+          {
+            github_org_id: github.githubOrgId,
+            github_team_id: github.githubTeamId,
+            slug: github.githubTeamSlug,
+            name: "Atomic removal",
+            role: "admin",
+          },
+        ]),
+      ],
+    );
+
+    await userClient.query("begin");
+    await userClient.query("set local role authenticated");
+    await userClient.query(
+      "select set_config('request.jwt.claims', $1, true)",
+      [JSON.stringify({ sub: fixture.owner, role: "authenticated" })],
+    );
+    const { rows } = await userClient.query("select pg_backend_pid() as pid");
+    const pendingMutation = expectPgError(() => mutation(userClient)).then(
+      (error) => ({ error }),
+      (cause: unknown) => ({ cause }),
+    );
+
+    try {
+      await expect
+        .poll(
+          async () => {
+            const result = await h.client.query(
+              "select wait_event_type from pg_stat_activity where pid = $1",
+              [rows[0].pid],
+            );
+            return result.rows[0]?.wait_event_type ?? null;
+          },
+          { timeout: 5_000 },
+        )
+        .toBe("Lock");
+      await serviceClient.query("commit");
+      const outcome = await pendingMutation;
+      if ("cause" in outcome) throw outcome.cause;
+      return outcome.error;
+    } finally {
+      await serviceClient.query("rollback").catch(() => undefined);
+      await pendingMutation;
+      await userClient.query("rollback").catch(() => undefined);
+    }
+  } finally {
+    await Promise.all([serviceClient.end(), userClient.end()]);
+  }
+}
 
 type WrapFactory = (
   owner: string,
@@ -315,6 +413,54 @@ describe.skipIf(SKIP)("atomic scope-member removal and key rotation", () => {
     expect(staleError.code).toBe("P0001");
     expect(await snapshot(fixture.scope, fixture.target)).toMatchObject({
       membership: "admin",
+    });
+  });
+
+  it("serializes role updates against GitHub admin promotion", async () => {
+    const fixture = await makeRemovalFixture();
+    const github = await configureGithubTeam(fixture.scope);
+    const error = await raceGithubAdminPromotion(fixture, github, (client) =>
+      client.query("select public.set_scope_role($1, $2, 'editor', 'viewer')", [
+        fixture.scope,
+        fixture.target,
+      ]),
+    );
+
+    expect(error.code).toBe("P0001");
+    expect(error.message).toContain(
+      "team member role changed; reload the team",
+    );
+    expect(await snapshot(fixture.scope, fixture.target)).toEqual({
+      membership: "admin",
+      epoch: 0,
+      keyCount: 3,
+      inviteCount: 1,
+    });
+  });
+
+  it("serializes member removal against GitHub admin promotion", async () => {
+    const fixture = await makeRemovalFixture();
+    const github = await configureGithubTeam(fixture.scope);
+    const error = await raceGithubAdminPromotion(fixture, github, (client) =>
+      client.query(
+        "select public.remove_scope_member_rotating($1, $2, 0, 'viewer', $3::jsonb)",
+        [
+          fixture.scope,
+          fixture.target,
+          JSON.stringify([wrap(fixture.owner), wrap(fixture.secondAdmin)]),
+        ],
+      ),
+    );
+
+    expect(error.code).toBe("P0001");
+    expect(error.message).toContain(
+      "team member role changed; reload the team",
+    );
+    expect(await snapshot(fixture.scope, fixture.target)).toEqual({
+      membership: "admin",
+      epoch: 0,
+      keyCount: 3,
+      inviteCount: 1,
     });
   });
 

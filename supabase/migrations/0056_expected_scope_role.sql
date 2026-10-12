@@ -14,7 +14,7 @@ as $$
 declare
   v_target_role text;
 begin
-  -- Serialize the compare-and-update with other scope membership changes.
+  -- Serialize client role changes with removal and key-rotation operations.
   perform pg_advisory_xact_lock(hashtextextended(p_scope::text, 0));
   if public.scope_role(p_scope) is distinct from 'admin' then
     raise exception 'only a scope admin may change roles' using errcode = '42501';
@@ -26,9 +26,11 @@ begin
     raise exception 'invalid expected scope role' using errcode = '22023';
   end if;
 
+  -- GitHub provisioning uses row writes without this advisory lock; lock before checking the role.
   select role into v_target_role
     from public.scope_members
-   where scope_id = p_scope and user_id = p_user;
+   where scope_id = p_scope and user_id = p_user
+   for update;
   if not found then
     raise exception 'team member not found' using errcode = 'P0002';
   end if;

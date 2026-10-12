@@ -273,6 +273,86 @@ describe("TeamPage", () => {
     expect(screen.queryByTestId("team-members")).toBeNull();
   });
 
+  it("ignores a pending roster response after membership disappears", async () => {
+    const emptyTeams: TeamList = { hosted: false, teams: [] };
+    const refreshedTeams = deferred<TeamList>();
+    const lateMembers = deferred<TeamMembersResponse>();
+    const getTeams = vi
+      .fn<ApiClient["getTeams"]>()
+      .mockResolvedValueOnce(teams)
+      .mockImplementationOnce(() => refreshedTeams.promise);
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockImplementationOnce(() => lateMembers.promise);
+    mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
+
+    await screen.findByTestId("team-members");
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const dialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Join team" }));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
+
+    refreshedTeams.resolve(emptyTeams);
+    expect(await screen.findByText("No team memberships")).toBeVisible();
+    lateMembers.resolve(memberResponse);
+    await lateMembers.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("No team memberships")).toBeVisible();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+  });
+
+  it("reloads the same team after joining from the no-team state", async () => {
+    const emptyTeams: TeamList = { hosted: false, teams: [] };
+    const refreshedTeams = deferred<TeamList>();
+    const pendingReload = deferred<TeamMembersResponse>();
+    const getTeams = vi
+      .fn<ApiClient["getTeams"]>()
+      .mockResolvedValueOnce(teams)
+      .mockImplementationOnce(() => refreshedTeams.promise)
+      .mockResolvedValueOnce(teams);
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockImplementationOnce(() => pendingReload.promise)
+      .mockResolvedValueOnce(memberResponse);
+    mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
+
+    await screen.findByTestId("team-members");
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const firstDialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(
+      within(firstDialog).getByRole("button", { name: "Join team" }),
+    );
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
+    pendingReload.resolve(memberResponse);
+    await waitFor(() =>
+      expect(screen.getByTestId("team-members")).toBeVisible(),
+    );
+
+    refreshedTeams.resolve(emptyTeams);
+    expect(await screen.findByText("No team memberships")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const secondDialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(
+      within(secondDialog).getByRole("button", { name: "Join team" }),
+    );
+
+    await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(3));
+    expect(await screen.findByTestId("team-members")).toBeVisible();
+  });
+
   it("shows hosted mode before the anonymous state", async () => {
     mount(
       () => <TeamPage />,
