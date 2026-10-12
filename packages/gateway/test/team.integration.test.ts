@@ -205,7 +205,7 @@ describe.skipIf(SKIP)(
         addTeamMember(bClient, scope, admin, "viewer"),
       ).rejects.toThrow(/add_scope_member/);
       await expect(removeTeamMember(bClient, scope, admin)).rejects.toThrow(
-        /remove_scope_member/,
+        "only a scope admin may remove team members",
       );
     });
   },

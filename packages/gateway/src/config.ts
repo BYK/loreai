@@ -342,12 +342,19 @@ export function assertGatewayAccessConfigured(
     GatewayConfig,
     "remoteGateway" | "hostedMode" | "gatewayAuthToken"
   > &
-    Partial<Pick<GatewayConfig, "upstreamExtraHeaders">>,
+    Partial<
+      Pick<GatewayConfig, "allowRemoteManagement" | "upstreamExtraHeaders">
+    >,
 ): void {
   const gatewayAuthToken = parseGatewayAuthToken(config.gatewayAuthToken);
-  if ((config.remoteGateway || config.hostedMode) && !gatewayAuthToken) {
+  if (
+    (config.remoteGateway ||
+      config.hostedMode ||
+      config.allowRemoteManagement) &&
+    !gatewayAuthToken
+  ) {
     throw new Error(
-      "Remote/hosted gateway mode requires LORE_GATEWAY_AUTH_TOKEN",
+      "Remote/hosted gateway and remote management require LORE_GATEWAY_AUTH_TOKEN",
     );
   }
   if (hasConflictingAuthHeaders(config.upstreamExtraHeaders)) {

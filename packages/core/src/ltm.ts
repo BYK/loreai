@@ -188,6 +188,12 @@ export type ApprovalStatus = "auto" | "pending" | "approved" | "rejected";
  *  non-queryable per-version data; queryable fields get dedicated columns (see
  *  worker_provider_id / worker_model_id, v35 — db.ts:1000-1004). (#627 Phase 1.) */
 export type KnowledgeMetadata = {
+  recovered_from?: {
+    kind: "sync_conflict_keep_local";
+    conflict_id: number;
+    remote_deleted_version_id: string;
+    restored_at: string;
+  };
   /** Commit SHA the session was on when this entry was minted
    *  (`synthetic-tools.ts` probe → `applySyntheticResolution` → SessionState).
    *  Format: 7-40 char lowercase hex. Never validated here — the probe guard at
@@ -1109,6 +1115,7 @@ export function update(
   input: {
     title?: string;
     content?: string;
+    category?: string;
     confidence?: number;
     updatedBy?: string;
     sensitivity?: Sensitivity;
@@ -1159,11 +1166,13 @@ export function update(
   const contentChanged =
     input.content !== undefined && cur != null && cur.content !== input.content;
   const titleChanged = effectiveTitle !== undefined;
+  const categoryChanged =
+    input.category !== undefined && input.category !== cur.category;
   const metadataChanged =
     input.replaceMetadata === true &&
     Object.hasOwn(input, "metadata") &&
     JSON.stringify(cur.metadata) !== JSON.stringify(input.metadata ?? null);
-  if (contentChanged || titleChanged || metadataChanged) {
+  if (contentChanged || titleChanged || categoryChanged || metadataChanged) {
     // Before `replaceMetadata`, an empty metadata object has always meant
     // "no fresh provenance" and therefore forward-copies the current value.
     // File imports explicitly opt into replacement so removing `enforce:` can
@@ -1178,6 +1187,7 @@ export function update(
     appendVersion(logicalId, {
       ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
       ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(categoryChanged ? { category: input.category } : {}),
       ...metadataOverride,
     });
     appended = true;
@@ -1310,6 +1320,78 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
       "DELETE FROM knowledge_contradictions WHERE tenant_id = ? AND (logical_id_a = ? OR logical_id_b = ?)",
     )
     .run(currentTenantId(), logicalId, logicalId);
+}
+
+export function restoreDeletedKnowledge(
+  logicalId: string,
+  input: {
+    expectedDeletedVersionId: string;
+    conflictId: number;
+    title: string;
+    content: string;
+    category?: string;
+    metadata: KnowledgeMetadata | null;
+  },
+):
+  | { ok: true; versionId: string }
+  | { ok: false; reason: "stale"; currentVersionId: string | null } {
+  return withSavepoint("restore_deleted_knowledge", () => {
+    const current = db()
+      .query(
+        "SELECT id, project_id, metadata, category, is_deleted FROM knowledge WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
+      )
+      .get(currentTenantId(), logicalId) as
+      | {
+          id: string;
+          project_id: string | null;
+          metadata: string | null;
+          category: string;
+          is_deleted: number;
+        }
+      | undefined;
+    if (
+      !current ||
+      current.is_deleted !== 1 ||
+      current.id !== input.expectedDeletedVersionId
+    ) {
+      return {
+        ok: false,
+        reason: "stale",
+        currentVersionId: current?.id ?? null,
+      };
+    }
+
+    const metadata = {
+      ...parseMetadata(current.metadata),
+      ...input.metadata,
+      recovered_from: {
+        kind: "sync_conflict_keep_local" as const,
+        conflict_id: input.conflictId,
+        remote_deleted_version_id: current.id,
+        restored_at: new Date().toISOString(),
+      },
+    };
+    const versionId = appendVersion(logicalId, {
+      title: input.title,
+      content: input.content,
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      metadata,
+      isDeleted: false,
+    });
+    if (!versionId) throw new Error("Deleted knowledge entry disappeared");
+
+    const approvalStatus =
+      current.project_id && projectScope(current.project_id)
+        ? "pending"
+        : "auto";
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = ?, approved_by = NULL, approved_at = NULL WHERE tenant_id = ? AND id = ? AND is_current = 1",
+      )
+      .run(approvalStatus, currentTenantId(), versionId);
+    clearTombstone(logicalId);
+    return { ok: true, versionId };
+  });
 }
 
 /** True when the entry for this logical_id was deleted (tombstoned). */

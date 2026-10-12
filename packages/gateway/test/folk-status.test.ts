@@ -270,7 +270,7 @@ describe("Folk Lore status routes", () => {
     test("anonymous → empty array even when mirrors have rows", async () => {
       mirrorTeam();
       const body = await (await get(server, "/api/v1/teams")).json();
-      expect(body).toEqual({ teams: [] });
+      expect(body).toEqual({ hosted: false, teams: [] });
     });
 
     test("signed in → the current user's team memberships from the local mirror", async () => {
@@ -300,6 +300,7 @@ describe("Folk Lore status routes", () => {
       signIn();
       const body = await (await get(server, "/api/v1/teams")).json();
       expect(body).toEqual({
+        hosted: false,
         teams: [{ id: TEAM, name: "Acme", role: "admin", member_count: 2 }],
       });
     });
@@ -314,9 +315,8 @@ describe("Folk Lore status routes", () => {
     test("hosted mode → empty array", async () => {
       mirrorTeam();
       signIn();
-      expect(await (await get(hosted, "/api/v1/teams")).json()).toEqual({
-        teams: [],
-      });
+      const body = await (await get(hosted, "/api/v1/teams")).json();
+      expect(body).toEqual({ hosted: true, teams: [] });
     });
   });
 
@@ -348,6 +348,8 @@ describe("Folk Lore status routes", () => {
           project_override: null,
           team_default: null,
         },
+        auto_share: false,
+        review_required: null,
         state: "not_linked",
         detail: null,
       });
@@ -367,19 +369,48 @@ describe("Folk Lore status routes", () => {
         linked: true,
         team: { id: TEAM, name: "Acme" },
         policy: {
-          effective: "auto",
+          effective: "manual",
           project_override: null,
           team_default: "auto",
         },
+        auto_share: false,
+        review_required: false,
         state: "linked",
         detail: null,
       });
     });
 
-    test("project override wins over the team default", async () => {
+    test("project auto-share is independent of team review policy", async () => {
       const pid = makeProject();
       mirrorTeam(TEAM, { policy: "auto" });
       setProjectScope(pid, TEAM);
+      const noOverride = await (
+        await get(server, `/api/v1/projects/${pid}/sharing`)
+      ).json();
+      expect(noOverride).toMatchObject({
+        policy: {
+          effective: "manual",
+          project_override: null,
+          team_default: "auto",
+        },
+        auto_share: false,
+        review_required: false,
+      });
+
+      setProjectPromotionPolicy(pid, "auto");
+      const automatic = await (
+        await get(server, `/api/v1/projects/${pid}/sharing`)
+      ).json();
+      expect(automatic).toMatchObject({
+        policy: {
+          effective: "auto",
+          project_override: "auto",
+          team_default: "auto",
+        },
+        auto_share: true,
+        review_required: false,
+      });
+
       setProjectPromotionPolicy(pid, "manual");
       const body = await (
         await get(server, `/api/v1/projects/${pid}/sharing`)
@@ -389,6 +420,8 @@ describe("Folk Lore status routes", () => {
         project_override: "manual",
         team_default: "auto",
       });
+      expect(body.auto_share).toBe(false);
+      expect(body.review_required).toBe(false);
     });
 
     test("linked with encryption escrow but no unlocked identity → locked", async () => {

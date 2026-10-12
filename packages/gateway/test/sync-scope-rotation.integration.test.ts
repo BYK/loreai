@@ -1,7 +1,7 @@
 /**
  * Integration tests for migration 0030 — key-rotation foundation (E-4c-3a, #827) against a real
  * Postgres:
- *  - rotate_scope_key atomically bumps scopes.key_epoch and is admin-only;
+ *  - the unused rotate_scope_key RPC is denied after the atomic member-removal migration;
  *  - the composite PK (scope_id, member_user_id, key_epoch) lets a member hold one wrap PER
  *    epoch (a new-epoch row coexists with the old, so past blobs stay decryptable);
  *  - the immutability guard blocks changing an existing epoch's wrapped_dek (rotation writes a
@@ -78,18 +78,15 @@ const putWrap = (
   );
 
 describe.skipIf(gate())("0030 key rotation foundation (E-4c-3a, #827)", () => {
-  it("rotate_scope_key bumps scopes.key_epoch and returns the new epoch; admin-only", async () => {
+  it("the legacy rotate_scope_key RPC is no longer executable", async () => {
     const a = await h.createUser();
-    const b = await h.createUser(); // not a member
     const scope = await createTeam(a, "Rot A");
-    expect(await rotate(a, scope)).toBe(1); // 0 → 1
-    expect(await rotate(a, scope)).toBe(2); // 1 → 2
+    expect((await expectError(() => rotate(a, scope))).code).toBe("42501");
     expect(
       await h.client
         .query("select key_epoch from public.scopes where id=$1", [scope])
         .then((r) => r.rows[0].key_epoch),
-    ).toBe(2);
-    expect((await expectError(() => rotate(b, scope))).code).toBe("42501"); // non-admin
+    ).toBe(0);
   });
 
   it("a member holds one wrap per epoch — new-epoch rows coexist with old (multi-epoch PK)", async () => {

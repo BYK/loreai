@@ -102,6 +102,17 @@ describe("gateway access configuration", () => {
     expect(enabled.allowRemoteManagement).toBe(true);
   });
 
+  test("requires a gateway token when remote management is enabled", () => {
+    expect(() =>
+      assertGatewayAccessConfigured({
+        remoteGateway: false,
+        hostedMode: false,
+        allowRemoteManagement: true,
+        gatewayAuthToken: undefined,
+      }),
+    ).toThrow("LORE_GATEWAY_AUTH_TOKEN");
+  });
+
   test("exposes provider-frame diagnostics unless explicitly disabled", () => {
     expect(loadConfig().exposeProviderDiagnostics).toBe(true);
 

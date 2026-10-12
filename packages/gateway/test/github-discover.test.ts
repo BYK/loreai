@@ -9,6 +9,7 @@ import {
   collectGithubIds,
   fetchRepoContributors,
   fetchUserRepos,
+  isValidInviteLogins,
   parseRepoRef,
   type RepoContributors,
 } from "../../../supabase/functions/github-discover/discover";
@@ -76,6 +77,17 @@ describe("parseRepoRef", () => {
     expect(parseRepoRef("owner/.")).toBeNull();
     expect(parseRepoRef("./x")).toBeNull();
     expect(parseRepoRef("../..")).toBeNull();
+  });
+});
+
+describe("isValidInviteLogins", () => {
+  it("requires a scope and valid GitHub logins for selected invites", () => {
+    expect(isValidInviteLogins(undefined, undefined)).toBe(true);
+    expect(isValidInviteLogins(["Ada-17"], "team-id")).toBe(true);
+    expect(isValidInviteLogins(["invalid login"], "team-id")).toBe(false);
+    expect(isValidInviteLogins(["ada"], undefined)).toBe(false);
+    expect(isValidInviteLogins("ada", "team-id")).toBe(false);
+    expect(isValidInviteLogins(["ada", "lin"], "team-id", 1)).toBe(false);
   });
 });
 

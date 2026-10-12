@@ -31,6 +31,7 @@ import {
   knowledgeSearchResponse,
   knowledgeVersionHistory,
   modelUsageDocument,
+  modelUsageUploadState,
   parseContract,
   projectClearResult,
   projectList,
@@ -46,6 +47,7 @@ import {
   sessionPage,
   sessionSearchPage,
   sharingStatus,
+  syncRunReceipt,
   syncStatus,
   teamList,
 } from "~/contracts";
@@ -100,6 +102,7 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-account.json": { route: "/account", schema: accountStatus },
   "folk-teams.json": { route: "/teams", schema: teamList },
   "folk-sync-status.json": { route: "/sync/status", schema: syncStatus },
+  "folk-sync-run.json": { route: "/sync/run", schema: syncRunReceipt },
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
@@ -107,6 +110,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "model-usage.json": {
     route: "/model-usage",
     schema: modelUsageDocument,
+  },
+  "model-usage-upload.json": {
+    route: "/model-usage/upload",
+    schema: modelUsageUploadState,
   },
   "project-imports.json": {
     route: "/projects/p/imports",

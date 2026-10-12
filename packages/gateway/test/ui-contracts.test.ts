@@ -48,6 +48,7 @@ import {
   costsSnapshot,
   dedupApplyReceipt,
   modelUsageDocument,
+  modelUsageUploadState,
   dedupPreviewResponse,
   projectClearResult,
   projectRenameResult,
@@ -920,6 +921,15 @@ describe("ui contracts against the real gateway", () => {
       "/model-usage",
       "/api/v1/model-usage",
       modelUsageDocument,
+    );
+  });
+
+  it("GET /model-usage/upload", async () => {
+    await contractRoute(
+      "model-usage-upload.json",
+      "/model-usage/upload",
+      "/api/v1/model-usage/upload",
+      modelUsageUploadState,
     );
   });
 

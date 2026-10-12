@@ -23,6 +23,7 @@ import {
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
 import { errorStateFor } from "./ErrorState";
 import { ModelFlowChart, shortModelName } from "./ModelFlowChart";
+import { ModelTidesUpload } from "./ModelTidesUpload";
 import { StateCard } from "./StateCard";
 
 const DAY = 86_400_000;
@@ -602,6 +603,7 @@ export const ModelUsagePage: Component = () => {
                 </section>
               </Show>
             </Show>
+            <ModelTidesUpload />
             <Show when={error() && doc()}>
               <p class="mt-4 text-xs text-danger">{showError(error())}</p>
             </Show>
