@@ -265,6 +265,39 @@ test.describe("persistent workspace panes", () => {
     await expect(document).toBeVisible();
   });
 
+  test("maximizes Participants to fill the workspace", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop pane controls",
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+
+    const participantsSection = page
+      .locator('[data-pane="nav"] section')
+      .filter({ has: page.getByTestId("pane-max-participants") });
+    await page.getByTestId("pane-max-participants").click();
+    await expect(page.getByTestId("pane-max-participants")).toHaveAttribute(
+      "aria-label",
+      "Restore Participants",
+    );
+
+    const heights = await page
+      .locator('[data-pane="nav"]')
+      .evaluate((aside) => {
+        const section = aside.querySelector("section");
+        if (!section) throw new Error("participants section is not rendered");
+        return {
+          aside: aside.getBoundingClientRect().height,
+          section: section.getBoundingClientRect().height,
+        };
+      });
+    expect(heights.section).toBeGreaterThan(heights.aside * 0.9);
+    await expect(participantsSection).toBeVisible();
+  });
+
   test("shows the selected document outside full mode and restores the list maximize", async ({
     page,
   }, testInfo) => {
@@ -353,8 +386,20 @@ test.describe("persistent workspace panes", () => {
     await expect(page.locator('[data-pane="nav"]')).toBeVisible();
 
     await participantsChip.click();
+    await expect(
+      page.getByRole("region", { name: "Participants" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Restore", exact: true }),
+    ).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await participantsChip.click();
     await page.getByRole("button", { name: "Restore", exact: true }).click();
-    await expect(participantsChip).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Participants" }),
+    ).toBeVisible();
   });
 
   test("restores the list from a chip while Navigation is maximized", async ({
@@ -423,6 +468,23 @@ test.describe("persistent workspace panes", () => {
       "data-workspace-identity",
       "mobile-persistent",
     );
+  });
+
+  test("closes the mobile navigation drawer across layout changes", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 400, height: 800 });
+    await page.goto("/ui");
+
+    const drawer = page.getByTestId("nav-drawer");
+    await page.getByTestId("open-nav").click();
+    await expect(drawer).toBeVisible();
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(drawer).toHaveCount(0);
+
+    await page.setViewportSize({ width: 400, height: 800 });
+    await expect(drawer).toHaveCount(0);
   });
 
   test("preserves filler-60's anchor through the mobile Back link", async ({

@@ -1,5 +1,12 @@
 import type { Component, JSX } from "solid-js";
-import { children, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import {
+  children,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  Show,
+} from "solid-js";
 import {
   A,
   type RouteSectionProps,
@@ -142,6 +149,14 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   let dragPointerId: number | null = null;
   let dragStartX = 0;
   let dragStartWidth = 0;
+
+  createEffect(() => {
+    if (mode() !== "single") {
+      // The drawer unmounts outside single mode, so clear its state before returning.
+      setNavOpen(false);
+      navOpener = null;
+    }
+  });
 
   const media = [
     globalThis.matchMedia?.("(min-width: 1100px)"),
@@ -385,7 +400,14 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
             </section>
           </Show>
           <Show when={participantsVisibleOutsidePopover()}>
-            <section class="flex min-h-0 max-h-[40%] flex-none flex-col overflow-y-auto border-t border-hairline">
+            <section
+              class={cn(
+                "flex min-h-0 flex-col overflow-y-auto border-t border-hairline",
+                activeMaximized() === "participants"
+                  ? "flex-1"
+                  : "max-h-[40%] flex-none",
+              )}
+            >
               <PaneHeader
                 title="Participants"
                 pane="participants"
