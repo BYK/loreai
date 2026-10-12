@@ -357,6 +357,7 @@ export type {
 } from "./gradient";
 export {
   formatKnowledge,
+  formatKnowledgeEntry,
   formatKnowledgeDelta,
   shortId,
   DELTA_MAX_ENTRIES,

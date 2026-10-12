@@ -1023,19 +1023,30 @@ export function formatKnowledge(
       return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
     });
     children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
-    children.push(
-      ul(
-        items.map((i) => {
-          const titleText = i.id
-            ? `${inline(`[${shortId(i.id)}] `)}${inline(i.title)}`
-            : inline(i.title);
-          return liph(strong(titleText), t(`: ${inline(i.content)}`));
-        }),
-      ),
-    );
+    children.push(ul(items.map(knowledgeListItem)));
   }
 
   return serialize(root(...children));
+}
+
+function knowledgeListItem(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): ReturnType<typeof liph> {
+  const titleText = entry.id
+    ? `${inline(`[${shortId(entry.id)}] `)}${inline(entry.title)}`
+    : inline(entry.title);
+  return liph(strong(titleText), t(`: ${inline(entry.content)}`));
+}
+
+/** Exact full-text list item used to verify durable delta delivery on replay. */
+export function formatKnowledgeEntry(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): string {
+  return serialize(root(ul([knowledgeListItem(entry)]))).trimEnd();
 }
 
 /** Selection and rendering must charge the same header and entry costs. */

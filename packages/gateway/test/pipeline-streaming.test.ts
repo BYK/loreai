@@ -8,6 +8,7 @@
  * postResponse storage.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { createHash } from "node:crypto";
 import * as core from "@loreai/core";
 import {
   distillation,
@@ -2934,6 +2935,57 @@ describe("Pipeline — streaming responses", () => {
         )
         .all(sessionID) as Array<{ logical_id: string }>;
       expect(injected.map((row) => row.logical_id)).toEqual(fullyDelivered);
+
+      // Forge only the selector: the unchanged payload still contains the
+      // hinted ID, but never the hinted entry's full rendered text.
+      const block = listSessionPromptDeltas(sessionID).at(-1);
+      if (!block) throw new Error("No persisted knowledge delta");
+      const selector = JSON.parse(block.selector) as {
+        full: Array<{ id: string; h: string }>;
+      };
+      const hintedEntry = fixtures[ids.indexOf(hinted)];
+      selector.full.push({
+        id: hinted,
+        h: createHash("sha256")
+          .update(
+            JSON.stringify(["gotcha", hintedEntry.title, hintedEntry.content]),
+          )
+          .digest("hex"),
+      });
+      db()
+        .query(
+          "UPDATE session_prompt_deltas SET selector = ? WHERE session_id = ? AND seq = ?",
+        )
+        .run(JSON.stringify(selector), sessionID, block.seq);
+      const hintedLogicalId = ltm.logicalIdOf(hinted);
+      const oldReinforcement = 1_700_000_000_000;
+      db()
+        .query(
+          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
+        )
+        .run(oldReinforcement, hintedLogicalId);
+
+      const retry = await handleRequest(
+        request("Fix gateway delta routing again"),
+        loadLocalConfig(),
+      );
+      expect(retry.status).toBe(200);
+      await retry.text();
+      expect(upstreamBodies.at(-1)).not.toContain(hintedEntry.content.trim());
+      expect(
+        db()
+          .query(
+            "SELECT logical_id FROM knowledge_session_injections WHERE session_id = ?",
+          )
+          .all(sessionID),
+      ).toEqual(injected);
+      expect(
+        db()
+          .query(
+            "SELECT last_reinforced_at FROM knowledge_meta WHERE logical_id = ?",
+          )
+          .get(hintedLogicalId),
+      ).toEqual({ last_reinforced_at: oldReinforcement });
     } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();

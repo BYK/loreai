@@ -116,6 +116,7 @@ import {
   consumeCameOutOfIdle,
   needsUrgentDistillation,
   formatKnowledge,
+  formatKnowledgeEntry,
   shouldImportLoreFile,
   importLoreFile,
   loreFileExists,
@@ -3679,7 +3680,10 @@ function deliveredContextEntries(
   for (const block of listSessionPromptDeltas(sessionID)) {
     if (block.projectID !== projectID) continue;
     if (!parseMessageInsertSelector(block.selector)) continue;
-    if (!parseDeltaMessages(block.content).length) continue;
+    const messages = parseDeltaMessages(block.content);
+    const payload =
+      messages[0]?.role === "user" ? firstText(messages[0]) : null;
+    if (typeof payload !== "string") continue;
     const mutation = parseDeltaMutation(block.selector);
     if (!mutation) continue;
     const selector = JSON.parse(block.selector) as {
@@ -3696,6 +3700,7 @@ function deliveredContextEntries(
     )
       continue;
     const hashes = new Map(mutation.changed.map(({ id, h }) => [id, h]));
+    const claimedLines = new Map<string, number>();
     for (const item of selector.full) {
       if (
         !item ||
@@ -3715,6 +3720,14 @@ function deliveredContextEntries(
         h !== exactKnowledgeDigest(entry.category, entry.title, entry.content)
       )
         continue;
+      // The manifest is only a claim. Prove the *same full rendered item* is in
+      // the persisted user payload; a hint or an added selector ID is not delivery.
+      // Count duplicates so one rendered bullet cannot credit two claimed IDs
+      // with identical short handles and text.
+      const line = `\n${formatKnowledgeEntry(entry)}\n`;
+      const nextCount = (claimedLines.get(line) ?? 0) + 1;
+      if (payload.split(line).length - 1 < nextCount) continue;
+      claimedLines.set(line, nextCount);
       delivered.set(logicalId, entry);
     }
   }
