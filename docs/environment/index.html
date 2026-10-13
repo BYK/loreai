@@ -129,7 +129,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_GATEWAY_AUTH_TOKEN</code></td>
-<td>Gateway access credential required for remote/hosted data-plane requests. It is sent as <code dir="auto">x-lore-gateway-token</code> and remains separate from provider API keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256 visible ASCII characters without commas. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.</td>
+<td>Optional gateway access credential for remote/hosted data-plane requests. It is sent as <code dir="auto">x-lore-gateway-token</code> and remains separate from provider API keys/bearer tokens. When configured, it must be 32-256 visible ASCII characters without commas and clients must supply it. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_GIT_REMOTE</code></td>
