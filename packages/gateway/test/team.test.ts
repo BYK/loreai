@@ -562,10 +562,15 @@ describe("removeTeamMember", () => {
 describe("setTeamRole", () => {
   it("calls set_scope_role", async () => {
     const c = makeClient();
-    await setTeamRole(c, "s", MEMBER, "admin");
+    await setTeamRole(c, "s", MEMBER, "admin", "viewer");
     expect(c.rpcCalls[0]).toEqual({
       name: "set_scope_role",
-      params: { p_scope: "s", p_user: MEMBER, p_role: "admin" },
+      params: {
+        p_scope: "s",
+        p_user: MEMBER,
+        p_role: "admin",
+        p_expected_role: "viewer",
+      },
     });
   });
 
@@ -576,9 +581,9 @@ describe("setTeamRole", () => {
           ? { data: null, error: { message: "last admin" } }
           : null,
     });
-    await expect(setTeamRole(c, "s", MEMBER, "editor")).rejects.toThrow(
-      /set_scope_role: last admin/,
-    );
+    await expect(
+      setTeamRole(c, "s", MEMBER, "editor", "viewer"),
+    ).rejects.toThrow(/set_scope_role: last admin/);
   });
 });
 

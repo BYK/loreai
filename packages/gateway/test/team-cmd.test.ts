@@ -99,6 +99,9 @@ beforeEach(() => {
     errs.push(a.join(" "));
   });
   vi.mocked(getAuthedClient).mockResolvedValue(FAKE_CLIENT);
+  vi.mocked(team.teamMembers).mockResolvedValue([
+    { userId: "u", role: "viewer" },
+  ]);
   vi.mocked(team.teamMemberProfiles).mockResolvedValue([]);
   vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
     ok: true,
@@ -397,6 +400,30 @@ describe("set-role", () => {
     expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
   });
 
+  it("reports a missing team member", async () => {
+    vi.mocked(team.teamMembers).mockResolvedValue([]);
+
+    await run("set-role", "s", "u", "admin");
+
+    expect(errs.join("\n")).toContain("Team member not found: u");
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unrecognized role returned by the server", async () => {
+    vi.mocked(team.teamMembers).mockResolvedValue([
+      { userId: "u", role: "owner" },
+    ] as never);
+
+    await run("set-role", "s", "u", "admin");
+
+    expect(errs.join("\n")).toContain(
+      "Unexpected team-member role from server.",
+    );
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
+  });
+
   it("sets the role", async () => {
     vi.mocked(team.teamMemberProfiles).mockResolvedValue([
       {
@@ -412,6 +439,7 @@ describe("set-role", () => {
       "s",
       "u",
       "admin",
+      "viewer",
     );
     expect(logs.join("\n")).toContain("Set Jordan to admin.");
     expect(logs.join("\n")).not.toContain("Set u to admin.");

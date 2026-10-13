@@ -356,11 +356,13 @@ export async function setTeamRole(
   scopeId: string,
   userId: string,
   role: "admin" | "editor" | "viewer",
+  expectedRole: "admin" | "editor" | "viewer",
 ): Promise<void> {
   const { error } = await client.rpc("set_scope_role", {
     p_scope: scopeId,
     p_user: userId,
     p_role: role,
+    p_expected_role: expectedRole,
   });
   if (error)
     throw new TeamRpcError(`set_scope_role: ${error.message}`, error.code);

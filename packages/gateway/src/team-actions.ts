@@ -733,6 +733,7 @@ async function changeMemberRole(
       scopeId,
       userId,
       body.role as "admin" | "editor" | "viewer",
+      body.expected_role as "admin" | "editor" | "viewer",
     );
     return json({ member: { user_id: userId, role: body.role } });
   } catch (error) {
