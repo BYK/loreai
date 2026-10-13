@@ -184,12 +184,12 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     if (
       remotePeer &&
       managementApiPath &&
-      (!config.gatewayAuthToken ||
-        !managementBearerMatches(
-          c.req.raw.headers,
-          config.gatewayAuthToken,
-          c.env.rawHeaders,
-        ))
+      config.gatewayAuthToken &&
+      !managementBearerMatches(
+        c.req.raw.headers,
+        config.gatewayAuthToken,
+        c.env.rawHeaders,
+      )
     ) {
       return withManagementCors(hiddenManagementResponse(), origin);
     }
@@ -200,7 +200,7 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
 /**
  * Data-plane access. Provider credentials authorize an upstream, not this
  * gateway: browser origins cannot invoke any model route (even from loopback),
- * the separate gateway access credential is enforced centrally, and mixed
+ * a configured gateway access credential is enforced centrally, and mixed
  * provider-auth pairs are rejected — all before OPTIONS handling, body reads,
  * session/storage/cost state, auth learning, configured credential overlays,
  * or upstream/interceptor calls. The access credential is stripped from the
@@ -215,8 +215,8 @@ function dataPlaneAccess(config: GatewayConfig): GatewayMiddleware {
     const { rawHeaders } = c.env;
     if (
       (config.remoteGateway || config.hostedMode) &&
-      (!config.gatewayAuthToken ||
-        !gatewayAccessMatches(req.headers, config.gatewayAuthToken, rawHeaders))
+      config.gatewayAuthToken &&
+      !gatewayAccessMatches(req.headers, config.gatewayAuthToken, rawHeaders)
     ) {
       return gatewayAccessDeniedResponse();
     }

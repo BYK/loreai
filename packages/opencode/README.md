@@ -58,7 +58,7 @@ Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name
 
 ## Remote gateway access
 
-Remote/hosted gateways require a separate access token in addition to the model provider's API key or bearer token:
+Gateway access authentication is optional. If the remote/hosted gateway configures a token, clients must supply it separately from the model provider's API key or bearer token:
 
 ```bash
 export LORE_REMOTE_URL=https://lore.example.com
