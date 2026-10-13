@@ -77,10 +77,10 @@ describe("gateway access configuration", () => {
     { remoteGateway: true, hostedMode: false },
     { remoteGateway: false, hostedMode: true },
     { remoteGateway: true, hostedMode: true },
-  ])("fails closed for remote/hosted mode without a token %#", (mode) => {
+  ])("allows remote/hosted mode without a token %#", (mode) => {
     expect(() =>
       assertGatewayAccessConfigured({ ...mode, gatewayAuthToken: undefined }),
-    ).toThrow("LORE_GATEWAY_AUTH_TOKEN");
+    ).not.toThrow();
   });
 
   test("keeps local mode token-optional", () => {
@@ -102,7 +102,7 @@ describe("gateway access configuration", () => {
     expect(enabled.allowRemoteManagement).toBe(true);
   });
 
-  test("requires a gateway token when remote management is enabled", () => {
+  test("allows remote management without a gateway token", () => {
     expect(() =>
       assertGatewayAccessConfigured({
         remoteGateway: false,
@@ -110,7 +110,7 @@ describe("gateway access configuration", () => {
         allowRemoteManagement: true,
         gatewayAuthToken: undefined,
       }),
-    ).toThrow("LORE_GATEWAY_AUTH_TOKEN");
+    ).not.toThrow();
   });
 
   test("exposes provider-frame diagnostics unless explicitly disabled", () => {
@@ -133,16 +133,19 @@ describe("gateway access configuration", () => {
     ).toThrow("LORE_GATEWAY_AUTH_TOKEN");
   });
 
-  test("public server startup applies the same fail-closed invariant", async () => {
+  test("public server startup allows remote mode without a token", async () => {
     const config = loadConfig();
     config.port = 0;
     config.remoteGateway = true;
     config.hostedMode = false;
     config.gatewayAuthToken = undefined;
 
-    await expect(startServer(config)).rejects.toThrow(
-      "LORE_GATEWAY_AUTH_TOKEN",
-    );
+    const server = await startServer(config);
+    try {
+      expect(server.port).toBeGreaterThan(0);
+    } finally {
+      await server.stop();
+    }
   });
 
   test("rejects configured mixed provider auth at config load", () => {

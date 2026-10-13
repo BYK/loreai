@@ -223,10 +223,10 @@ export function injectAdoptionHeaders(
 }
 
 /**
- * Gateway access credential required for remote/hosted data-plane requests.
+ * Optional gateway access credential for remote/hosted data-plane requests.
  * It is sent as `x-lore-gateway-token` and remains separate from provider API
- * keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256
- * visible ASCII characters without commas. OpenCode/Pi consume
+ * keys/bearer tokens. When configured, it must be 32-256 visible ASCII
+ * characters without commas and clients must supply it. OpenCode/Pi consume
  * LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code
  * supports a per-request custom header directly. Never place it in a URL or
  * CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.

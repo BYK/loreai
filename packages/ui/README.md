@@ -597,7 +597,9 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 - the SPA and its assets sit behind the **same management authorization as
   `/api`** (`server.ts`): non-loopback peers get the bodyless 404 unless
   `LORE_ALLOW_REMOTE_MANAGEMENT` is set, `Origin` is checked the same way and
-  `LORE_GATEWAY_AUTH_TOKEN` applies. `/` keeps redirecting to `/ui`.
+  `LORE_GATEWAY_AUTH_TOKEN`, when configured, applies to remote API requests.
+  Without a token, explicitly enabled remote management opens directly (for
+  example, on a trusted Tailscale network). `/` keeps redirecting to `/ui`.
 
 ### Tests
 
