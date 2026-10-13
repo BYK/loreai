@@ -6925,6 +6925,9 @@ export type ProviderQuotaRow = {
 
 /** Fallback staleness bound when the window length itself is unknown. */
 export const QUOTA_STALE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+export const MAX_PROVIDER_QUOTA_WINDOWS_PER_ACCOUNT = 64;
+export const MAX_PROVIDER_QUOTA_ROWS = 4096;
+const MAX_PROVIDER_QUOTA_WINDOW_LENGTH = 128;
 
 /**
  * Whether a persisted quota snapshot may no longer reflect the live window:
@@ -6946,14 +6949,72 @@ export function isProviderQuotaStale(
  * Store the latest quota snapshot for a window. Out-of-order writes lose:
  * a snapshot only replaces the stored row when its observed_at is >= the
  * existing row's, so stale headers can never rewind newer observations.
+ * At either cardinality cap, reclaim only rows whose quota windows are stale;
+ * active admitted rows remain available, and stale rows cannot permanently
+ * exhaust capacity for later identities.
+ * Returns whether the insert or update was accepted.
  */
-export function upsertProviderQuota(row: ProviderQuotaRow): void {
-  db()
+export function upsertProviderQuota(row: ProviderQuotaRow): boolean {
+  if (row.window.length > MAX_PROVIDER_QUOTA_WINDOW_LENGTH) return false;
+  const database = db();
+  const now = Date.now();
+  database
+    .query(
+      `DELETE FROM provider_quotas
+        WHERE (
+          (resets_at IS NOT NULL AND resets_at <= ?)
+          OR (window_minutes IS NOT NULL
+            AND observed_at < ? - window_minutes * 60000)
+          OR (window_minutes IS NULL
+            AND observed_at < ? - ?)
+        )
+        AND NOT (
+          provider = ? AND auth_kind = ? AND account = ? AND window = ?
+        )
+        AND (
+          (SELECT COUNT(*) FROM provider_quotas) >= ?
+          OR (
+            provider = ? AND auth_kind = ? AND account = ?
+            AND (SELECT COUNT(*) FROM provider_quotas
+              WHERE provider = ? AND auth_kind = ? AND account = ?) >= ?
+          )
+        )`,
+    )
+    .run(
+      now,
+      now,
+      now,
+      QUOTA_STALE_FALLBACK_MS,
+      row.provider,
+      row.authKind,
+      row.account,
+      row.window,
+      MAX_PROVIDER_QUOTA_ROWS,
+      row.provider,
+      row.authKind,
+      row.account,
+      row.provider,
+      row.authKind,
+      row.account,
+      MAX_PROVIDER_QUOTA_WINDOWS_PER_ACCOUNT,
+    );
+  const result = database
     .query(
       `INSERT INTO provider_quotas (
          provider, auth_kind, account, window, label, window_minutes,
          used_percent, remaining, "limit", resets_at, source, observed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM provider_quotas
+          WHERE provider = ? AND auth_kind = ? AND account = ? AND window = ?
+        ) OR (
+          (
+            SELECT COUNT(*) FROM provider_quotas
+            WHERE provider = ? AND auth_kind = ? AND account = ?
+          ) < ? AND (
+            SELECT COUNT(*) FROM provider_quotas
+          ) < ?
+        )
        ON CONFLICT(provider, auth_kind, account, window) DO UPDATE SET
          label = excluded.label,
          window_minutes = excluded.window_minutes,
@@ -6978,7 +7039,17 @@ export function upsertProviderQuota(row: ProviderQuotaRow): void {
       row.resetsAt,
       row.source,
       row.observedAt,
+      row.provider,
+      row.authKind,
+      row.account,
+      row.window,
+      row.provider,
+      row.authKind,
+      row.account,
+      MAX_PROVIDER_QUOTA_WINDOWS_PER_ACCOUNT,
+      MAX_PROVIDER_QUOTA_ROWS,
     );
+  return Number(result.changes) > 0;
 }
 
 type ProviderQuotaDbRow = {

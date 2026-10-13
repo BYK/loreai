@@ -1,8 +1,15 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { db, upsertProviderQuota, type ProviderQuotaRow } from "@loreai/core";
+import {
+  db,
+  listProviderQuotas,
+  upsertProviderQuota,
+  type ProviderQuotaRow,
+} from "@loreai/core";
 import {
   MAX_PACING_DELAY_MS,
+  PACING_DISABLED_REASON,
   _resetPacingTrackerForTest,
+  _pacingTrackerSizesForTest,
   computePacingDelayMs,
   evaluatePacingWindow,
   evaluateProviderPacing,
@@ -14,11 +21,18 @@ import {
   parsePacingSetting,
   recordForegroundRequest,
   recordQuotaObservation,
+  registerPacingWait,
+  sessionBudgetMatch,
   setPacingEnabled,
   type BudgetMatch,
   type PacingWindowInput,
 } from "../src/provider-budgets";
 import { observeProviderQuotaHeaders } from "../src/provider-quota-headers";
+import {
+  cacheAnthropicOrganizationFromResponse,
+  _resetCostAttributionForTest,
+  resolveCostAttribution,
+} from "../src/cost-attribution";
 
 const NOW = Date.UTC(2099, 0, 1, 12, 0, 0);
 const HOUR = 3_600_000;
@@ -33,6 +47,7 @@ function clear(): void {
   db().exec("DELETE FROM provider_quotas");
   db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
   _resetPacingTrackerForTest();
+  _resetCostAttributionForTest();
 }
 
 beforeEach(clear);
@@ -228,6 +243,47 @@ describe("pacingDelayMs (quota rows + tracker)", () => {
     expect(pacingDelayMs(MATCH, NOW)).toBe(MAX_PACING_DELAY_MS);
   });
 
+  test("disabling and re-enabling starts a fresh foreground cadence", () => {
+    upsertProviderQuota(quotaRow());
+    gapOf(10_000);
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBe(10_000);
+
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: false,
+    });
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: true,
+    });
+
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBeNull();
+  });
+
+  test("disabling releases only that account's active pacing waits", () => {
+    const disabledWait = new AbortController();
+    const otherWait = new AbortController();
+    const unregisterDisabled = registerPacingWait(MATCH, disabledWait);
+    const unregisterOther = registerPacingWait(
+      { provider: "anthropic", account: "another-account" },
+      otherWait,
+    );
+
+    setPacingEnabled({
+      provider: MATCH.provider,
+      account: MATCH.account,
+      enabled: false,
+    });
+
+    expect(disabledWait.signal.aborted).toBe(true);
+    expect(disabledWait.signal.reason).toBe(PACING_DISABLED_REASON);
+    expect(otherWait.signal.aborted).toBe(false);
+    unregisterDisabled();
+    unregisterOther();
+  });
+
   test("API-key accounts are never paced", () => {
     upsertProviderQuota(quotaRow({ authKind: "api_key", usedPercent: 100 }));
     const apiKey: BudgetMatch = { ...MATCH, auth_kind: "api_key" };
@@ -278,6 +334,17 @@ describe("rate tracker", () => {
     expect(windowStatus()).toMatchObject({ rate_source: "average" });
   });
 
+  test("out-of-order quota observations do not rewind the rate tracker", () => {
+    observe(at(-10 * 60_000, 50));
+    observe(at(-5 * 60_000, 51));
+    recordQuotaObservation(at(-6 * 60_000, 10));
+
+    expect(windowStatus()).toMatchObject({
+      rate_source: "observed",
+      current_rate: 12,
+    });
+  });
+
   test("successive samples are smoothed by the EWMA", () => {
     observe(at(-15 * 60_000, 50));
     observe(at(-10 * 60_000, 51)); // 12 %/h
@@ -298,6 +365,34 @@ describe("rate tracker", () => {
     observe(at(-5 * 60_000, 51));
     observe(at(-60_000, 10));
     expect(windowStatus()).toMatchObject({ rate_source: "average", used: 10 });
+  });
+
+  test("a long idle does not inflate pacing when the user resumes", () => {
+    gapOf(10_000);
+    observe(at(0, 60));
+
+    const resumedAt = NOW + 10 * 60_000;
+    recordForegroundRequest(MATCH, resumedAt);
+    recordForegroundRequest(MATCH, resumedAt + 10_000);
+    observe(at(11 * 60_000, 65));
+
+    expect
+      .soft(pacingDelayMs(MATCH, NOW + 11 * 60_000))
+      .toBeLessThan(MAX_PACING_DELAY_MS);
+    expect
+      .soft(evaluateProviderPacing(NOW + 11 * 60_000)[0]?.request_gap_ms)
+      .toBe(10_000);
+  });
+
+  test("a gap exactly at the idle threshold starts a fresh cadence", () => {
+    gapOf(10_000);
+    recordForegroundRequest(MATCH, NOW + 5 * 60_000);
+    recordForegroundRequest(MATCH, NOW + 5 * 60_000 + 10_000);
+    upsertProviderQuota(quotaRow());
+
+    expect(
+      evaluateProviderPacing(NOW + 5 * 60_000 + 10_000)[0]?.request_gap_ms,
+    ).toBe(10_000);
   });
 
   test("quota-header writes feed the tracker", () => {
@@ -323,6 +418,35 @@ describe("rate tracker", () => {
     expect(windowStatus()?.current_rate).toBeCloseTo(12, 6);
   });
 
+  test("stale quota headers do not seed the in-memory rate tracker", () => {
+    const attribution = {
+      provider: "anthropic",
+      authKind: "subscription" as const,
+      account: "acct1",
+    };
+    const reset = Math.floor((NOW + 2.5 * HOUR) / 1000);
+    const headers = (utilization: string) =>
+      new Headers({
+        "anthropic-ratelimit-unified-5h-utilization": utilization,
+        "anthropic-ratelimit-unified-5h-reset": String(reset),
+        "anthropic-ratelimit-unified-status": "allowed",
+      });
+
+    // Simulate a newer persisted row after a gateway restart, before the
+    // in-memory tracker has seen it.
+    upsertProviderQuota(
+      quotaRow({ usedPercent: 51, observedAt: NOW - 5 * 60_000 }),
+    );
+    observeProviderQuotaHeaders(
+      headers("0.10"),
+      attribution,
+      NOW - 10 * 60_000,
+    );
+    observeProviderQuotaHeaders(headers("0.52"), attribution, NOW);
+
+    expect(windowStatus()).toMatchObject({ rate_source: "average" });
+  });
+
   test("the foreground gap is an EWMA of request gaps", () => {
     recordForegroundRequest(MATCH, NOW - 30_000);
     recordForegroundRequest(MATCH, NOW - 20_000); // 10 s
@@ -332,6 +456,298 @@ describe("rate tracker", () => {
       13_000,
       6,
     );
+  });
+
+  test("new accounts cannot evict an established held pacing delay", () => {
+    const established: BudgetMatch = {
+      provider: "openai",
+      auth_kind: "subscription",
+      account: "verified-account",
+    };
+    const resetsAt = NOW + HOUR;
+    recordForegroundRequest(established, NOW - 20_000);
+    recordForegroundRequest(established, NOW - 10_000);
+    recordForegroundRequest(established, NOW);
+    const observe = (usedPercent: number, observedAt: number) => {
+      const row = quotaRow({
+        provider: established.provider,
+        account: established.account,
+        usedPercent,
+        observedAt,
+        resetsAt,
+      });
+      upsertProviderQuota(row);
+      recordQuotaObservation(row);
+    };
+    observe(1.66, NOW - 5 * 60_000);
+    observe(10, NOW);
+    const heldDelay = pacingDelayMs(established, NOW);
+    expect(heldDelay).toBeGreaterThan(0);
+    expect(10 / (FIVE_H - HOUR)).toBeLessThan(90 / HOUR);
+
+    const otherMatch: BudgetMatch = {
+      provider: "openai",
+      auth_kind: "subscription",
+      account: "caller-zero",
+    };
+    recordForegroundRequest(otherMatch, NOW - 5_000);
+    recordForegroundRequest(otherMatch, NOW);
+    recordQuotaObservation(
+      quotaRow({
+        provider: otherMatch.provider,
+        account: otherMatch.account,
+        usedPercent: 10,
+        observedAt: NOW,
+        resetsAt,
+      }),
+    );
+    expect(pacingDelayMs(established, NOW)).toBe(heldDelay);
+
+    for (const index of Array.from({ length: 1_024 }, (_, index) => index)) {
+      const account = `caller-${index}`;
+      recordForegroundRequest(
+        {
+          provider: "openai",
+          auth_kind: "subscription",
+          account,
+        },
+        NOW + index,
+      );
+      recordQuotaObservation(
+        quotaRow({ provider: "openai", account, observedAt: NOW + index }),
+      );
+    }
+
+    expect(pacingDelayMs(established, NOW + 1_000)).toBe(heldDelay);
+    expect(_pacingTrackerSizesForTest()).toEqual({
+      rateTracks: 512,
+      requestGaps: 512,
+    });
+  });
+
+  test("caller account hints cannot churn credential-owned pacing state", () => {
+    const credentialPayload = Buffer.from(
+      JSON.stringify({
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: "verified-account",
+        },
+      }),
+    ).toString("base64url");
+    const credential = {
+      scheme: "bearer" as const,
+      value: `header.${credentialPayload}.signature`,
+    };
+    const quotaHeaders = new Headers({
+      "x-codex-primary-window-minutes": "300",
+      "x-codex-primary-used-percent": "10",
+      "x-codex-primary-reset-at": String((NOW + HOUR) / 1000),
+      "x-codex-secondary-window-minutes": "0",
+    });
+    const trustedAttribution = resolveCostAttribution({
+      providerID: "openai-codex",
+      credential,
+      responseHeaders: quotaHeaders,
+      requestHeaders: new Headers({ "chatgpt-account-id": "verified-account" }),
+    });
+    const established: BudgetMatch = {
+      provider: trustedAttribution.provider,
+      auth_kind: trustedAttribution.authKind,
+      account: trustedAttribution.account,
+    };
+    expect(established.account).not.toBe("verified-account");
+
+    const resetsAt = NOW + HOUR;
+    recordForegroundRequest(established, NOW - 20_000);
+    recordForegroundRequest(established, NOW - 10_000);
+    recordForegroundRequest(established, NOW);
+    const observe = (usedPercent: number, observedAt: number) => {
+      const row = quotaRow({
+        provider: established.provider,
+        account: established.account,
+        usedPercent,
+        observedAt,
+        resetsAt,
+      });
+      upsertProviderQuota(row);
+      recordQuotaObservation(row);
+    };
+    observe(1.66, NOW - 5 * 60_000);
+    observe(10, NOW);
+    const heldDelay = pacingDelayMs(established, NOW);
+    expect(heldDelay).toBeGreaterThan(0);
+
+    for (const index of Array.from({ length: 1_024 }, (_, index) => index)) {
+      const attribution = resolveCostAttribution({
+        providerID: "openai-codex",
+        credential,
+        responseHeaders: quotaHeaders,
+        requestHeaders: new Headers({
+          "chatgpt-account-id": `caller-${index}`,
+        }),
+      });
+      const match: BudgetMatch = {
+        provider: attribution.provider,
+        auth_kind: attribution.authKind,
+        account: attribution.account,
+      };
+      recordForegroundRequest(match, NOW + index);
+      observeProviderQuotaHeaders(
+        quotaHeaders,
+        attribution,
+        NOW + index,
+        NOW + index,
+      );
+    }
+
+    expect(pacingDelayMs(established, NOW + 1_000)).toBe(heldDelay);
+    expect(_pacingTrackerSizesForTest()).toEqual({
+      rateTracks: 1,
+      requestGaps: 1,
+    });
+  });
+
+  test("a stale organization header cannot replace the cached quota identity", () => {
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat-synthetic-token",
+    };
+    const quotaHeaders = (
+      organizationID: string,
+      usedPercent: string,
+      includeSevenDay = false,
+    ) =>
+      new Headers({
+        "anthropic-organization-id": organizationID,
+        "anthropic-ratelimit-unified-5h-utilization": usedPercent,
+        "anthropic-ratelimit-unified-5h-reset": String((NOW + HOUR) / 1000),
+        "anthropic-ratelimit-unified-status": "allowed",
+        ...(includeSevenDay
+          ? {
+              "anthropic-ratelimit-unified-7d-utilization": "0.10",
+              "anthropic-ratelimit-unified-7d-reset": String(
+                (NOW + 24 * HOUR) / 1000,
+              ),
+            }
+          : {}),
+      });
+    const acceptedHeaders = quotaHeaders("org-established", "0.50");
+    const acceptedAttribution = resolveCostAttribution({
+      providerID: "anthropic",
+      credential,
+      sessionID: "session-established",
+      responseHeaders: acceptedHeaders,
+    });
+    const accepted = observeProviderQuotaHeaders(
+      acceptedHeaders,
+      acceptedAttribution,
+      NOW,
+      NOW,
+    );
+    if (accepted) {
+      cacheAnthropicOrganizationFromResponse({
+        provider: acceptedAttribution.provider,
+        credential,
+        sessionID: "session-established",
+        observedAt: NOW,
+        responseHeaders: acceptedHeaders,
+      });
+    }
+    expect(accepted).toBe(true);
+    expect(
+      resolveCostAttribution({
+        providerID: "anthropic",
+        credential,
+        sessionID: "session-established",
+      }).account,
+    ).toBe(acceptedAttribution.account);
+
+    const staleHeaders = quotaHeaders("org-stale", "0.10", true);
+    const staleAttribution = resolveCostAttribution({
+      providerID: "anthropic",
+      credential,
+      sessionID: "session-established",
+      responseHeaders: staleHeaders,
+    });
+    const staleAccepted = observeProviderQuotaHeaders(
+      staleHeaders,
+      staleAttribution,
+      NOW - 1,
+      NOW,
+    );
+    if (staleAccepted) {
+      cacheAnthropicOrganizationFromResponse({
+        provider: staleAttribution.provider,
+        credential,
+        sessionID: "session-established",
+        observedAt: NOW - 1,
+        responseHeaders: staleHeaders,
+      });
+    }
+    expect(staleAccepted).toBe(true);
+    const quotas = listProviderQuotas();
+    expect(quotas.find((row) => row.window === "5h")?.usedPercent).toBe(50);
+    expect(
+      quotas.some(
+        (row) =>
+          row.window === "7d" && row.account === acceptedAttribution.account,
+      ),
+    ).toBe(true);
+
+    const laterAttribution = resolveCostAttribution({
+      providerID: "anthropic",
+      credential,
+      sessionID: "session-established",
+    });
+    expect(laterAttribution.account).toBe(acceptedAttribution.account);
+  });
+
+  test("new Anthropic sessions cannot evict an established quota identity", () => {
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat-established",
+    };
+    const sessionID = "session-established";
+    const establishedHeaders = new Headers({
+      "anthropic-organization-id": "org-established",
+    });
+    cacheAnthropicOrganizationFromResponse({
+      provider: "anthropic",
+      credential,
+      sessionID,
+      observedAt: NOW,
+      responseHeaders: establishedHeaders,
+    });
+    const established = sessionBudgetMatch(
+      sessionID,
+      { providerID: "anthropic" },
+      null,
+      credential,
+    );
+    expect(established?.account).not.toBe("org-established");
+
+    for (const index of Array.from({ length: 256 }, (_, index) => index)) {
+      cacheAnthropicOrganizationFromResponse({
+        provider: "anthropic",
+        credential: {
+          scheme: "bearer",
+          value: `sk-ant-oat-caller-${index}`,
+        },
+        sessionID: `caller-session-${index}`,
+        observedAt: NOW + index,
+        responseHeaders: new Headers({
+          "anthropic-organization-id": `org-caller-${index}`,
+        }),
+      });
+    }
+
+    expect(
+      sessionBudgetMatch(
+        sessionID,
+        { providerID: "anthropic" },
+        null,
+        credential,
+      )?.account,
+    ).toBe(established?.account);
   });
 });
 
@@ -479,9 +895,42 @@ describe("integral controller (held d_w)", () => {
     expect(status(NOW)?.windows[0]?.delay_ms).toBe(0);
     // Integration resumes from 0 on the next accepted sample.
     observe(row(16, NOW));
-    const next = pacingDelayMs(MATCH, NOW);
+    recordForegroundRequest(MATCH, NOW);
+    recordForegroundRequest(MATCH, NOW + 10_000);
+    observe(row(17, NOW + 60_000));
+    const next = pacingDelayMs(MATCH, NOW + 60_000);
     expect(next).toBeGreaterThan(0);
     expect(next).toBeLessThanOrEqual(integrateHeldDelayMs(0, 10_000, 1e9));
+  });
+
+  test("re-enabling pacing does not restore a held delay from before disable", () => {
+    gapOf(10_000);
+    observe(row(10, NOW - 10 * 60_000));
+    observe(row(12, NOW - 5 * 60_000));
+    expect(pacingDelayMs(MATCH, NOW)).toBeGreaterThan(0);
+
+    const otherMatch = { ...MATCH, account: "acct2" };
+    recordForegroundRequest(otherMatch, NOW - 10_000);
+    recordForegroundRequest(otherMatch, NOW);
+    observe({ ...row(10, NOW - 10 * 60_000), account: "acct2" });
+    observe({ ...row(12, NOW - 5 * 60_000), account: "acct2" });
+    expect(pacingDelayMs(otherMatch, NOW)).toBeGreaterThan(0);
+
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: false,
+    });
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: true,
+    });
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
+    expect(isCurationPacingPaused(MATCH, NOW)).toBe(false);
+    expect(pacingDelayMs(otherMatch, NOW)).toBeGreaterThan(0);
   });
 
   test("a held delay keeps curation paused while ρ dips below 1", () => {

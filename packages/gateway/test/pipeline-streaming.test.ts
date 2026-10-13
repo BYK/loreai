@@ -27,6 +27,11 @@ import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import type { FixtureEntry } from "../src/recorder";
 import type { GatewayRequest } from "../src/translate/types";
+import {
+  PACING_DISABLED_REASON,
+  registerPacingWait,
+  setPacingEnabled,
+} from "../src/provider-budgets";
 
 vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
@@ -2344,6 +2349,26 @@ describe("non-stream recall usage aggregation", () => {
 
 describe("budget throttle cancellation", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("disabling pacing releases its active delay without affecting another account", () => {
+    const account = { provider: "anthropic", account: "active-wait-test" };
+    const otherAccount = {
+      provider: "anthropic",
+      account: "other-active-wait-test",
+    };
+    const controller = new AbortController();
+    const otherController = new AbortController();
+    const unregister = registerPacingWait(account, controller);
+    const unregisterOther = registerPacingWait(otherAccount, otherController);
+    setPacingEnabled({ ...account, enabled: false });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toBe(PACING_DISABLED_REASON);
+    expect(otherController.signal.aborted).toBe(false);
+    unregister();
+    unregisterOther();
+    setPacingEnabled({ ...account, enabled: true });
+  });
 
   it("caller abort clears a long delay and removes its listener", async () => {
     vi.useFakeTimers();

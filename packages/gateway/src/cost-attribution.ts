@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import type { ProviderAuthKind } from "@loreai/core";
 import { authFingerprint, type AuthCredential } from "./auth";
-import { isChatGPTBackend, sessionChatGPTAccountId } from "./chatgpt-backend";
+import { isChatGPTBackend } from "./chatgpt-backend";
 import { isClaudeCodeOAuthSession } from "./cch";
 import { providerForUpstreamURL } from "./config";
 
@@ -17,52 +17,99 @@ export type CostAttribution = {
   account: string;
 };
 
-const MAX_ANTHROPIC_ORGANIZATION_KEYS = 256;
-const anthropicOrganizations = new Map<string, string>();
+const MAX_ANTHROPIC_ACCOUNT_KEYS = 256;
+const MAX_ANTHROPIC_ORGANIZATION_ID_LENGTH = 128;
+type AnthropicAccountCacheEntry = { account: string; observedAt: number };
+const anthropicAccounts = new Map<string, AnthropicAccountCacheEntry>();
+const anthropicSessionAccounts = new Map<string, AnthropicAccountCacheEntry>();
 
 function anthropicOrganizationKey(
   credential: AuthCredential | null | undefined,
-  sessionID: string | undefined,
 ): string[] {
   const keys: string[] = [];
   if (credential?.value) {
     keys.push(`credential:${authFingerprint(credential)}`);
   }
-  if (sessionID) keys.push(`session:${sessionID}`);
   return keys;
+}
+
+function anthropicSessionKey(
+  sessionID: string,
+  credential: AuthCredential | null | undefined,
+): string | null {
+  // A session may switch credentials; never let one credential inherit another's organization.
+  if (!credential?.value) return null;
+  return `session:${sha256(sessionID)}:credential:${authFingerprint(credential)}`;
 }
 
 function rememberAnthropicOrganization(
   organizationID: string,
   credential: AuthCredential | null | undefined,
   sessionID: string | undefined,
+  observedAt: number,
 ): void {
-  for (const key of anthropicOrganizationKey(credential, sessionID)) {
-    anthropicOrganizations.delete(key);
-    anthropicOrganizations.set(key, organizationID);
-    if (anthropicOrganizations.size > MAX_ANTHROPIC_ORGANIZATION_KEYS) {
-      const oldest = anthropicOrganizations.keys().next().value;
-      if (oldest !== undefined) anthropicOrganizations.delete(oldest);
+  if (organizationID.length > MAX_ANTHROPIC_ORGANIZATION_ID_LENGTH) return;
+  const account = sha256(organizationID).slice(0, 12);
+  const keys = anthropicOrganizationKey(credential);
+  const sessionKey = sessionID
+    ? anthropicSessionKey(sessionID, credential)
+    : null;
+  const latestObservedAt = Math.max(
+    ...keys.map((key) => anthropicAccounts.get(key)?.observedAt ?? -Infinity),
+    sessionKey
+      ? (anthropicSessionAccounts.get(sessionKey)?.observedAt ?? -Infinity)
+      : -Infinity,
+  );
+  // Quota persistence orders observations by request start. Keep the cache on
+  // that same clock so a stale response with a newly-seen window cannot rewind
+  // the credential's organization identity.
+  if (observedAt < latestObservedAt) return;
+  const entry = { account, observedAt };
+  for (const key of keys) {
+    // Cache only opaque account keys. New sessions may not evict established
+    // credential ownership when the bounded cache is full.
+    if (
+      !anthropicAccounts.has(key) &&
+      anthropicAccounts.size >= MAX_ANTHROPIC_ACCOUNT_KEYS
+    ) {
+      continue;
     }
+    anthropicAccounts.delete(key);
+    anthropicAccounts.set(key, entry);
+  }
+  if (
+    sessionKey &&
+    (anthropicSessionAccounts.has(sessionKey) ||
+      anthropicSessionAccounts.size < MAX_ANTHROPIC_ACCOUNT_KEYS)
+  ) {
+    anthropicSessionAccounts.set(sessionKey, entry);
   }
 }
 
-function cachedAnthropicOrganization(
+function cachedAnthropicAccountForKeys(
   credential: AuthCredential | null | undefined,
   sessionID: string | undefined,
 ): string | null {
-  for (const key of anthropicOrganizationKey(credential, sessionID)) {
-    const organizationID = anthropicOrganizations.get(key);
-    if (organizationID === undefined) continue;
-    anthropicOrganizations.delete(key);
-    anthropicOrganizations.set(key, organizationID);
-    return organizationID;
+  if (sessionID) {
+    const sessionKey = anthropicSessionKey(sessionID, credential);
+    if (sessionKey) {
+      const entry = anthropicSessionAccounts.get(sessionKey);
+      if (entry !== undefined) return entry.account;
+    }
+  }
+  for (const key of anthropicOrganizationKey(credential)) {
+    const entry = anthropicAccounts.get(key);
+    if (entry === undefined) continue;
+    anthropicAccounts.delete(key);
+    anthropicAccounts.set(key, entry);
+    return entry.account;
   }
   return null;
 }
 
 export function _resetCostAttributionForTest(): void {
-  anthropicOrganizations.clear();
+  anthropicAccounts.clear();
+  anthropicSessionAccounts.clear();
 }
 
 function providerFromHost(hostname: string, upstreamURL: string): string {
@@ -131,26 +178,6 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function chatGPTAccountIdFromCredential(
-  credential: AuthCredential | null | undefined,
-): string | null {
-  if (credential?.scheme !== "bearer") return null;
-  const payloadPart = credential?.value.split(".")[1];
-  if (!payloadPart || !/^[A-Za-z0-9_-]+$/.test(payloadPart)) return null;
-  try {
-    const payload = JSON.parse(
-      Buffer.from(payloadPart, "base64url").toString("utf8"),
-    ) as {
-      "https://api.openai.com/auth"?: { chatgpt_account_id?: unknown };
-    };
-    const accountId =
-      payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-    return typeof accountId === "string" ? accountId.trim() || null : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Resolve the attribution tuple for one upstream request/response.
  *
@@ -158,9 +185,9 @@ function chatGPTAccountIdFromCredential(
  *   upstream URL host, else "unknown".
  * - `authKind`: "subscription" for Anthropic OAuth (Claude Code) and ChatGPT
  *   Codex backends, else "api_key".
- * - `account`: a non-reversible key — never the raw credential. Subscription
- *   accounts use a stable provider account id when available, otherwise
- *   "default"; API-key accounts use a credential fingerprint.
+ * - `account`: a non-reversible key — never the raw credential. Use a cached
+ *   Anthropic organization key when known, otherwise a credential fingerprint;
+ *   use "default" only when neither identity is available.
  */
 export function resolveCostAttribution(input: {
   sessionID?: string;
@@ -168,39 +195,20 @@ export function resolveCostAttribution(input: {
   upstreamURL?: string;
   credential?: AuthCredential | null;
   responseHeaders?: Headers | null;
+  /** Forwarding hints only; never use caller-supplied headers as account identity. */
   requestHeaders?: Headers | Record<string, string> | null;
 }): CostAttribution {
-  const {
-    sessionID,
-    providerID,
-    upstreamURL,
-    credential,
-    responseHeaders,
-    requestHeaders,
-  } = input;
+  const { sessionID, providerID, upstreamURL, credential, responseHeaders } =
+    input;
   const provider = resolveProvider(providerID, upstreamURL);
   const responseAnthropicOrganizationID =
     provider === "anthropic"
       ? headerValue(responseHeaders, "anthropic-organization-id")
       : null;
-  if (responseAnthropicOrganizationID) {
-    rememberAnthropicOrganization(
-      responseAnthropicOrganizationID,
-      credential,
-      sessionID,
-    );
-  }
   // The Codex route only exists for ChatGPT subscriptions.
   const codexRoute = providerID?.trim().toLowerCase() === "openai-codex";
-  const requestChatGPTAccountId = headerValue(
-    requestHeaders,
-    "chatgpt-account-id",
-  );
-  const sessionAccountId = sessionChatGPTAccountId(sessionID);
-  const chatgptAccountId =
-    requestChatGPTAccountId ??
-    sessionAccountId ??
-    (provider === "openai" ? chatGPTAccountIdFromCredential(credential) : null);
+  // Bearer JWT payloads are not signature-verified here. Their account claims
+  // are untrusted and must never select an identity or subscription auth kind.
 
   let authKind: ProviderAuthKind = "api_key";
   if (provider === "anthropic") {
@@ -216,14 +224,6 @@ export function resolveCostAttribution(input: {
     if (
       codexRoute ||
       isChatGPTBackend(upstreamURL) ||
-      chatgptAccountId !== null ||
-      (requestHeaders &&
-        hasHeaderPrefix(
-          requestHeaders instanceof Headers
-            ? requestHeaders
-            : new Headers(requestHeaders),
-          "x-codex-",
-        )) ||
       (responseHeaders && hasHeaderPrefix(responseHeaders, "x-codex-"))
     ) {
       authKind = "subscription";
@@ -232,17 +232,51 @@ export function resolveCostAttribution(input: {
 
   let account = "default";
   if (authKind === "subscription") {
-    const stableAccountId =
-      provider === "openai"
-        ? chatgptAccountId
-        : provider === "anthropic"
-          ? (responseAnthropicOrganizationID ??
-            cachedAnthropicOrganization(credential, sessionID))
-          : null;
-    if (stableAccountId) account = sha256(stableAccountId).slice(0, 12);
+    if (provider === "openai" && credential?.value) {
+      // Without a verified provider account claim, isolate pacing to this
+      // credential instead of sharing one default bucket across accounts.
+      account = authFingerprint(credential).slice(0, 12);
+    } else if (provider === "anthropic") {
+      account =
+        cachedAnthropicAccountForKeys(credential, sessionID) ??
+        (responseAnthropicOrganizationID
+          ? sha256(responseAnthropicOrganizationID).slice(0, 12)
+          : "default");
+    }
   } else if (credential?.value) {
     account = authFingerprint(credential).slice(0, 12);
   }
 
   return { provider, authKind, account };
+}
+
+/** Cache a provider organization only after its quota observation persists. */
+export function cacheAnthropicOrganizationFromResponse(input: {
+  provider: string;
+  credential?: AuthCredential | null;
+  sessionID?: string;
+  observedAt: number;
+  responseHeaders?: Headers | null;
+}): void {
+  if (input.provider !== "anthropic") return;
+  const organizationID = headerValue(
+    input.responseHeaders,
+    "anthropic-organization-id",
+  );
+  if (organizationID) {
+    rememberAnthropicOrganization(
+      organizationID,
+      input.credential,
+      input.sessionID,
+      input.observedAt,
+    );
+  }
+}
+
+/** Resolve a cached organization identity without accepting response hints. */
+export function cachedAnthropicAccount(
+  credential: AuthCredential | null | undefined,
+  sessionID: string | undefined,
+): string | null {
+  return cachedAnthropicAccountForKeys(credential, sessionID);
 }

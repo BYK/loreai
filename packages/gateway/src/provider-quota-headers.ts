@@ -8,6 +8,15 @@ import { upsertProviderQuota, log } from "@loreai/core";
 import type { CostAttribution } from "./cost-attribution";
 import { recordQuotaObservation } from "./provider-budgets";
 
+let lastObservationStartedAt = 0;
+
+/** Return a strictly increasing wall-clock timestamp for upstream attempts. */
+export function providerQuotaObservationStartedAt(): number {
+  const next = Math.max(Date.now(), lastObservationStartedAt + 0.001);
+  lastObservationStartedAt = next;
+  return next;
+}
+
 export type ParsedQuotaWindow = {
   window: string;
   label: string | null;
@@ -112,11 +121,12 @@ const NAMED_BUCKET_RE =
 
 /**
  * Parse all recognized quota header families into normalized windows.
- * `observedAt` (ms epoch) is used to convert relative reset durations.
+ * `resetBaseAt` (ms epoch) is the response-receipt time used to convert
+ * relative reset durations.
  */
 export function parseProviderQuotaHeaders(
   headers: Headers,
-  observedAt: number,
+  resetBaseAt: number,
 ): ParsedQuotaWindow[] {
   const windows = new Map<string, ParsedQuotaWindow>();
   const put = (w: ParsedQuotaWindow | null): ParsedQuotaWindow | null => {
@@ -231,7 +241,7 @@ export function parseProviderQuotaHeaders(
   }
   function epochFromDuration(value: string | null): number | null {
     const ms = durationMs(value);
-    return ms === null ? null : observedAt + ms;
+    return ms === null ? null : resetBaseAt + ms;
   }
 
   // --- Codex quota windows ---------------------------------------------------
@@ -339,7 +349,7 @@ export function parseProviderQuotaHeaders(
       const value =
         field === "reset"
           ? seconds !== null && seconds >= 0
-            ? observedAt + seconds * 1000
+            ? resetBaseAt + seconds * 1000
             : null
           : nonneg(num(raw));
       fillIfUnset("requests", field === "reset" ? "resetsAt" : field, value);
@@ -369,7 +379,7 @@ export function parseProviderQuotaHeaders(
       }
       if (resetMatch && target.resetsAt === null) {
         const seconds = num(resetMatch[1]);
-        if (seconds !== null) target.resetsAt = observedAt + seconds * 1000;
+        if (seconds !== null) target.resetsAt = resetBaseAt + seconds * 1000;
       }
       // A bare "name";t=30 line with no numeric field would have been
       // dropped by makeWindow; if it was dropped and still has nothing,
@@ -424,14 +434,18 @@ export function parseProviderQuotaHeaders(
  * Parse quota headers from an upstream response and persist each window as
  * the latest snapshot for the attributed provider/account. Never throws —
  * failures (e.g. closed DB in tests) are logged at debug level.
+ * `observedAt` orders observations; `responseReceivedAt` anchors relative
+ * reset durations and must not be replaced with request-start time.
  */
 export function observeProviderQuotaHeaders(
   headers: Headers,
   attribution: CostAttribution,
   observedAt: number = Date.now(),
-): void {
+  responseReceivedAt: number = Date.now(),
+): boolean {
+  let accepted = false;
   try {
-    const windows = parseProviderQuotaHeaders(headers, observedAt);
+    const windows = parseProviderQuotaHeaders(headers, responseReceivedAt);
     for (const w of windows) {
       const row = {
         provider: attribution.provider,
@@ -447,12 +461,15 @@ export function observeProviderQuotaHeaders(
         source: w.source,
         observedAt,
       };
-      upsertProviderQuota(row);
-      recordQuotaObservation(row);
+      if (upsertProviderQuota(row)) {
+        recordQuotaObservation(row);
+        accepted = true;
+      }
     }
   } catch (error) {
     log.info("provider quota capture failed", {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  return accepted;
 }

@@ -25,8 +25,11 @@ import {
   type ProviderAuthKind,
   type ProviderQuotaRow,
 } from "@loreai/core";
-import { resolveAuth } from "./auth";
-import { resolveCostAttribution } from "./cost-attribution";
+import { resolveAuth, type AuthCredential } from "./auth";
+import {
+  cachedAnthropicAccount,
+  resolveCostAttribution,
+} from "./cost-attribution";
 
 export type PacingWindow = "5h" | "7d";
 
@@ -83,12 +86,15 @@ export type ProviderPacingStatus = {
 export const PROVIDER_PACING_KV_KEY = "provider_pacing";
 /** Maximum foreground pacing delay (MAX_THROTTLE_DELAY, 60 s). */
 export const MAX_PACING_DELAY_MS = 60_000;
+/** Gaps this long are idle time, not an interval induced by pacing. */
+const REQUEST_GAP_IDLE_MS = 5 * 60_000;
 /** Minimum Δt between quota observations that count as a rate sample. */
 export const MIN_SAMPLE_INTERVAL_MS = 60_000;
 /** EWMA weight of the newest sample (rates and request gaps). */
 export const PACING_EWMA_ALPHA = 0.3;
 const HOUR_MS = 3_600_000;
 const MAX_SETTINGS = 200;
+const MAX_PACING_TRACKS = 512;
 const PROVIDER_RE = /^[a-z0-9._-]{1,64}$/;
 const ACCOUNT_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const PACING_WINDOWS = new Set(["5h", "7d"]);
@@ -153,6 +159,15 @@ export function setPacingEnabled(setting: PacingSetting): void {
   );
   const next = setting.enabled ? rest : [...rest, setting];
   setKV(PROVIDER_PACING_KV_KEY, JSON.stringify(next.slice(-MAX_SETTINGS)));
+  if (!setting.enabled) {
+    // Disabling pacing discards every held delay for this account so toggling
+    // it back on can never revive stale controller state.
+    for (const window of PACING_WINDOWS) {
+      rateTracks.delete(trackKey(setting.provider, setting.account, window));
+    }
+    requestGaps.delete(trackKey(setting.provider, setting.account));
+    cancelPacingWaits(setting.provider, setting.account);
+  }
 }
 
 export function isPacingEnabled(provider: string, account: string): boolean {
@@ -176,6 +191,8 @@ type RateTrack = {
 
 const rateTracks = new Map<string, RateTrack>();
 const requestGaps = new Map<string, { lastAt: number; gap: number | null }>();
+const pacingWaits = new Map<string, Set<AbortController>>();
+export const PACING_DISABLED_REASON = Symbol("provider pacing disabled");
 
 function trackKey(provider: string, account: string, window?: string): string {
   return window === undefined
@@ -183,10 +200,53 @@ function trackKey(provider: string, account: string, window?: string): string {
     : `${provider}\x1f${account}\x1f${window}`;
 }
 
+/** Register an account-scoped sleep so disabling pacing releases that wait. */
+export function registerPacingWait(
+  match: Pick<BudgetMatch, "provider" | "account">,
+  controller: AbortController,
+): () => void {
+  const key = trackKey(match.provider, match.account, "wait");
+  const waits = pacingWaits.get(key) ?? new Set<AbortController>();
+  waits.add(controller);
+  pacingWaits.set(key, waits);
+  let enabled = true;
+  try {
+    enabled = isPacingEnabled(match.provider, match.account);
+  } catch {
+    // A settings read can fail while storage is closing; never fail the request
+    // because an optional pacing wait could not be registered safely.
+    enabled = false;
+  }
+  if (!enabled) {
+    controller.abort(PACING_DISABLED_REASON);
+  }
+  return () => {
+    waits.delete(controller);
+    if (waits.size === 0 && pacingWaits.get(key) === waits) {
+      pacingWaits.delete(key);
+    }
+  };
+}
+
+function cancelPacingWaits(provider: string, account: string): void {
+  const waits = pacingWaits.get(trackKey(provider, account, "wait"));
+  if (!waits) return;
+  for (const controller of waits) controller.abort(PACING_DISABLED_REASON);
+  pacingWaits.delete(trackKey(provider, account, "wait"));
+}
+
 function ewma(previous: number | null, sample: number): number {
   return previous === null
     ? sample
     : PACING_EWMA_ALPHA * sample + (1 - PACING_EWMA_ALPHA) * previous;
+}
+
+function rememberTrack<T>(map: Map<string, T>, key: string, value: T): void {
+  // Caller-controlled identities must never grow process memory without bound,
+  // and a new identity must never evict an established account's pacing state.
+  if (!map.has(key) && map.size >= MAX_PACING_TRACKS) return;
+  map.delete(key);
+  map.set(key, value);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -222,8 +282,9 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
   if (used === null) return;
   const key = trackKey(row.provider, row.account, row.window);
   const track = rateTracks.get(key);
+  if (track && row.observedAt < track.lastAt) return;
   if (!track || track.resetsAt !== row.resetsAt || used < track.lastUsed) {
-    rateTracks.set(key, {
+    rememberTrack(rateTracks, key, {
       resetsAt: row.resetsAt,
       lastUsed: used,
       lastAt: row.observedAt,
@@ -234,7 +295,10 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
     return;
   }
   const dt = row.observedAt - track.lastAt;
-  if (dt < MIN_SAMPLE_INTERVAL_MS) return;
+  if (dt < MIN_SAMPLE_INTERVAL_MS) {
+    rememberTrack(rateTracks, key, track);
+    return;
+  }
   const rate = ewma(track.rate, (used - track.lastUsed) / dt);
   track.rate = rate;
   track.lastUsed = used;
@@ -255,6 +319,7 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
       rate / ((100 - used) / T),
     );
   }
+  rememberTrack(rateTracks, key, track);
 }
 
 /**
@@ -281,16 +346,33 @@ export function recordForegroundRequest(
   const key = trackKey(match.provider, match.account);
   const entry = requestGaps.get(key);
   if (!entry) {
-    requestGaps.set(key, { lastAt: now, gap: null });
+    rememberTrack(requestGaps, key, { lastAt: now, gap: null });
     return;
   }
-  if (now > entry.lastAt) entry.gap = ewma(entry.gap, now - entry.lastAt);
-  entry.lastAt = now;
+  if (now > entry.lastAt) {
+    // A resumed session starts a fresh cadence; never treat the idle pause as
+    // a pacing interval, or the integral controller can jump to its 60 s cap.
+    const gap = now - entry.lastAt;
+    entry.gap = gap >= REQUEST_GAP_IDLE_MS ? null : ewma(entry.gap, gap);
+    entry.lastAt = now;
+    rememberTrack(requestGaps, key, entry);
+  }
 }
 
 export function _resetPacingTrackerForTest(): void {
+  for (const waits of pacingWaits.values()) {
+    for (const controller of waits) controller.abort(PACING_DISABLED_REASON);
+  }
+  pacingWaits.clear();
   rateTracks.clear();
   requestGaps.clear();
+}
+
+export function _pacingTrackerSizesForTest(): {
+  rateTracks: number;
+  requestGaps: number;
+} {
+  return { rateTracks: rateTracks.size, requestGaps: requestGaps.size };
 }
 
 // ---------------------------------------------------------------------------
@@ -488,19 +570,25 @@ export function sessionBudgetMatch(
   sessionID: string,
   upstream?: { providerID?: string; url?: string },
   requestHeaders?: Headers | Record<string, string> | null,
+  credentialOverride?: AuthCredential | null,
 ): BudgetMatch | null {
+  const credential =
+    credentialOverride ?? resolveAuth(sessionID, upstream?.providerID);
   const attribution = resolveCostAttribution({
     sessionID,
     providerID: upstream?.providerID,
     upstreamURL: upstream?.url,
-    credential: resolveAuth(sessionID, upstream?.providerID),
+    credential,
     requestHeaders,
   });
   if (attribution.provider === "unknown") return null;
   return {
     provider: attribution.provider,
     auth_kind: attribution.authKind,
-    account: attribution.account,
+    account:
+      attribution.provider === "anthropic"
+        ? (cachedAnthropicAccount(credential, sessionID) ?? attribution.account)
+        : attribution.account,
   };
 }
 

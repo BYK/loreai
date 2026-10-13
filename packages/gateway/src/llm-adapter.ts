@@ -44,8 +44,14 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
-import { resolveCostAttribution } from "./cost-attribution";
-import { observeProviderQuotaHeaders } from "./provider-quota-headers";
+import {
+  cacheAnthropicOrganizationFromResponse,
+  resolveCostAttribution,
+} from "./cost-attribution";
+import {
+  observeProviderQuotaHeaders,
+  providerQuotaObservationStartedAt,
+} from "./provider-quota-headers";
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import {
@@ -3930,8 +3936,16 @@ export function createGatewayLLMClient(
               await abortableSleep(delay, requestSignal);
             };
 
+            // Keep reset conversion anchored to response receipt even if later
+            // worker response parsing takes time.
+            const quotaObservationReceivedTimes = new WeakMap<
+              Response,
+              number
+            >();
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
+              const quotaObservationStartedAt =
+                providerQuotaObservationStartedAt();
               let response: Response;
               try {
                 recordPromptDispatch(model, target.protocol);
@@ -3974,6 +3988,7 @@ export function createGatewayLLMClient(
                 throw new WorkerTransportFailureError(e);
               }
 
+              quotaObservationReceivedTimes.set(response, Date.now());
               finalStatus = response.status;
 
               if (response.ok) {
@@ -4363,7 +4378,21 @@ export function createGatewayLLMClient(
                     undefined,
                     attribution,
                   );
-                  observeProviderQuotaHeaders(response.headers, attribution);
+                  const acceptedQuota = observeProviderQuotaHeaders(
+                    response.headers,
+                    attribution,
+                    quotaObservationStartedAt,
+                    quotaObservationReceivedTimes.get(response) ?? Date.now(),
+                  );
+                  if (acceptedQuota) {
+                    cacheAnthropicOrganizationFromResponse({
+                      provider: attribution.provider,
+                      credential: cred,
+                      sessionID: opts?.sessionID,
+                      observedAt: quotaObservationStartedAt,
+                      responseHeaders: response.headers,
+                    });
+                  }
                 }
 
                 // Enrich span with retry metadata on eventual success

@@ -14,14 +14,22 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
-import { resolveCostAttribution } from "./cost-attribution";
 import {
+  cacheAnthropicOrganizationFromResponse,
+  resolveCostAttribution,
+} from "./cost-attribution";
+import {
+  PACING_DISABLED_REASON,
   isSessionCurationPacingPaused,
   pacingDelayMs,
   recordForegroundRequest,
+  registerPacingWait,
   sessionBudgetMatch,
 } from "./provider-budgets";
-import { observeProviderQuotaHeaders } from "./provider-quota-headers";
+import {
+  observeProviderQuotaHeaders,
+  providerQuotaObservationStartedAt,
+} from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
 import {
   formatUpstreamRequestShape,
@@ -8497,16 +8505,33 @@ async function forwardToUpstream(
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
+  let quotaObservationStartedAt: number | undefined;
+  type QuotaObservationTiming = {
+    observedAt: number;
+    responseReceivedAt: number;
+  };
+  const quotaObservationTimes = new WeakMap<Response, QuotaObservationTiming>();
+  const quotaObservationBodyTimes = new WeakMap<
+    ReadableStream<Uint8Array>,
+    QuotaObservationTiming
+  >();
+  let latestQuotaObservationTiming: QuotaObservationTiming | undefined;
 
   const dispatchUpstream = (dispatchSignal?: AbortSignal): Promise<Response> =>
     responseAgainstAbort(async () => {
+      const observedAt = providerQuotaObservationStartedAt();
       try {
-        return await upstreamFetch(url, {
+        const response = await upstreamFetch(url, {
           method: "POST",
           headers,
           body: upstreamBody,
           signal: dispatchSignal,
         });
+        const timing = { observedAt, responseReceivedAt: Date.now() };
+        quotaObservationTimes.set(response, timing);
+        if (response.body) quotaObservationBodyTimes.set(response.body, timing);
+        latestQuotaObservationTiming = timing;
+        return response;
       } catch (error) {
         logUpstreamFetchFailure(error, req, route, dispatchSignal);
         throw error;
@@ -8514,6 +8539,9 @@ async function forwardToUpstream(
     }, dispatchSignal);
 
   const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
+    // Timestamp before invoking interceptors too: recording/replay adapters can
+    // return a response without calling dispatchUpstream.
+    quotaObservationStartedAt = providerQuotaObservationStartedAt();
     const response = await (effectiveInterceptor
       ? responseAgainstAbort(
           () =>
@@ -8523,20 +8551,43 @@ async function forwardToUpstream(
           dispatchSignal,
         )
       : dispatchUpstream(dispatchSignal));
+    const responseTiming =
+      quotaObservationTimes.get(response) ??
+      (response.body
+        ? quotaObservationBodyTimes.get(response.body)
+        : undefined) ??
+      latestQuotaObservationTiming;
+    const responseReceivedAt = responseTiming?.responseReceivedAt ?? Date.now();
     // Capture provider quota headers for the cost ledger (#1926). Header
     // reads only — the response object is returned untouched.
     try {
-      observeProviderQuotaHeaders(
+      const attribution = resolveCostAttribution({
+        sessionID,
+        providerID,
+        upstreamURL: effectiveUpstreamBase,
+        credential: routingAuth,
+        responseHeaders: response.headers,
+        requestHeaders: req.rawHeaders,
+      });
+      const quotaObservedAt =
+        responseTiming?.observedAt ??
+        quotaObservationStartedAt ??
+        providerQuotaObservationStartedAt();
+      const accepted = observeProviderQuotaHeaders(
         response.headers,
-        resolveCostAttribution({
-          sessionID,
-          providerID,
-          upstreamURL: effectiveUpstreamBase,
-          credential: routingAuth,
-          responseHeaders: response.headers,
-          requestHeaders: req.rawHeaders,
-        }),
+        attribution,
+        quotaObservedAt,
+        responseReceivedAt,
       );
+      if (accepted) {
+        cacheAnthropicOrganizationFromResponse({
+          provider: attribution.provider,
+          credential: routingAuth,
+          sessionID,
+          observedAt: quotaObservedAt,
+          responseHeaders: response.headers,
+        });
+      }
     } catch {
       // Quota capture must never affect the proxied response.
     }
@@ -22910,15 +22961,17 @@ async function handleConversationTurnPrepared(
   // to avoid causing cache busts (which would be self-defeating — costing
   // more than the throttle saved). A DB failure must never break the request.
   let pacingDelay = 0;
+  let pacingMatch: ReturnType<typeof sessionBudgetMatch> | undefined;
   try {
-    const match = sessionBudgetMatch(
+    pacingMatch = sessionBudgetMatch(
       sessionID,
       sessionState.lastUpstream,
       req.rawHeaders,
+      resolveAuth(sessionID, sessionState.lastUpstream?.providerID),
     );
     const now = Date.now();
-    recordForegroundRequest(match, now);
-    pacingDelay = pacingDelayMs(match, now) / 1000;
+    recordForegroundRequest(pacingMatch, now);
+    pacingDelay = pacingDelayMs(pacingMatch, now) / 1000;
   } catch (err) {
     log.info(`provider-pacing: evaluation failed: ${String(err)}`);
   }
@@ -22939,10 +22992,20 @@ async function handleConversationTurnPrepared(
         `pacing-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
           `session=${sessionID.slice(0, 16)}`,
       );
+      const pacingWaitController = new AbortController();
+      const unregisterPacingWait = pacingMatch
+        ? registerPacingWait(pacingMatch, pacingWaitController)
+        : () => {};
+      const abortPacingWait = (): void =>
+        pacingWaitController.abort(foregroundAbort.signal.reason);
+      foregroundAbort.signal.addEventListener("abort", abortPacingWait, {
+        once: true,
+      });
+      if (foregroundAbort.signal.aborted) abortPacingWait();
       try {
         await completeBudgetThrottleDelay(
           actualDelay * 1000,
-          foregroundAbort.signal,
+          pacingWaitController.signal,
           () => {
             const costs = getSessionCosts(sessionID);
             if (costs) {
@@ -22952,8 +23015,17 @@ async function handleConversationTurnPrepared(
           },
         );
       } catch (error) {
-        foregroundAbort.dispose();
-        throw error;
+        if (foregroundAbort.signal.aborted) {
+          foregroundAbort.dispose();
+          throw foregroundAbort.signal.reason;
+        }
+        if (error !== PACING_DISABLED_REASON) {
+          foregroundAbort.dispose();
+          throw error;
+        }
+      } finally {
+        foregroundAbort.signal.removeEventListener("abort", abortPacingWait);
+        unregisterPacingWait();
       }
     }
   }
