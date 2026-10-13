@@ -27,6 +27,9 @@ import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import type { FixtureEntry } from "../src/recorder";
 import type { GatewayRequest } from "../src/translate/types";
+import { measureKnowledgeDelivery } from "../src/knowledge-delivery";
+import { parseOpenAIResponsesRequest } from "../src/translate/openai-responses";
+import { loreSessionToken } from "../src/pipeline";
 
 vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
@@ -2924,6 +2927,20 @@ describe("Pipeline — streaming responses", () => {
       const wire = upstreamBodies.at(-1);
       if (!wire) throw new Error("No upstream request was sent");
       expect(wire.includes("Lore knowledge update")).toBe(true);
+      const actualRequest = parseOpenAIResponsesRequest(JSON.parse(wire), {});
+      const delivery = measureKnowledgeDelivery(
+        actualRequest.messages,
+        ids.map((id) => ltm.get(id)!),
+        loreSessionToken(sessionID),
+        { providerID: "openai", modelID: actualRequest.model },
+      );
+      expect(delivery).toMatchObject({
+        full: 1,
+        hintOnly: 1,
+        absent: 0,
+        blocks: 1,
+      });
+      expect(delivery.deltaTextTokens).toBeGreaterThan(delivery.fullTextTokens);
       const fullyDelivered = fixtures.flatMap((entry, index) =>
         wire.includes(entry.content.trim()) ? [ids[index]] : [],
       );
