@@ -144,6 +144,25 @@ function debugLog(config: GatewayConfig, message: string): void {
   if (config.debug && !log.isStderrSilenced()) console.error(message);
 }
 
+function isGatewayOperatorMutation(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS")
+    return false;
+  // These actions consume the gateway operator's persisted Supabase session;
+  // a remote gateway token must never confer that operator's identity.
+  return (
+    path === "/api/v1/teams" ||
+    path.startsWith("/api/v1/teams/") ||
+    /^\/api\/v1\/orgs\/[^/]+\/domains(?:\/|$)/.test(path) ||
+    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path) ||
+    (method === "POST" &&
+      (path === "/api/v1/sync/run" ||
+        /^\/api\/v1\/knowledge\/[^/]+\/promote$/.test(path) ||
+        /^\/api\/v1\/promotions\/[^/]+\/(?:approve|reject|withdraw)$/.test(
+          path,
+        )))
+  );
+}
+
 /**
  * Management authorization (`/`, `/api*`, `/ui*`). Authorizes from node:http's
  * socket metadata, never from Forwarded, X-Forwarded-For, Host, or another
@@ -159,10 +178,8 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     c.set("allowedManagementOrigin", null);
     if (!managementPath) return next();
 
-    if (
-      !config.allowRemoteManagement &&
-      !isLoopbackAddress(c.env.peerAddress)
-    ) {
+    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
+    if (!config.allowRemoteManagement && remotePeer) {
       return hiddenManagementResponse();
     }
 
@@ -174,22 +191,27 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     if (origin === false) return hiddenManagementResponse();
     c.set("allowedManagementOrigin", origin);
 
+    // The gateway Bearer token authenticates access to this process; it does not
+    // identify the caller represented by the gateway's persisted Supabase session.
+    if (remotePeer && isGatewayOperatorMutation(c.req.method, c.req.path)) {
+      return withManagementCors(hiddenManagementResponse(), origin);
+    }
+
     if (c.req.method === "OPTIONS") {
       return withManagementCors(new Response(null, { status: 204 }), origin);
     }
 
-    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
     const managementApiPath =
       c.req.path === "/api" || c.req.path.startsWith("/api/");
     if (
       remotePeer &&
       managementApiPath &&
-      (!config.gatewayAuthToken ||
-        !managementBearerMatches(
-          c.req.raw.headers,
-          config.gatewayAuthToken,
-          c.env.rawHeaders,
-        ))
+      config.gatewayAuthToken &&
+      !managementBearerMatches(
+        c.req.raw.headers,
+        config.gatewayAuthToken,
+        c.env.rawHeaders,
+      )
     ) {
       return withManagementCors(hiddenManagementResponse(), origin);
     }
@@ -200,7 +222,7 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
 /**
  * Data-plane access. Provider credentials authorize an upstream, not this
  * gateway: browser origins cannot invoke any model route (even from loopback),
- * the separate gateway access credential is enforced centrally, and mixed
+ * a configured gateway access credential is enforced centrally, and mixed
  * provider-auth pairs are rejected — all before OPTIONS handling, body reads,
  * session/storage/cost state, auth learning, configured credential overlays,
  * or upstream/interceptor calls. The access credential is stripped from the
@@ -215,8 +237,8 @@ function dataPlaneAccess(config: GatewayConfig): GatewayMiddleware {
     const { rawHeaders } = c.env;
     if (
       (config.remoteGateway || config.hostedMode) &&
-      (!config.gatewayAuthToken ||
-        !gatewayAccessMatches(req.headers, config.gatewayAuthToken, rawHeaders))
+      config.gatewayAuthToken &&
+      !gatewayAccessMatches(req.headers, config.gatewayAuthToken, rawHeaders)
     ) {
       return gatewayAccessDeniedResponse();
     }

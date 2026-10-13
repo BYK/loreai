@@ -971,19 +971,14 @@ export function formatKnowledge(
 ): string {
   if (!entries.length) return "";
 
-  // Apply token budget: greedily include entries (already sorted by confidence
-  // DESC from the DB query) until the budget is exhausted. Overhead accounts for
-  // the section heading and per-entry markdown scaffolding (~50 chars each).
+  // Apply the same token costs as forSession() so selected entries survive
+  // rendering under the same budget. The caller supplies selection order.
   let included = entries;
   if (maxTokens !== undefined) {
-    const HEADER_OVERHEAD = 50; // "## Long-term Knowledge\n### Category\n"
-    let used = HEADER_OVERHEAD;
+    let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
     const fitting: typeof entries = [];
     for (const e of entries) {
-      const cost =
-        estimateTokens(e.title + e.content) +
-        (e.id ? ID_PREFIX_OVERHEAD : 0) +
-        10; // per-entry bullet overhead
+      const cost = knowledgeEntryTokenCost(e);
       if (used + cost > maxTokens) continue; // skip; keep trying smaller entries
       fitting.push(e);
       used += cost;
@@ -1028,26 +1023,49 @@ export function formatKnowledge(
       return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
     });
     children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
-    children.push(
-      ul(
-        items.map((i) => {
-          const titleText = i.id
-            ? `${inline(`[${shortId(i.id)}] `)}${inline(i.title)}`
-            : inline(i.title);
-          return liph(strong(titleText), t(`: ${inline(i.content)}`));
-        }),
-      ),
-    );
+    children.push(ul(items.map(knowledgeListItem)));
   }
 
   return serialize(root(...children));
 }
 
-/**
- * Per-entry char-cost overhead for the `[xxxxxxxx] ` ID prefix that
- * `formatKnowledge` emits when an entry has an `id`. Used by the budget
- * packer (above) to keep the token estimate honest.
- */
+function knowledgeListItem(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): ReturnType<typeof liph> {
+  const titleText = entry.id
+    ? `${inline(`[${shortId(entry.id)}] `)}${inline(entry.title)}`
+    : inline(entry.title);
+  return liph(strong(titleText), t(`: ${inline(entry.content)}`));
+}
+
+/** Exact full-text list item used to verify durable delta delivery on replay. */
+export function formatKnowledgeEntry(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): string {
+  return serialize(root(ul([knowledgeListItem(entry)]))).trimEnd();
+}
+
+/** Selection and rendering must charge the same header and entry costs. */
+export const KNOWLEDGE_HEADER_OVERHEAD_TOKENS = 50;
+
+/** Per-entry cost shared by forSession() and formatKnowledge(). */
+export function knowledgeEntryTokenCost(entry: {
+  id?: string;
+  title: string;
+  content: string;
+}): number {
+  return (
+    estimateTokens(entry.title + entry.content) +
+    (entry.id ? ID_PREFIX_OVERHEAD : 0) +
+    10
+  );
+}
+
+/** Overhead for the `[xxxxxxxx] ` ID prefix rendered by formatKnowledge(). */
 const ID_PREFIX_OVERHEAD = 12;
 
 /** First 8 chars of a UUID — the short, stable handle the delta channel references. */

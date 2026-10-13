@@ -368,7 +368,22 @@ export async function commandTeam(
         if (role !== "admin" && role !== "editor" && role !== "viewer")
           return usage();
         const labels = await memberLabels(client, scope);
-        await setTeamRole(client, scope, userId, role);
+        const target = (await teamMembers(client, scope)).find(
+          (member) => member.userId === userId,
+        );
+        if (!target) {
+          console.error(`Team member not found: ${userId}`);
+          process.exitCode = 1;
+          return;
+        }
+        if (
+          target.role !== "admin" &&
+          target.role !== "editor" &&
+          target.role !== "viewer"
+        ) {
+          throw new Error("Unexpected team-member role from server.");
+        }
+        await setTeamRole(client, scope, userId, role, target.role);
         console.log(`Set ${labels.get(userId) ?? userId} to ${role}.`);
         break;
       }

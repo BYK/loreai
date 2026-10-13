@@ -31,6 +31,13 @@ mkdirSync(scratch, { recursive: true });
 
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
+const fileLinks = join(root, "file-links-fixture");
+mkdirSync(fileLinks, { recursive: true });
+const fileLinksProjectId = core.ensureProject(fileLinks, "file-links", null);
+core
+  .db()
+  .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+  .run("github.com/BYK/loreai", fileLinksProjectId);
 const sharingProject = join(root, "sharing-e2e");
 mkdirSync(sharingProject, { recursive: true });
 core.ensureProject(sharingProject, "sharing-e2e", null);
@@ -394,6 +401,17 @@ for (const entry of entries) {
   if (!firstKnowledgeId) firstKnowledgeId = id;
   knowledgeIds.push(id);
 }
+const fileLinkKnowledgeId = core.ltm.create({
+  category: "pattern",
+  title: "GitHub file link provenance fixture",
+  content: "Fixture content for the recorded repository file link.",
+  confidence: 0.9,
+  projectPath: fileLinks,
+  scope: "project",
+  session: "e2e-file-link",
+  metadata: { gitHead: "0123456789abcdef0123456789abcdef01234567" },
+});
+core.ltm.setFileRefs(fileLinkKnowledgeId, ["packages/ui/src/contracts/url.ts"]);
 core.ltm.create({
   scope: "global",
   category: "decision",

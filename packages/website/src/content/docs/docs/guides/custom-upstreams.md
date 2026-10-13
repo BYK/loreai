@@ -153,8 +153,8 @@ Two caveats:
 Hosted mode is for running the Lore gateway as a central service that multiple clients connect to from different machines. In hosted mode, the gateway is always a **remote gateway** — it has no shared filesystem with its clients.
 
 ```bash
-# Generate and configure a high-entropy access credential. Remote/hosted
-# startup fails closed when this is absent or malformed.
+# Optional: configure gateway authentication in addition to network access control.
+# When set, clients must supply this token; malformed tokens prevent startup.
 export LORE_GATEWAY_AUTH_TOKEN="$(openssl rand -hex 32)"
 
 # Enable hosted mode

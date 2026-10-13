@@ -58,6 +58,10 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import {
+  KNOWLEDGE_HEADER_OVERHEAD_TOKENS,
+  knowledgeEntryTokenCost,
+} from "./prompt";
 import { taskHintExcerpt } from "./task-text";
 import { currentTenantId } from "./tenant";
 
@@ -2655,9 +2659,14 @@ export function setFileRefs(logicalId: string, paths: string[]): string[] {
  */
 export function knowledgeFileRefsBatch(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_FILES_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_FILES_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   const rows = db()
     .query(
@@ -2684,7 +2693,7 @@ export function knowledgeFileRefsBatch(
       (p): p is string => typeof p === "string" && p.length > 0,
     );
     if (paths.length === 0) continue;
-    out.set(r.logical_id, paths.slice(0, MAX_RECALL_FILES_PER_ENTRY));
+    out.set(r.logical_id, paths.slice(0, limit));
   }
   return out;
 }
@@ -2699,9 +2708,14 @@ export function knowledgeFileRefsBatch(
  */
 export function knowledgeRefAnchors(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, KnowledgeRefAnchor[]> {
   const out = new Map<string, KnowledgeRefAnchor[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_ANCHORS_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_ANCHORS_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   // 'file' < 'symbol' lexically, so ORDER BY kind puts file anchors first; a
   // stable secondary sort by anchor keeps output deterministic (cache-friendly).
@@ -2725,7 +2739,7 @@ export function knowledgeRefAnchors(
       arr = [];
       out.set(r.logical_id, arr);
     }
-    if (arr.length >= MAX_RECALL_ANCHORS_PER_ENTRY) continue;
+    if (arr.length >= limit) continue;
     arr.push({ kind: r.kind, anchor: r.anchor });
   }
   return out;
@@ -3060,9 +3074,15 @@ export async function forSession(
   // wall-time remainder is the synchronous entry-load / FTS / scoring / packing
   // cost. Emitted at each real-work return.
   const timer = new ReadPathTimer();
+  const architectureInjection = config().knowledge.architectureInjection;
+  if (
+    architectureInjection !== "ranked" &&
+    architectureInjection !== "reserved"
+  ) {
+    throw new Error("Invalid architecture injection mode");
+  }
   const pid = ensureProject(projectPath);
   const categoryFilter = options?.categories;
-  const excludeFilter = options?.excludeCategories;
 
   // Build optional SQL category clauses (include / exclude are mutually exclusive)
   let categoryClause = "";
@@ -3070,9 +3090,9 @@ export async function forSession(
   if (categoryFilter?.length) {
     categoryClause = ` AND category IN (${categoryFilter.map(() => "?").join(",")})`;
     categoryParams = categoryFilter;
-  } else if (excludeFilter?.length) {
-    categoryClause = ` AND category NOT IN (${excludeFilter.map(() => "?").join(",")})`;
-    categoryParams = excludeFilter;
+  } else if (options?.excludeCategories?.length) {
+    categoryClause = ` AND category NOT IN (${options.excludeCategories.map(() => "?").join(",")})`;
+    categoryParams = options.excludeCategories;
   }
 
   // --- 1 & 2. Load project-specific + cross-project candidates ---
@@ -3185,12 +3205,11 @@ export async function forSession(
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
 
-    const HEADER_OVERHEAD_TOKENS = 15;
-    let used = HEADER_OVERHEAD_TOKENS;
+    let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
     const result: KnowledgeEntry[] = [];
     for (const entry of allPrefs) {
       if (used >= maxTokens) break;
-      const cost = estimateTokens(entry.title + entry.content) + 10;
+      const cost = knowledgeEntryTokenCost(entry);
       if (used + cost > maxTokens) continue;
       result.push(entry);
       used += cost;
@@ -3352,9 +3371,15 @@ export async function forSession(
         clearTimeout(deadlineTimer);
       }
       const hits = await timer.await(
-        embedding.vectorSearch(contextVec, 50, excludeFilter, "knowledge", {
-          signal: options?.signal,
-        }),
+        embedding.vectorSearch(
+          contextVec,
+          50,
+          options?.excludeCategories,
+          "knowledge",
+          {
+            signal: options?.signal,
+          },
+        ),
         "vectorSearch",
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
@@ -3462,10 +3487,9 @@ export async function forSession(
   }
 
   // --- 5. Merge and pack into token budget ---
-  // Architecture entries get a guaranteed minimum allocation (first 20% of
-  // budget) before the general score-ranked packing. These entries provide
-  // the structural "map" that makes specific gotchas/decisions interpretable
-  // — without them, a gotcha about a subsystem is harder to contextualize.
+  // In reserved mode, architecture gets the established first-pass allocation.
+  // Ranked mode lets it compete for shared slots. Neither mode changes
+  // on-demand recall or the hard token budget.
   const allScored = [...scoredProject, ...scoredCross];
 
   // --- 5b. Fold in relevance-ranked context sources (distillation/temporal) ---
@@ -3514,25 +3538,28 @@ export async function forSession(
     b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
   );
 
-  const HEADER_OVERHEAD_TOKENS = 15;
   const ARCH_BUDGET_FRACTION = 0.2;
-  let used = HEADER_OVERHEAD_TOKENS;
+  // The formatter receives the same budget. Shared packing costs ensure no
+  // selected entry disappears before its injection effects are recorded.
+  let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
   const result: KnowledgeEntry[] = [];
   const packedIds = new Set<string>();
 
-  // Phase 1: Pack architecture entries first (up to 20% of budget)
+  // Only the legacy reserved mode packs architecture first. Ranked mode lets
+  // every entry compete for the same hard budget by relevance.
   const archBudget = Math.floor(maxTokens * ARCH_BUDGET_FRACTION);
-  const archEntries = allScored.filter(
-    (s) => s.entry.category === "architecture",
-  );
+  const archEntries =
+    architectureInjection === "reserved"
+      ? allScored.filter((s) => s.entry.category === "architecture")
+      : [];
   // Sort architecture by score descending (already sorted, but filter may
   // reorder) with the same id tiebreak for deterministic selection.
   archEntries.sort((a, b) =>
     b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
   );
   for (const { entry } of archEntries) {
-    if (used >= archBudget + HEADER_OVERHEAD_TOKENS) break;
-    const cost = estimateTokens(entry.title + entry.content) + 10;
+    if (used >= archBudget + KNOWLEDGE_HEADER_OVERHEAD_TOKENS) break;
+    const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue; // hard cap: never exceed total budget
     result.push(entry);
     packedIds.add(entry.id);
@@ -3543,7 +3570,7 @@ export async function forSession(
   for (const { entry } of allScored) {
     if (used >= maxTokens) break;
     if (packedIds.has(entry.id)) continue;
-    const cost = estimateTokens(entry.title + entry.content) + 10;
+    const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue;
     result.push(entry);
     used += cost;
@@ -3562,7 +3589,12 @@ export async function forSession(
     for (const section of latSections) {
       if (used >= maxTokens) break;
       const display = section.first_paragraph ?? section.content;
-      const cost = estimateTokens(section.heading + display) + 10;
+      const title = `[${section.file}] ${section.heading}`;
+      const cost = knowledgeEntryTokenCost({
+        id: section.id,
+        title,
+        content: display,
+      });
       if (used + cost > maxTokens) continue;
       // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
       result.push({
@@ -3571,7 +3603,7 @@ export async function forSession(
         tenant_id: currentTenantId(),
         project_id: section.project_id,
         category: "lat.md",
-        title: `[${section.file}] ${section.heading}`,
+        title,
         content: display,
         source_session: null,
         cross_project: 0,
@@ -3656,7 +3688,7 @@ export function recordForSessionEffects(
     log.warn("forSession: transfer recording failed (non-fatal):", err);
   }
 
-  // Being selected resets the decay clock without changing confidence.
+  // Full-content delivery resets the decay clock without changing confidence.
   signal?.throwIfAborted();
   try {
     const knowledgeResult = result.filter(

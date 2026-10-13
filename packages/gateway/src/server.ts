@@ -210,6 +210,7 @@ export async function startServer(
           );
           const accessAllowed =
             !(config.remoteGateway || config.hostedMode) ||
+            !config.gatewayAuthToken ||
             (typeof config.gatewayAuthToken === "string" &&
               accessHeader !== null &&
               constantTimeTokenMatches(accessHeader, config.gatewayAuthToken));

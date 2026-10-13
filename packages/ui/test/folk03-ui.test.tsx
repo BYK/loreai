@@ -209,7 +209,150 @@ function mount(component: () => JSX.Element, client: ApiClient) {
   ));
 }
 
+function deferred<T>() {
+  let resolvePromise: (value: T) => void = () => {
+    throw new Error("deferred promise was not initialized");
+  };
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: (value: T) => resolvePromise(value) };
+}
+
 describe("TeamPage", () => {
+  it("hides prior members when a team reload fails and ignores late responses", async () => {
+    const firstTeamResponse: TeamMembersResponse = {
+      ...memberResponse,
+      team: { id: "team-1", name: "Acme" },
+      members: memberResponse.members.map((member) => ({
+        ...member,
+        label: member.me ? "Admin A" : "Alice",
+      })),
+    };
+    const firstRequest = deferred<TeamMembersResponse>();
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockImplementationOnce(() => firstRequest.promise)
+      .mockRejectedValueOnce(new Error("Beta is unavailable"));
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeams: async () => ({
+          hosted: false,
+          teams: [
+            { id: "team-1", name: "Acme", role: "admin", member_count: 2 },
+            { id: "team-2", name: "Beta", role: "admin", member_count: 2 },
+          ],
+        }),
+        getTeamMembers,
+      }),
+    );
+
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledWith("team-1"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Team" }), {
+      target: { value: "team-2" },
+    });
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledWith("team-2"));
+    expect(
+      await screen.findByText("The team could not be loaded"),
+    ).toBeVisible();
+    expect(screen.queryByText("Alice")).toBeNull();
+    expect(screen.queryByText("Admin A")).toBeNull();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+
+    firstRequest.resolve(firstTeamResponse);
+    await firstRequest.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(screen.getByRole("combobox", { name: "Team" })).toHaveValue(
+      "team-2",
+    );
+    expect(screen.queryByText("Alice")).toBeNull();
+    expect(screen.queryByText("Admin A")).toBeNull();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+  });
+
+  it("ignores a pending roster response after membership disappears", async () => {
+    const emptyTeams: TeamList = { hosted: false, teams: [] };
+    const refreshedTeams = deferred<TeamList>();
+    const lateMembers = deferred<TeamMembersResponse>();
+    const getTeams = vi
+      .fn<ApiClient["getTeams"]>()
+      .mockResolvedValueOnce(teams)
+      .mockImplementationOnce(() => refreshedTeams.promise);
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockImplementationOnce(() => lateMembers.promise);
+    mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
+
+    await screen.findByTestId("team-members");
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const dialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Join team" }));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
+
+    refreshedTeams.resolve(emptyTeams);
+    expect(await screen.findByText("No team memberships")).toBeVisible();
+    lateMembers.resolve(memberResponse);
+    await lateMembers.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("No team memberships")).toBeVisible();
+    expect(screen.queryByTestId("team-members")).toBeNull();
+  });
+
+  it("reloads the same team after joining from the no-team state", async () => {
+    const emptyTeams: TeamList = { hosted: false, teams: [] };
+    const refreshedTeams = deferred<TeamList>();
+    const pendingReload = deferred<TeamMembersResponse>();
+    const getTeams = vi
+      .fn<ApiClient["getTeams"]>()
+      .mockResolvedValueOnce(teams)
+      .mockImplementationOnce(() => refreshedTeams.promise)
+      .mockResolvedValueOnce(teams);
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockImplementationOnce(() => pendingReload.promise)
+      .mockResolvedValueOnce(memberResponse);
+    mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
+
+    await screen.findByTestId("team-members");
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const firstDialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(
+      within(firstDialog).getByRole("button", { name: "Join team" }),
+    );
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
+    pendingReload.resolve(memberResponse);
+    await waitFor(() =>
+      expect(screen.getByTestId("team-members")).toBeVisible(),
+    );
+
+    refreshedTeams.resolve(emptyTeams);
+    expect(await screen.findByText("No team memberships")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    const secondDialog = await screen.findByTestId("team-join-dialog");
+    fireEvent.input(screen.getByTestId("team-invite-token"), {
+      target: { value: "invite-token" },
+    });
+    fireEvent.click(
+      within(secondDialog).getByRole("button", { name: "Join team" }),
+    );
+
+    await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(3));
+    expect(await screen.findByTestId("team-members")).toBeVisible();
+  });
+
   it("shows hosted mode before the anonymous state", async () => {
     mount(
       () => <TeamPage />,
