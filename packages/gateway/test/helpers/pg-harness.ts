@@ -61,6 +61,8 @@ const SHIM = join(HERE, "supabase-shim.sql");
 
 export interface PgHarness {
   client: Client;
+  /** Open an independent superuser connection for concurrency tests. */
+  connect(): Promise<Client>;
   /** Run `fn` inside a transaction as `authenticated` with the given user's JWT. */
   asUser<T>(uid: string, fn: (c: Client) => Promise<T>): Promise<T>;
   asService<T>(fn: (c: Client) => Promise<T>): Promise<T>;
@@ -238,6 +240,11 @@ export async function startPgHarness(
 
     return {
       client,
+      async connect() {
+        const connection = new Client(cfg);
+        await connection.connect();
+        return connection;
+      },
       restUrl,
       userJwt: (uid: string) => mintJwt({ sub: uid, role: "authenticated" }),
       asUser: (uid, fn) =>
