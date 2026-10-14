@@ -2380,35 +2380,59 @@ export async function peekProjectRefsOffloaded(
 
 /**
  * Record which knowledge entries were injected into a session, for the
- * outcome-reward loop (#497). Keyed by `logical_id` (the A2 stable identity), so
- * crediting survives a version edit between injection and the idle credit pass.
- * Idempotent per (session, entry) via the PK — re-injection across turns does
- * NOT reset the `credited` flag, so an entry is credited at most once per
+ * outcome-reward loop (#497, #2054). The supplied snapshot's `id` pins the
+ * exposed version; never look up a replacement and pretend it was shown.
+ * Same-version re-injection preserves its first exposure. A newly shown current
+ * version can replace an uncredited receipt and start a new window. Credited
+ * receipts never change, so a logical entry is credited at most once per
  * session. cross_project (shared) and synthetic (lat.md) entries are skipped:
  * the loop must never auto-adjust shared knowledge, and synthetics aren't rows.
  */
 export function recordSessionInjections(
   sessionID: string | undefined,
   projectPath: string,
-  entries: { logical_id?: string; cross_project?: number; category?: string }[],
+  entries: {
+    id?: string;
+    logical_id?: string;
+    cross_project?: number;
+    category?: string;
+  }[],
 ): void {
   if (!sessionID) return;
   const pid = ensureProject(projectPath);
+  const tenant = currentTenantId();
   const now = Date.now();
   const stmt = db().query(
     `INSERT INTO knowledge_session_injections
-       (session_id, logical_id, project_id, created_at, credited)
-     VALUES (?, ?, ?, ?, 0)
-     ON CONFLICT(session_id, logical_id) DO NOTHING`,
+       (session_id, logical_id, project_id, created_at, credited, version_id)
+     SELECT ?, k.logical_id, k.project_id, ?, 0, k.id FROM knowledge k
+     WHERE k.id = ? AND k.logical_id = ? AND k.project_id = ?
+       AND k.tenant_id = ? AND k.cross_project = 0 AND k.is_deleted = 0
+     ON CONFLICT(session_id, logical_id) DO UPDATE SET
+       version_id = excluded.version_id,
+       created_at = excluded.created_at,
+       verdict = NULL
+     WHERE knowledge_session_injections.credited = 0
+       AND knowledge_session_injections.project_id = excluded.project_id
+       AND knowledge_session_injections.version_id IS NOT excluded.version_id
+       -- Stale snapshot replays may record an initial historical exposure, but
+       -- must never replace a newer/current exposure or guess legacy provenance.
+       AND EXISTS (
+         SELECT 1 FROM knowledge_current current
+         WHERE current.id = excluded.version_id
+           AND current.logical_id = excluded.logical_id
+           AND current.project_id = excluded.project_id
+           AND current.tenant_id = ? AND current.cross_project = 0
+       )`,
   );
   // One transaction for the whole batch (matches markInjected's single write and
   // avoids a per-entry auto-commit on the request hot path).
   withTransaction(() => {
     for (const e of entries) {
-      if (!e.logical_id) continue;
+      if (!e.id || !e.logical_id) continue;
       if (e.cross_project === 1) continue;
       if (e.category === "lat.md") continue;
-      stmt.run(sessionID, e.logical_id, pid, now);
+      stmt.run(sessionID, now, e.id, e.logical_id, pid, tenant, tenant);
     }
   });
 }
@@ -2424,7 +2448,8 @@ export type OutcomeCreditResult = {
 /**
  * Credit a session's injected knowledge entries by verifier co-occurrence
  * (#497, #2052). Each entry considers only checks seeded at or after its first
- * injection. Passing windows get a small (capped) boost; windows with failures
+ * exposure of the current version. Unknown/superseded exposures are neutral.
+ * Passing windows get a small (capped) boost; windows with failures
  * get a larger penalty. Runs at idle, at most once per entry per session (the
  * `credited` flag), so a later idle tick won't re-credit.
  *
@@ -2441,31 +2466,41 @@ export function creditSessionOutcome(
   projectPath: string,
 ): OutcomeCreditResult {
   const pid = ensureProject(projectPath);
-  const uncredited = db()
-    .query(
-      `SELECT logical_id, created_at FROM knowledge_session_injections
-       WHERE session_id = ? AND project_id = ? AND credited = 0`,
-    )
-    .all(sessionID, pid) as { logical_id: string; created_at: number }[];
-  if (uncredited.length === 0) return { verdict: "none", credited: 0 };
-
-  const verdicts = sessionVerifierVerdictsAfter(
-    projectPath,
-    sessionID,
-    uncredited.map((entry) => entry.created_at),
+  const tenant = currentTenantId();
+  const readUncredited = db().query(
+    `SELECT i.logical_id, i.created_at FROM knowledge_session_injections i
+     JOIN knowledge_current k ON k.logical_id = i.logical_id AND k.id = i.version_id
+     WHERE i.session_id = ? AND i.project_id = ? AND i.credited = 0
+       AND k.project_id = i.project_id AND k.tenant_id = ? AND k.cross_project = 0`,
   );
-  const groups: Record<"pass" | "fail", string[]> = { pass: [], fail: [] };
-  for (let i = 0; i < uncredited.length; i++) {
-    const verdict = verdicts[i];
-    if (verdict !== "none") groups[verdict].push(uncredited[i].logical_id);
+  // Most idle calls have nothing to credit. Avoid a write lock in that case;
+  // re-read eligible versions under the lock before applying any feedback.
+  if (!readUncredited.get(sessionID, pid, tenant)) {
+    return { verdict: "none", credited: 0 };
   }
-  const credited = groups.pass.length + groups.fail.length;
-  if (credited === 0) return { verdict: "none", credited: 0 };
+  return withTransaction(() => {
+    const uncredited = readUncredited.all(sessionID, pid, tenant) as {
+      logical_id: string;
+      created_at: number;
+    }[];
+    if (uncredited.length === 0) return { verdict: "none", credited: 0 };
 
-  const now = Date.now();
-  // Apply the confidence adjustment and the credited-flag write atomically, so a
-  // crash between them can't re-credit (double-adjust) on restart.
-  withTransaction(() => {
+    const verdicts = sessionVerifierVerdictsAfter(
+      projectPath,
+      sessionID,
+      uncredited.map((entry) => entry.created_at),
+    );
+    const groups: Record<"pass" | "fail", string[]> = { pass: [], fail: [] };
+    for (let i = 0; i < uncredited.length; i++) {
+      const verdict = verdicts[i];
+      if (verdict !== "none") groups[verdict].push(uncredited[i].logical_id);
+    }
+    const credited = groups.pass.length + groups.fail.length;
+    if (credited === 0) return { verdict: "none", credited: 0 };
+
+    const now = Date.now();
+    // Apply the confidence adjustment and the credited-flag write atomically, so a
+    // crash between them can't re-credit (double-adjust) on restart.
     // Adjust the current, live version of each injected logical entry. The
     // cross_project = 0 guard is a real backstop (a PROMOTED entry keeps its
     // origin project_id but has cross_project = 1 — it must never be adjusted);
@@ -2529,12 +2564,11 @@ export function creditSessionOutcome(
           .run(verdict, sessionID, pid, ...ids);
       }
     }
+    return { verdict: groups.fail.length > 0 ? "fail" : "pass", credited };
   });
-
-  return { verdict: groups.fail.length > 0 ? "fail" : "pass", credited };
 }
 
-/** Per-entry outcome co-occurrence stats for the reward loop (#497). */
+/** Current-version outcome co-occurrence stats for the reward loop (#497). */
 export type OutcomeImpact = {
   /** Sessions this entry was injected into that ended with passing verifiers. */
   passes: number;
@@ -2548,6 +2582,8 @@ export type OutcomeImpact = {
  * one query per entry. The idle consolidation path evaluates dozens of entries
  * per pass, so the per-entry form was an N+1 (Sentry LOREAI-GATEWAY-3D).
  *
+ * Counts only receipts for the current version, preventing historical or
+ * unknown exposure from being evidence for replacement content (#2054).
  * Counts credited injection rows by verdict; 'none' verdicts are not recorded
  * (no signal), so only pass/fail are counted (the `verdict IN ('pass','fail')`
  * filter also excludes still-uncredited NULL rows). Backed by the
@@ -2575,7 +2611,7 @@ export function outcomeImpactMany(
       .query(
         `SELECT i.logical_id, i.verdict, COUNT(*) AS n
          FROM knowledge_session_injections i
-         JOIN knowledge_current k ON k.logical_id = i.logical_id
+         JOIN knowledge_current k ON k.logical_id = i.logical_id AND k.id = i.version_id
          WHERE k.tenant_id = ? AND i.logical_id IN (${placeholders})
            AND i.verdict IN ('pass','fail')
          GROUP BY i.logical_id, i.verdict`,

@@ -25,9 +25,9 @@ function clearProject(): void {
     .run(pid);
 }
 
-function inject(title: string, at: number): string {
+function createEntry(title: string, at: number): string {
   vi.spyOn(Date, "now").mockReturnValue(at);
-  const id = ltm.create({
+  return ltm.create({
     projectPath: PROJECT,
     category: "pattern",
     title,
@@ -35,17 +35,43 @@ function inject(title: string, at: number): string {
     scope: "project",
     confidence: 0.5,
   });
-  const { logical_id } = entry(id);
-  ltm.recordSessionInjections(SESSION, PROJECT, [
-    { logical_id, cross_project: 0, category: "pattern" },
-  ]);
+}
+
+function inject(title: string, at: number): string {
+  const id = createEntry(title, at);
+  ltm.recordSessionInjections(SESSION, PROJECT, [entry(id)]);
   return id;
 }
 
-function entry(id: string): { logical_id: string; confidence: number } {
+function entry(id: string): {
+  id: string;
+  logical_id: string;
+  confidence: number;
+  cross_project: number;
+  category: string;
+} {
   return db()
-    .query("SELECT logical_id, confidence FROM knowledge_current WHERE id = ?")
-    .get(id) as { logical_id: string; confidence: number };
+    .query(
+      `SELECT id, logical_id, confidence, cross_project, category FROM knowledge_current
+       WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)`,
+    )
+    .get(id) as {
+    id: string;
+    logical_id: string;
+    confidence: number;
+    cross_project: number;
+    category: string;
+  };
+}
+
+function recordedVersion(id: string): string | null | undefined {
+  const receipt = db()
+    .query(
+      `SELECT * FROM knowledge_session_injections
+       WHERE session_id = ? AND logical_id = ?`,
+    )
+    .get(SESSION, entry(id).logical_id) as { version_id?: string | null };
+  return receipt?.version_id;
 }
 
 function injection(id: string): {
@@ -231,13 +257,7 @@ describe("outcome feedback follows each memory's exposure window", () => {
     const id = inject("repeated memory", 1000);
     recordCheck(2000, "error");
     vi.spyOn(Date, "now").mockReturnValue(3000);
-    ltm.recordSessionInjections(SESSION, PROJECT, [
-      {
-        logical_id: entry(id).logical_id,
-        cross_project: 0,
-        category: "pattern",
-      },
-    ]);
+    ltm.recordSessionInjections(SESSION, PROJECT, [entry(id)]);
 
     expect(injection(id).created_at).toBe(1000);
     expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(1);
@@ -369,7 +389,7 @@ describe("outcome feedback follows each memory's exposure window", () => {
               const existing = memories.get(action.memory);
               if (existing) {
                 ltm.recordSessionInjections(SESSION, PROJECT, [
-                  { logical_id: entry(existing.id).logical_id },
+                  entry(existing.id),
                 ]);
               } else {
                 memories.set(action.memory, {
@@ -406,6 +426,366 @@ describe("outcome feedback follows each memory's exposure window", () => {
           }
           idle();
           idle();
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});
+
+describe("outcome feedback follows the injected memory version", () => {
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    clearProject();
+  });
+
+  test("records the selected version ID", () => {
+    const id = inject("versioned memory", 1000);
+    expect(recordedVersion(id)).toBe(entry(id).id);
+  });
+
+  test("the real selector and deferred effects expose the current version ID", async () => {
+    const id = createEntry("selected current revision", 1000);
+    vi.spyOn(Date, "now").mockReturnValue(2000);
+    ltm.update(id, { content: "current revision selected for the agent" });
+    const current = entry(id);
+    const selected = await ltm.forSession(PROJECT, SESSION, 10_000, {
+      deferEffects: true,
+    });
+    expect(
+      selected.find((memory) => memory.logical_id === current.logical_id)?.id,
+    ).toBe(current.id);
+    ltm.recordForSessionEffects(PROJECT, SESSION, selected);
+    expect(recordedVersion(id)).toBe(current.id);
+    recordCheck(3000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(1);
+    expect(entry(id).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD);
+  });
+
+  test.each(["completed", "error"] as const)(
+    "an unseen replacement receives no feedback from a %s check",
+    (status) => {
+      const id = inject("original memory", 1000);
+      const original = entry(id);
+      vi.spyOn(Date, "now").mockReturnValue(2000);
+      ltm.update(id, { content: "corrected memory", confidence: 0.6 });
+      expect(entry(id).id).not.toBe(original.id);
+      recordCheck(3000, status);
+
+      expect(ltm.creditSessionOutcome(SESSION, PROJECT)).toEqual({
+        verdict: "none",
+        credited: 0,
+      });
+      expect(entry(id).confidence).toBeCloseTo(0.6);
+      expect(injection(id).credited).toBe(0);
+      expect(ltm.outcomeImpact(original.logical_id)).toEqual({
+        passes: 0,
+        fails: 0,
+      });
+    },
+  );
+
+  test("a selection superseded before recording keeps its actual version", () => {
+    const id = createEntry("selected memory", 1000);
+    const selected = ltm.getByLogical(entry(id).logical_id);
+    if (!selected) throw new Error("expected selected knowledge snapshot");
+    vi.spyOn(Date, "now").mockReturnValue(2000);
+    ltm.update(id, { content: "replacement not shown to this request" });
+    vi.spyOn(Date, "now").mockReturnValue(3000);
+    ltm.recordForSessionEffects(PROJECT, SESSION, [selected]);
+    recordCheck(4000, "error");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(id).confidence).toBe(0.5);
+    expect(recordedVersion(id)).toBe(selected.id);
+  });
+
+  test("same-millisecond revisions are distinguished by version identity", () => {
+    const id = inject("same-tick revision", 1000);
+    const original = entry(id);
+    ltm.update(id, { content: "new content in the same tick" });
+    expect(entry(id).id).not.toBe(original.id);
+    recordCheck(1000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(id).confidence).toBe(0.5);
+    expect(recordedVersion(id)).toBe(original.id);
+  });
+
+  test("exposing a replacement starts its own uncredited window", () => {
+    const id = inject("repairable memory", 1000);
+    recordCheck(2000, "error");
+    vi.spyOn(Date, "now").mockReturnValue(3000);
+    ltm.update(id, { content: "repaired memory" });
+    const replacement = entry(id);
+    vi.spyOn(Date, "now").mockReturnValue(4000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [replacement]);
+    recordCheck(5000, "completed");
+    vi.spyOn(Date, "now").mockReturnValue(6000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [replacement]);
+
+    expect(injection(id).created_at).toBe(4000);
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT)).toEqual({
+      verdict: "pass",
+      credited: 1,
+    });
+    expect(entry(id).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD);
+    expect(recordedVersion(id)).toBe(replacement.id);
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+  });
+
+  test("a stale version replay cannot overwrite a newer exposure", () => {
+    const id = inject("replayed memory", 1000);
+    const original = entry(id);
+    vi.spyOn(Date, "now").mockReturnValue(2000);
+    ltm.update(id, { content: "new version" });
+    const replacement = entry(id);
+    vi.spyOn(Date, "now").mockReturnValue(3000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [replacement]);
+    recordCheck(4000, "completed");
+    vi.spyOn(Date, "now").mockReturnValue(5000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [original]);
+
+    expect(injection(id).created_at).toBe(3000);
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(1);
+    expect(entry(id).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD);
+    expect(recordedVersion(id)).toBe(replacement.id);
+  });
+
+  test("credited old versions retain receipts without leaking impact or credit to replacements", () => {
+    const id = inject("credited memory", 1000);
+    const original = entry(id);
+    recordCheck(2000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(1);
+    expect(ltm.outcomeImpact(original.logical_id).passes).toBe(1);
+    vi.spyOn(Date, "now").mockReturnValue(3000);
+    ltm.update(id, { content: "replacement", confidence: 0.5 });
+    const replacement = entry(id);
+    vi.spyOn(Date, "now").mockReturnValue(4000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [replacement]);
+    recordCheck(5000, "error");
+
+    expect(injection(id)).toEqual({
+      created_at: 1000,
+      credited: 1,
+      verdict: "pass",
+    });
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(id).confidence).toBe(0.5);
+    expect(ltm.outcomeImpact(original.logical_id)).toEqual({
+      passes: 0,
+      fails: 0,
+    });
+    expect(recordedVersion(id)).toBe(original.id);
+
+    vi.spyOn(Date, "now").mockReturnValue(6000);
+    ltm.recordSessionInjections("replacement-session", PROJECT, [replacement]);
+    recordCheck(7000, "completed", { sessionID: "replacement-session" });
+    expect(
+      ltm.creditSessionOutcome("replacement-session", PROJECT).credited,
+    ).toBe(1);
+    expect(entry(id).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD);
+    expect(ltm.outcomeImpact(original.logical_id)).toEqual({
+      passes: 1,
+      fails: 0,
+    });
+  });
+
+  test("confidence-only updates preserve version eligibility", () => {
+    const id = inject("reconfirmed memory", 1000);
+    const original = entry(id);
+    vi.spyOn(Date, "now").mockReturnValue(2000);
+    ltm.update(id, { confidence: 0.6 });
+    expect(entry(id).id).toBe(original.id);
+    recordCheck(3000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(1);
+    expect(entry(id).confidence).toBeCloseTo(0.6 + ltm.OUTCOME_REWARD);
+  });
+
+  test("a revision changed between preflight and the credit lock stays neutral", () => {
+    const id = inject("concurrent correction", 1000);
+    recordCheck(2000, "completed");
+    let corrected = false;
+    registerSink({
+      ...NOOP_SINK,
+      withDbSpan(sql, fn) {
+        const result = fn();
+        if (
+          !corrected &&
+          sql.includes("SELECT") &&
+          sql.includes("FROM knowledge_session_injections")
+        ) {
+          corrected = true;
+          ltm.update(id, {
+            content: "correction between reads",
+            confidence: 0.6,
+          });
+        }
+        return result;
+      },
+    });
+    try {
+      expect(ltm.creditSessionOutcome(SESSION, PROJECT)).toEqual({
+        verdict: "none",
+        credited: 0,
+      });
+    } finally {
+      registerSink(NOOP_SINK);
+    }
+    expect(corrected).toBe(true);
+    expect(entry(id).confidence).toBeCloseTo(0.6);
+    expect(injection(id).credited).toBe(0);
+  });
+
+  test("missing IDs, mismatched identities, and foreign-project snapshots cannot create receipts", () => {
+    const a = createEntry("memory A", 1000);
+    const b = createEntry("memory B", 1000);
+    const snapshot = entry(a);
+    const other = ltm.create({
+      projectPath: "/test/outcome-version-other",
+      scope: "project",
+      category: "pattern",
+      title: "foreign memory",
+      content: "other project content",
+      confidence: 0.5,
+    });
+    ltm.recordSessionInjections(SESSION, PROJECT, [
+      { logical_id: snapshot.logical_id },
+      { ...snapshot, logical_id: entry(b).logical_id },
+      entry(other),
+    ]);
+    expect(
+      db()
+        .query(
+          "SELECT COUNT(*) AS n FROM knowledge_session_injections WHERE session_id = ?",
+        )
+        .get(SESSION),
+    ).toEqual({ n: 0 });
+    recordCheck(2000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(a).confidence).toBe(0.5);
+    expect(entry(b).confidence).toBe(0.5);
+    expect(entry(other).confidence).toBe(0.5);
+  });
+
+  test("credited legacy receipts retain history without guessing current-version impact", () => {
+    const id = createEntry("legacy credited memory", 1000);
+    const selected = entry(id);
+    db()
+      .query(`INSERT INTO knowledge_session_injections
+      (session_id, logical_id, project_id, created_at, credited, verdict)
+      VALUES (?, ?, ?, 1000, 1, 'fail')`)
+      .run(SESSION, selected.logical_id, ensureProject(PROJECT));
+    vi.spyOn(Date, "now").mockReturnValue(2000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [selected]);
+    expect(ltm.outcomeImpact(selected.logical_id)).toEqual({
+      passes: 0,
+      fails: 0,
+    });
+    expect(recordedVersion(id)).toBeNull();
+    expect(injection(id)).toEqual({
+      created_at: 1000,
+      credited: 1,
+      verdict: "fail",
+    });
+    recordCheck(3000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(id).confidence).toBe(0.5);
+  });
+
+  test("unknown legacy provenance is neutral until a new explicit exposure", () => {
+    const id = createEntry("legacy receipt memory", 1000);
+    const selected = entry(id);
+    db()
+      .query(`INSERT INTO knowledge_session_injections
+      (session_id, logical_id, project_id, created_at, credited)
+      VALUES (?, ?, ?, 1000, 0)`)
+      .run(SESSION, selected.logical_id, ensureProject(PROJECT));
+    recordCheck(2000, "error");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+    expect(entry(id).confidence).toBe(0.5);
+    vi.spyOn(Date, "now").mockReturnValue(3000);
+    ltm.recordSessionInjections(SESSION, PROJECT, [selected]);
+    expect(injection(id).created_at).toBe(3000);
+    expect(recordedVersion(id)).toBe(selected.id);
+    recordCheck(4000, "completed");
+    expect(ltm.creditSessionOutcome(SESSION, PROJECT).verdict).toBe("pass");
+    expect(entry(id).confidence).toBeCloseTo(0.5 + ltm.OUTCOME_REWARD);
+  });
+
+  test("generated revision, re-exposure, stale replay, and idle combinations preserve attribution", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          before: fc.constantFrom("pending", "completed", "error"),
+          after: fc.constantFrom("pending", "completed", "error"),
+          firstIdle: fc.boolean(),
+          contentEdit: fc.boolean(),
+          exposeNew: fc.boolean(),
+          replayOld: fc.boolean(),
+        }),
+        (scenario) => {
+          clearProject();
+          const id = inject("generated revision", 1000);
+          const original = entry(id);
+          recordCheck(2000, scenario.before);
+          const initiallyCredited =
+            scenario.firstIdle && scenario.before !== "pending";
+          if (scenario.firstIdle) ltm.creditSessionOutcome(SESSION, PROJECT);
+          vi.spyOn(Date, "now").mockReturnValue(3000);
+          ltm.update(id, {
+            ...(scenario.contentEdit
+              ? { content: "replacement revision" }
+              : {}),
+            confidence: 0.5,
+          });
+          const current = entry(id);
+          vi.spyOn(Date, "now").mockReturnValue(4000);
+          if (scenario.exposeNew)
+            ltm.recordSessionInjections(SESSION, PROJECT, [current]);
+          vi.spyOn(Date, "now").mockReturnValue(5000);
+          if (scenario.replayOld)
+            ltm.recordSessionInjections(SESSION, PROJECT, [original]);
+          recordCheck(6000, scenario.after);
+
+          const replaced =
+            !initiallyCredited && scenario.contentEdit && scenario.exposeNew;
+          const exposedVersion = replaced ? current.id : original.id;
+          const exposedAt = replaced ? 4000 : 1000;
+          const outcomes = [
+            { at: 2000, status: scenario.before },
+            { at: 6000, status: scenario.after },
+          ].filter((check) => check.at >= exposedAt);
+          const outcome =
+            initiallyCredited || exposedVersion !== current.id
+              ? "none"
+              : outcomes.some((check) => check.status === "error")
+                ? "fail"
+                : outcomes.some((check) => check.status === "completed")
+                  ? "pass"
+                  : "none";
+          expect(ltm.creditSessionOutcome(SESSION, PROJECT)).toEqual({
+            verdict: outcome,
+            credited: outcome === "none" ? 0 : 1,
+          });
+          const delta =
+            outcome === "fail"
+              ? -ltm.OUTCOME_PENALTY
+              : outcome === "pass"
+                ? ltm.OUTCOME_REWARD
+                : 0;
+          expect(entry(id).confidence).toBeCloseTo(0.5 + delta);
+          expect(recordedVersion(id)).toBe(exposedVersion);
+          expect(injection(id).created_at).toBe(exposedAt);
+          expect(injection(id).credited).toBe(
+            initiallyCredited || outcome !== "none" ? 1 : 0,
+          );
+          const counted =
+            exposedVersion === current.id ? injection(id).verdict : null;
+          expect(ltm.outcomeImpact(original.logical_id)).toEqual({
+            passes: counted === "pass" ? 1 : 0,
+            fails: counted === "fail" ? 1 : 0,
+          });
+          expect(ltm.creditSessionOutcome(SESSION, PROJECT).credited).toBe(0);
+          expect(entry(id).confidence).toBeCloseTo(0.5 + delta);
         },
       ),
       { numRuns: 100 },
