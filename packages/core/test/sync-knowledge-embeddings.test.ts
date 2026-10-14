@@ -1,9 +1,11 @@
 import { existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   close,
   databaseInTransaction,
   db,
+  dbPath,
   deleteTeamConfig,
   ensureProject,
 } from "../src/db";
@@ -17,6 +19,7 @@ import {
 } from "../src/db/vec-store";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
+import * as log from "../src/log";
 import {
   applyRemoteKnowledge,
   applyRemoteKnowledgeDelete,
@@ -25,6 +28,7 @@ import {
   readOutbox,
   withApplying,
 } from "../src/sync-data";
+import { withTenant } from "../src/tenant";
 import { fromBlob, runVectorQuery } from "../src/vector-query";
 import { createTestDatabasePath } from "./helpers/test-db-path";
 
@@ -34,6 +38,12 @@ OLD[0] = 1;
 const NEXT = new Float32Array(DIM);
 NEXT[1] = 1;
 let seq = 0;
+const passthroughSink: log.LogSink = {
+  info() {},
+  warn() {},
+  error() {},
+  captureException() {},
+};
 
 for (const mode of ["blob", "vec0"] as const) {
   describe(`pulled knowledge embeddings (${mode})`, () => {
@@ -272,6 +282,110 @@ for (const mode of ["blob", "vec0"] as const) {
       expect(vector(s.id)).toEqual(mode === "vec0" ? null : Array.from(OLD));
       expect(readOutbox(0)).toEqual(s.outbox);
     });
+
+    test("a WAL writer cannot resurrect a vector after the eligibility read", async () => {
+      const id = ltm.create({
+        projectPath: `/test/sync-vector-wal/${++seq}`,
+        scope: "project",
+        category: "decision",
+        title: "Before WAL",
+        content: "Original body",
+        confidence: 0.5,
+      });
+      const logical = ltm.logicalIdOf(id);
+      const successor = `wal-successor-${seq}`;
+      const competitor = new DatabaseSync(dbPath());
+      competitor.exec("PRAGMA busy_timeout = 1000");
+      let intervened = false;
+      install();
+      try {
+        log.registerSink({
+          ...passthroughSink,
+          withDbSpan<T>(sql: string, fn: () => T): T {
+            const result = fn();
+            if (
+              !intervened &&
+              sql.startsWith(
+                "SELECT 1 FROM knowledge WHERE id = ? AND tenant_id = ?",
+              )
+            ) {
+              // Commit a real second-connection write after eligibility was
+              // read but before the pending document stores its vector.
+              competitor.exec("BEGIN IMMEDIATE");
+              try {
+                competitor
+                  .prepare("UPDATE knowledge SET is_current = 0 WHERE id = ?")
+                  .run(id);
+                competitor
+                  .prepare(
+                    `INSERT INTO knowledge (id, tenant_id, project_id, category, title, content, created_at, updated_at, logical_id, version, is_current, is_deleted)
+                     SELECT ?, tenant_id, project_id, category, 'Competing revision', content, created_at, updated_at, logical_id, version + 1, 1, 0 FROM knowledge WHERE id = ?`,
+                  )
+                  .run(successor, id);
+                competitor.exec("COMMIT");
+                intervened = true;
+              } catch (error) {
+                competitor.exec("ROLLBACK");
+                throw error;
+              }
+            }
+            return result;
+          },
+        });
+        embedding.embedKnowledgeEntry(id, "Before WAL", "Original body", {
+          suppressSyncCapture: true,
+        });
+        await embedding.settleDocumentEmbeds();
+        expect(intervened).toBe(true);
+        expect(ltm.getByLogical(logical)!.id).toBe(successor);
+        expect(calls).toHaveLength(1);
+        expect(vector(id)).toBeNull();
+      } finally {
+        log.registerSink(passthroughSink);
+        await embedding.settleDocumentEmbeds();
+        competitor.close();
+      }
+    });
+
+    test.each(["tenant", "tombstone"] as const)(
+      "document stores reject a current row with a %s mismatch",
+      async (kind) => {
+        const create = () =>
+          ltm.create({
+            projectPath: `/test/sync-vector-authority/${++seq}`,
+            scope: "project",
+            category: "decision",
+            title: "Authorized body",
+            content: "Source",
+            confidence: 0.5,
+          });
+        let id =
+          kind === "tenant" ? withTenant("different-owner", create) : create();
+        if (kind === "tombstone") {
+          applyRemoteKnowledgeDelete(id);
+          const tombstone = db()
+            .query(
+              "SELECT id, is_deleted FROM knowledge WHERE logical_id = ? AND is_current = 1",
+            )
+            .get(id) as { id: string; is_deleted: number };
+          expect(tombstone.is_deleted).toBe(1);
+          id = tombstone.id;
+        } else {
+          expect(
+            db()
+              .query("SELECT tenant_id FROM knowledge_current WHERE id = ?")
+              .get(id),
+          ).toEqual({ tenant_id: "different-owner" });
+        }
+        install();
+        embedding.embedKnowledgeEntry(id, "Authorized body", "Source", {
+          suppressSyncCapture: true,
+        });
+        await embedding.settleDocumentEmbeds();
+        expect(calls).toHaveLength(1);
+        expect(vector(id)).toBeNull();
+      },
+    );
 
     test("an in-flight pulled embedding cannot open a successor database", async () => {
       const s = seed();
