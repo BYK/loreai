@@ -74,6 +74,64 @@ describe("Codex provider configuration adversarial cases", () => {
     },
   );
 
+  test.each([
+    { existingProvider: false, existingRootKeys: false },
+    { existingProvider: false, existingRootKeys: true },
+    { existingProvider: true, existingRootKeys: false },
+    { existingProvider: true, existingRootKeys: true },
+  ])(
+    "round-trips CRLF config ($existingProvider provider, $existingRootKeys root keys)",
+    ({ existingProvider, existingRootKeys }) => {
+      const original = [
+        "# Windows config",
+        ...(existingRootKeys
+          ? [
+              'model_provider = "proxy"',
+              'openai_base_url = "https://api.openai.com/v1"',
+              "model_auto_compact_token_limit = 1000",
+            ]
+          : []),
+        'instructions = """',
+        "[model_providers.fake]",
+        'model_provider = "inside string"',
+        '"""',
+        ...(existingProvider
+          ? [
+              "[model_providers.lore_http]",
+              "# Existing provider comment",
+              'name = "Existing"',
+              "[model_providers.lore_http.http_headers]",
+              'X-Note = "keep # lore-set this"',
+            ]
+          : []),
+        "[model_providers.proxy]",
+        'name = "Private proxy"',
+        "[profiles.work]",
+        'model_provider = "proxy"',
+        "",
+      ].join("\r\n");
+      const configured = setup(setup(original, FIRST_URL), NEXT_URL);
+      const parsed = parse(configured);
+      expect(parsed.model_provider).toBe("lore_http");
+      expect(parsed.openai_base_url).toBe(NEXT_URL);
+      expect(parsed.model_auto_compact_token_limit).toBe(999999999);
+      expect(parsed.instructions).toBe(parse(original).instructions);
+      expect(parsed.profiles).toEqual(parse(original).profiles);
+      expect(configured).toContain(
+        '[model_providers.proxy]\r\nname = "Private proxy"\r\n',
+      );
+      const restored = restoreTomlBackup(configured);
+      expect(restored.summary.skipped).toEqual([]);
+      expect(parse(restored.content)).toEqual(parse(original));
+      expect(restored.content).not.toContain("lore setup backup");
+      if (existingProvider) {
+        expect(restored.content).toContain(
+          "[model_providers.lore_http]\r\n# Existing provider comment\r\n",
+        );
+      }
+    },
+  );
+
   test("upgrades a genuine legacy backup and restores the original after changing endpoints", () => {
     const original =
       '# Personal config\nmodel_provider = "proxy"\nopenai_base_url = "https://api.openai.com/v1"\nmodel_auto_compact_token_limit = 1000\n[model_providers.proxy]\nname = "Private proxy"\n';

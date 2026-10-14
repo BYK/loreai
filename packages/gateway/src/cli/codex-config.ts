@@ -40,6 +40,8 @@ export function codexHttpProvider(baseUrl: string): TomlTable {
     wire_api: "responses",
     requires_openai_auth: true,
     supports_websockets: false,
+    // Match Codex's built-in OpenAI provider: values name environment
+    // variables that Codex resolves at request time, preserving account scoping.
     env_http_headers: {
       "OpenAI-Organization": "OPENAI_ORGANIZATION",
       "OpenAI-Project": "OPENAI_PROJECT",
@@ -55,8 +57,10 @@ export function tomlHeaders(
   for (let index = 0; index < lines.length; index++) {
     if (!/^\s*\[/.test(lines[index])) continue;
     try {
-      parseCodexToml(lines.slice(0, index + 1).join("\n"));
-      let value: unknown = parseCodexToml(lines[index]);
+      // Restore the line terminator removed by split/slice. In CRLF files
+      // the last line retains its CR, which must be followed by LF to parse.
+      parseCodexToml(`${lines.slice(0, index + 1).join("\n")}\n`);
+      let value: unknown = parseCodexToml(`${lines[index]}\n`);
       const path: string[] = [];
       while (value && typeof value === "object" && !Array.isArray(value)) {
         const entries = Object.entries(value);
@@ -74,7 +78,7 @@ export function tomlHeaders(
 
 export function isTomlTopLevelLine(lines: string[], index: number): boolean {
   try {
-    parseCodexToml(lines.slice(0, index).join("\n"));
+    parseCodexToml(`${lines.slice(0, index).join("\n")}\n`);
     return !tomlHeaders(lines.slice(0, index)).length;
   } catch {
     return false;
@@ -130,7 +134,9 @@ export function setCodexProviderValue(
   const range = providerRange(content);
   const block = value === null ? "" : decodeProviderBackup(value);
   // A backup may restore only this provider, never arbitrary config or tables.
-  const restored = parseCodexToml(block);
+  // A block sliced before the next table can end in the CR of its CRLF.
+  // Complete that terminator for validation while retaining the original bytes.
+  const restored = parseCodexToml(`${block}\n`);
   if (
     block &&
     (Object.keys(restored).length !== 1 ||
