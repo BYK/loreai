@@ -625,8 +625,14 @@ for (let k = 0; k < MESSAGES; k++) {
 // markers have real rows to read. The prompt delta's createdAt sits inside
 // the first page of loaded messages so its applied_at marker renders there.
 core.ltm.recordSessionInjections(SESSION, lore, [
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[0]) },
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[2]) },
+  {
+    id: knowledgeIds[0],
+    logical_id: core.ltm.logicalIdOf(knowledgeIds[0]),
+  },
+  {
+    id: knowledgeIds[2],
+    logical_id: core.ltm.logicalIdOf(knowledgeIds[2]),
+  },
 ]);
 core.appendSessionPromptDelta({
   sessionID: SESSION,

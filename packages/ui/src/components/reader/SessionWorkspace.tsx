@@ -76,7 +76,7 @@ export const SessionWorkspace: Component<{
     <aside
       data-pane="context"
       aria-label="Context window"
-      class="border-l border-line bg-surface lg:h-[calc(100dvh-62px)] lg:overflow-y-auto"
+      class="h-full min-h-0 overflow-y-auto border-l border-line bg-surface"
     >
       <PaneHead title="Context window" />
       {contextPane()}
@@ -87,7 +87,7 @@ export const SessionWorkspace: Component<{
     <Show
       when={desktop()}
       fallback={
-        <div class="flex h-[calc(100dvh-62px)] min-h-0 flex-col overflow-hidden">
+        <div class="flex h-full min-h-0 flex-col overflow-hidden">
           <div
             role="tablist"
             aria-label="Session panes"
@@ -135,7 +135,7 @@ export const SessionWorkspace: Component<{
         </div>
       }
     >
-      <div class="grid lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div class="grid h-full min-h-0 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div class="min-w-0">{transcript()}</div>
         {contextPanel}
       </div>

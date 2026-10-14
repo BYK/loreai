@@ -68,6 +68,7 @@ async function revealRow(page: Page, marker: string) {
   await expect(rowWith(page, marker)).toBeVisible();
   await page.getByTestId("search-clear").click();
   await expect(page.locator("mark.passage-search")).toHaveCount(0);
+  await page.getByTestId("search-close").click();
 }
 
 /** Select displayed text `needle` inside the row that mentions `marker` with a real Range. */
@@ -238,6 +239,21 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "230 messages, complete as captured",
     );
+    const paneGeometry = await page.evaluate(() => {
+      const session = document.querySelector('[data-testid="session-view"]');
+      const pane = document.querySelector('[data-testid="document-pane"]');
+      if (!(session instanceof HTMLElement) || !(pane instanceof HTMLElement))
+        return null;
+      return {
+        sessionBottom: session.getBoundingClientRect().bottom,
+        paneBottom: pane.getBoundingClientRect().bottom,
+      };
+    });
+    if (!paneGeometry)
+      throw new Error("Session view or document pane is missing");
+    expect(
+      Math.abs(paneGeometry.sessionBottom - paneGeometry.paneBottom),
+    ).toBeLessThanOrEqual(1);
     await expectPassageOnScreen(page);
 
     // The link opened elsewhere: no cached window to restore from, the

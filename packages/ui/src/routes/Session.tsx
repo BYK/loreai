@@ -155,6 +155,7 @@ export const Session: Component = () => {
           <SessionWorkspace
             transcript={
               <SessionView
+                class="h-full"
                 sessionId={sessionId() ?? ""}
                 messages={reader.messages()}
                 distillations={reader.distillations()}
