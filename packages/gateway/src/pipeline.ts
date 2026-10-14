@@ -7825,6 +7825,8 @@ function resolveRequestUpstreamRoute(
   if (
     !providerRoute &&
     req.codex === true &&
+    req.rawHeaders["chatgpt-account-id"]?.trim() &&
+    extractAuth(req.rawHeaders)?.scheme === "bearer" &&
     providerHeader === undefined &&
     !headerUpstream
   ) {
