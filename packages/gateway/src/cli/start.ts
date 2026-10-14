@@ -1473,6 +1473,12 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(`  export ANTHROPIC_BASE_URL=${localAddr}`);
     console.log(`  export OPENAI_BASE_URL=${localAddr}/v1`);
     console.log("");
+    console.log("[lore] For Codex, configure HTTP transport once:");
+    console.log(`  lore setup codex -r ${localAddr}`);
+    console.log(
+      "[lore] Restart Codex Desktop after setup and open a new chat.",
+    );
+    console.log("");
     console.log("[lore] IMPORTANT: When using Claude Code, also set:");
     console.log("  export DISABLE_AUTO_COMPACT=1");
     console.log("");

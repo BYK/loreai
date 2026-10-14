@@ -1065,7 +1065,9 @@ export function findRecallToolUse(
 ): GatewayToolUseBlock | undefined {
   return resp.content.find(
     (b): b is GatewayToolUseBlock =>
-      b.type === "tool_use" && b.name === RECALL_TOOL_NAME,
+      b.type === "tool_use" &&
+      b.name === RECALL_TOOL_NAME &&
+      b.responsesCall === undefined,
   );
 }
 
@@ -1077,7 +1079,9 @@ export function hasRecallToolUse(resp: GatewayResponse): boolean {
 /** Check whether the response contains non-recall tool_use blocks. */
 export function hasOtherToolUse(resp: GatewayResponse): boolean {
   return resp.content.some(
-    (b) => b.type === "tool_use" && b.name !== RECALL_TOOL_NAME,
+    (b) =>
+      b.type === "tool_use" &&
+      (b.name !== RECALL_TOOL_NAME || b.responsesCall !== undefined),
   );
 }
 

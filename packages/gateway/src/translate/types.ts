@@ -50,6 +50,8 @@ export type GatewayToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
+  /** Native Responses call kind and namespace, excluding the mutable input. */
+  responsesCall?: Record<string, unknown>;
   /**
    * Provider-native tool-call part retained for response egress when it carries
    * opaque reasoning/signature metadata (for example Gemini thoughtSignature).
@@ -75,6 +77,8 @@ export type GatewayToolResultBlock = {
   content: GatewayContentBlock[];
   /** Responses output was an array, even when it contained one text part. */
   nativeResponsesOutputArray?: true;
+  /** Native output envelope, excluding its mutable output payload. */
+  responsesOutput?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -223,7 +227,7 @@ export type GatewayTool = {
   /** Responses function schema strictness, retained for native replay. */
   strict?: boolean;
   /** Verified native Responses tool definition; never synthesize as a function. */
-  responsesBuiltin?: "web_search_preview";
+  responsesNative?: Record<string, unknown>;
   /** True only for tools injected and owned by the gateway. */
   gatewayOwned?: boolean;
 };
@@ -291,6 +295,7 @@ export type GatewayRequest = {
       hasLateItems: boolean;
       items: Array<{
         type?: "message";
+        id?: string;
         role: "system" | "developer";
         content: string | Array<{ type: "input_text"; text: string }>;
       }>;

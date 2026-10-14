@@ -34,6 +34,33 @@ import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import { boundFallbackHistory } from "../src/fallback-history";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 
+// Shapes emitted by the Codex CLI bundled with the Desktop app.
+const CODEX_NATIVE_TOOLS = [
+  {
+    type: "custom",
+    name: "apply_patch",
+    description: "Apply a patch",
+    format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+  },
+  {
+    type: "tool_search",
+    execution: "client",
+    description: "Find available tools",
+    parameters: { type: "object", properties: { query: { type: "string" } } },
+  },
+  {
+    type: "web_search",
+    external_web_access: false,
+    search_content_types: ["text"],
+  },
+  {
+    type: "namespace",
+    name: "functions",
+    description: "Available functions",
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
+  },
+];
+
 const png =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9FeAAAAABJRU5ErkJggg==";
 const dataURL = `data:image/png;base64,${png}`;
@@ -119,7 +146,11 @@ describe("cross-provider request conformance through real forwarding", () => {
     body: Record<string, unknown>,
     shouldDispatch = true,
     beforeRequest?: () => void | Promise<void>,
-    options?: { upstreamCalls?: number; headers?: Record<string, string> },
+    options?: {
+      upstreamCalls?: number;
+      headers?: Record<string, string>;
+      omitProvider?: boolean;
+    },
   ): Promise<{
     response: Response;
     upstream: Record<string, unknown>;
@@ -194,7 +225,9 @@ describe("cross-provider request conformance through real forwarding", () => {
       headers: {
         "content-type": "application/json",
         authorization: "Bearer test-key",
-        ...(provider === "gemini" ? {} : { "x-lore-provider": provider }),
+        ...(provider === "gemini" || options?.omitProvider
+          ? {}
+          : { "x-lore-provider": provider }),
         "x-lore-project": projectPath,
         "x-lore-agent": "coder",
         "x-lore-no-store": "true",
@@ -1053,6 +1086,85 @@ describe("cross-provider request conformance through real forwarding", () => {
         tools: [{ type: "web_search_preview" }],
       });
       expect(upstream.tools).toEqual([{ type: "web_search_preview" }]);
+    },
+  );
+
+  it.each([false, true])(
+    "forwards Codex native tool definitions unchanged (streamed=%s)",
+    async (streamed) => {
+      const { upstream } = await forward("/v1/responses", "openai", {
+        model: "gpt-test",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [{ role: "user", content: "help with this code" }],
+        tools: CODEX_NATIVE_TOOLS,
+      });
+      expect(upstream.tools).toEqual(CODEX_NATIVE_TOOLS);
+    },
+  );
+
+  it.each(["anthropic"] as const)(
+    "rejects Codex native tools before dispatch to %s",
+    async (provider) => {
+      const { response } = await forward(
+        "/v1/responses",
+        provider,
+        {
+          model:
+            provider === "anthropic"
+              ? "claude-test"
+              : provider === "gemini"
+                ? "gemini-test"
+                : "openai/gpt-test",
+          input: [{ role: "user", content: "help with this code" }],
+          tools: CODEX_NATIVE_TOOLS,
+        },
+        false,
+      );
+      expect(response.status).toBe(400);
+    },
+  );
+
+  it.each([false, true])(
+    "replays Codex native custom-tool history before the next user turn (streamed=%s)",
+    async (streamed) => {
+      const call = {
+        type: "custom_tool_call",
+        id: "ctc_patch",
+        call_id: "patch",
+        name: "apply_patch",
+        input: "*** Begin Patch\n*** End Patch",
+      };
+      const result = {
+        type: "custom_tool_call_output",
+        call_id: "patch",
+        output: "Patch applied",
+      };
+      const { upstream } = await forward("/v1/responses", "openai", {
+        model: "gpt-test",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [
+          { role: "user", content: "apply the patch" },
+          call,
+          result,
+          { role: "user", content: "continue" },
+        ],
+        tools: [CODEX_NATIVE_TOOLS[0]],
+      });
+      expect(upstream.input).toEqual(expect.arrayContaining([call, result]));
+      const items = upstream.input as unknown[];
+      expect(
+        items.findIndex(
+          (item) => JSON.stringify(item) === JSON.stringify(call),
+        ),
+      ).toBeLessThan(
+        items.findIndex(
+          (item) => JSON.stringify(item) === JSON.stringify(result),
+        ),
+      );
     },
   );
 
@@ -3086,6 +3198,33 @@ describe("cross-provider request conformance through real forwarding", () => {
       response_format: responseFormat,
     });
     expect(upstream.response_format).toEqual(responseFormat);
+  });
+
+  it("forwards Codex output settings on the default OpenAI model route", async () => {
+    const tools = CODEX_NATIVE_TOOLS;
+    const text = { format: { type: "text" }, verbosity: "low" };
+    const instruction = {
+      type: "message",
+      id: "msg_developer",
+      role: "developer",
+      content: [{ type: "input_text", text: "Follow project instructions" }],
+    };
+    const { upstream } = await forward(
+      "/v1/responses",
+      "openai",
+      {
+        model: "gpt-test",
+        tools,
+        text,
+        input: [instruction, { role: "user", content: "Reply ok" }],
+      },
+      true,
+      undefined,
+      { omitProvider: true },
+    );
+    expect(upstream.text).toEqual(text);
+    expect(upstream.tools).toEqual(expect.arrayContaining(tools));
+    expect(upstream.input).toEqual(expect.arrayContaining([instruction]));
   });
 
   it("rejects a Responses JSON schema routed to an incompatible Chat endpoint", async () => {

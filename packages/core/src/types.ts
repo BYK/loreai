@@ -169,6 +169,9 @@ export type LoreToolPart = {
   /** Provider function name for result parts whose call ID is distinct. */
   toolName?: string;
   callID: string;
+  /** Native Responses envelopes, kept when context compression drops provenance. */
+  responsesCall?: Record<string, unknown>;
+  responsesOutput?: Record<string, unknown>;
   state: LoreToolState;
 };
 

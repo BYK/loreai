@@ -1,3 +1,4 @@
+import { assertPortableResponsesResponse } from "../translate/responses-tools";
 /**
  * Anthropic SSE stream handling.
  *
@@ -1082,6 +1083,7 @@ export function buildSSEMarkerMessage(
  * a tool call would otherwise receive an empty stream.
  */
 export function buildSSEResponse(resp: GatewayResponse): string {
+  assertPortableResponsesResponse(resp);
   const events: string[] = [buildSSEMessageStart(resp)];
 
   resp.content.forEach((block: GatewayContentBlock, index: number) => {
