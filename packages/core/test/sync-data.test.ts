@@ -150,6 +150,73 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     ).toBe("sensitive");
   });
 
+  test.each(["title", "category"])(
+    "a %s-only remote edit appends once without re-push",
+    (field) => {
+      enableSync("basic");
+      const row = remoteRow(`immutable-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        ...row,
+        [field]: field === "title" ? "Remote title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        db()
+          .query("SELECT title, category FROM knowledge WHERE id = ?")
+          .get(row.id),
+      ).toEqual({ title: "AK", category: "decision" });
+      const current = currentKnowledgeRow(row.id)!;
+      expect(current[field]).toBe(changed[field]);
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        readOutbox(0).filter(
+          (entry) =>
+            entry.table_name === "knowledge" && entry.row_id === row.id,
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test.each(["title", "category"])(
+    "partial %s edits retain the other version fields",
+    (field) => {
+      const row = remoteRow(`partial-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        id: row.id,
+        content: row.content,
+        [field]: field === "title" ? "Partial title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(currentKnowledgeRow(row.id)).toMatchObject({
+        project_id: row.project_id,
+        content: row.content,
+        title: field === "title" ? "Partial title" : "AK",
+        category: field === "category" ? "gotcha" : "decision",
+      });
+    },
+  );
+
+  test("partial metadata pulls do not invent absent title/category changes", () => {
+    const row = remoteRow("partial-metadata", "same body");
+    applyRemoteKnowledge(row);
+    applyRemoteKnowledge({
+      id: row.id,
+      content: row.content,
+      sensitivity: "sensitive",
+    });
+    expect(versions(row.id)).toHaveLength(1);
+    expect(currentKnowledgeRow(row.id)).toMatchObject({
+      title: "AK",
+      category: "decision",
+      sensitivity: "sensitive",
+    });
+  });
+
   test("delete → death-cert (no live current); re-delete is a no-op", () => {
     applyRemoteKnowledge(remoteRow("d1", "body"));
     applyRemoteKnowledgeDelete("d1");

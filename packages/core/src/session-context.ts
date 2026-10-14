@@ -70,6 +70,8 @@ export type SessionContext = {
       /** Captured immutable version; null for legacy receipts. */
       version_id: string | null;
       version_status: InjectionVersionStatus;
+      /** Live current destination; null when it no longer exists in this project. */
+      current_version_id: string | null;
       title: string | null;
       category: string | null;
       /** Current logical entry's mutable score, never a historical snapshot. */
@@ -188,6 +190,7 @@ export function sessionContext(
       logical_id: string;
       version_id: string | null;
       version_status: InjectionVersionStatus;
+      current_version_id: string | null;
       title: string | null;
       category: string | null;
       confidence: number | null;
@@ -201,7 +204,8 @@ export function sessionContext(
                     WHEN k.id IS NULL THEN 'unavailable'
                     WHEN k.is_current = 1 THEN 'current'
                     ELSE 'superseded' END AS version_status,
-               k.title, k.category, current_entry.confidence,
+               k.title, k.category, current_entry.id AS current_version_id,
+               current_entry.confidence,
                i.created_at, i.credited, i.verdict
           FROM knowledge_session_injections i
           LEFT JOIN knowledge k ON k.id = i.version_id AND k.logical_id = i.logical_id
@@ -216,6 +220,7 @@ export function sessionContext(
       logical_id: row.logical_id,
       version_id: row.version_id,
       version_status: row.version_status,
+      current_version_id: row.current_version_id,
       title: row.title,
       category: row.category,
       confidence: row.confidence,

@@ -2273,8 +2273,8 @@ function insertKnowledgeVersion(
 
 /**
  * Apply a pulled knowledge row (keyed by `logical_id` = `row.id`) into the local
- * APPEND-ONLY model (A2, #823). The remote is a current-only mirror, so a content
- * change is "the same concern, new value" arriving from another device → append a
+ * APPEND-ONLY model (A2, #823). The remote is a current-only mirror, so a content,
+ * title, or category change arriving from another device → append a
  * new current version (mirrors a local update()); a metadata-only change converges
  * in place; a brand-new entry inserts v1. Idempotency: re-pulling our own pushed
  * content matches the current version → no new version. Runs under apply-
@@ -2301,9 +2301,9 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
       };
       const cur = db()
         .query(
-          "SELECT content FROM knowledge_current WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
+          "SELECT * FROM knowledge_current WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
         )
-        .get(LOCAL_TENANT_ID, logicalId) as { content: string } | undefined;
+        .get(LOCAL_TENANT_ID, logicalId) as Record<string, unknown> | undefined;
 
       if (agg.n === 0) {
         // Brand-new entry: v1 carries the remote id AS the logical_id (id == logical_id).
@@ -2315,8 +2315,13 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
         });
         return;
       }
-      if (cur && cur.content === row.content) {
-        // Content already converged — update the other (hashed) synced fields on the
+      if (
+        cur &&
+        ["content", "title", "category"].every(
+          (c) => !(c in row) || cur[c] === row[c],
+        )
+      ) {
+        // Version fields already converged — update the other synced fields on the
         // current version in place so the local hash matches the remote (no re-push),
         // without minting a new version. content/identity/version cols are excluded.
         const skip = new Set([
@@ -2326,6 +2331,8 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
           "is_current",
           "is_deleted",
           "content",
+          "title",
+          "category",
         ]);
         const setCols = syncCols.filter((c) => !skip.has(c));
         if (setCols.length > 0) {
@@ -2342,13 +2349,18 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
         }
         return;
       }
-      // Content differs (or no live current → revive) → append a new current version.
+      // A version field differs (or no live current → revive). Partial updates
+      // retain omitted fields instead of losing them when taking the append path.
+      const source = cur ? { ...cur, ...row } : row;
+      const appendCols = columns("knowledge").filter(
+        (c) => !PAYLOAD_EXCLUDE.has(c) && c in source,
+      );
       db()
         .query(
           "UPDATE knowledge SET is_current = 0 WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
         )
         .run(LOCAL_TENANT_ID, logicalId);
-      insertKnowledgeVersion(row, syncCols, {
+      insertKnowledgeVersion(source, appendCols, {
         id: uuidv7(),
         logicalId,
         version: (agg.maxV ?? 0) + 1,

@@ -17,7 +17,7 @@
  *         distillations: [{ id, generation, token_count, created_at,
  *                           observations }] },
  *       knowledge: { cache_text, cache_tokens, pin_tokens, stable_tokens,
- *         injections: [{ logical_id, version_id, version_status,
+ *         injections: [{ logical_id, version_id, version_status, current_version_id,
  *                        title, category, confidence,
  *                        created_at, credited, verdict }] },
  *       prompt_deltas: [{ seq, insert_at, applied_at,
@@ -29,7 +29,8 @@
  *
  * Injection title/category come from the captured version. Unknown legacy or
  * unavailable versions have null fields; confidence is the current logical
- * entry's mutable score, not its score when injected.
+ * entry's mutable score, not its score when injected. A null current_version_id
+ * means the receipt has no live navigation destination in this project.
  *
  * Prompt-delta reshape: the persisted `selector` JSON carries the block's
  * `insertAt` and its `mut` signature (`changed` ids + `removed` ids);

@@ -392,6 +392,7 @@ describe("contract violations", () => {
       const withVersion = structuredClone(sample);
       Object.assign(withVersion.knowledge.injections[0]!, {
         version_id: "v1",
+        current_version_id: version_status === "unavailable" ? null : "v2",
         version_status,
       });
       const parsed = safeParseContract(
@@ -404,6 +405,7 @@ describe("contract violations", () => {
     }
     for (const invalid of [
       { version_id: 42 },
+      { current_version_id: 42 },
       { version_status: "invented" },
     ]) {
       const badVersion = structuredClone(sample);

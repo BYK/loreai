@@ -180,13 +180,18 @@ const InjectionsSection: Component<{
                       </span>
                     }
                   >
-                    <A
-                      class="text-accent underline"
-                      href={props.knowledgeHref(i.logical_id)}
-                      title="Open current memory"
+                    <Show
+                      when={i.current_version_id !== null}
+                      fallback={<span>{i.title}</span>}
                     >
-                      {i.title}
-                    </A>
+                      <A
+                        class="text-accent underline"
+                        href={props.knowledgeHref(i.logical_id)}
+                        title="Open current memory"
+                      >
+                        {i.title}
+                      </A>
+                    </Show>
                   </Show>
                   <Show when={i.title !== null}>
                     <Badge variant="outline">

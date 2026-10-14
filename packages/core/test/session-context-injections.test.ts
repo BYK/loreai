@@ -5,6 +5,11 @@ import * as ltm from "../src/ltm";
 import { sessionContext } from "../src/session-context";
 import { recordToolCalls } from "../src/temporal";
 import { withTenant } from "../src/tenant";
+import {
+  applyRemoteKnowledge,
+  applyRemoteKnowledgeDelete,
+  currentKnowledgeRow,
+} from "../src/sync-data";
 
 let seq = 0;
 function setup() {
@@ -27,7 +32,7 @@ function setup() {
   return { project, session, id, logical, expose, read };
 }
 
-function credit(s: ReturnType<typeof setup>) {
+function credit(s: ReturnType<typeof setup>, expected = 1) {
   recordToolCalls({
     projectPath: s.project,
     info: {
@@ -66,10 +71,54 @@ function credit(s: ReturnType<typeof setup>) {
       },
     ],
   });
-  expect(ltm.creditSessionOutcome(s.session, s.project).credited).toBe(1);
+  expect(ltm.creditSessionOutcome(s.session, s.project).credited).toBe(
+    expected,
+  );
 }
 
 describe("session injection version projection", () => {
+  test.each(["title", "category"])(
+    "a pulled %s edit preserves the captured revision",
+    (field) => {
+      const s = setup();
+      const remote = {
+        ...currentKnowledgeRow(s.logical)!,
+        [field]: field === "title" ? "Remote title" : "gotcha",
+      };
+      applyRemoteKnowledge(remote);
+      const current = ltm.getByLogical(s.logical)!;
+      expect(current.id).not.toBe(s.id);
+      expect(s.read()[0]).toMatchObject({
+        version_id: s.id,
+        current_version_id: current.id,
+        version_status: "superseded",
+        title: "Original title",
+        category: "decision",
+      });
+      // Re-pulling the same revision is still idempotent.
+      applyRemoteKnowledge(remote);
+      expect(ltm.getByLogical(s.logical)!.id).toBe(current.id);
+      // A remote revision is just as ineligible for the old receipt's feedback.
+      credit(s, 0);
+      expect(ltm.getByLogical(s.logical)!.confidence).toBe(0.5);
+      expect(s.read()[0].credited).toBe(false);
+    },
+  );
+
+  test("a pulled deletion retains captured fields without a current navigation target", () => {
+    const s = setup();
+    applyRemoteKnowledgeDelete(s.logical);
+    expect(ltm.getByLogical(s.logical)).toBeNull();
+    expect(s.read()[0]).toMatchObject({
+      version_id: s.id,
+      current_version_id: null,
+      version_status: "superseded",
+      title: "Original title",
+      category: "decision",
+      confidence: null,
+    });
+  });
+
   test.each([false, true])(
     "keeps captured fields after an edit (credited=%s)",
     (credited) => {
@@ -87,6 +136,7 @@ describe("session injection version projection", () => {
           logical_id: s.logical,
           version_id: s.id,
           version_status: "superseded",
+          current_version_id: ltm.getByLogical(s.logical)!.id,
           title: "Original title",
           category: "decision",
           confidence: 0.7,

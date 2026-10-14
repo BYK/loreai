@@ -178,6 +178,30 @@ describe("ContextWindowPane", () => {
     expect(screen.queryByText(/entry removed/)).toBeNull();
   });
 
+  it("keeps captured titles as plain text after the current entry is removed", () => {
+    const context = empty();
+    context.knowledge.injections = [
+      {
+        logical_id: "removed",
+        version_id: "v1",
+        current_version_id: null,
+        version_status: "superseded",
+        title: "Captured before sync deletion",
+        category: "decision",
+        confidence: null,
+        created_at: 1000,
+        credited: false,
+        verdict: null,
+      },
+    ] as SessionContext["knowledge"]["injections"];
+    mount({ context });
+    const pane = screen.getByTestId("context-injections");
+    expect(pane).toHaveTextContent("Captured before sync deletion");
+    expect(pane).toHaveTextContent("Earlier version");
+    expect(pane.querySelector("a")).toBeNull();
+    expect(pane).not.toHaveTextContent("Current confidence:");
+  });
+
   it("shows the layer badge without turns when context.layer is set", () => {
     mount({ context: empty({ layer: 1 }) });
     expect(screen.getByTestId("context-summary")).toHaveTextContent(
