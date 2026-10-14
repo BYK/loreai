@@ -157,6 +157,7 @@ import type {
   GatewayProtocol,
   GatewayResponse,
   GatewayMessage,
+  GatewayMessageProvenance,
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
@@ -8196,7 +8197,8 @@ async function forwardToUpstream(
       ? req.extras?.nativeInstructionPrefix
       : undefined;
   if (
-    nativeInstructions?.hasLateItems ||
+    (nativeInstructions?.hasLateItems &&
+      effectiveProtocol !== "openai-responses") ||
     (req.protocol === "openai" &&
       req.extras?.nativeChatInstructionPrefix?.hasLateItems) ||
     (effectiveProtocol !== "openai-responses" &&
@@ -8210,8 +8212,8 @@ async function forwardToUpstream(
             item.content.some((part) => part.cache_control !== undefined),
         )))
   ) {
-    // A late instruction cannot be moved to the front, and other providers
-    // cannot carry Responses developer instructions at their original tier.
+    // Native Responses replays late instructions from request-only provenance
+    // at their source seam; other protocols cannot preserve that ordering or tier.
     throw new InvalidCrossProviderRequestError();
   }
   if (
@@ -22618,6 +22620,8 @@ async function handleConversationTurnPrepared(
       result.layer < 4,
     req.protocol === "openai-responses" &&
       requestUpstreamRoute.effectiveProtocol === "openai-responses",
+    req.protocol === "openai-responses" &&
+      requestUpstreamRoute.effectiveProtocol === "openai-responses",
   );
   removeOrphanedToolResults(transformedMessages);
 
@@ -24501,18 +24505,25 @@ export function loreMessagesToGateway(
   messages: LoreMessageWithParts[],
   provenanceByMessageId: ReadonlyMap<
     string,
-    Pick<
-      GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
-    >
+    GatewayMessageProvenance
   > = new Map(),
   allowProvenance = true,
   allowNativeUserProvenance = false,
   allowNativeChatTextProvenance = false,
   allowNativeToolOutputProvenance = false,
   nativeToolOutputRoute = false,
+  allowNativeResponsesInstructions = false,
 ): GatewayMessage[] {
   const out: GatewayMessage[] = [];
+  const sourceResponsesInstructions = [
+    ...provenanceByMessageId.values(),
+  ].flatMap((candidate) => candidate.responsesInstructions ?? []);
+  if (
+    sourceResponsesInstructions.length > 0 &&
+    !allowNativeResponsesInstructions
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
 
   // tool_result blocks reconstructed from the preceding assistant message's
   // completed/error tool parts. Injected at the start of the next user message.
@@ -24646,6 +24657,12 @@ export function loreMessagesToGateway(
 
     const message: GatewayMessage = { role: msg.info.role, content };
     let candidate = provenanceByMessageId.get(msg.info.id);
+    if (candidate?.responsesInstructions && allowNativeResponsesInstructions) {
+      if (candidate.role !== message.role) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      message.responsesInstructions = [...candidate.responsesInstructions];
+    }
     const userNativeProvenance =
       allowNativeUserProvenance &&
       msg.info.role === "user" &&
@@ -24829,6 +24846,20 @@ export function loreMessagesToGateway(
       throw new InvalidCrossProviderRequestError();
     }
     out.push(message);
+  }
+
+  if (allowNativeResponsesInstructions) {
+    const replayedResponsesInstructions = out.flatMap(
+      (message) => message.responsesInstructions ?? [],
+    );
+    // Keep the complete source-ordered instruction map or reject before
+    // dispatch; a dropped or reordered message must never yield partial replay.
+    if (
+      JSON.stringify(replayedResponsesInstructions) !==
+      JSON.stringify(sourceResponsesInstructions)
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
   }
 
   return out;
@@ -25560,9 +25591,12 @@ async function handleRequestInner(
       const route = resolveRequestUpstreamRoute(req, config);
       assertCrossProviderRequestControls(req, route.effectiveProtocol);
       assertCrossProviderProvenance(req, route.effectiveProtocol);
+      // Native Responses can replay late instructions in place. Reject before
+      // slash-command side effects only when the destination cannot do so.
       if (
         req.extras?.nativeChatInstructionPrefix?.hasLateItems ||
-        req.extras?.nativeInstructionPrefix?.hasLateItems
+        (req.extras?.nativeInstructionPrefix?.hasLateItems &&
+          route.effectiveProtocol !== "openai-responses")
       ) {
         throw new InvalidCrossProviderRequestError();
       }

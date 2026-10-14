@@ -27,6 +27,7 @@ import {
 import type {
   GatewayContentBlock,
   GatewayMessage,
+  GatewayResponsesInstruction,
   GatewayRequest,
   GatewayResponse,
   GatewayTool,
@@ -71,11 +72,9 @@ export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 type ParsedInputItems = {
   messages: GatewayMessage[];
   instructions: string[];
-  elevatedItems: Array<{
-    type?: "message";
-    role: "system" | "developer";
-    content: string | Array<{ type: "input_text"; text: string }>;
-  }>;
+  /** Leading native instructions; late items stay in message provenance. */
+  elevatedItems: GatewayResponsesInstruction[];
+  /** At least one native instruction followed conversation content. */
   hasLateItems: boolean;
   boundarySafe: boolean;
 };
@@ -257,7 +256,7 @@ function parseOpenAIResponsesRequestInternal(
   if (raw.reasoning !== undefined) {
     extras.reasoning = raw.reasoning;
   }
-  if (parsed.elevatedItems.length > 0) {
+  if (parsed.elevatedItems.length > 0 || parsed.hasLateItems) {
     extras.nativeInstructionPrefix = {
       originalInstructions: instructions,
       normalizedSystem: system,
@@ -486,12 +485,21 @@ function createInputItemsBuilder(): {
   const messages: GatewayMessage[] = [];
   const instructions: string[] = [];
   const elevatedItems: ParsedInputItems["elevatedItems"] = [];
-  let pendingReasoning: GatewayContentBlock[] = [];
+  let pendingResponsesInstructions: GatewayResponsesInstruction[] = [];
+  let pendingProvenance: GatewayContentBlock[] = [];
   let sawItem = false;
   let sawConversationItem = false;
   let elevatedAfterConversation = false;
   let seamKind: "none" | "other" | "tool-call" | "tool-result" = "none";
   let seamHasPendingReasoning = false;
+
+  const attachPendingResponsesInstructions = (
+    message: GatewayMessage,
+  ): void => {
+    if (pendingResponsesInstructions.length === 0) return;
+    message.responsesInstructions = [...pendingResponsesInstructions];
+    pendingResponsesInstructions = [];
+  };
 
   const appendAssistant = (
     content: GatewayContentBlock[],
@@ -499,18 +507,19 @@ function createInputItemsBuilder(): {
     provenancePositions?: number[],
   ): GatewayMessage => {
     const message: GatewayMessage = { role: "assistant", content };
+    attachPendingResponsesInstructions(message);
     if (provenanceContent) {
-      message.provenanceContent = [...pendingReasoning, ...provenanceContent];
+      message.provenanceContent = [...pendingProvenance, ...provenanceContent];
       message.provenancePositions = (provenancePositions ?? []).map(
-        (position) => pendingReasoning.length + position,
+        (position) => pendingProvenance.length + position,
       );
-      pendingReasoning = [];
-    } else if (pendingReasoning.length > 0) {
-      message.provenanceContent = [...pendingReasoning, ...content];
+      pendingProvenance = [];
+    } else if (pendingProvenance.length > 0) {
+      message.provenanceContent = [...pendingProvenance, ...content];
       message.provenancePositions = content.map(
-        (_block, index) => pendingReasoning.length + index,
+        (_block, index) => pendingProvenance.length + index,
       );
-      pendingReasoning = [];
+      pendingProvenance = [];
     }
     messages.push(message);
     return message;
@@ -524,9 +533,9 @@ function createInputItemsBuilder(): {
 
     // Track only the state that can affect normalization across an item seam.
     if (itemType === "message" || (!itemType && role)) {
-      if (role === "user" && pendingReasoning.length > 0) {
-        // The pending assistant items would otherwise be appended after this
-        // user turn, changing the source item's order.
+      if (role === "user" && pendingProvenance.length > 0) {
+        // Reasoning and other pending assistant items cannot cross a user
+        // turn. Late instructions live in their own ordered field below.
         throw new InvalidCrossProviderRequestError();
       }
       if (
@@ -606,16 +615,7 @@ function createInputItemsBuilder(): {
         if (content.some((block) => block.type !== "text")) {
           throw new InvalidCrossProviderRequestError();
         }
-        if (sawConversationItem) elevatedAfterConversation = true;
-        const text = content
-          .map((block) => (block.type === "text" ? block.text : ""))
-          .join("\n");
-        if (text) {
-          instructions.push(text);
-        }
-        // Keep the original wire shape, including string content and an
-        // omitted `type`. The joined text above is only for translation.
-        elevatedItems.push({
+        const nativeItem: ParsedInputItems["elevatedItems"][number] = {
           ...(typeof raw.id === "string" ? { id: raw.id } : {}),
           ...(raw.type === undefined ? {} : { type: "message" }),
           role: msgRole,
@@ -624,7 +624,26 @@ function createInputItemsBuilder(): {
                 (part) => ({ ...part }),
               )
             : raw.content,
-        });
+        };
+        if (sawConversationItem) {
+          elevatedAfterConversation = true;
+          // Keep late native instructions at their source seam. Prefixing them
+          // would silently change which turns the instruction governs.
+          if (pendingProvenance.length > 0) {
+            // The gateway cannot represent an instruction after pending native
+            // reasoning without changing the original Responses item order.
+            throw new InvalidCrossProviderRequestError();
+          }
+          pendingResponsesInstructions.push(nativeItem);
+        } else {
+          elevatedItems.push(nativeItem);
+        }
+        const text = content
+          .map((block) => (block.type === "text" ? block.text : ""))
+          .join("\n");
+        if (text && !sawConversationItem) {
+          instructions.push(text);
+        }
       } else if (msgRole === "assistant") {
         sawConversationItem = true;
         if (typeof raw.content !== "string" && !Array.isArray(raw.content)) {
@@ -680,21 +699,26 @@ function createInputItemsBuilder(): {
         }
         // Every input item is a separate item on the Responses wire, even
         // without an ID or status. Keep its complete envelope for replay.
-        messages.push({
+        const sourcePosition = pendingProvenance.length;
+        const message: GatewayMessage = {
           role: "user",
           content,
           provenanceContent: [
+            ...pendingProvenance,
             { type: "opaque", raw, responsesItem: true, requestOnly: true },
           ],
-          provenancePositions: content.map(() => 0),
-        });
+          provenancePositions: content.map(() => sourcePosition),
+        };
+        attachPendingResponsesInstructions(message);
+        messages.push(message);
+        pendingProvenance = [];
       }
       return;
     }
 
     if (isServerOwnedResponsesSearch(raw)) {
       sawConversationItem = true;
-      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+      pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
 
@@ -737,18 +761,23 @@ function createInputItemsBuilder(): {
         last.role === "assistant" &&
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_use");
+      if (lastIsToolUseMessage && pendingResponsesInstructions.length > 0) {
+        // Coalescing consecutive calls into one assistant message would move
+        // an instruction between calls to before the entire message.
+        throw new InvalidCrossProviderRequestError();
+      }
       if (lastIsToolUseMessage) {
         const provenance = last.provenanceContent ?? [...last.content];
         const positions =
           last.provenancePositions ??
           last.content.map((_block, index) => index);
-        const position = provenance.length + pendingReasoning.length;
-        provenance.push(...pendingReasoning, provenanceBlock);
+        const position = provenance.length + pendingProvenance.length;
+        provenance.push(...pendingProvenance, provenanceBlock);
         positions.push(position);
         last.content.push(toolUseBlock);
         last.provenanceContent = provenance;
         last.provenancePositions = positions;
-        pendingReasoning = [];
+        pendingProvenance = [];
       } else {
         appendAssistant([toolUseBlock], [provenanceBlock], [0]);
       }
@@ -760,9 +789,9 @@ function createInputItemsBuilder(): {
       itemType === "custom_tool_call_output" ||
       itemType === "tool_search_output"
     ) {
-      if (pendingReasoning.length > 0) {
-        // A result cannot cross a pending assistant reasoning item: the
-        // normalized tool pair cannot represent that native item order.
+      if (pendingProvenance.length > 0) {
+        // Tool results cannot cross pending native assistant items. Late
+        // instructions remain separate and attach to this result message below.
         throw new InvalidCrossProviderRequestError();
       }
       sawConversationItem = true;
@@ -832,29 +861,50 @@ function createInputItemsBuilder(): {
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_result");
       if (lastIsToolResultMessage) {
-        if (last.provenanceContent || raw.output !== undefined) {
+        if (pendingResponsesInstructions.length > 0) {
+          // Coalescing consecutive results would move an instruction between
+          // outputs to before the whole user message.
+          throw new InvalidCrossProviderRequestError();
+        }
+        if (
+          last.provenanceContent ||
+          raw.output !== undefined ||
+          pendingProvenance.length > 0
+        ) {
+          const provenance = last.provenanceContent ?? [...last.content];
+          const positions =
+            last.provenancePositions ??
+            last.content.map((_block, index) => index);
           last.provenanceContent = [
-            ...(last.provenanceContent ?? last.content),
+            ...provenance,
+            ...pendingProvenance,
             provenanceBlock,
           ];
-          last.provenancePositions = last.content.map((_block, index) => index);
-          last.provenancePositions.push(last.content.length);
+          last.provenancePositions = [
+            ...positions,
+            provenance.length + pendingProvenance.length,
+          ];
         }
         last.content.push(toolResultBlock);
+        pendingProvenance = [];
       } else {
-        messages.push({
+        const sourcePosition = pendingProvenance.length;
+        const message: GatewayMessage = {
           role: "user",
           content: [toolResultBlock],
-          provenanceContent: [provenanceBlock],
-          provenancePositions: [0],
-        });
+          provenanceContent: [...pendingProvenance, provenanceBlock],
+          provenancePositions: [sourcePosition],
+        };
+        attachPendingResponsesInstructions(message);
+        messages.push(message);
+        pendingProvenance = [];
       }
       return;
     }
 
     if (itemType === "reasoning") {
       sawConversationItem = true;
-      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+      pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
 
@@ -870,7 +920,7 @@ function createInputItemsBuilder(): {
     // gateway may not render an unknown item, but canonical replay must hash
     // the same full transcript on both the producing and consuming turns.
     sawConversationItem = true;
-    pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+    pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
   };
 
   const finish = (): ParsedInputItems => {
@@ -883,14 +933,19 @@ function createInputItemsBuilder(): {
       !seamHasPendingReasoning &&
       seamKind !== "tool-call" &&
       seamKind !== "tool-result";
-    if (pendingReasoning.length > 0) {
+    if (pendingResponsesInstructions.length > 0) {
+      // No following message exists to carry these instructions at their
+      // source seam; reject instead of letting semantic preparation drop them.
+      throw new InvalidCrossProviderRequestError();
+    }
+    if (pendingProvenance.length > 0) {
       messages.push({
         role: "assistant",
         content: [],
-        provenanceContent: pendingReasoning,
+        provenanceContent: pendingProvenance,
         provenancePositions: [],
       });
-      pendingReasoning = [];
+      pendingProvenance = [];
     }
 
     return {
@@ -1493,6 +1548,9 @@ function buildResponsesInput(
   };
 
   for (const msg of messages) {
+    for (const instruction of msg.responsesInstructions ?? []) {
+      appendItem(instruction, true);
+    }
     for (const block of msg.provenanceContent ?? msg.content) {
       if (block.type === "text") {
         appendItem({

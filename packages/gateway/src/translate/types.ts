@@ -112,6 +112,14 @@ export type GatewayContentBlock =
   | GatewayToolResultBlock
   | GatewayOpaqueBlock;
 
+/** Validated native Responses instruction item, kept outside visible content. */
+export type GatewayResponsesInstruction = {
+  id?: string;
+  type?: "message";
+  role: "system" | "developer";
+  content: string | Array<{ type: "input_text"; text: string }>;
+};
+
 /**
  * Project a content-block array down to a plain-text representation.
  *
@@ -213,7 +221,23 @@ export type GatewayMessage = {
   provenanceContent?: GatewayContentBlock[];
   /** Index of each visible `content` block inside `provenanceContent`. */
   provenancePositions?: number[];
+  /**
+   * Validated native Responses instructions at this source seam. These remain
+   * separate from user envelopes and opaque provenance through same-route
+   * transforms, then replay immediately before this message.
+   */
+  responsesInstructions?: GatewayResponsesInstruction[];
 };
+
+/**
+ * Persisted or test-provided provenance may predate optional request metadata.
+ * Instruction-bearing entries still require a matching role at replay time.
+ */
+export type GatewayMessageProvenance = Pick<
+  GatewayMessage,
+  "content" | "provenanceContent" | "provenancePositions"
+> &
+  Partial<Pick<GatewayMessage, "role" | "responsesInstructions">>;
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -287,18 +311,14 @@ export type GatewayRequest = {
     previous_response_id?: string;
     /** OpenAI Responses API: reasoning configuration. */
     reasoning?: unknown;
-    /** Native instruction items retained outside the user/assistant history. */
+    /** Native Responses instructions; late items remain at their source seam. */
     nativeInstructionPrefix?: {
       originalInstructions: string;
       normalizedSystem: string;
-      /** Replaying these items before the conversation would change their order. */
+      /** A late instruction is preserved in place and cannot cross protocols. */
       hasLateItems: boolean;
-      items: Array<{
-        type?: "message";
-        id?: string;
-        role: "system" | "developer";
-        content: string | Array<{ type: "input_text"; text: string }>;
-      }>;
+      /** Leading native instruction items replayed before the conversation. */
+      items: GatewayResponsesInstruction[];
     };
     /** Chat developer content must not inherit another provider's system tier. */
     chatDeveloperInstruction?: boolean;

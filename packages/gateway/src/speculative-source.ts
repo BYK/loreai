@@ -7,12 +7,12 @@ import {
   type LoreMessageWithParts,
 } from "@loreai/core";
 import { deterministicID, visibleContentForMessage } from "./temporal-adapter";
-import type { GatewayMessage } from "./translate/types";
-
-type Provenance = Pick<
+import type {
   GatewayMessage,
-  "content" | "provenanceContent" | "provenancePositions"
->;
+  GatewayMessageProvenance,
+} from "./translate/types";
+
+type Provenance = GatewayMessageProvenance;
 
 export type SpeculativeSource = {
   projectPath: string;
@@ -121,8 +121,12 @@ export function rememberSpeculativeSource(
   while (
     speculative.size >= MAX_SESSIONS ||
     retainedBytes + sizeBytes > MAX_TOTAL_BYTES
-  )
-    drop(speculative.keys().next().value!);
+  ) {
+    const oldest = speculative.keys().next();
+    if (oldest.done)
+      throw new Error("Speculative source cache lost its oldest entry");
+    drop(oldest.value);
+  }
   const stored = {
     ...entry,
     projectID,

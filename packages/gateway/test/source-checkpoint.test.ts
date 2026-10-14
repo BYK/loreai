@@ -453,6 +453,39 @@ it.each([false, true])(
   },
 );
 
+it("retains late Responses instructions in a complete source checkpoint", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const source = messages.slice(0, 6);
+  const instruction = {
+    id: "msg_late_instruction",
+    type: "message" as const,
+    role: "developer" as const,
+    content: "late instruction survives checkpoint replay",
+  };
+  source[1] = { ...source[1], responsesInstructions: [instruction] };
+
+  accept((await prepare(source)).prepared);
+  const unchanged = await prepare(source);
+  expect(unchanged.timing.observations.source_checkpoint_hit).toBe(1);
+  expect([...unchanged.prepared.provenanceByMessageId.values()]).toContainEqual(
+    expect.objectContaining({ responsesInstructions: [instruction] }),
+  );
+
+  const next: GatewayMessage[] = [
+    ...source,
+    {
+      role: "user",
+      content: [{ type: "text", text: "continue" }],
+    },
+  ];
+  const appended = await prepare(next);
+  expect(appended.timing.observations.source_checkpoint_hit).toBe(1);
+  expect([...appended.prepared.provenanceByMessageId.values()]).toContainEqual(
+    expect.objectContaining({ responsesInstructions: [instruction] }),
+  );
+});
+
 it("reconciles historical edits even when the old boundary is unchanged", async () => {
   accept((await prepare(messages)).prepared);
   const edited = structuredClone(messages);

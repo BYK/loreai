@@ -1,10 +1,10 @@
-import type { GatewayContentBlock, GatewayMessage } from "./translate/types";
+import type {
+  GatewayContentBlock,
+  GatewayMessageProvenance,
+} from "./translate/types";
 import { InvalidCrossProviderRequestError } from "./translate/errors";
 
-type UserProvenance = Pick<
-  GatewayMessage,
-  "content" | "provenanceContent" | "provenancePositions"
->;
+type UserProvenance = GatewayMessageProvenance;
 
 /** Carry edited visible text into a native user envelope without losing metadata. */
 export function projectNativeUserProvenance(
