@@ -54,6 +54,7 @@ import {
 } from "../lifecycle-lock";
 import { readGatewayProcessFile } from "../pidfile";
 import { detectAgents } from "./agents";
+import { findCodexSetupEvidence } from "./setup-discovery";
 import {
   refreshJsonBackup,
   parseStableJsonBackup,
@@ -3400,11 +3401,24 @@ async function commandSetupLocked(
     return { baseUrl, remoteUrl, authenticatedPort };
   }
 
-  // No app name — auto-detect
+  // Setup supports desktop clients; launching through `lore run` still needs a CLI.
   const detected = detectAgents();
-  const setupTargets = SUPPORTED_APPS.filter((app) =>
-    detected.some((d) => d.def.name === app.agentName),
-  );
+  const setupTargets = SUPPORTED_APPS.filter((app) => {
+    if (detected.some((d) => d.def.name === app.agentName)) return true;
+    if (app.agentName === "codex") {
+      const evidence = findCodexSetupEvidence(codexConfigPath());
+      if (evidence) {
+        console.log(
+          `[lore] Detected Codex ${evidence.kind} at ${evidence.path}; configuring without a CLI on PATH.`,
+        );
+        return true;
+      }
+    }
+    console.log(
+      `[lore] Skipped ${app.displayName}: ${app.agentName === "codex" ? "CLI not found on PATH and no desktop app or config detected" : "CLI not found on PATH"}. Run \`lore setup ${app.agentName}\` to configure explicitly.`,
+    );
+    return false;
+  });
 
   if (setupTargets.length === 0) {
     const supported = SUPPORTED_APPS.map(
