@@ -3406,7 +3406,15 @@ async function commandSetupLocked(
   const setupTargets = SUPPORTED_APPS.filter((app) => {
     if (detected.some((d) => d.def.name === app.agentName)) return true;
     if (app.agentName === "codex") {
-      const evidence = findCodexSetupEvidence(codexConfigPath());
+      const evidence = findCodexSetupEvidence(
+        codexConfigPath(),
+        (path, error) => {
+          const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+          console.error(
+            `[lore] Could not inspect Codex desktop app at ${path} (${code}); continuing discovery.`,
+          );
+        },
+      );
       if (evidence) {
         console.log(
           `[lore] Detected Codex ${evidence.kind} at ${evidence.path}; configuring without a CLI on PATH.`,

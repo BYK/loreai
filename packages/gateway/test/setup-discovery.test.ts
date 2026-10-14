@@ -10,11 +10,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { commandSetup } from "../src/cli/setup";
 import { detectAgents } from "../src/cli/agents";
 
 vi.mock("node:os", { spy: true });
+vi.mock("node:fs", { spy: true });
 
 let home: string;
 let output: string[];
@@ -150,4 +152,54 @@ describe("automatic setup discovery", () => {
       expect(output.join("\n")).not.toContain("Skipped Codex:");
     },
   );
+
+  it("reports an unreadable optional app and discovers the next desktop candidate", async () => {
+    vi.mocked(os.platform).mockReturnValue("darwin");
+    const denied = join(home, "Applications", "Codex.app");
+    const available = join(home, "Applications", "ChatGPT.app");
+    mkdirSync(join(available, "Contents", "Resources", "codex-cli"), {
+      recursive: true,
+    });
+    writeFileSync(join(available, "Contents", "Info.plist"), "fixture");
+    const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    vi.spyOn(fs, "lstatSync").mockImplementation((...args) => {
+      if (String(args[0]) === join(denied, "Contents")) {
+        throw Object.assign(new Error("denied optional app"), {
+          code: "EACCES",
+        });
+      }
+      return Reflect.apply(actualFs.lstatSync, actualFs, args);
+    });
+    await setup();
+    expect(existsSync(configPath())).toBe(true);
+    expect(output.join("\n")).toContain(denied);
+    expect(output.join("\n")).toContain("EACCES");
+    expect(output.join("\n")).toContain(available);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "configures another agent despite an optional desktop symlink loop",
+    async () => {
+      vi.mocked(os.platform).mockReturnValue("darwin");
+      symlinkSync("Applications", join(home, "Applications"));
+      writeFileSync(join(home, "claude"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      await setup();
+      const claudeConfig = JSON.parse(
+        readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+      );
+      expect(claudeConfig.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3299");
+      expect(output.join("\n")).toContain("ELOOP");
+      expect(output.join("\n")).toContain("Could not inspect");
+      expect(process.exitCode ?? 0).toBe(0);
+    },
+  );
+
+  it("still rejects unsafe config evidence before configuring any app", async () => {
+    mkdirSync(configPath(), { recursive: true });
+    await expect(setup()).rejects.toThrow("expected a regular file");
+    expect(output.join("\n")).not.toContain("continuing discovery");
+    expect(existsSync(join(home, ".claude", "settings.json"))).toBe(false);
+  });
 });

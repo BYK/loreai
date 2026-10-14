@@ -19,6 +19,7 @@ function hasKind(path: string, kind: "file" | "directory"): boolean {
 /** Setup can configure desktop clients even when there is no launchable CLI. */
 export function findCodexSetupEvidence(
   configPath: string,
+  reportProbeError?: (appPath: string, error: unknown) => void,
 ): CodexSetupEvidence | null {
   if (trustedFileExists(configPath))
     return { kind: "config", path: configPath };
@@ -30,11 +31,17 @@ export function findCodexSetupEvidence(
       ["ChatGPT.app", "Contents/Resources/codex-cli"],
     ] as const) {
       const path = join(directory, name);
-      if (
-        hasKind(join(path, marker), "directory") &&
-        hasKind(join(path, "Contents", "Info.plist"), "file")
-      ) {
-        return { kind: "desktop app", path };
+      try {
+        if (
+          hasKind(join(path, marker), "directory") &&
+          hasKind(join(path, "Contents", "Info.plist"), "file")
+        ) {
+          return { kind: "desktop app", path };
+        }
+      } catch (error) {
+        // Optional installation hints must not block other candidates or agents.
+        // Config trust failures above still propagate to the setup caller.
+        reportProbeError?.(path, error);
       }
     }
   }
