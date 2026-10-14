@@ -5,6 +5,7 @@ import {
   For,
   Match,
   onMount,
+  onCleanup,
   Show,
   Switch,
   untrack,
@@ -122,6 +123,50 @@ export const TeamPage: Component = () => {
   const [reviewPolicyError, setReviewPolicyError] =
     createSignal<MutationFailure | null>(null);
   const [savingReviewPolicy, setSavingReviewPolicy] = createSignal(false);
+  let accountOwner: string | null | undefined;
+  let actionEpoch = 0;
+  onCleanup(() => {
+    actionEpoch++;
+    setMemberLoadGeneration((generation) => generation + 1);
+  });
+  const accountId = () => {
+    const account = folk.account.data();
+    return !folk.account.error() &&
+      account?.signed_in &&
+      account.state === "signed_in"
+      ? (account.user?.id ?? null)
+      : null;
+  };
+  const resetActions = () => {
+    actionEpoch++;
+    setBusy(false);
+    setRemoving(false);
+    setSavingReviewPolicy(false);
+    setReviewPolicyDialogOpen(false);
+    setRemoveTarget(null);
+    setRemoveError(null);
+    setInviteReceipt(null);
+    setInviteError("");
+    setInviteEmail("");
+    setOfflineInvite(false);
+    setCopyMessage("");
+    setActionError("");
+    setReviewPolicyError(null);
+    setStaleMemberId(null);
+    setRemoveReceipt(null);
+    setRoleReceipt(null);
+    setLeftTeam(false);
+  };
+  const accountReady = () =>
+    accountId() !== null &&
+    accountOwner === accountId() &&
+    !folk.account.loading() &&
+    !folk.teams.loading() &&
+    !folk.teams.error();
+  const canAct = () =>
+    accountReady() &&
+    !loadingMembers() &&
+    (folk.teams.data()?.teams ?? []).some((team) => team.id === teamId());
 
   const teams = () => folk.teams.data()?.teams ?? [];
   const columns = helper.columns([
@@ -142,10 +187,18 @@ export const TeamPage: Component = () => {
   });
 
   const loadMembers = async (selectedTeam: string) => {
-    if (!selectedTeam) return;
+    const owner = accountId();
+    if (
+      !selectedTeam ||
+      !owner ||
+      !accountReady() ||
+      !teams().some((team) => team.id === selectedTeam)
+    )
+      return;
     const generation = untrack(() => memberLoadGeneration() + 1);
     setMemberLoadGeneration(generation);
     if (selectedTeam !== teamId()) {
+      resetActions();
       setMembers(undefined);
       setReviewPolicy(undefined);
       setReviewPolicyError(null);
@@ -155,7 +208,7 @@ export const TeamPage: Component = () => {
       setLeftTeam(false);
     }
     setTeamId(selectedTeam);
-    setPageState("loading");
+    if (!members()) setPageState("loading");
     setPageError(undefined);
     setActionError("");
     setLoadingMembers(true);
@@ -163,7 +216,8 @@ export const TeamPage: Component = () => {
       const response = await ws.tracked(() =>
         ws.client.getTeamMembers(selectedTeam),
       );
-      if (generation !== memberLoadGeneration()) return;
+      if (generation !== memberLoadGeneration() || owner !== accountId())
+        return;
       setMembers(response);
       setReviewPolicy(undefined);
       setReviewPolicyError(null);
@@ -172,31 +226,47 @@ export const TeamPage: Component = () => {
           const policy = await ws.tracked(() =>
             ws.client.getTeamReviewPolicy(selectedTeam),
           );
-          if (generation !== memberLoadGeneration()) return;
+          if (generation !== memberLoadGeneration() || owner !== accountId())
+            return;
           setReviewPolicy(policy.policy);
         } catch (error) {
-          if (generation !== memberLoadGeneration()) return;
+          if (generation !== memberLoadGeneration() || owner !== accountId())
+            return;
           setReviewPolicyError({
             cause: error,
             message: actionMessage(error),
           });
         }
       }
-      if (generation !== memberLoadGeneration()) return;
+      if (generation !== memberLoadGeneration() || owner !== accountId())
+        return;
       if (response.remote === "anonymous") setPageState("anonymous");
       else if (response.remote === "hosted") setPageState("hosted");
       else if (response.remote === "unreachable") setPageState("unreachable");
       else setPageState("ready");
     } catch (error) {
-      if (generation !== memberLoadGeneration()) return;
+      if (generation !== memberLoadGeneration() || owner !== accountId())
+        return;
       setPageError(error);
       setPageState(pageStateForError(error));
     } finally {
-      if (generation === memberLoadGeneration()) setLoadingMembers(false);
+      if (generation === memberLoadGeneration() && owner === accountId())
+        setLoadingMembers(false);
     }
   };
 
   createEffect(() => {
+    const owner = accountId();
+    if (owner !== accountOwner) {
+      accountOwner = owner;
+      resetActions();
+      setMemberLoadGeneration((generation) => generation + 1);
+      setMembers(undefined);
+      setReviewPolicy(undefined);
+      setTeamId("");
+      setLoadingMembers(false);
+      setPageState("loading");
+    }
     const account = folk.account.data();
     const accountError = folk.account.error();
     const teamList = folk.teams.data();
@@ -220,8 +290,12 @@ export const TeamPage: Component = () => {
       setPageState(pageStateForError(teamsError));
       return;
     }
+    // The account loader publishes data before clearing its loading flag.
+    // Wait for the owner-scoped team loader before selecting a membership.
+    if (folk.account.loading() || folk.teams.loading()) return;
     if (!teamList) return;
     if (teamList.teams.length === 0) {
+      if (untrack(teamId)) resetActions();
       // Membership loss invalidates pending loads and forces a fresh fetch after rejoining.
       setMemberLoadGeneration((generation) => generation + 1);
       setMembers(undefined);
@@ -232,15 +306,24 @@ export const TeamPage: Component = () => {
     }
     const selected =
       teamList.teams.find((team) => team.id === teamId()) ?? teamList.teams[0]!;
-    if (teamId() !== selected.id) void loadMembers(selected.id);
+    if (
+      teamId() !== selected.id ||
+      (!untrack(loadingMembers) &&
+        untrack(() => members()?.my_role) !== selected.role)
+    )
+      void loadMembers(selected.id);
   });
 
   onMount(() => folk.refresh());
 
   const retry = () => {
     setPageError(undefined);
+    setMemberLoadGeneration((generation) => generation + 1);
+    setLoadingMembers(false);
+    setMembers(undefined);
+    setReviewPolicy(undefined);
+    setPageState("loading");
     folk.refresh();
-    if (teamId()) void loadMembers(teamId());
   };
 
   const staleMemberNotice = () => {
@@ -273,8 +356,15 @@ export const TeamPage: Component = () => {
     select: HTMLSelectElement,
   ) => {
     const current = members();
-    if (!current || !current.can_manage || role === member.role || busy())
+    if (
+      !canAct() ||
+      !current ||
+      !current.can_manage ||
+      role === member.role ||
+      busy()
+    )
       return;
+    const epoch = actionEpoch;
     setBusy(true);
     setActionError("");
     setRoleReceipt(null);
@@ -287,6 +377,7 @@ export const TeamPage: Component = () => {
           member.role as Role,
         ),
       );
+      if (epoch !== actionEpoch) return;
       setStaleMemberId(null);
       setRoleReceipt(receipt);
       setMembers((previous) =>
@@ -306,6 +397,7 @@ export const TeamPage: Component = () => {
           : previous,
       );
     } catch (error) {
+      if (epoch !== actionEpoch) return;
       select.value = member.role;
       if (error instanceof ApiError && error.code === "stale_member") {
         setStaleMemberId(member.user_id);
@@ -315,14 +407,21 @@ export const TeamPage: Component = () => {
         setActionError(actionMessage(error));
       }
     } finally {
-      setBusy(false);
+      if (epoch === actionEpoch) setBusy(false);
     }
   };
 
   const submitInvite = async (event: SubmitEvent) => {
     event.preventDefault();
     const current = members();
-    if (!current || current.actions.invite !== "available" || busy()) return;
+    if (
+      !canAct() ||
+      !current ||
+      current.actions.invite !== "available" ||
+      busy()
+    )
+      return;
+    const epoch = actionEpoch;
     setBusy(true);
     setInviteError("");
     setCopyMessage("");
@@ -334,22 +433,31 @@ export const TeamPage: Component = () => {
           ...(inviteEmail().trim() ? { email: inviteEmail().trim() } : {}),
         }),
       );
+      if (epoch !== actionEpoch) return;
       setStaleMemberId(null);
       setInviteReceipt(receipt);
       setInviteEmail("");
       setOfflineInvite(false);
     } catch (error) {
+      if (epoch !== actionEpoch) return;
       setInviteError(actionMessage(error));
     } finally {
-      setBusy(false);
+      if (epoch === actionEpoch) setBusy(false);
     }
   };
 
   const changeReviewPolicy = async (required: boolean) => {
     const current = reviewPolicy();
     const team = members()?.team?.id ?? teamId();
-    if (!current || !members()?.can_manage || !team || savingReviewPolicy())
+    if (
+      !canAct() ||
+      !current ||
+      !members()?.can_manage ||
+      !team ||
+      savingReviewPolicy()
+    )
       return;
+    const epoch = actionEpoch;
     setSavingReviewPolicy(true);
     setReviewPolicyError(null);
     try {
@@ -360,12 +468,14 @@ export const TeamPage: Component = () => {
           current,
         ),
       );
+      if (epoch !== actionEpoch) return;
       setReviewPolicy(updated.policy);
       setReviewPolicyDialogOpen(false);
     } catch (error) {
+      if (epoch !== actionEpoch) return;
       setReviewPolicyError({ cause: error, message: actionMessage(error) });
     } finally {
-      setSavingReviewPolicy(false);
+      if (epoch === actionEpoch) setSavingReviewPolicy(false);
     }
   };
 
@@ -377,15 +487,18 @@ export const TeamPage: Component = () => {
 
   const reloadReviewPolicy = async () => {
     const team = members()?.team?.id ?? teamId();
-    if (!team) return;
+    if (!canAct() || !team) return;
+    const epoch = actionEpoch;
     setReviewPolicyError(null);
     try {
       const current = await ws.tracked(() =>
         ws.client.getTeamReviewPolicy(team),
       );
+      if (epoch !== actionEpoch) return;
       setReviewPolicy(current.policy);
       if (reviewPolicyDialogOpen()) setReviewPolicyDialogOpen(false);
     } catch (error) {
+      if (epoch !== actionEpoch) return;
       setReviewPolicyError({ cause: error, message: actionMessage(error) });
     }
   };
@@ -393,7 +506,16 @@ export const TeamPage: Component = () => {
   const confirmRemove = async () => {
     const target = removeTarget();
     const current = members();
-    if (!target || !current || busy()) return;
+    if (
+      !canAct() ||
+      !target ||
+      !current ||
+      !current.can_manage ||
+      current.actions.remove !== "available" ||
+      busy()
+    )
+      return;
+    const epoch = actionEpoch;
     setBusy(true);
     setRemoving(true);
     setRemoveError(null);
@@ -405,6 +527,7 @@ export const TeamPage: Component = () => {
           target.role as Role,
         ),
       );
+      if (epoch !== actionEpoch) return;
       setStaleMemberId(null);
       setRemoveReceipt(receipt);
       setLeftTeam(target.me);
@@ -423,10 +546,11 @@ export const TeamPage: Component = () => {
       setRemoveTarget(null);
       folk.refresh();
     } catch (error) {
+      if (epoch !== actionEpoch) return;
       setRemoveError({ cause: error, message: actionMessage(error) });
     } finally {
-      setRemoving(false);
-      setBusy(false);
+      if (epoch === actionEpoch) setRemoving(false);
+      if (epoch === actionEpoch) setBusy(false);
     }
   };
 
@@ -617,6 +741,7 @@ export const TeamPage: Component = () => {
               selectedTeamId=""
               canManage={false}
               hasTeams={false}
+              disabled={!accountReady()}
               onChanged={() => folk.refresh()}
             />
           </>
@@ -651,11 +776,13 @@ export const TeamPage: Component = () => {
                       data-testid="team-require-review"
                       checked={reviewPolicy() === "required"}
                       disabled={
+                        !canAct() ||
                         savingReviewPolicy() ||
                         reviewPolicy() === undefined ||
                         !current().can_manage
                       }
                       onChange={(event) => {
+                        if (!canAct()) return;
                         const next = event.currentTarget.checked;
                         event.currentTarget.checked =
                           reviewPolicy() === "required";
@@ -696,10 +823,8 @@ export const TeamPage: Component = () => {
                   selectedTeamId={current().team?.id ?? teamId()}
                   canManage={current().can_manage}
                   hasTeams={teams().length > 0}
-                  onChanged={() => {
-                    folk.refresh();
-                    if (teamId()) void loadMembers(teamId());
-                  }}
+                  disabled={!canAct()}
+                  onChanged={retry}
                 />
                 <Show when={roleReceipt()}>
                   {(receipt) => (
@@ -764,6 +889,7 @@ export const TeamPage: Component = () => {
                                             class="h-8 rounded-md border border-line bg-surface px-2 text-xs"
                                             value={row.original.role}
                                             disabled={
+                                              !canAct() ||
                                               busy() ||
                                               !current().can_manage ||
                                               current().actions.set_role !==
@@ -804,12 +930,14 @@ export const TeamPage: Component = () => {
                                           size="sm"
                                           variant="outline"
                                           disabled={
+                                            !canAct() ||
                                             busy() ||
                                             !current().can_manage ||
                                             current().actions.remove !==
                                               "available"
                                           }
                                           onClick={() =>
+                                            canAct() &&
                                             setRemoveTarget(row.original)
                                           }
                                         >
@@ -898,7 +1026,9 @@ export const TeamPage: Component = () => {
                       type="submit"
                       size="sm"
                       disabled={
-                        busy() || current().actions.invite !== "available"
+                        !canAct() ||
+                        busy() ||
+                        current().actions.invite !== "available"
                       }
                     >
                       {busy() ? "Creating invite…" : "Create invite"}
@@ -981,6 +1111,7 @@ export const TeamPage: Component = () => {
             </Button>
             <Button
               disabled={
+                !canAct() ||
                 savingReviewPolicy() ||
                 (reviewPolicyError() !== null &&
                   requiresMutationReload(reviewPolicyError()?.cause))
@@ -1053,6 +1184,7 @@ export const TeamPage: Component = () => {
             <Button
               variant="destructive"
               disabled={
+                !canAct() ||
                 removing() ||
                 (removeError() !== null &&
                   requiresMutationReload(removeError()?.cause))
