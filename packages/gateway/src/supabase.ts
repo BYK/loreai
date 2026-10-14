@@ -15,6 +15,8 @@
  *    only on the user's machine.
  */
 
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   createClient,
   type Session,
@@ -25,6 +27,9 @@ import {
   getTeamConfig,
   setTeamConfig,
   syncData,
+  db,
+  withSavepoint,
+  withTransaction,
 } from "@loreai/core";
 
 /** Public project URL. Build-time default → Folk Lore's project; env override. */
@@ -38,6 +43,51 @@ export const SUPABASE_ANON_KEY =
 
 /** team_config key under which the auth session is persisted. */
 const SESSION_KEY = "supabase.session";
+const SESSION_REVISION_KEY = "supabase.session.revision";
+const REFRESH_LEASE_KEY = "supabase.refresh.lease";
+const REFRESH_LEASE_MS = 15_000;
+export const SESSION_REFRESH_MARGIN_SECONDS = 60;
+
+/** Temporary failures and concurrent login changes must never erase credentials. */
+export class SessionUnavailableError extends Error {
+  constructor(
+    message = "Account service unavailable. Your saved login has been kept; retry shortly.",
+  ) {
+    super(message);
+    this.name = "SessionUnavailableError";
+  }
+}
+
+const restores = new Map<
+  string,
+  { promise: Promise<SupabaseClient | null>; controller: AbortController }
+>();
+let unavailableSessionKey: string | null = null;
+const clientRevisions = new WeakMap<SupabaseClient, string>();
+
+function sessionSnapshot(): { raw: string; revision: string | null } | null {
+  return db()
+    .query(
+      "SELECT s.value AS raw, r.value AS revision FROM team_config s LEFT JOIN team_config r ON r.key = ? WHERE s.key = ?",
+    )
+    .get(SESSION_REVISION_KEY, SESSION_KEY) as {
+    raw: string;
+    revision: string | null;
+  } | null;
+}
+
+function snapshotKey(snapshot: {
+  raw: string;
+  revision: string | null;
+}): string {
+  return `${snapshot.revision ?? ""}\0${snapshot.raw}`;
+}
+
+/** Read-only status for an expired token whose last restore was transiently unsuccessful. */
+export function sessionRefreshUnavailable(): boolean {
+  const snapshot = sessionSnapshot();
+  return snapshot !== null && unavailableSessionKey === snapshotKey(snapshot);
+}
 
 /**
  * The persisted shape of an authenticated session. A trimmed projection of the
@@ -61,6 +111,10 @@ export interface PersistedSession {
 /** Load the persisted session, or null if not logged in / unparsable. */
 export function loadPersistedSession(): PersistedSession | null {
   const raw = getTeamConfig(SESSION_KEY);
+  return parsePersistedSession(raw);
+}
+
+function parsePersistedSession(raw: string | null): PersistedSession | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as PersistedSession;
@@ -73,26 +127,35 @@ export function loadPersistedSession(): PersistedSession | null {
 
 /** Persist (or replace) the auth session. */
 export function persistSession(session: PersistedSession): void {
-  const prev = loadPersistedSession();
-  // Account switch (different user_id) — drop the previous user's pulled profile
-  // mirror so currentTier() can't report the prior account's tier and the new
-  // account's profile is re-pulled fresh. A token refresh (same user_id) keeps
-  // the mirror intact.
-  if (prev && prev.user_id !== session.user_id) {
-    syncData.clearPullOnlyMirrors();
-    clearProviderTokenCache();
-  }
-  setTeamConfig(SESSION_KEY, JSON.stringify(session));
+  withSavepoint("persist_account_session", () => {
+    const prev = loadPersistedSession();
+    // Account switch (different user_id) — drop the previous user's pulled profile
+    // mirror so currentTier() can't report the prior account's tier and the new
+    // account's profile is re-pulled fresh. A token refresh (same user_id) keeps
+    // the mirror intact.
+    if (prev && prev.user_id !== session.user_id) {
+      syncData.clearPullOnlyMirrors();
+      clearProviderTokenCache();
+    }
+    setTeamConfig(SESSION_KEY, JSON.stringify(session));
+    setTeamConfig(SESSION_REVISION_KEY, randomUUID());
+    unavailableSessionKey = null;
+  });
 }
 
 /** Remove any persisted session (logout). */
 export function clearSession(): void {
-  deleteTeamConfig(SESSION_KEY);
-  // The mirrored plan tier is server-authoritative; it must not survive a
-  // sign-out (otherwise currentTier() would keep reporting the logged-out
-  // user's tier until a future login + pull).
-  syncData.clearPullOnlyMirrors();
-  clearProviderTokenCache();
+  withSavepoint("clear_account_session", () => {
+    deleteTeamConfig(SESSION_KEY);
+    // The mirrored plan tier is server-authoritative; it must not survive a
+    // sign-out (otherwise currentTier() would keep reporting the logged-out
+    // user's tier until a future login + pull).
+    syncData.clearPullOnlyMirrors();
+    clearProviderTokenCache();
+    // Even re-login with identical credentials is a new login generation.
+    setTeamConfig(SESSION_REVISION_KEY, randomUUID());
+    unavailableSessionKey = null;
+  });
 }
 
 /** True when a session is persisted locally. Does NOT verify with the server. */
@@ -220,8 +283,29 @@ function memoryStorage() {
  * (team_config), so the client's own persistence is in-memory and refresh is
  * manual. `flowType: "pkce"` is required for the CLI loopback OAuth flow.
  */
-export function createSupabaseClient(): SupabaseClient {
+export function createSupabaseClient(
+  signal?: () => AbortSignal | undefined,
+): SupabaseClient {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    ...(signal
+      ? {
+          global: {
+            fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+              const active = signal();
+              return fetch(input, {
+                ...init,
+                ...(active
+                  ? {
+                      signal: init?.signal
+                        ? AbortSignal.any([active, init.signal])
+                        : active,
+                    }
+                  : {}),
+              });
+            }) as typeof fetch,
+          },
+        }
+      : {}),
     auth: {
       flowType: "pkce",
       persistSession: true,
@@ -258,41 +342,230 @@ export function getServiceRoleClient(): SupabaseClient | null {
 
 /**
  * Build a client with the persisted session restored (and refreshed if the
- * access token expired). Re-persists the refreshed tokens. Returns null when
- * not logged in or the session could not be restored (expired refresh token,
- * revoked, etc.) — the caller decides whether to clear the stale session.
+ * access token is near expiry). Returns null for no session or an explicit
+ * server rejection (clears that login only); temporary failures throw a safe
+ * SessionUnavailableError and preserve credentials. A lifecycle signal cancels
+ * shared authentication work but never limits the returned client's lifetime.
  */
-export async function getAuthedClient(): Promise<SupabaseClient | null> {
-  const persisted = loadPersistedSession();
+export async function getAuthedClient(
+  signal?: AbortSignal,
+): Promise<SupabaseClient | null> {
+  const snapshot = sessionSnapshot();
+  const persisted = parsePersistedSession(snapshot?.raw ?? null);
   if (!persisted) return null;
+  const { raw, revision } = snapshot!;
+  const key = snapshotKey(snapshot!);
+  const existing = restores.get(key);
+  if (existing) {
+    // A scheduler joining an on-demand restore still owns gateway shutdown.
+    // Its lifecycle abort must cancel the shared operation whichever caller
+    // started it first.
+    const abort = () => existing.controller.abort();
+    if (signal?.aborted) abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      return await existing.promise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+  // Shared by on-demand callers and the scheduler. A SQLite lease additionally
+  // serializes CLI/gateway processes consuming the same rotating refresh token.
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const pending = restoreSession(persisted, raw, revision, controller.signal);
+  const record = { promise: pending, controller };
+  restores.set(key, record);
+  try {
+    return await pending;
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    if (restores.get(key) === record) restores.delete(key);
+  }
+}
 
-  const client = createSupabaseClient();
-  const { data, error } = await client.auth.setSession({
-    access_token: persisted.access_token,
-    refresh_token: persisted.refresh_token,
+function rejectedSession(error: { code?: string; status?: number }): boolean {
+  return (
+    error.status !== undefined &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    [
+      "refresh_token_not_found",
+      "refresh_token_already_used",
+      "session_not_found",
+      "user_not_found",
+      "user_banned",
+    ].includes(error.code ?? "")
+  );
+}
+
+async function restoreSession(
+  persisted: PersistedSession,
+  raw: string,
+  revision: string | null,
+  parentSignal?: AbortSignal,
+): Promise<SupabaseClient | null> {
+  const signal = parentSignal
+    ? AbortSignal.any([parentSignal, AbortSignal.timeout(10_000)])
+    : AbortSignal.timeout(10_000);
+  const sameSession = () =>
+    getTeamConfig(SESSION_KEY) === raw &&
+    getTeamConfig(SESSION_REVISION_KEY) === revision;
+  const changed = () =>
+    new SessionUnavailableError(
+      "Active login changed while authentication was in progress. Retry the request.",
+    );
+  const lease = JSON.stringify({
+    owner: randomUUID(),
+    expiresAt: Date.now() + REFRESH_LEASE_MS,
   });
-  if (error || !data.session) return null;
-
-  // setSession may have refreshed the tokens — persist the new values.
-  persistSession(sessionToPersisted(data.session, persisted));
-  return client;
+  let owned = false;
+  const releaseLease = () => {
+    if (!owned) return;
+    db()
+      .query("DELETE FROM team_config WHERE key = ? AND value = ?")
+      .run(REFRESH_LEASE_KEY, lease);
+    owned = false;
+  };
+  // Release synchronously when shutdown aborts, while SQLite is still open.
+  // A later SDK response only observes the aborted signal and cannot reopen it.
+  parentSignal?.addEventListener("abort", releaseLease, { once: true });
+  try {
+    while (!owned) {
+      signal.throwIfAborted();
+      const acquired = withTransaction(() => {
+        if (!sameSession()) {
+          const next = sessionSnapshot();
+          // A different process may have just rotated this login's tokens.
+          // A login/logout changes the generation, so only rotation is retried.
+          if (
+            next?.revision === revision &&
+            parsePersistedSession(next.raw)?.user_id === persisted.user_id
+          )
+            return "rotated" as const;
+          throw changed();
+        }
+        const current = getTeamConfig(REFRESH_LEASE_KEY);
+        if (current) {
+          const held = JSON.parse(current) as { expiresAt: number };
+          if (held.expiresAt > Date.now()) return false;
+        }
+        setTeamConfig(REFRESH_LEASE_KEY, lease);
+        return true;
+      });
+      if (acquired === "rotated") return await getAuthedClient(signal);
+      owned = acquired;
+      if (!owned) await delay(50, undefined, { signal });
+    }
+    let authInProgress = true;
+    const client = createSupabaseClient(() =>
+      authInProgress ? signal : undefined,
+    );
+    const needsRefresh =
+      persisted.expires_at !== undefined &&
+      persisted.expires_at <=
+        Date.now() / 1000 + SESSION_REFRESH_MARGIN_SECONDS;
+    let result = needsRefresh
+      ? await client.auth.refreshSession({
+          refresh_token: persisted.refresh_token,
+        })
+      : await client.auth.setSession({
+          access_token: persisted.access_token,
+          refresh_token: persisted.refresh_token,
+        });
+    // An access-token rejection can still be recovered with the refresh token.
+    if (
+      !needsRefresh &&
+      result.error?.status === 401 &&
+      !rejectedSession(result.error)
+    ) {
+      result = await client.auth.refreshSession({
+        refresh_token: persisted.refresh_token,
+      });
+    }
+    signal.throwIfAborted();
+    return withTransaction(() => {
+      if (!sameSession() || getTeamConfig(REFRESH_LEASE_KEY) !== lease)
+        throw changed();
+      if (result.error && rejectedSession(result.error)) {
+        clearSession();
+        return null;
+      }
+      const session = result.data.session;
+      if (
+        result.error ||
+        !session?.access_token ||
+        !session.refresh_token ||
+        session.user?.id !== persisted.user_id
+      ) {
+        unavailableSessionKey = snapshotKey({ raw, revision });
+        throw new SessionUnavailableError();
+      }
+      const nextRaw = JSON.stringify(sessionToPersisted(session, persisted));
+      setTeamConfig(SESSION_KEY, nextRaw);
+      unavailableSessionKey = null;
+      clientRevisions.set(client, snapshotKey({ raw: nextRaw, revision }));
+      // Authentication's deadline does not limit later sync/team requests.
+      authInProgress = false;
+      return client;
+    });
+  } catch (error) {
+    if (!parentSignal?.aborted && sameSession())
+      unavailableSessionKey = snapshotKey({ raw, revision });
+    // Never expose provider error bodies or tokens through logs / CLI output.
+    throw error instanceof SessionUnavailableError
+      ? error
+      : new SessionUnavailableError();
+  } finally {
+    parentSignal?.removeEventListener("abort", releaseLease);
+    if (!parentSignal?.aborted) releaseLease();
+  }
 }
 
 /**
  * Return the current account identity. Cheap path returns the cached persisted
- * identity; when `verify` is set, round-trips to the server (auth + RLS check)
- * and returns null if the session is no longer valid.
+ * identity while the access token is valid; expired tokens are restored first.
+ * `verify` additionally checks the server identity, with temporary failures
+ * reported separately from an explicitly rejected login.
  */
 export async function getCurrentUser(
   opts: { verify?: boolean } = {},
 ): Promise<PersistedSession | null> {
   const persisted = loadPersistedSession();
   if (!persisted) return null;
-  if (!opts.verify) return persisted;
+  if (
+    !opts.verify &&
+    (persisted.expires_at === undefined ||
+      persisted.expires_at > Date.now() / 1000)
+  )
+    return persisted;
 
   const client = await getAuthedClient();
   if (!client) return null;
+  const restoredSnapshot = sessionSnapshot();
+  const restored = parsePersistedSession(restoredSnapshot?.raw ?? null);
+  if (
+    !restored ||
+    restored.user_id !== persisted.user_id ||
+    !restoredSnapshot ||
+    clientRevisions.get(client) !== snapshotKey(restoredSnapshot)
+  )
+    throw new SessionUnavailableError(
+      "Active login changed while authentication was in progress. Retry the request.",
+    );
+  if (!opts.verify) return restored;
   const { data, error } = await client.auth.getUser();
-  if (error || !data.user) return null;
+  const verifiedSnapshot = sessionSnapshot();
+  if (
+    !verifiedSnapshot ||
+    snapshotKey(verifiedSnapshot) !== snapshotKey(restoredSnapshot)
+  )
+    throw new SessionUnavailableError(
+      "Active login changed while authentication was in progress. Retry the request.",
+    );
+  if (error || !data.user || data.user.id !== restored.user_id)
+    throw new SessionUnavailableError();
   return loadPersistedSession();
 }

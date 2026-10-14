@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 const h = vi.hoisted(() => ({
   auth: {
     setSession: vi.fn(),
+    refreshSession: vi.fn(),
     getUser: vi.fn(),
   },
   from: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { db, syncData } from "@loreai/core";
+import { startSessionRefreshScheduler } from "../src/session-refresh";
 import {
   clearProviderTokenCache,
   clearSession,
@@ -125,16 +127,216 @@ describe("supabase session persistence", () => {
   });
 });
 
+describe("background account refresh", () => {
+  beforeEach(() => {
+    clearSession();
+    vi.useFakeTimers();
+    h.auth.refreshSession.mockReset();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  test("refreshes before expiry even with sync disabled, then keeps fresh credentials", async () => {
+    syncData.disableSync();
+    persistSession({
+      ...SAMPLE,
+      expires_at: Math.floor(Date.now() / 1000) + 30,
+    });
+    h.auth.refreshSession.mockResolvedValue({
+      data: { session: fakeSupabaseSession() },
+      error: null,
+    });
+    const stop = startSessionRefreshScheduler({
+      hostedMode: false,
+      remoteGateway: false,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(loadPersistedSession()?.access_token).toBe("at-2");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.auth.refreshSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await stop();
+    }
+  });
+
+  test("temporary failures retry on the next interval without deleting the login", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    h.auth.refreshSession
+      .mockResolvedValueOnce({
+        data: { session: null },
+        error: { status: 503 },
+      })
+      .mockResolvedValue({
+        data: { session: fakeSupabaseSession() },
+        error: null,
+      });
+    const stop = startSessionRefreshScheduler({
+      hostedMode: false,
+      remoteGateway: false,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(loadPersistedSession()?.access_token).toBe("at-1");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(loadPersistedSession()?.access_token).toBe("at-2");
+    } finally {
+      await stop();
+    }
+  });
+
+  test.each([
+    { hostedMode: true, remoteGateway: false },
+    { hostedMode: false, remoteGateway: true },
+  ])("never refreshes the operator's account in %j", async (mode) => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    const stop = startSessionRefreshScheduler(mode);
+    await vi.advanceTimersByTimeAsync(90_000);
+    await stop();
+    expect(h.auth.refreshSession).not.toHaveBeenCalled();
+    expect(loadPersistedSession()?.access_token).toBe("at-1");
+  });
+
+  test("stopping cancels an in-flight response and prevents late token persistence", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    let finish!: (value: unknown) => void;
+    h.auth.refreshSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const stop = startSessionRefreshScheduler({
+      hostedMode: false,
+      remoteGateway: false,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    const stopped = stop();
+    finish({ data: { session: fakeSupabaseSession() }, error: null });
+    await stopped;
+    expect(loadPersistedSession()?.access_token).toBe("at-1");
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(h.auth.refreshSession).toHaveBeenCalledTimes(1);
+  });
+
+  test("shutdown cancels a restore started by an on-demand caller before the scheduler joined", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    let finish!: (value: unknown) => void;
+    h.auth.refreshSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const demand = getAuthedClient();
+    const demandOutcome = demand.then(
+      () => "saved",
+      () => "cancelled",
+    );
+    const stop = startSessionRefreshScheduler({
+      hostedMode: false,
+      remoteGateway: false,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    const stopped = stop();
+    finish({ data: { session: fakeSupabaseSession() }, error: null });
+    await stopped;
+    expect(await demandOutcome).toBe("cancelled");
+    expect(loadPersistedSession()?.access_token).toBe("at-1");
+  });
+});
+
 describe("getAuthedClient / getCurrentUser", () => {
   beforeEach(() => {
     clearSession();
     h.auth.setSession.mockReset();
+    h.auth.refreshSession.mockReset();
     h.auth.getUser.mockReset();
   });
 
   test("returns null when not logged in", async () => {
     expect(await getAuthedClient()).toBeNull();
     expect(await getCurrentUser()).toBeNull();
+  });
+
+  test("whoami restores an expired access token instead of reporting a cached login", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    h.auth.refreshSession.mockResolvedValue({
+      data: { session: fakeSupabaseSession() },
+      error: null,
+    });
+    expect((await getCurrentUser())?.access_token).toBe("at-2");
+    expect(loadPersistedSession()?.refresh_token).toBe("rt-2");
+  });
+
+  test("concurrent restores share one session rotation", async () => {
+    persistSession(SAMPLE);
+    const finishes: Array<(value: unknown) => void> = [];
+    h.auth.setSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishes.push(resolve);
+        }),
+    );
+    const first = getAuthedClient();
+    const second = getAuthedClient();
+    for (const finish of finishes)
+      finish({ data: { session: fakeSupabaseSession() }, error: null });
+    const clients = await Promise.all([first, second]);
+    expect(clients[0]).toBe(clients[1]);
+    expect(h.auth.setSession).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["logout", "switch", "relogin"])(
+    "a late refresh cannot overwrite %s",
+    async (action) => {
+      persistSession(SAMPLE);
+      let finish!: (value: unknown) => void;
+      h.auth.setSession.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const pending = getAuthedClient();
+      clearSession();
+      if (action !== "logout")
+        persistSession(
+          action === "switch" ? { ...SAMPLE, user_id: "user-other" } : SAMPLE,
+        );
+      finish({ data: { session: fakeSupabaseSession() }, error: null });
+      await expect(pending).rejects.toThrow(/changed/i);
+      expect(loadPersistedSession()).toEqual(
+        action === "logout"
+          ? null
+          : action === "switch"
+            ? { ...SAMPLE, user_id: "user-other" }
+            : SAMPLE,
+      );
+    },
+  );
+
+  test("temporary restore failures preserve credentials and report unavailable", async () => {
+    persistSession(SAMPLE);
+    h.auth.setSession.mockResolvedValue({
+      data: { session: null },
+      error: { status: 503, message: "secret provider response" },
+    });
+    await expect(getAuthedClient()).rejects.toThrow(/unavailable/i);
+    expect(loadPersistedSession()).toEqual(SAMPLE);
+  });
+
+  test("explicit refresh-token rejection clears the rejected session", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    h.auth.refreshSession.mockResolvedValue({
+      data: { session: null },
+      error: { status: 400, code: "refresh_token_not_found" },
+    });
+    h.auth.setSession.mockResolvedValue({
+      data: { session: null },
+      error: { status: 400, code: "refresh_token_not_found" },
+    });
+    expect(await getAuthedClient()).toBeNull();
+    expect(loadPersistedSession()).toBeNull();
   });
 
   test("restores the session and re-persists refreshed tokens", async () => {
@@ -155,14 +357,13 @@ describe("getAuthedClient / getCurrentUser", () => {
     expect(loadPersistedSession()?.refresh_token).toBe("rt-2");
   });
 
-  test("returns null and keeps the stale session on restore failure", async () => {
+  test("unclassified restore failures preserve the session and report unavailable", async () => {
     persistSession(SAMPLE);
     h.auth.setSession.mockResolvedValue({
       data: { session: null },
       error: { message: "refresh_token_not_found" },
     });
-    expect(await getAuthedClient()).toBeNull();
-    // We do NOT clear here — the caller decides.
+    await expect(getAuthedClient()).rejects.toThrow(/unavailable/i);
     expect(loadPersistedSession()).toEqual(SAMPLE);
   });
 
@@ -174,7 +375,7 @@ describe("getAuthedClient / getCurrentUser", () => {
     expect(h.auth.setSession).not.toHaveBeenCalled();
   });
 
-  test("getCurrentUser with verify round-trips and returns null when invalid", async () => {
+  test("getCurrentUser does not erase a session for an unclassified verification failure", async () => {
     persistSession(SAMPLE);
     h.auth.setSession.mockResolvedValue({
       data: { session: fakeSupabaseSession() },
@@ -184,7 +385,26 @@ describe("getAuthedClient / getCurrentUser", () => {
       data: { user: null },
       error: { message: "bad jwt" },
     });
-    expect(await getCurrentUser({ verify: true })).toBeNull();
+    await expect(getCurrentUser({ verify: true })).rejects.toThrow(
+      /unavailable/i,
+    );
+    expect(loadPersistedSession()?.access_token).toBe("at-2");
+  });
+
+  test("verification cannot mark another user as the cached account", async () => {
+    persistSession(SAMPLE);
+    h.auth.setSession.mockResolvedValue({
+      data: { session: fakeSupabaseSession() },
+      error: null,
+    });
+    h.auth.getUser.mockResolvedValue({
+      data: { user: { id: "user-other" } },
+      error: null,
+    });
+    await expect(getCurrentUser({ verify: true })).rejects.toThrow(
+      /unavailable/i,
+    );
+    expect(loadPersistedSession()?.user_id).toBe("user-123");
   });
 });
 

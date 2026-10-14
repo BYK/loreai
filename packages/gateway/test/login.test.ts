@@ -112,7 +112,7 @@ describe("commandWhoami", () => {
     // getAuthedClient() -> setSession() fails -> session is dead.
     h.auth.setSession.mockResolvedValue({
       data: { session: null },
-      error: { message: "refresh_token_not_found" },
+      error: { status: 400, code: "refresh_token_not_found" },
     });
 
     await commandWhoami([], { verify: true });
@@ -120,6 +120,19 @@ describe("commandWhoami", () => {
     expect(loadPersistedSession()).toBeNull(); // cleared
     expect(logs.join("\n")).toMatch(/Session expired/);
     expect(process.exitCode).toBe(1);
+  });
+
+  test("a temporary verification failure preserves the saved account", async () => {
+    persistSession(SAMPLE);
+    h.auth.setSession.mockResolvedValue({
+      data: { session: null },
+      error: { status: 503 },
+    });
+    await expect(commandWhoami([], { verify: true })).rejects.toThrow(
+      /unavailable/i,
+    );
+    expect(loadPersistedSession()).toEqual(SAMPLE);
+    expect(logs.join("\n")).not.toContain("Session expired");
   });
 });
 

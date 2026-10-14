@@ -25,7 +25,7 @@ function expiresLabel(account: AccountStatus): string | null {
   if (!account.expires_at) return null;
   const at = Date.parse(account.expires_at);
   if (Number.isNaN(at)) return null;
-  return `${account.state === "expired" ? "expired" : "expires"} ${formatWhen(at)}`;
+  return `access token ${at <= Date.now() ? "expired" : "expires"} ${formatWhen(at)}`;
 }
 
 /**

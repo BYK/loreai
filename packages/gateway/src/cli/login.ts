@@ -79,7 +79,7 @@ export async function commandLogin(
   _positionals: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
-  const existing = loadPersistedSession();
+  const existing = await getCurrentUser();
   if (existing) {
     console.log(
       `Already logged in as ${formatIdentity(existing)}. Run "lore logout" first to switch accounts.`,
@@ -615,7 +615,6 @@ export async function commandWhoami(
   const user = await getCurrentUser({ verify });
   if (!user) {
     if (verify && hadSession) {
-      clearSession();
       console.log('Session expired. Run "lore login" to sign in again.');
     } else {
       console.log('Not logged in. Run "lore login" to sign in.');

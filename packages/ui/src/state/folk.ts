@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createSignal, onCleanup, onMount } from "solid-js";
 
 import type { ApiClient } from "~/lib/api";
 import { createLoader } from "~/lib/loader";
@@ -22,6 +22,21 @@ export function createFolkState({ client }: { client: ApiClient }) {
     () => (teamsWanted() ? true : null),
     async (_key, signal) => client.getTeams(signal),
   );
+  // CLI login/logout and background token rotation happen outside this tab.
+  // Keep the shell current without requiring a popover click or page reload.
+  onMount(() => {
+    const refreshAccount = () => {
+      if (document.visibilityState === "hidden" || account.loading()) return;
+      account.reload();
+      sync.reload();
+    };
+    const timer = window.setInterval(refreshAccount, 30_000);
+    window.addEventListener("focus", refreshAccount);
+    onCleanup(() => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshAccount);
+    });
+  });
   return {
     account,
     sync,
