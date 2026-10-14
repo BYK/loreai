@@ -31,13 +31,19 @@ import {
 } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import { requestIsHosted } from "./folk-access";
-import { loadPersistedSession } from "./supabase";
+import { loadPersistedSession, sessionRefreshUnavailable } from "./supabase";
 
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
 
-export type AccountState = "signed_in" | "anonymous" | "expired";
+export type AccountState =
+  | "signed_in"
+  | "anonymous"
+  | "expired"
+  | "hosted"
+  | "refreshing"
+  | "unavailable";
 
 export interface AccountStatus {
   signed_in: boolean;
@@ -107,9 +113,7 @@ function notFound(message: string): Response {
  * remote-gateway deployments, or any request running under a non-local tenant.
  */
 function folkUnavailable(config: GatewayConfig): boolean {
-  return (
-    config.hostedMode || config.remoteGateway || !syncData.isLocalSyncContext()
-  );
+  return requestIsHosted(config);
 }
 
 type SafeSession = {
@@ -157,7 +161,7 @@ export function accountStatus(
       user: null,
       provider: null,
       expires_at: null,
-      state: "anonymous",
+      state: folkUnavailable(config) ? "hosted" : "anonymous",
     };
   }
   const expired = isExpired(s, nowMs);
@@ -169,7 +173,11 @@ export function accountStatus(
       s.expires_at === null
         ? null
         : new Date(s.expires_at * 1000).toISOString(),
-    state: expired ? "expired" : "signed_in",
+    state: expired
+      ? sessionRefreshUnavailable()
+        ? "unavailable"
+        : "refreshing"
+      : "signed_in",
   };
 }
 

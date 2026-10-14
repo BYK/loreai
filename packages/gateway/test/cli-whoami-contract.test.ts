@@ -197,12 +197,9 @@ describe("Phase 3A — typed lore whoami", () => {
     expect(stderr).toContain("Try: lore login");
   });
 
-  // M-NEW-2 (independent review agent): the verified-stale-session path
-  // must (a) clear the local session, (b) surface "Session expired…"
-  // rather than "Not logged in…", and (c) preserve AuthError(10).
-  // This pins the divergence between the local store (hadSession=true)
-  // and the server (mockServerUser=null under verify=true).
-  test("verified=true with stale local session → AuthError + clears local + exit 10", async () => {
+  // The session helper clears only a matching rejected login. The command
+  // reports its outcome without indiscriminately clearing a newer login.
+  test("a rejected session reports AuthError while cleanup belongs to the session helper", async () => {
     mockSession = {
       user_id: "user-stale",
       github_login: "byk",
@@ -213,7 +210,7 @@ describe("Phase 3A — typed lore whoami", () => {
     expect(exitCode).toBe(10);
     expect(stderr).toContain("Session expired");
     expect(stderr).toContain("Try: lore login");
-    expect(mockClearSessionCalls).toBe(1);
+    expect(mockClearSessionCalls).toBe(0);
   });
 
   test("verified=true with no local session at all → AuthError without clearSession", async () => {

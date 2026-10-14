@@ -4,6 +4,7 @@ import { A } from "@solidjs/router";
 
 import { Button } from "~/components/ui/button";
 import { THEME_CHOICES, theme, type ThemeChoice } from "~/lib/theme";
+import { useWorkspace } from "~/routes/workspace";
 
 import { Avatar } from "../lore/Avatar";
 import { FolkStatus } from "./FolkStatus";
@@ -61,31 +62,68 @@ export const AppBar: Component<{
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
   searchProjectId?: string;
-}> = (props) => (
-  <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
-    <Show when={props.leading}>
-      <span class="lg:hidden">{props.leading}</span>
-    </Show>
-    <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
-      <Logo wordmark="sm" />
-    </A>
-    <SearchEntry searchProjectId={props.searchProjectId} />
-    <div class="ml-auto flex items-center gap-2 sm:gap-4">
-      <FolkStatus />
-      <ThemeToggle />
-      <Avatar label="You" class="hidden sm:inline-flex" />
-      <Show when={props.onOpenNav}>
-        <Button
-          variant="outline"
-          size="sm"
-          class="lg:hidden"
-          aria-label="Open navigation"
-          data-testid="open-nav"
-          onClick={() => props.onOpenNav?.()}
-        >
-          ☰
-        </Button>
+}> = (props) => {
+  const ws = useWorkspace();
+  const account = () => {
+    const folk = ws.state.folk;
+    const current = folk.account.data();
+    return ws.connection.state() === "reachable" &&
+      !folk.account.error() &&
+      !folk.account.loading() &&
+      current?.signed_in &&
+      current.state === "signed_in"
+      ? current.user
+      : null;
+  };
+  return (
+    <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
+      <Show when={props.leading}>
+        <span class="lg:hidden">{props.leading}</span>
       </Show>
-    </div>
-  </header>
-);
+      <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
+        <Logo wordmark="sm" />
+      </A>
+      <SearchEntry searchProjectId={props.searchProjectId} />
+      <div class="ml-auto flex items-center gap-2 sm:gap-4">
+        <FolkStatus />
+        <ThemeToggle />
+        <Show when={account()}>
+          {(user) => {
+            const name = () => user().display_name || user().email || "Account";
+            const initials = () =>
+              name()
+                .split(/\s+/)
+                .filter(Boolean)
+                .map((part) => part[0])
+                .slice(0, 2)
+                .join("")
+                .toUpperCase();
+            return (
+              <span
+                data-testid="account-avatar"
+                role="img"
+                aria-label={`Signed in as ${name()}`}
+                title={name()}
+                class="hidden sm:inline-flex"
+              >
+                <Avatar label={initials()} />
+              </span>
+            );
+          }}
+        </Show>
+        <Show when={props.onOpenNav}>
+          <Button
+            variant="outline"
+            size="sm"
+            class="lg:hidden"
+            aria-label="Open navigation"
+            data-testid="open-nav"
+            onClick={() => props.onOpenNav?.()}
+          >
+            ☰
+          </Button>
+        </Show>
+      </div>
+    </header>
+  );
+};

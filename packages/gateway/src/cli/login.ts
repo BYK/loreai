@@ -18,9 +18,12 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import { withTransaction } from "@loreai/core";
 import {
   clearSession,
   createSupabaseClient,
+  getAuthedClient,
+  accountDataClient,
   getCurrentUser,
   isLoggedIn,
   loadCachedProviderToken,
@@ -29,6 +32,9 @@ import {
   type PersistedSession,
   persistSession,
   sessionToPersisted,
+  updateSessionProfile,
+  SessionUnavailableError,
+  captureLoginRevision,
 } from "../supabase";
 
 /** GitHub OAuth scopes needed:
@@ -57,7 +63,10 @@ const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
  * for OAuth flows that never opened the GitHub scope — rare and shouldn't be
  * cached).
  */
-function cacheProviderTokenFromSession(session: Session): boolean {
+function cacheProviderTokenFromSession(
+  session: Session,
+  revision: string,
+): boolean {
   const providerToken = session.provider_token;
   if (!providerToken) return false;
   const sessionTtl = session.expires_at
@@ -67,7 +76,7 @@ function cacheProviderTokenFromSession(session: Session): boolean {
     sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
     GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
   );
-  persistProviderTokenCache(providerToken, ttl);
+  persistProviderTokenCache(providerToken, ttl, revision);
   return true;
 }
 
@@ -79,7 +88,7 @@ export async function commandLogin(
   _positionals: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
-  const existing = loadPersistedSession();
+  const existing = await getCurrentUser();
   if (existing) {
     console.log(
       `Already logged in as ${formatIdentity(existing)}. Run "lore logout" first to switch accounts.`,
@@ -116,6 +125,7 @@ export async function commandLogin(
 // --- Email magic-link / OTP -------------------------------------------------
 
 async function loginWithEmail(email: string): Promise<void> {
+  const expectedRevision = captureLoginRevision(true);
   const client = createSupabaseClient();
   const { error } = await client.auth.signInWithOtp({ email });
   if (error) throw new Error(error.message);
@@ -147,7 +157,7 @@ async function loginWithEmail(email: string): Promise<void> {
   // A brand-new email triggers the "signup" confirmation token; a returning
   // email uses the "email" magic-link OTP. Try the common case, then fall back.
   const session = await verifyEmailOtp(client, email, code);
-  await finalizeLogin(client, sessionToPersisted(session));
+  await finalizeLogin(client, sessionToPersisted(session), expectedRevision);
 }
 
 /**
@@ -196,6 +206,7 @@ function extractCodeFromInput(input: string): string {
 // --- GitHub OAuth (loopback + PKCE) ----------------------------------------
 
 async function loginWithGitHub(): Promise<void> {
+  const expectedRevision = captureLoginRevision(true);
   const client = createSupabaseClient();
 
   // Bind a one-shot loopback server on an ephemeral port BEFORE requesting the
@@ -222,12 +233,20 @@ async function loginWithGitHub(): Promise<void> {
   const oauthCode = await code; // resolves when the browser hits the callback
   const session = await exchangeOAuthCode(client, oauthCode);
 
-  await finalizeLogin(client, sessionToPersisted(session));
+  const revision = await finalizeLogin(
+    client,
+    sessionToPersisted(session),
+    expectedRevision,
+  );
+  if (!revision) return;
   // Persist the GitHub provider_token so the next `lore team discover` within
   // the 8h window skips the OAuth dance. Without this, every GitHub-touching
   // command after `lore login` would re-prompt until an OAuth dance ran once.
-  cacheProviderTokenFromSession(session);
-  await provisionGitHubTeams(client, session.provider_token);
+  cacheProviderTokenFromSession(session, revision);
+  await provisionGitHubTeams(
+    accountDataClient(revision, sessionToPersisted(session)),
+    session.provider_token,
+  );
 }
 
 /**
@@ -252,30 +271,14 @@ export async function acquireGitHubProviderToken(opts?: {
   providerToken: string;
 }> {
   // Try the disk cache first — avoids re-prompting OAuth within the token TTL.
-  // On cache HIT: validate the persisted Supabase session via setSession; if it
-  // fails (genuine RefreshTokenRevoked / expired refresh_token / transient net
-  // failure) we fall through to a fresh OAuth dance. The dance itself REWRITES
-  // the cache row on success, so we don't aggressively clear it here — that
-  // would lose a still-valid provider_token on a one-off network blip and force
-  // the dance even on the next call.
-  const cached = loadCachedProviderToken();
-  if (cached) {
-    const client = createSupabaseClient();
-    const persisted = loadPersistedSession();
-    if (persisted) {
-      const { error: setErr } = await client.auth.setSession({
-        access_token: persisted.access_token,
-        refresh_token: persisted.refresh_token,
-      });
-      if (!setErr) {
-        // Cache hit + session restorable → no OAuth dance. Both tokens are valid;
-        // the EF call uses them as-is.
-        return { client, providerToken: cached.provider_token };
-      }
-      // Transient setErr (network / 502 / 504) — keep the cache row, fall through
-      // to the OAuth dance. The dance will overwrite the cache on success.
-    }
-    // No persisted session, OR setSession errored: fall through.
+  // Restore through the same coordinator as the gateway so cached GitHub
+  // access cannot consume a rotating refresh token outside the SQLite lease.
+  // A temporary failure retains both credentials and never reopens OAuth.
+  if (loadCachedProviderToken()) {
+    const client = await getAuthedClient();
+    const cached = loadCachedProviderToken();
+    if (client && cached)
+      return { client, providerToken: cached.provider_token };
   }
 
   // No cached token — run OAuth.
@@ -295,6 +298,7 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
   client: SupabaseClient;
   providerToken: string;
 }> {
+  const expectedRevision = captureLoginRevision();
   const client = createSupabaseClient();
   const { code: cbCode, redirectTo, done } = await startLoopbackCallback();
   const { data, error } = await client.auth.signInWithOAuth({
@@ -342,12 +346,7 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
   }
 
   const session = await exchangeOAuthCode(client, oauthCode);
-  await finalizeLogin(client, sessionToPersisted(session));
-  if (!session.provider_token)
-    throw new Error("GitHub did not return an access token.");
-  // Persist the GitHub provider_token (8h-capped, see helper docstring).
-  cacheProviderTokenFromSession(session);
-  return { client, providerToken: session.provider_token };
+  return completeProviderAuthorization(client, session, expectedRevision);
 }
 
 /**
@@ -359,6 +358,7 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
   client: SupabaseClient;
   providerToken: string;
 }> {
+  const expectedRevision = captureLoginRevision();
   const client = createSupabaseClient();
 
   const redirectTo = "http://127.0.0.1/callback";
@@ -390,12 +390,34 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
   if (!oauthCode) throw new Error("No code provided.");
 
   const session = await exchangeOAuthCode(client, oauthCode);
-  await finalizeLogin(client, sessionToPersisted(session));
+  return completeProviderAuthorization(client, session, expectedRevision);
+}
+
+/** Both provider OAuth flows bind cached tokens and data requests to this login. */
+async function completeProviderAuthorization(
+  client: SupabaseClient,
+  session: Session,
+  expectedRevision: string | null,
+): Promise<{
+  client: SupabaseClient;
+  providerToken: string;
+}> {
+  const revision = await finalizeLogin(
+    client,
+    sessionToPersisted(session),
+    expectedRevision,
+  );
+  if (!revision)
+    throw new SessionUnavailableError(
+      "Active login changed while GitHub authorization was in progress.",
+    );
   if (!session.provider_token)
     throw new Error("GitHub did not return an access token.");
-  // Same 8h cap as the loopback path (see cacheProviderTokenFromSession).
-  cacheProviderTokenFromSession(session);
-  return { client, providerToken: session.provider_token };
+  cacheProviderTokenFromSession(session, revision);
+  return {
+    client: accountDataClient(revision, sessionToPersisted(session)),
+    providerToken: session.provider_token,
+  };
 }
 
 // --- GitHub OAuth, headless (manual code paste, no loopback) ----------------
@@ -409,6 +431,7 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
  * browser completed the sign-in.
  */
 async function loginWithGitHubManual(): Promise<void> {
+  const expectedRevision = captureLoginRevision(true);
   const client = createSupabaseClient();
 
   // A stable, allow-listed redirect. The browser will land on a page that does
@@ -446,11 +469,19 @@ async function loginWithGitHubManual(): Promise<void> {
   if (exchErr) throw new Error(exchErr.message);
   if (!sess.session) throw new Error("No session returned after OAuth.");
 
-  await finalizeLogin(client, sessionToPersisted(sess.session));
+  const revision = await finalizeLogin(
+    client,
+    sessionToPersisted(sess.session),
+    expectedRevision,
+  );
+  if (!revision) return;
   // Persist the GitHub provider_token so the next `lore team discover` within
   // the 8h window skips the OAuth dance (same as the loopback path).
-  cacheProviderTokenFromSession(sess.session);
-  await provisionGitHubTeams(client, sess.session.provider_token);
+  cacheProviderTokenFromSession(sess.session, revision);
+  await provisionGitHubTeams(
+    accountDataClient(revision, sessionToPersisted(sess.session)),
+    sess.session.provider_token,
+  );
 }
 
 /**
@@ -579,23 +610,26 @@ function startLoopbackCallback(): Promise<LoopbackHandle> {
 // ---------------------------------------------------------------------------
 
 export async function commandLogout(): Promise<void> {
-  const existing = loadPersistedSession();
+  const existing = withTransaction(() => {
+    const session = loadPersistedSession();
+    // Even an empty logout cancels an OAuth/OTP attempt still awaiting a grant.
+    clearSession();
+    return session;
+  });
   if (!existing) {
     console.log("Not logged in.");
     return;
   }
-  // Best-effort server-side sign-out; always clear the local session.
+  // Commit local logout before any network work: a late response must not
+  // erase a subsequent login. Revoke this session using its existing JWT,
+  // without rotating refresh tokens or signing out another device's session.
   try {
-    const client = createSupabaseClient();
-    await client.auth.setSession({
-      access_token: existing.access_token,
-      refresh_token: existing.refresh_token,
-    });
-    await client.auth.signOut();
+    const deadline = AbortSignal.timeout(10_000);
+    const client = createSupabaseClient(() => deadline);
+    await client.auth.admin.signOut(existing.access_token, "local");
   } catch {
     // Ignore network/auth errors — local logout is what matters.
   }
-  clearSession();
   console.log("Logged out.");
 }
 
@@ -615,7 +649,6 @@ export async function commandWhoami(
   const user = await getCurrentUser({ verify });
   if (!user) {
     if (verify && hadSession) {
-      clearSession();
       console.log('Session expired. Run "lore login" to sign in again.');
     } else {
       console.log('Not logged in. Run "lore login" to sign in.');
@@ -648,8 +681,9 @@ export async function commandWhoami(
 async function finalizeLogin(
   client: SupabaseClient,
   session: PersistedSession,
-): Promise<void> {
-  persistSession(session);
+  expectedRevision: string | null,
+): Promise<string | null> {
+  const revision = persistSession(session, expectedRevision);
 
   // Fetch the auto-provisioned profile (RLS scopes it to us). Best-effort —
   // a failure here doesn't undo a successful login.
@@ -660,20 +694,22 @@ async function finalizeLogin(
       .eq("id", session.user_id)
       .maybeSingle();
     if (data) {
-      persistSession({
-        ...session,
-        github_login: data.github_login ?? session.github_login,
-        display_name: data.display_name ?? session.display_name,
-        email: data.email ?? session.email,
-      });
+      updateSessionProfile(revision, data);
     }
   } catch {
     // Ignore — profile fetch is informational.
   }
 
-  console.log(
-    `Signed in as ${formatIdentity(loadPersistedSession() ?? session)}.`,
-  );
+  const current = updateSessionProfile(revision, {});
+  if (!current) {
+    console.log(
+      "Active login changed while sign-in was completing. Retry with the current account.",
+    );
+    process.exitCode = 1;
+    return null;
+  }
+  console.log(`Signed in as ${formatIdentity(current)}.`);
+  return revision;
 }
 
 function formatIdentity(s: PersistedSession): string {

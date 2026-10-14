@@ -205,13 +205,13 @@ describe("Folk Lore status routes", () => {
       expect(body.state).toBe("signed_in");
     });
 
-    test("expired when the cached access token is past expiry", async () => {
+    test("an expired access token waits for refresh rather than requiring login", async () => {
       const exp = Math.floor(Date.now() / 1000) - 60;
       signIn({ expiresAt: exp });
       const body = await (await get(server, "/api/v1/account")).json();
       expect(body).toMatchObject({
         signed_in: false,
-        state: "expired",
+        state: "refreshing",
         expires_at: new Date(exp * 1000).toISOString(),
       });
       expect(body.user.id).toBe(USER);
@@ -222,7 +222,9 @@ describe("Folk Lore status routes", () => {
       expect(accountStatus(config, 1_700_000_000 * 1000 - 1).state).toBe(
         "signed_in",
       );
-      expect(accountStatus(config, 1_700_000_000 * 1000).state).toBe("expired");
+      expect(accountStatus(config, 1_700_000_000 * 1000).state).toBe(
+        "refreshing",
+      );
     });
 
     test("a session without expires_at reports null and is not expired", async () => {
@@ -249,7 +251,7 @@ describe("Folk Lore status routes", () => {
         user: null,
         provider: null,
         expires_at: null,
-        state: "anonymous",
+        state: "hosted",
       });
     });
 
@@ -257,7 +259,7 @@ describe("Folk Lore status routes", () => {
       signIn();
       expect(accountStatus(config).state).toBe("signed_in");
       expect(withTenant("tenant-a", () => accountStatus(config)).state).toBe(
-        "anonymous",
+        "hosted",
       );
     });
   });

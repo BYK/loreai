@@ -7,7 +7,9 @@ import { type } from "arktype";
 
 import { nonNegInt } from "./primitives";
 
-export const accountState = type("'signed_in' | 'anonymous' | 'expired'");
+export const accountState = type(
+  "'signed_in' | 'anonymous' | 'expired' | 'hosted' | 'refreshing' | 'unavailable'",
+);
 
 export const accountStatus = type({
   signed_in: "boolean",

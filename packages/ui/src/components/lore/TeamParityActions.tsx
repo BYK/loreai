@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 
 import type {
   DomainJoinRequestList,
@@ -23,6 +23,7 @@ type Props = {
   canManage: boolean;
   hasTeams: boolean;
   onChanged: () => void;
+  disabled?: boolean;
 };
 
 function errorText(error: unknown): string {
@@ -47,6 +48,10 @@ function tokenFromInviteInput(value: string): string | null {
 
 export const TeamParityActions: Component<Props> = (props) => {
   const ws = useWorkspace();
+  let active = true;
+  onCleanup(() => {
+    active = false;
+  });
   const [createOpen, setCreateOpen] = createSignal(false);
   const [createName, setCreateName] = createSignal("");
   const [createError, setCreateError] = createSignal("");
@@ -85,11 +90,13 @@ export const TeamParityActions: Component<Props> = (props) => {
   const loadOrganizations = async () => {
     try {
       const result = await ws.tracked(() => ws.client.getOrganizations());
+      if (!active) return;
       setOrganizations(result);
       if (!selectedOrg() && result.organizations.length > 0) {
         setSelectedOrg(result.organizations[0]!.id);
       }
     } catch (error) {
+      if (!active) return;
       setDomainError(errorText(error));
     }
   };
@@ -101,10 +108,13 @@ export const TeamParityActions: Component<Props> = (props) => {
     }
     setDomainError("");
     try {
-      setDomainRequests(
-        await ws.tracked(() => ws.client.getDomainJoinRequests(orgId)),
+      const requests = await ws.tracked(() =>
+        ws.client.getDomainJoinRequests(orgId),
       );
+      if (!active) return;
+      setDomainRequests(requests);
     } catch (error) {
+      if (!active) return;
       setDomainRequests(undefined);
       setDomainError(errorText(error));
     }
@@ -114,35 +124,39 @@ export const TeamParityActions: Component<Props> = (props) => {
 
   const createTeam = async (event: SubmitEvent) => {
     event.preventDefault();
-    if (creating() || !createName().trim()) return;
+    if (props.disabled || creating() || !createName().trim()) return;
     setCreating(true);
     setCreateError("");
     try {
       await ws.tracked(() => ws.client.createTeam(createName().trim()));
+      if (!active) return;
       setCreateOpen(false);
       setCreateName("");
       props.onChanged();
     } catch (error) {
+      if (!active) return;
       setCreateError(errorText(error));
     } finally {
-      setCreating(false);
+      if (active) setCreating(false);
     }
   };
 
   const joinTeam = async (event: SubmitEvent) => {
     event.preventDefault();
     const token = tokenFromInviteInput(inviteToken());
-    if (joining() || !token) return;
+    if (props.disabled || joining() || !token) return;
     setJoining(true);
     setJoinError("");
     try {
       await ws.tracked(() => ws.client.acceptTeamInvite(token));
+      if (!active) return;
       closeJoinDialog(false);
       props.onChanged();
     } catch (error) {
+      if (!active) return;
       setJoinError(errorText(error));
     } finally {
-      setJoining(false);
+      if (active) setJoining(false);
     }
   };
 
@@ -156,7 +170,8 @@ export const TeamParityActions: Component<Props> = (props) => {
 
   const addMember = async (event: SubmitEvent) => {
     event.preventDefault();
-    if (adding() || !props.selectedTeamId) return;
+    if (props.disabled || !props.canManage || adding() || !props.selectedTeamId)
+      return;
     setAdding(true);
     setAddError("");
     try {
@@ -167,18 +182,26 @@ export const TeamParityActions: Component<Props> = (props) => {
           addRole(),
         ),
       );
+      if (!active) return;
       setAddOpen(false);
       setAccountId("");
       props.onChanged();
     } catch (error) {
+      if (!active) return;
       setAddError(errorText(error));
     } finally {
-      setAdding(false);
+      if (active) setAdding(false);
     }
   };
 
   const runDiscovery = async (inviteLogins?: string[]) => {
-    if (discovering() || !props.selectedTeamId) return;
+    if (
+      props.disabled ||
+      !props.canManage ||
+      discovering() ||
+      !props.selectedTeamId
+    )
+      return;
     setDiscovering(true);
     setDiscoveryError("");
     try {
@@ -194,17 +217,19 @@ export const TeamParityActions: Component<Props> = (props) => {
             : {}),
         }),
       );
+      if (!active) return;
       setDiscovery(result);
       if (!inviteLogins) setSelectedLogins([]);
     } catch (error) {
+      if (!active) return;
       setDiscoveryError(errorText(error));
     } finally {
-      setDiscovering(false);
+      if (active) setDiscovering(false);
     }
   };
 
   const updateDomain = async (action: "claim" | "request", orgId: string) => {
-    if (domainBusy()) return;
+    if (props.disabled || domainBusy()) return;
     if (!orgId) {
       setDomainError(
         action === "request"
@@ -230,12 +255,14 @@ export const TeamParityActions: Component<Props> = (props) => {
           ws.client.requestOrganizationJoin(orgId, trimmedDomain),
         );
       }
+      if (!active) return;
       setDomain("");
       if (action === "claim") await loadDomainRequests(orgId);
     } catch (error) {
+      if (!active) return;
       setDomainError(errorText(error));
     } finally {
-      setDomainBusy(false);
+      if (active) setDomainBusy(false);
     }
   };
 
@@ -244,18 +271,20 @@ export const TeamParityActions: Component<Props> = (props) => {
     requestId: string,
     decision: "approve" | "reject",
   ) => {
-    if (domainBusy()) return;
+    if (props.disabled || domainBusy()) return;
     setDomainBusy(true);
     setDomainError("");
     try {
       await ws.tracked(() =>
         ws.client.decideDomainJoinRequest(orgId, requestId, decision),
       );
+      if (!active) return;
       await loadDomainRequests(orgId);
     } catch (error) {
+      if (!active) return;
       setDomainError(errorText(error));
     } finally {
-      setDomainBusy(false);
+      if (active) setDomainBusy(false);
     }
   };
 
@@ -269,7 +298,9 @@ export const TeamParityActions: Component<Props> = (props) => {
             size="sm"
             variant="outline"
             data-testid="team-new"
+            disabled={props.disabled}
             onClick={() => {
+              if (props.disabled) return;
               setCreateError("");
               setCreateOpen(true);
             }}
@@ -281,7 +312,9 @@ export const TeamParityActions: Component<Props> = (props) => {
           size="sm"
           variant="outline"
           data-testid="team-join"
+          disabled={props.disabled}
           onClick={() => {
+            if (props.disabled) return;
             setInviteToken("");
             setJoinError("");
             setJoinOpen(true);
@@ -294,7 +327,9 @@ export const TeamParityActions: Component<Props> = (props) => {
             size="sm"
             variant="outline"
             data-testid="team-add-by-id"
+            disabled={props.disabled}
             onClick={() => {
+              if (props.disabled) return;
               setAddError("");
               setAddOpen(true);
             }}
@@ -326,7 +361,11 @@ export const TeamParityActions: Component<Props> = (props) => {
               {createError()}
             </p>
           </Show>
-          <Button class="mt-3" type="submit" disabled={creating()}>
+          <Button
+            class="mt-3"
+            type="submit"
+            disabled={props.disabled || creating()}
+          >
             {creating() ? "Creating…" : "Create team"}
           </Button>
         </form>
@@ -352,7 +391,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             class="mt-3"
             size="sm"
             variant="outline"
-            disabled={discovering()}
+            disabled={props.disabled || discovering()}
             data-testid="team-discover"
             onClick={() => void runDiscovery()}
           >
@@ -422,6 +461,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                   <Button
                     size="sm"
                     disabled={
+                      props.disabled ||
                       discovering() ||
                       selectedLogins().length === 0 ||
                       result().invited !== undefined
@@ -488,7 +528,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={domainBusy()}
+                        disabled={props.disabled || domainBusy()}
                         onClick={() =>
                           void decideDomain(
                             selectedOrg(),
@@ -502,7 +542,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={domainBusy()}
+                        disabled={props.disabled || domainBusy()}
                         onClick={() =>
                           void decideDomain(selectedOrg(), request.id, "reject")
                         }
@@ -581,7 +621,7 @@ export const TeamParityActions: Component<Props> = (props) => {
               type="submit"
               size="sm"
               variant="outline"
-              disabled={domainBusy()}
+              disabled={props.disabled || domainBusy()}
             >
               Request to join
             </Button>
@@ -589,7 +629,7 @@ export const TeamParityActions: Component<Props> = (props) => {
               type="button"
               size="sm"
               variant="outline"
-              disabled={domainBusy() || !selectedOrg()}
+              disabled={props.disabled || domainBusy() || !selectedOrg()}
               onClick={() => void updateDomain("claim", selectedOrg())}
             >
               Claim domain
@@ -632,12 +672,12 @@ export const TeamParityActions: Component<Props> = (props) => {
               <Button
                 type="button"
                 variant="outline"
-                disabled={creating()}
+                disabled={props.disabled || creating()}
                 onClick={() => setCreateOpen(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={creating()}>
+              <Button type="submit" disabled={props.disabled || creating()}>
                 {creating() ? "Creating…" : "Create team"}
               </Button>
             </DialogFooter>
@@ -674,12 +714,12 @@ export const TeamParityActions: Component<Props> = (props) => {
               <Button
                 type="button"
                 variant="outline"
-                disabled={joining()}
+                disabled={props.disabled || joining()}
                 onClick={() => closeJoinDialog(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={joining()}>
+              <Button type="submit" disabled={props.disabled || joining()}>
                 {joining() ? "Joining…" : "Join team"}
               </Button>
             </DialogFooter>
@@ -731,12 +771,12 @@ export const TeamParityActions: Component<Props> = (props) => {
               <Button
                 type="button"
                 variant="outline"
-                disabled={adding()}
+                disabled={props.disabled || adding()}
                 onClick={() => setAddOpen(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={adding()}>
+              <Button type="submit" disabled={props.disabled || adding()}>
                 {adding() ? "Adding…" : "Add member"}
               </Button>
             </DialogFooter>
