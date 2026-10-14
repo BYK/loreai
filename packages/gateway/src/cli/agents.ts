@@ -12,7 +12,12 @@ import { PROVIDER_AUTH_HEADER_NAMES } from "../auth";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { whichSync } from "./lib/which";
 
-/** Only headers actually forwarded below can override a persisted mapping. */
+/**
+ * LORE_UPSTREAM_EXTRA_HEADERS forwards newline-separated `Name: Value` headers
+ * to Codex's HTTP provider and Lore's upstream requests. Explicit header values
+ * override persisted Codex headers. Codex excludes provider-authentication and
+ * gateway-access headers from this passthrough.
+ */
 function codexExtraHeaderNames(): string[] {
   return (process.env.LORE_UPSTREAM_EXTRA_HEADERS ?? "")
     .split(/\r?\n/)
