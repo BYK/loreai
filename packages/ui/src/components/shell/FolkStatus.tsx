@@ -151,7 +151,15 @@ export const FolkStatus: Component = () => {
           <div class="mt-3 border-t border-line pt-3">
             <div class="eyebrow mb-1">Teams</div>
             <Switch
-              fallback={<div class="text-xs text-muted">Loading teams…</div>}
+              fallback={
+                <div class="text-xs text-muted">
+                  {folk.account.loading()
+                    ? "Checking account…"
+                    : folk.teams.loading()
+                      ? "Loading teams…"
+                      : "Teams unavailable."}
+                </div>
+              }
             >
               <Match when={folk.teams.data()}>
                 {(list) => (

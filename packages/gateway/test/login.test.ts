@@ -3,6 +3,8 @@ import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 const h = vi.hoisted(() => ({
   auth: {
     setSession: vi.fn(),
+    refreshSession: vi.fn(),
+    admin: { signOut: vi.fn() },
     getUser: vi.fn(),
     signInWithOtp: vi.fn(),
     verifyOtp: vi.fn(),
@@ -35,6 +37,7 @@ import {
 import {
   clearProviderTokenCache,
   clearSession,
+  getAuthedClient,
   loadCachedProviderToken,
   loadPersistedSession,
   persistProviderTokenCache,
@@ -66,7 +69,10 @@ let errSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   clearSession();
   clearProviderTokenCache();
-  for (const fn of Object.values(h.auth)) fn.mockReset();
+  for (const fn of Object.values(h.auth)) {
+    if (typeof fn === "function") fn.mockReset();
+  }
+  h.auth.admin.signOut.mockReset();
   h.from.mockReset();
   h.answer.value = "";
   process.exitCode = undefined;
@@ -157,9 +163,144 @@ describe("commandLogout", () => {
     await commandLogout();
     expect(loadPersistedSession()).toBeNull();
   });
+
+  test("logout clears immediately and a late sign-out cannot erase a new login", async () => {
+    persistSession(SAMPLE);
+    let finish!: () => void;
+    const pending = new Promise<{ error: null }>((resolve) => {
+      finish = () => resolve({ error: null });
+    });
+    h.auth.setSession.mockResolvedValue({ data: {}, error: null });
+    h.auth.signOut.mockReturnValue(pending);
+    h.auth.admin.signOut.mockReturnValue(pending);
+    const logout = commandLogout();
+    const clearedImmediately = loadPersistedSession() === null;
+    const next = {
+      ...SAMPLE,
+      user_id: "another-user",
+      access_token: "next-at",
+    };
+    persistSession(next);
+    finish();
+    await logout;
+    expect(clearedImmediately).toBe(true);
+    expect(loadPersistedSession()).toEqual(next);
+  });
 });
 
 describe("commandLogin (email OTP)", () => {
+  test.each(["login", "logout"])(
+    "an older OTP response cannot undo a later %s",
+    async (operation) => {
+      h.answer.value = "123456";
+      h.auth.signInWithOtp.mockResolvedValue({ error: null });
+      let finish!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      h.auth.verifyOtp.mockImplementation(() => {
+        started();
+        return new Promise((resolve) => {
+          finish = () =>
+            resolve({
+              data: {
+                session: {
+                  access_token: SAMPLE.access_token,
+                  refresh_token: SAMPLE.refresh_token,
+                  expires_at: Math.floor(Date.now() / 1000) + 3600,
+                  user: { id: SAMPLE.user_id, email: SAMPLE.email },
+                },
+              },
+              error: null,
+            });
+        });
+      });
+      h.from.mockReturnValue(profileChain(null));
+      const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+        process.exitCode = Number(code);
+        return undefined as never;
+      });
+      try {
+        const pending = commandLogin([], { email: SAMPLE.email });
+        await entered;
+        const newer = { ...SAMPLE, user_id: "newer-login" };
+        if (operation === "login") persistSession(newer);
+        else await commandLogout();
+        finish();
+        await pending;
+        expect(loadPersistedSession()).toEqual(
+          operation === "login" ? newer : null,
+        );
+        expect(process.exitCode).toBe(1);
+      } finally {
+        exit.mockRestore();
+      }
+    },
+  );
+
+  test.each(["logout", "switch", "refresh"])(
+    "profile enrichment cannot undo a concurrent %s",
+    async (operation) => {
+      h.answer.value = "123456";
+      h.auth.signInWithOtp.mockResolvedValue({ error: null });
+      h.auth.verifyOtp.mockResolvedValue({
+        data: {
+          session: {
+            access_token: SAMPLE.access_token,
+            refresh_token: SAMPLE.refresh_token,
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            user: { id: SAMPLE.user_id, email: SAMPLE.email },
+          },
+        },
+        error: null,
+      });
+      let finish!: () => void;
+      h.from.mockReturnValue({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () =>
+              new Promise((resolve) => {
+                finish = () =>
+                  resolve({
+                    data: { display_name: "Updated profile" },
+                    error: null,
+                  });
+              }),
+          }),
+        }),
+      });
+      const login = commandLogin([], { email: SAMPLE.email });
+      await vi.waitFor(() => expect(loadPersistedSession()).not.toBeNull());
+      if (operation === "logout") clearSession();
+      else if (operation === "switch")
+        persistSession({ ...SAMPLE, user_id: "other-user" });
+      else {
+        h.auth.setSession.mockResolvedValue({
+          data: {
+            session: {
+              access_token: "rotated-at",
+              refresh_token: "rotated-rt",
+              expires_at: Math.floor(Date.now() / 1000) + 3600,
+              user: { id: SAMPLE.user_id, email: SAMPLE.email },
+            },
+          },
+          error: null,
+        });
+        await getAuthedClient();
+      }
+      finish();
+      await login;
+      if (operation === "logout") expect(loadPersistedSession()).toBeNull();
+      else if (operation === "switch")
+        expect(loadPersistedSession()?.user_id).toBe("other-user");
+      else {
+        expect(loadPersistedSession()?.refresh_token).toBe("rotated-rt");
+        expect(loadPersistedSession()?.display_name).toBe("Updated profile");
+      }
+    },
+  );
+
   test("verifies the code, persists the session, and confirms identity", async () => {
     h.answer.value = "123456";
     h.auth.signInWithOtp.mockResolvedValue({ error: null });
@@ -435,7 +576,10 @@ describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
   beforeEach(() => {
     clearSession();
     clearProviderTokenCache();
-    for (const fn of Object.values(h.auth)) fn.mockReset();
+    for (const fn of Object.values(h.auth)) {
+      if (typeof fn === "function") fn.mockReset();
+    }
+    h.auth.admin.signOut.mockReset();
     h.from.mockReset();
     h.answer.value = "";
   });
@@ -510,7 +654,7 @@ describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
     expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
   });
 
-  test("cache hit + setSession error preserves the cache row and falls through to dance", async () => {
+  test("temporary cache-hit restore failure retains the login without opening OAuth", async () => {
     // Regression: a transient setSession failure (network blip, fresh
     // refresh_token the server hasn't seen yet) used to clear the cache
     // blindly, then re-do OAuth. The dance itself overwrites the cache on
@@ -547,15 +691,76 @@ describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
     });
     h.from.mockReturnValue(profileChain(null));
 
-    const result = await acquireGitHubProviderToken({ noBrowser: true });
-    // The dance ran (because setSession errored).
-    expect(h.auth.signInWithOAuth).toHaveBeenCalled();
-    // And produced a fresh token.
-    expect(result.providerToken).toBe("gh-from-rescue");
-    // Most importantly: the cache row is now the FRESH token, not stale.
-    // (We didn't blindly clear; the dance overwrote it.)
+    await expect(
+      acquireGitHubProviderToken({ noBrowser: true }),
+    ).rejects.toThrow(/unavailable/i);
+    expect(h.auth.signInWithOAuth).not.toHaveBeenCalled();
+    expect(loadPersistedSession()?.access_token).toBe("at-fresh");
     const cached = loadCachedProviderToken();
-    expect(cached?.provider_token).toBe("gh-from-rescue");
+    expect(cached?.provider_token).toBe("gh-cached");
+  });
+
+  test("cached GitHub access persists an expired Supabase session's token rotation", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    persistProviderTokenCache("gh-cached", 3600);
+    const rotated = {
+      access_token: "at-rotated",
+      refresh_token: "rt-rotated",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { id: SAMPLE.user_id, email: SAMPLE.email },
+    };
+    h.auth.setSession.mockResolvedValue({
+      data: { session: rotated },
+      error: null,
+    });
+    h.auth.refreshSession.mockResolvedValue({
+      data: { session: rotated },
+      error: null,
+    });
+    const result = await acquireGitHubProviderToken({ noBrowser: true });
+    expect(result.providerToken).toBe("gh-cached");
+    expect(loadPersistedSession()?.refresh_token).toBe("rt-rotated");
+  });
+
+  test("late OAuth profile completion cannot cache the previous account's GitHub token", async () => {
+    h.answer.value = "callback-code";
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth" },
+      error: null,
+    });
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: SAMPLE.access_token,
+          refresh_token: SAMPLE.refresh_token,
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          provider_token: "previous-github-token",
+          user: { id: SAMPLE.user_id, email: SAMPLE.email },
+        },
+      },
+      error: null,
+    });
+    let finish!: () => void;
+    h.from.mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () =>
+            new Promise((resolve) => {
+              finish = () => resolve({ data: null, error: null });
+            }),
+        }),
+      }),
+    });
+    const pending = acquireGitHubProviderToken({ noBrowser: true });
+    const outcome = pending.catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(loadPersistedSession()?.user_id).toBe(SAMPLE.user_id),
+    );
+    persistSession({ ...SAMPLE, user_id: "next-user" });
+    persistProviderTokenCache("next-github-token", 3600);
+    finish();
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(loadCachedProviderToken()?.provider_token).toBe("next-github-token");
   });
 
   test("paste-path cache TTL is capped at 8h even when session TTL is longer", async () => {

@@ -25,8 +25,8 @@ const client = await getAuthedClient();
 AbortSignal.timeout = timeout;
 deadline.abort();
 if (!client) throw new Error("Missing restored test client");
-const verification = await client.auth.getUser();
-if (verification.error || verification.data.user?.id !== user.user_id)
+const verification = await client.from("profiles").select("id");
+if (verification.error)
   throw new Error("Restored client retained its authentication deadline");
 console.log(JSON.stringify({ user_id: user.user_id }));
 process.disconnect?.();

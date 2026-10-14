@@ -66,6 +66,8 @@ test("independent CLI/gateway processes rotate once and both use the refreshed s
         );
       } else if (req.url === "/auth/v1/user") {
         res.end(JSON.stringify(user));
+      } else if (req.url?.startsWith("/rest/v1/profiles")) {
+        res.end(JSON.stringify([{ id: user.id }]));
       } else {
         res.statusCode = 404;
         res.end("{}");

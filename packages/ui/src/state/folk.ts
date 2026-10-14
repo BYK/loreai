@@ -19,7 +19,15 @@ export function createFolkState({ client }: { client: ApiClient }) {
   );
   const [teamsWanted, setTeamsWanted] = createSignal(false);
   const teams = createLoader(
-    () => (teamsWanted() ? true : null),
+    () => {
+      if (!teamsWanted() || account.loading() || account.error() !== undefined)
+        return null;
+      const current = account.data();
+      if (current?.state === "anonymous") return "anonymous";
+      return current?.signed_in && current.state === "signed_in" && current.user
+        ? `user:${current.user.id}`
+        : null;
+    },
     async (_key, signal) => client.getTeams(signal),
   );
   // CLI login/logout and background token rotation happen outside this tab.

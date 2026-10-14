@@ -34,6 +34,7 @@ import {
   sessionToPersisted,
   SUPABASE_ANON_KEY,
   SUPABASE_URL,
+  updateSessionProfile,
 } from "../src/supabase";
 
 const SAMPLE = {
@@ -125,6 +126,24 @@ describe("supabase session persistence", () => {
     expect(persisted.email).toBe("prev@example.com");
     expect(persisted.user_id).toBe("user-9");
   });
+});
+
+test("profile enrichment during refresh preserves both rotated credentials and the enriched profile", async () => {
+  clearSession();
+  const revision = persistSession({ ...SAMPLE, expires_at: 1 });
+  let finish!: () => void;
+  h.auth.refreshSession.mockReturnValue(
+    new Promise((resolve) => {
+      finish = () =>
+        resolve({ data: { session: fakeSupabaseSession() }, error: null });
+    }),
+  );
+  const pending = getAuthedClient();
+  updateSessionProfile(revision, { display_name: "Latest profile" });
+  finish();
+  await pending;
+  expect(loadPersistedSession()?.refresh_token).toBe("rt-2");
+  expect(loadPersistedSession()?.display_name).toBe("Latest profile");
 });
 
 describe("background account refresh", () => {

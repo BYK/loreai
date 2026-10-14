@@ -353,6 +353,170 @@ describe("Folk shell status", () => {
     );
   });
 
+  it("re-reads teams for a new CLI account while the panel stays open", async () => {
+    let owner = "Ada";
+    mount(
+      client({
+        async getAccount() {
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: owner, email: null, display_name: owner },
+          };
+        },
+        async getTeams() {
+          return {
+            hosted: false,
+            teams: [
+              {
+                id: `team-${owner}`,
+                name: `${owner} team`,
+                role: "editor",
+                member_count: 1,
+              },
+            ],
+          };
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await screen.findByText("Ada team");
+    owner = "Grace";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-account")).toHaveTextContent("Grace"),
+    );
+    expect(await screen.findByText("Grace team")).toBeInTheDocument();
+    expect(screen.queryByText("Ada team")).not.toBeInTheDocument();
+  });
+
+  it.each(["hosted", "expired", "refreshing", "unavailable"] as const)(
+    "does not claim teams are loading for an account in %s state",
+    async (state) => {
+      const getTeams = vi.fn(async () => NO_TEAMS);
+      mount(
+        client({
+          async getAccount() {
+            return { ...ANONYMOUS, state };
+          },
+          getTeams,
+        }),
+      );
+      const badge = await screen.findByTestId("folk-status");
+      await waitFor(() =>
+        expect(badge).toHaveAttribute("data-folk-state", state),
+      );
+      fireEvent.click(badge);
+      expect(await screen.findByText("Teams unavailable.")).toBeInTheDocument();
+      expect(screen.queryByText("Loading teams…")).not.toBeInTheDocument();
+      expect(getTeams).not.toHaveBeenCalled();
+    },
+  );
+
+  it("clears the previous account's teams after CLI logout with the panel open", async () => {
+    let loggedIn = true;
+    mount(
+      client({
+        async getAccount() {
+          return loggedIn
+            ? {
+                ...ANONYMOUS,
+                signed_in: true,
+                state: "signed_in",
+                user: { id: "Ada", email: null, display_name: "Ada" },
+              }
+            : ANONYMOUS;
+        },
+        async getTeams() {
+          return loggedIn
+            ? {
+                hosted: false,
+                teams: [
+                  {
+                    id: "team-ada",
+                    name: "Ada team",
+                    role: "editor",
+                    member_count: 1,
+                  },
+                ],
+              }
+            : NO_TEAMS;
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await screen.findByText("Ada team");
+    loggedIn = false;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-status")).toHaveAttribute(
+        "data-folk-state",
+        "anonymous",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Ada team")).not.toBeInTheDocument(),
+    );
+    expect(
+      await screen.findByText("No team memberships are known on this device."),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels an old account's team request and ignores its late response", async () => {
+    let owner = "Ada";
+    let finishOld!: (teams: TeamList) => void;
+    let oldSignal: AbortSignal | undefined;
+    const getTeams = vi.fn((signal?: AbortSignal) => {
+      if (owner === "Ada") {
+        oldSignal = signal;
+        return new Promise<TeamList>((resolve) => {
+          finishOld = resolve;
+        });
+      }
+      return Promise.resolve({
+        hosted: false,
+        teams: [
+          {
+            id: "team-grace",
+            name: "Grace team",
+            role: "editor",
+            member_count: 1,
+          },
+        ],
+      });
+    });
+    mount(
+      client({
+        async getAccount() {
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: owner, email: null, display_name: owner },
+          };
+        },
+        getTeams,
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await waitFor(() => expect(finishOld).toBeTypeOf("function"));
+    owner = "Grace";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-account")).toHaveTextContent("Grace"),
+    );
+    finishOld({
+      hosted: false,
+      teams: [
+        { id: "team-ada", name: "Ada team", role: "editor", member_count: 1 },
+      ],
+    });
+    expect(await screen.findByText("Grace team")).toBeInTheDocument();
+    expect(oldSignal?.aborted).toBe(true);
+    expect(screen.queryByText("Ada team")).not.toBeInTheDocument();
+  });
+
   it("hides a stale avatar when the account service stops answering", async () => {
     let offline = false;
     mount(

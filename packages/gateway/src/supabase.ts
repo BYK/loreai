@@ -80,7 +80,16 @@ function snapshotKey(snapshot: {
   raw: string;
   revision: string | null;
 }): string {
-  return `${snapshot.revision ?? ""}\0${snapshot.raw}`;
+  const session = parsePersistedSession(snapshot.raw);
+  // Profile enrichment is not a new credential generation and must not
+  // invalidate an in-flight rotation of the same refresh token.
+  return JSON.stringify([
+    snapshot.revision,
+    session?.user_id,
+    session?.access_token,
+    session?.refresh_token,
+    session?.expires_at,
+  ]);
 }
 
 /** Read-only status for an expired token whose last restore was transiently unsuccessful. */
@@ -126,8 +135,18 @@ function parsePersistedSession(raw: string | null): PersistedSession | null {
 }
 
 /** Persist (or replace) the auth session. */
-export function persistSession(session: PersistedSession): void {
-  withSavepoint("persist_account_session", () => {
+export function persistSession(
+  session: PersistedSession,
+  expectedRevision?: string | null,
+): string {
+  const commit = () => {
+    if (
+      expectedRevision !== undefined &&
+      getTeamConfig(SESSION_REVISION_KEY) !== expectedRevision
+    )
+      throw new SessionUnavailableError(
+        "Active login changed while sign-in was in progress. Retry the request.",
+      );
     const prev = loadPersistedSession();
     // Account switch (different user_id) — drop the previous user's pulled profile
     // mirror so currentTier() can't report the prior account's tier and the new
@@ -138,8 +157,44 @@ export function persistSession(session: PersistedSession): void {
       clearProviderTokenCache();
     }
     setTeamConfig(SESSION_KEY, JSON.stringify(session));
-    setTeamConfig(SESSION_REVISION_KEY, randomUUID());
+    const revision = randomUUID();
+    setTeamConfig(SESSION_REVISION_KEY, revision);
     unavailableSessionKey = null;
+    return revision;
+  };
+  return expectedRevision === undefined
+    ? withSavepoint("persist_account_session", commit)
+    : withTransaction(commit);
+}
+
+/** Pin a login attempt before waiting for an OAuth/OTP response or user input. */
+export function captureLoginRevision(requireAnonymous = false): string | null {
+  return withTransaction(() => {
+    if (requireAnonymous && loadPersistedSession())
+      throw new SessionUnavailableError(
+        "Active login changed. Sign out before starting another login.",
+      );
+    return getTeamConfig(SESSION_REVISION_KEY);
+  });
+}
+
+/** Enrich only this login generation, preserving any concurrently rotated tokens. */
+export function updateSessionProfile(
+  revision: string,
+  profile: Pick<PersistedSession, "email" | "github_login" | "display_name">,
+): PersistedSession | null {
+  return withTransaction(() => {
+    if (getTeamConfig(SESSION_REVISION_KEY) !== revision) return null;
+    const current = loadPersistedSession();
+    if (!current) return null;
+    const enriched = {
+      ...current,
+      email: profile.email ?? current.email,
+      github_login: profile.github_login ?? current.github_login,
+      display_name: profile.display_name ?? current.display_name,
+    };
+    setTeamConfig(SESSION_KEY, JSON.stringify(enriched));
+    return enriched;
   });
 }
 
@@ -216,13 +271,23 @@ export function loadCachedProviderToken(): CachedProviderToken | null {
 export function persistProviderTokenCache(
   providerToken: string,
   expiresIn?: number,
+  revision?: string,
 ): void {
   const ttl = typeof expiresIn === "number" && expiresIn > 0 ? expiresIn : 3000; // default 50 min
   const entry: CachedProviderToken = {
     provider_token: providerToken,
     expires_at: Math.floor(Date.now() / 1000) + ttl,
   };
-  setTeamConfig(CACHED_PROVIDER_TOKEN_KEY, JSON.stringify(entry));
+  withTransaction(() => {
+    if (
+      revision !== undefined &&
+      getTeamConfig(SESSION_REVISION_KEY) !== revision
+    )
+      throw new SessionUnavailableError(
+        "Active login changed while GitHub authorization was in progress.",
+      );
+    setTeamConfig(CACHED_PROVIDER_TOKEN_KEY, JSON.stringify(entry));
+  });
 }
 
 /** Clear the cached provider_token — called on logout and account switch. */
@@ -285,23 +350,42 @@ function memoryStorage() {
  */
 export function createSupabaseClient(
   signal?: () => AbortSignal | undefined,
+  accessToken?: () => Promise<string>,
 ): SupabaseClient {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    ...(accessToken ? { accessToken } : {}),
     ...(signal
       ? {
           global: {
-            fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+            fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
               const active = signal();
-              return fetch(input, {
-                ...init,
-                ...(active
-                  ? {
-                      signal: init?.signal
-                        ? AbortSignal.any([active, init.signal])
-                        : active,
-                    }
-                  : {}),
-              });
+              // The SDK retries thrown fetch errors and 5xx responses with
+              // uninterruptible backoff. Local scheduling owns retries; turn
+              // temporary/aborted auth failures into a non-retryable SDK error.
+              const unavailable = () =>
+                Response.json(
+                  { msg: "Account service unavailable" },
+                  { status: 499 },
+                );
+              try {
+                if (active?.aborted) return unavailable();
+                const response = await fetch(input, {
+                  ...init,
+                  ...(active
+                    ? {
+                        signal: init?.signal
+                          ? AbortSignal.any([active, init.signal])
+                          : active,
+                      }
+                    : {}),
+                });
+                return active && response.status >= 500
+                  ? unavailable()
+                  : response;
+              } catch (error) {
+                if (active) return unavailable();
+                throw error;
+              }
             }) as typeof fetch,
           },
         }
@@ -386,18 +470,23 @@ export async function getAuthedClient(
   }
 }
 
-function rejectedSession(error: { code?: string; status?: number }): boolean {
+function rejectedSession(error: {
+  code?: string;
+  status?: number;
+  name?: string;
+}): boolean {
   return (
     error.status !== undefined &&
     error.status >= 400 &&
     error.status < 500 &&
-    [
-      "refresh_token_not_found",
-      "refresh_token_already_used",
-      "session_not_found",
-      "user_not_found",
-      "user_banned",
-    ].includes(error.code ?? "")
+    (error.name === "AuthSessionMissingError" ||
+      [
+        "refresh_token_not_found",
+        "refresh_token_already_used",
+        "session_not_found",
+        "user_not_found",
+        "user_banned",
+      ].includes(error.code ?? ""))
   );
 }
 
@@ -410,9 +499,11 @@ async function restoreSession(
   const signal = parentSignal
     ? AbortSignal.any([parentSignal, AbortSignal.timeout(10_000)])
     : AbortSignal.timeout(10_000);
-  const sameSession = () =>
-    getTeamConfig(SESSION_KEY) === raw &&
-    getTeamConfig(SESSION_REVISION_KEY) === revision;
+  const expectedKey = snapshotKey({ raw, revision });
+  const sameSession = () => {
+    const current = sessionSnapshot();
+    return current !== null && snapshotKey(current) === expectedKey;
+  };
   const changed = () =>
     new SessionUnavailableError(
       "Active login changed while authentication was in progress. Retry the request.",
@@ -459,10 +550,7 @@ async function restoreSession(
       owned = acquired;
       if (!owned) await delay(50, undefined, { signal });
     }
-    let authInProgress = true;
-    const client = createSupabaseClient(() =>
-      authInProgress ? signal : undefined,
-    );
+    const client = createSupabaseClient(() => signal);
     const needsRefresh =
       persisted.expires_at !== undefined &&
       persisted.expires_at <=
@@ -503,13 +591,17 @@ async function restoreSession(
         unavailableSessionKey = snapshotKey({ raw, revision });
         throw new SessionUnavailableError();
       }
-      const nextRaw = JSON.stringify(sessionToPersisted(session, persisted));
+      const current = loadPersistedSession()!;
+      const next = sessionToPersisted(session, current);
+      for (const field of ["email", "github_login", "display_name"] as const) {
+        if (current[field] !== persisted[field]) next[field] = current[field];
+      }
+      const nextRaw = JSON.stringify(next);
       setTeamConfig(SESSION_KEY, nextRaw);
       unavailableSessionKey = null;
-      clientRevisions.set(client, snapshotKey({ raw: nextRaw, revision }));
-      // Authentication's deadline does not limit later sync/team requests.
-      authInProgress = false;
-      return client;
+      const dataClient = accountDataClient(revision, next);
+      clientRevisions.set(dataClient, snapshotKey({ raw: nextRaw, revision }));
+      return dataClient;
     });
   } catch (error) {
     if (!parentSignal?.aborted && sameSession())
@@ -522,6 +614,48 @@ async function restoreSession(
     parentSignal?.removeEventListener("abort", releaseLease);
     if (!parentSignal?.aborted) releaseLease();
   }
+}
+
+/**
+ * Build a data client for an already authenticated login (restoration or fresh
+ * OAuth). Data requests use the coordinator instead of the SDK's implicit
+ * getSession refresh, and refuse another login's credentials. Auth methods
+ * belong to the private auth client; this client serves REST/functions reads.
+ */
+export function accountDataClient(
+  revision: string | null,
+  initial: PersistedSession,
+): SupabaseClient {
+  let initialized = false;
+  const read = () => {
+    const current = sessionSnapshot();
+    const session = parsePersistedSession(current?.raw ?? null);
+    if (
+      !session ||
+      current?.revision !== revision ||
+      session.user_id !== initial.user_id
+    )
+      throw new SessionUnavailableError(
+        "Active login changed. Retry with the current account.",
+      );
+    return session;
+  };
+  const client = createSupabaseClient(undefined, async () => {
+    let session = read();
+    // The SDK eagerly requests a realtime token in its constructor. The
+    // authenticated initial token is already restored; avoid recursive work.
+    if (
+      initialized &&
+      session.expires_at !== undefined &&
+      session.expires_at <= Date.now() / 1000 + SESSION_REFRESH_MARGIN_SECONDS
+    ) {
+      if (!(await getAuthedClient())) throw new SessionUnavailableError();
+      session = read();
+    }
+    return session.access_token;
+  });
+  initialized = true;
+  return client;
 }
 
 /**
@@ -556,16 +690,24 @@ export async function getCurrentUser(
       "Active login changed while authentication was in progress. Retry the request.",
     );
   if (!opts.verify) return restored;
-  const { data, error } = await client.auth.getUser();
-  const verifiedSnapshot = sessionSnapshot();
-  if (
-    !verifiedSnapshot ||
-    snapshotKey(verifiedSnapshot) !== snapshotKey(restoredSnapshot)
-  )
-    throw new SessionUnavailableError(
-      "Active login changed while authentication was in progress. Retry the request.",
-    );
-  if (error || !data.user || data.user.id !== restored.user_id)
-    throw new SessionUnavailableError();
-  return loadPersistedSession();
+  const deadline = AbortSignal.timeout(10_000);
+  const verifier = createSupabaseClient(() => deadline);
+  const { data, error } = await verifier.auth.getUser(restored.access_token);
+  return withTransaction(() => {
+    const verifiedSnapshot = sessionSnapshot();
+    if (
+      !verifiedSnapshot ||
+      snapshotKey(verifiedSnapshot) !== snapshotKey(restoredSnapshot)
+    )
+      throw new SessionUnavailableError(
+        "Active login changed while authentication was in progress. Retry the request.",
+      );
+    if (error && rejectedSession(error)) {
+      clearSession();
+      return null;
+    }
+    if (error || !data.user || data.user.id !== restored.user_id)
+      throw new SessionUnavailableError();
+    return parsePersistedSession(verifiedSnapshot.raw);
+  });
 }
