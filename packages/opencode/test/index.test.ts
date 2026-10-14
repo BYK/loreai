@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { LorePlugin } from "../src/index";
 import { applyLoreProviderConfig } from "../src/internal";
+import { RECALL_TOOL_DESCRIPTION } from "@loreai/core";
 import type { Plugin } from "@opencode-ai/plugin";
 
 /**
@@ -261,10 +262,19 @@ describe("LorePlugin hooks", () => {
     }
   });
 
-  test("returns an empty tool map", async () => {
+  test("registers recall through the native tool hook", async () => {
     const { hooks, cleanup } = await initPlugin();
     try {
-      expect(hooks.tool).toEqual({});
+      expect(Object.keys(hooks.tool ?? {})).toEqual(["recall"]);
+      expect(hooks.tool?.recall.description).toBe(RECALL_TOOL_DESCRIPTION);
+      expect(Object.keys(hooks.tool?.recall.args ?? {}).sort()).toEqual([
+        "detailLimit",
+        "detailOffset",
+        "id",
+        "ids",
+        "query",
+        "scope",
+      ]);
     } finally {
       cleanup();
     }

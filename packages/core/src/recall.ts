@@ -2,8 +2,8 @@
  * Recall — unified search across Lore's memory sources.
  *
  * Pure search + result-formatting logic shared by every host's recall tool.
- * Hosts (OpenCode plugin, Pi extension, future ACP server) wrap `runRecall()`
- * in their tool-registration mechanism:
+ * Harness adapters register the canonical contract and use the shared
+ * `executeRecallTool()` executor from `recall-tool.ts`:
  *   - OpenCode: `tool()` from `@opencode-ai/plugin/tool`
  *   - Pi: `pi.registerTool()` with TypeBox schema
  *

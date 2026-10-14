@@ -473,6 +473,7 @@ import {
   projectRecallRecoveryResponse,
   hasOtherToolUse,
   clientHasRecallTool,
+  markNativeRecallTool,
   hasGatewayRecallTool,
   shouldEnableRecallMarkerReplay,
   runRecallFollowUpStreaming,
@@ -22607,9 +22608,14 @@ async function handleConversationTurnPrepared(
     messages: transformedMessages,
   };
 
+  // Native host adapters register Lore recall through their own tool registry.
+  // Mark its shared definition as gateway-owned so hosted calls keep the same
+  // private execution, continuation, and marker/replay path.
+  modifiedReq.tools = markNativeRecallTool(modifiedReq.tools);
+
   // --- 8b. Inject recall tool (with git reminder appended to description) ---
-  // Only inject if the client doesn't already have a recall tool (e.g. from
-  // a host plugin like OpenCode) and the request has a callable function tool.
+  // Only inject if the client doesn't already have a native recall tool and
+  // the request has a callable function tool.
   // A provider-owned built-in cannot execute recall, and a client's explicit
   // parallel-tool setting must not be replaced by our serial recall policy.
   if (

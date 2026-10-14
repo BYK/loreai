@@ -123,6 +123,19 @@ export {
   type TaggedResult,
   type ScoredTaggedResult,
 } from "./recall";
+export {
+  RECALL_TOOL_NAME,
+  RECALL_TOOL_SCOPES,
+  RECALL_TOOL_INPUT_SCHEMA,
+  parseRecallToolArguments,
+  createRecallToolExecutor,
+  executeRecallTool,
+  type RecallToolArguments,
+  type RecallToolContext,
+  type RecallToolExecutor,
+  type RecallToolParseResult,
+  type RecallToolRunner,
+} from "./recall-tool";
 
 export type {
   LoreMessage,
