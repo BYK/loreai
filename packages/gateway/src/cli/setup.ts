@@ -2,8 +2,8 @@
  * `lore setup [app]` — configure an AI app to route through the Lore gateway.
  *
  * Currently supports:
- *   - codex: writes `openai_base_url` and `model_auto_compact_token_limit`
- *     to `~/.codex/config.toml`
+ *   - codex: selects an authenticated HTTP Responses provider and disables
+ *     auto-compaction in `~/.codex/config.toml`
  *   - opencode: writes `provider.openai.options.baseURL` to
  *     `~/.config/opencode/opencode.json` and installs the
  *     `@loreai/opencode` plugin (unless `--no-plugin`)
@@ -13,6 +13,14 @@
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
  */
+import {
+  CODEX_PROVIDER_BACKUP_KEY,
+  parseCodexToml,
+  codexProviderValue,
+  setCodexProviderValue,
+  tomlHeaders,
+  isTomlTopLevelLine,
+} from "./codex-config";
 import { execFileSync, spawnSync } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -1364,7 +1372,8 @@ const CODEX_COMPACT_DISABLE_LIMIT = 999999999;
 
 /**
  * Update (or create) the Codex user-level `config.toml` to set
- * `openai_base_url` to the Lore gateway and disable auto-compaction.
+ * a named HTTP-only Responses provider and disable auto-compaction.
+ * `openai_base_url` is retained for compatibility with earlier Lore setup.
  *
  * Strategy (per key):
  * - If the key already exists as a top-level key, replace it.
@@ -1373,13 +1382,15 @@ const CODEX_COMPACT_DISABLE_LIMIT = 999999999;
  * - Idempotent: running twice produces the same result.
  */
 export function updateCodexConfig(content: string, baseUrl: string): string {
+  parseCodexToml(content);
   let result = setTopLevelKey(content, "openai_base_url", `"${baseUrl}"`);
+  result = setTopLevelKey(result, "model_provider", '"lore_http"');
   result = setTopLevelKey(
     result,
     "model_auto_compact_token_limit",
     String(CODEX_COMPACT_DISABLE_LIMIT),
   );
-  return result;
+  return setCodexProviderValue(result, codexProviderValue(content, baseUrl));
 }
 
 /**
@@ -1421,7 +1432,7 @@ export function setTopLevelKey(
 
   // Insert at the top, before the first [section] or at the very start.
   // Find the first non-comment, non-blank line that starts a section.
-  const firstSectionIdx = lines.findIndex((line) => /^\s*\[/.test(line));
+  const firstSectionIdx = tomlHeaders(lines)[0]?.index ?? -1;
 
   if (firstSectionIdx === -1) {
     // No sections — append at end (with blank line separator if needed)
@@ -1448,15 +1459,7 @@ export function setTopLevelKey(
  * reaching the start of the file, the key belongs to that section.
  */
 function isTopLevel(lines: string[], index: number): boolean {
-  for (let i = index - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line === "" || line.startsWith("#")) continue;
-    // If we hit a section header, this key is inside that section
-    if (line.startsWith("[")) return false;
-    // Other bare keys don't tell us anything — keep walking back
-  }
-  // Reached the start of the file without hitting a section header → top level
-  return true;
+  return isTomlTopLevelLine(lines, index);
 }
 
 // ---------------------------------------------------------------------------
@@ -1479,7 +1482,9 @@ function setupCodex(baseUrl: string, guard: SetupGuard): void {
   // if the file still holds them. Then apply lore's changes and prepend it.
   const prepared = refreshTomlBackupBlock(content, {
     openai_base_url: `"${baseUrl}"`,
+    model_provider: '"lore_http"',
     model_auto_compact_token_limit: String(CODEX_COMPACT_DISABLE_LIMIT),
+    [CODEX_PROVIDER_BACKUP_KEY]: codexProviderValue(content, baseUrl),
   });
   const updated = updateCodexConfig(prepared.content, baseUrl);
   const final = prependTomlBackupBlock(updated, prepared.block);
@@ -1488,7 +1493,12 @@ function setupCodex(baseUrl: string, guard: SetupGuard): void {
     expectedIdentity: existingFile?.identity ?? null,
   });
 
-  console.log(`[lore] Codex configured to use Lore gateway.`);
+  console.log(
+    `[lore] Codex configured to use Lore gateway over HTTP (WebSockets disabled).`,
+  );
+  console.log(
+    `[lore]   model_provider = "lore_http" (previous providers' sessions may require codex resume --all)`,
+  );
   console.log(`[lore]   openai_base_url = "${baseUrl}"`);
   console.log(
     `[lore]   model_auto_compact_token_limit = ${CODEX_COMPACT_DISABLE_LIMIT} (auto-compaction disabled)`,

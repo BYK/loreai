@@ -1,3 +1,4 @@
+import { codexHttpProvider, codexPersistedHeaderEnv } from "./codex-config";
 /**
  * Agent registry — known AI coding agents that can be launched through
  * the gateway.
@@ -10,6 +11,23 @@ import { GATEWAY_AUTH_HEADER, getGitRemote } from "@loreai/core";
 import { PROVIDER_AUTH_HEADER_NAMES } from "../auth";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { whichSync } from "./lib/which";
+
+/** Only headers actually forwarded below can override a persisted mapping. */
+function codexExtraHeaderNames(): string[] {
+  return (process.env.LORE_UPSTREAM_EXTRA_HEADERS ?? "")
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const colon = line.indexOf(":");
+      if (colon <= 0) return [];
+      const name = line.slice(0, colon).trim();
+      const lower = name.toLowerCase();
+      return name &&
+        lower !== GATEWAY_AUTH_HEADER &&
+        !PROVIDER_AUTH_HEADER_NAMES.some((candidate) => candidate === lower)
+        ? [name]
+        : [];
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Agent definitions
@@ -25,13 +43,21 @@ export interface AgentDef {
   /** Returns the binary path if found, or null */
   detect: () => string | null;
   /** Env vars to inject given the gateway URL (e.g. "http://127.0.0.1:3207") and project cwd */
-  envVars: (gatewayUrl: string, cwd: string) => Record<string, string>;
+  envVars: (
+    gatewayUrl: string,
+    cwd: string,
+    configContent?: string,
+  ) => Record<string, string>;
   /**
    * Extra CLI arguments to prepend when launching the agent.
    * Used by agents like Codex that read config from their own config file
    * rather than environment variables — we inject `-c key=value` overrides.
    */
-  cliArgs?: (gatewayUrl: string, cwd: string) => string[];
+  cliArgs?: (
+    gatewayUrl: string,
+    cwd: string,
+    configContent?: string,
+  ) => string[];
   /**
    * Base-URL env var(s) this agent honors to pick an upstream, in priority
    * order (first defined wins). `lore run` rewrites these to point the agent
@@ -415,7 +441,7 @@ export const AGENTS: AgentDef[] = [
     upstreamEnvVars: ["OPENAI_BASE_URL"],
     wireProtocol: "openai",
     authTokenEnvVars: [{ var: "OPENAI_API_KEY", scheme: "bearer" }],
-    envVars: (_url, cwd) => {
+    envVars: (_url, cwd, configContent = "") => {
       // Codex CLI is a Rust binary that does NOT read OPENAI_BASE_URL from the
       // environment. Provider routing is done exclusively via config.toml or
       // `-c` CLI overrides (see cliArgs below). We still expose LORE_PROJECT /
@@ -428,7 +454,10 @@ export const AGENTS: AgentDef[] = [
        * gateway itself does not read this env var; it only sets it
        * for downstream consumption.
        */
-      const env: Record<string, string> = { LORE_PROJECT: cwd };
+      const env: Record<string, string> = {
+        LORE_PROJECT: cwd,
+        ...codexPersistedHeaderEnv(configContent, codexExtraHeaderNames()).env,
+      };
       const remote = safeRemote(cwd);
       /**
        * Git remote URL (e.g. `git@github.com:org/repo.git`) of the
@@ -442,7 +471,13 @@ export const AGENTS: AgentDef[] = [
       if (remote) env.LORE_GIT_REMOTE = remote;
       return env;
     },
-    cliArgs: (url) => {
+    cliArgs: (url, _cwd, configContent = "") => {
+      const provider = codexHttpProvider(`${url}/v1`);
+      provider.env_http_headers = {
+        ...(provider.env_http_headers as Record<string, string>),
+        ...codexPersistedHeaderEnv(configContent, codexExtraHeaderNames())
+          .mappings,
+      };
       const args = [
         // Override the built-in OpenAI provider's base URL to route through the
         // Lore gateway. Uses `-c` so the change is per-invocation only — it does
@@ -453,6 +488,21 @@ export const AGENTS: AgentDef[] = [
         // gradient context manager and distillation pipeline.
         "-c",
         "model_auto_compact_token_limit=999999999",
+        "-c",
+        'model_provider="lore_http"',
+        ...Object.entries(provider).flatMap(([key, value]) => [
+          "-c",
+          `model_providers.lore_http.${key}=${
+            typeof value === "object"
+              ? `{ ${Object.entries(value)
+                  .map(
+                    ([name, item]) =>
+                      `${tomlQuote(name)} = ${tomlQuote(String(item))}`,
+                  )
+                  .join(", ")} }`
+              : JSON.stringify(value)
+          }`,
+        ]),
       ];
       // Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the
       // `openai_provider_headers` config key (TOML map of header name → value).
@@ -482,6 +532,10 @@ export const AGENTS: AgentDef[] = [
         }
         if (pairs.length) {
           args.push("-c", `openai_provider_headers = { ${pairs.join(", ")} }`);
+          args.push(
+            "-c",
+            `model_providers.lore_http.http_headers = { ${pairs.join(", ")} }`,
+          );
         }
       }
       return args;

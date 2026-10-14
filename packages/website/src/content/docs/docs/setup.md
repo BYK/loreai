@@ -42,15 +42,17 @@ If the named app isn't installed (for example, `lore setup codex` on a machine w
 
 | App          | Config written                                                            | Notes                                                                                       |
 | ------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `codex`      | `~/.codex/config.toml` (with `openai_base_url` + `model_auto_compact_token_limit`) | Required for Codex Desktop. Idempotent — re-running updates existing fields without losing other settings. |
+| `codex`      | `~/.codex/config.toml` (with an HTTP-only `lore_http` provider + `model_auto_compact_token_limit`) | Required for Codex Desktop. Idempotent — re-running updates existing fields without losing other settings. |
 | `opencode`   | `~/.config/opencode/opencode.json` (with `provider.openai.options.baseURL` + `compaction.auto: false`) | Sets the built-in `openai` provider's `baseURL` and disables OpenCode's auto-compaction. Deep-merges with existing config (preserves custom providers, themes, keybinds). |
 | `claude-code`| `~/.claude/settings.json` (with `env.ANTHROPIC_BASE_URL` + `env.DISABLE_AUTO_COMPACT`) | The Anthropic base URL is written without the `/v1` suffix — Claude Code appends `/v1/messages` itself. Deep-merges with existing settings (preserves permissions, hooks, model overrides). |
 | `pi`         | `~/.pi/agent/models.json` (with `providers.<id>.baseUrl` for every gateway-routable provider) | Anthropic-family providers point at the gateway root; OpenAI-family at `/v1`. Deep-merges with existing config (preserves custom providers and models). Honors `PI_CODING_AGENT_DIR`. The `@loreai/pi` extension is the richer alternative (dynamic routing + memory features). |
 | `hermes`     | `~/.hermes/.env` (with `OPENAI_BASE_URL` + `HERMES_INFERENCE_PROVIDER=custom`) | The base URL keeps its `/v1` suffix (Hermes speaks the OpenAI-compatible wire format). Upserts the two keys and preserves all other lines (credentials, comments). Honors `HERMES_HOME`. A named `model.provider` in `~/.hermes/config.yaml` takes precedence over these env vars. |
 
-`openai_base_url` is set to the gateway's `baseUrl`, normalized to end with `/v1` (required by Codex). The port defaults to `3207` (the first entry in `DEFAULT_PORTS`); override with `-p` or `-r`.
+For Codex, setup selects `model_provider = "lore_http"` and writes a named Responses provider with `requires_openai_auth = true` and `supports_websockets = false`. Its `base_url` points to the gateway, normalized to end with `/v1`. This retains Codex authentication and avoids WebSocket retries against Lore's HTTP-only gateway. The legacy `openai_base_url` override is also retained. The port defaults to `3207` (the first entry in `DEFAULT_PORTS`); override with `-p` or `-r`.
 
 `model_auto_compact_token_limit = 999999999` disables Codex's built-in auto-compaction so Lore's gradient context manager and distillation pipeline can do their job. Re-running `lore setup` resets this value to `999999999` — any custom value you set is overwritten.
+
+Existing installations can opt into HTTP transport by re-running `lore setup codex` and restarting Codex. Setup preserves unrelated providers and records the complete Lore provider for undo. Codex scopes older sessions by provider; use `codex resume --all` if they no longer appear after switching. A default profile selecting another provider must be adjusted before setup; see [Codex with Lore](/docs/guides/with-codex/) for compatibility details.
 
 ## Undoing setup
 
