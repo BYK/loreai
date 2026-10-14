@@ -10,7 +10,6 @@ const h = vi.hoisted(() => ({
     verifyOtp: vi.fn(),
     signInWithOAuth: vi.fn(),
     exchangeCodeForSession: vi.fn(),
-    signOut: vi.fn(),
   },
   from: vi.fn(),
   answer: { value: "" },
@@ -150,8 +149,7 @@ describe("commandLogout", () => {
 
   test("clears the local session", async () => {
     persistSession(SAMPLE);
-    h.auth.setSession.mockResolvedValue({ data: {}, error: null });
-    h.auth.signOut.mockResolvedValue({ error: null });
+    h.auth.admin.signOut.mockResolvedValue({ error: null });
     await commandLogout();
     expect(loadPersistedSession()).toBeNull();
     expect(logs.join("\n")).toMatch(/Logged out/);
@@ -159,7 +157,7 @@ describe("commandLogout", () => {
 
   test("clears locally even when server sign-out fails", async () => {
     persistSession(SAMPLE);
-    h.auth.setSession.mockRejectedValue(new Error("network"));
+    h.auth.admin.signOut.mockRejectedValue(new Error("network"));
     await commandLogout();
     expect(loadPersistedSession()).toBeNull();
   });
@@ -170,8 +168,6 @@ describe("commandLogout", () => {
     const pending = new Promise<{ error: null }>((resolve) => {
       finish = () => resolve({ error: null });
     });
-    h.auth.setSession.mockResolvedValue({ data: {}, error: null });
-    h.auth.signOut.mockReturnValue(pending);
     h.auth.admin.signOut.mockReturnValue(pending);
     const logout = commandLogout();
     const clearedImmediately = loadPersistedSession() === null;
@@ -573,17 +569,6 @@ describe("commandLogin (GitHub --no-browser)", () => {
 });
 
 describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
-  beforeEach(() => {
-    clearSession();
-    clearProviderTokenCache();
-    for (const fn of Object.values(h.auth)) {
-      if (typeof fn === "function") fn.mockReset();
-    }
-    h.auth.admin.signOut.mockReset();
-    h.from.mockReset();
-    h.answer.value = "";
-  });
-
   test("loginWithGitHubManual (via commandLogin --no-browser) populates the cache", async () => {
     // Regression: `lore login` (github) returned a provider_token inline but never
     // wrote it to the cache, so the FIRST `lore team discover` after `lore login`
@@ -655,10 +640,9 @@ describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
   });
 
   test("temporary cache-hit restore failure retains the login without opening OAuth", async () => {
-    // Regression: a transient setSession failure (network blip, fresh
-    // refresh_token the server hasn't seen yet) used to clear the cache
-    // blindly, then re-do OAuth. The dance itself overwrites the cache on
-    // success, so clearing eagerly loses the row on a one-off error.
+    // A transient restore must keep the saved login and provider token.
+    // Make an incorrect OAuth fallback capable of succeeding, so this test
+    // detects both reopening sign-in and overwriting the cached credentials.
     persistSession({
       access_token: "at-fresh",
       refresh_token: "rt-fresh",
