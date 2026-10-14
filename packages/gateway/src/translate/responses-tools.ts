@@ -5,10 +5,22 @@ import type {
 } from "./types";
 import { InvalidCrossProviderRequestError } from "./errors";
 
+/** Hosted search is completed by the provider and has no client call identity. */
+export function isServerOwnedResponsesSearch(
+  raw: Record<string, unknown>,
+): boolean {
+  return (
+    (raw.type === "tool_search_call" || raw.type === "tool_search_output") &&
+    raw.execution === "server" &&
+    raw.call_id === null
+  );
+}
+
 /** Native call envelopes stay attached to normalized tool parts during compression. */
 export function nativeResponsesCall(
   raw: Record<string, unknown>,
 ): GatewayToolUseBlock | null {
+  if (isServerOwnedResponsesSearch(raw)) return null;
   const custom = raw.type === "custom_tool_call";
   const search = raw.type === "tool_search_call";
   const namespaced =

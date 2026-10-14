@@ -8,7 +8,10 @@ import {
   resolveToolResults,
   deterministicID,
 } from "../src/temporal-adapter";
-import { loreMessagesToGateway } from "../src/pipeline";
+import {
+  accumulateResponsesNonStreamJSON,
+  loreMessagesToGateway,
+} from "../src/pipeline";
 import { buildAnthropicRequest } from "../src/translate/anthropic";
 import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
 import { buildGeminiUpstreamRequest } from "../src/translate/gemini";
@@ -58,6 +61,44 @@ const functionResult = {
 };
 
 describe("Codex native tool replay", () => {
+  const hostedSearch = [
+    {
+      id: "tsc_hosted",
+      type: "tool_search_call",
+      execution: "server",
+      call_id: null,
+      status: "completed",
+      arguments: { paths: ["files"] },
+    },
+    {
+      id: "tso_hosted",
+      type: "tool_search_output",
+      execution: "server",
+      call_id: null,
+      status: "completed",
+      tools: searchResult.tools,
+    },
+  ];
+  test("keeps server-owned tool search opaque in native request history", () => {
+    const items = [...hostedSearch, functionCall, functionResult];
+    const req = parseOpenAIResponsesRequest({ input: items }, {});
+    const { body } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    );
+    expect((body as { input: unknown[] }).input).toEqual(items);
+  });
+  test("does not turn hosted tool search into a client tool invocation", () => {
+    const response = accumulateResponsesNonStreamJSON({
+      id: "resp_hosted",
+      model: "gpt-test",
+      status: "completed",
+      output: hostedSearch,
+    });
+    expect(response.content).toEqual([]);
+    expect(response.rawOutputItems).toEqual(hostedSearch);
+  });
+
   test.each(["developer", "system"])(
     "preserves Codex %s message identity on native routes",
     (role) => {

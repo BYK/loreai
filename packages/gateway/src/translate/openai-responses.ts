@@ -1,4 +1,5 @@
 import {
+  isServerOwnedResponsesSearch,
   nativeResponsesCall,
   responsesCallItem,
   responsesOutputItem,
@@ -668,6 +669,12 @@ function createInputItemsBuilder(): {
           provenancePositions: content.map(() => 0),
         });
       }
+      return;
+    }
+
+    if (isServerOwnedResponsesSearch(raw)) {
+      sawConversationItem = true;
+      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
 
