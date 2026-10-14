@@ -268,6 +268,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: ^0.79.1
         version: 0.79.8(ws@8.21.0)(zod@4.5.4)
+      typebox:
+        specifier: 1.1.38
+        version: 1.1.38
 
   packages/ui:
     dependencies:

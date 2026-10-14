@@ -1,4 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  RECALL_TOOL_DESCRIPTION,
+  RECALL_TOOL_INPUT_SCHEMA,
+  RECALL_TOOL_NAME,
+} from "@loreai/core";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import lorePiExtension from "../src/index";
 import { ANTHROPIC_PROVIDERS, OPENAI_PROVIDERS } from "../src/internal";
 
@@ -20,6 +26,7 @@ interface Registration {
 }
 function createMockPi() {
   const registrations: Registration[] = [];
+  const tools: ToolDefinition[] = [];
   const handlers = new Map<string, AnyHandler>();
   const pi = {
     registerProvider(
@@ -28,11 +35,14 @@ function createMockPi() {
     ): void {
       registrations.push({ name, config });
     },
+    registerTool(tool: ToolDefinition): void {
+      tools.push(tool);
+    },
     on(event: string, handler: AnyHandler): void {
       handlers.set(event, handler);
     },
   };
-  return { pi, registrations, handlers };
+  return { pi, registrations, tools, handlers };
 }
 
 /** Minimal non-streaming Anthropic response (what the mocked upstream returns). */
@@ -147,6 +157,19 @@ describe("pi extension — e2e against a real gateway", () => {
     // Wired up its lifecycle hooks.
     expect(mock.handlers.get("session_start")).toBeTypeOf("function");
     expect(mock.handlers.get("session_before_compact")).toBeTypeOf("function");
+  });
+
+  test("registers recall as a native tool through Pi's extension API", () => {
+    expect(mock.tools).toHaveLength(1);
+    expect(mock.tools[0]).toMatchObject({
+      name: RECALL_TOOL_NAME,
+      description: RECALL_TOOL_DESCRIPTION,
+      parameters: {
+        type: RECALL_TOOL_INPUT_SCHEMA.type,
+        additionalProperties: false,
+        anyOf: RECALL_TOOL_INPUT_SCHEMA.anyOf,
+      },
+    });
   });
 
   test("points Anthropic providers at the gateway root and OpenAI at /v1", () => {
