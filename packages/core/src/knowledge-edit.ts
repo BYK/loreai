@@ -371,8 +371,14 @@ export function editKnowledge(
       );
     }
 
+    // An explicit boundary target can match the displayed confidence while
+    // still needing to cancel banked overshoot in the underlying register.
+    // Ignore rounding-scale residuals when the displayed value already matches;
+    // distinct requested values must still be applied, however small the change.
     const confidenceChanged =
-      input.confidence !== undefined && input.confidence !== current.confidence;
+      input.confidence !== undefined &&
+      (input.confidence !== current.confidence ||
+        ltm.hasConfidenceOvershoot(logicalId));
     if (confidenceChanged) changed.push("confidence");
     const versionedChanged =
       title !== head.title ||

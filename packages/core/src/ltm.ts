@@ -421,12 +421,43 @@ function applyConfidenceDelta(
   rematerializeConfidence(logicalId, now);
 }
 
-/** Current materialized confidence of a logical entry (default 1.0 if no row). */
-function currentConfidence(logicalId: string): number {
+/** Observed confidence components and their cancellation-scale roundoff. */
+function confidenceRegister(logicalId: string): {
+  raw: number;
+  roundoff: number;
+} {
   const row = db()
-    .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
-    .get(logicalId) as { confidence: number } | undefined;
-  return row?.confidence ?? 1.0;
+    .query(
+      `SELECT base_confidence,
+              COALESCE((SELECT SUM(pos) FROM knowledge_meta_crdt WHERE logical_id = ?), 0) AS pos,
+              COALESCE((SELECT SUM(neg) FROM knowledge_meta_crdt WHERE logical_id = ?), 0) AS neg,
+              (SELECT COUNT(*) FROM knowledge_meta_crdt WHERE logical_id = ?) AS replicas
+         FROM knowledge_meta WHERE logical_id = ?`,
+    )
+    .get(logicalId, logicalId, logicalId, logicalId) as
+    | { base_confidence: number; pos: number; neg: number; replicas: number }
+    | undefined;
+  if (!row) return { raw: 1.0, roundoff: 0 };
+  // The sums and final add/subtract can lose precision when large positive and
+  // negative components cancel. Scale the bound by the observed magnitudes and
+  // replica count, rather than treating every residual above a fixed epsilon as
+  // meaningful evidence. Only the boundary no-op check uses this tolerance.
+  const scale = Math.max(1, Math.abs(row.base_confidence) + row.pos + row.neg);
+  return {
+    raw: row.base_confidence + row.pos - row.neg,
+    roundoff: Number.EPSILON * (row.replicas + 2) * scale,
+  };
+}
+
+/** Underlying total for absolute confidence edits, before clamping. */
+function rawConfidence(logicalId: string): number {
+  return confidenceRegister(logicalId).raw;
+}
+
+/** Whether a displayed boundary hides evidence beyond numerical roundoff. */
+export function hasConfidenceOvershoot(logicalId: string): boolean {
+  const { raw, roundoff } = confidenceRegister(logicalId);
+  return raw < -roundoff || raw - 1 > roundoff;
 }
 
 export function create(input: {
@@ -1221,11 +1252,13 @@ export function update(
       "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
     )
     .run(now, logicalId);
-  // A confidence "set" (A2 3b-2) becomes a delta to the target on the local replica
-  // (clamped to [0,1]); applyConfidenceDelta re-materializes + bumps updated_at.
+  // An explicit set cancels the observed RAW total, including banked overshoot,
+  // so it reaches the target in one pass. Only the local grow-only counters
+  // change; peer deltas still merge additively. Ordinary reinforce/decay keeps
+  // its boundary hysteresis. applyConfidenceDelta re-materializes the cache.
   if (input.confidence !== undefined) {
     const target = Math.max(0, Math.min(1, input.confidence));
-    applyConfidenceDelta(logicalId, target - currentConfidence(logicalId), now);
+    applyConfidenceDelta(logicalId, target - rawConfidence(logicalId), now);
   }
 
   // Re-embed the new current version only when a content change was appended.
