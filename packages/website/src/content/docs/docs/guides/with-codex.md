@@ -27,17 +27,25 @@ lore run
 
 ## What `lore run` does for Codex
 
-It launches Codex with these CLI overrides:
+It launches Codex with per-invocation overrides equivalent to this configuration:
 
-```text
--c openai_base_url="http://127.0.0.1:3207/v1"
--c model_auto_compact_token_limit=999999999
+```toml
+model_provider = "lore_http"
+model_auto_compact_token_limit = 999999999
+
+[model_providers.lore_http]
+name = "Lore"
+base_url = "http://127.0.0.1:3207/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
 ```
 
-- `openai_base_url` points Codex at the Lore gateway instead of OpenAI directly.
-- `model_auto_compact_token_limit=999999999` disables Codex's auto-compaction, so Lore's gradient context manager and distillation pipeline can do their job.
+The named provider uses Codex's existing OpenAI API-key or ChatGPT authentication and streams Responses over HTTP. Lore does not support WebSocket transport. Changing only `openai_base_url` leaves the built-in OpenAI provider's WebSockets enabled, causing repeated upgrade attempts before HTTP fallback.
 
-Both overrides are per-invocation — they do not affect Codex's persisted `config.toml` or session scoping.
+The compaction limit lets Lore's gradient context manager and distillation pipeline manage context. The launcher also retains `openai_base_url` for compatibility and forwards OpenAI organization/project environment headers. All overrides apply only to the launched process.
+
+Codex scopes session discovery by provider identity. When switching from `openai` to `lore_http`, older sessions may require `codex resume --all`. Setup undo restores your previous provider selection.
 
 ## Manual setup (CLI)
 
@@ -45,7 +53,9 @@ If you'd rather start the gateway yourself and launch Codex directly — or if y
 
 ## Custom upstream headers
 
-The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and folds its values into Codex's `openai_provider_headers` TOML map. This is the path for corporate proxies, LiteLLM team-routing tokens, and Cloudflare AI Gateway. See the [custom upstreams guide](/docs/guides/custom-upstreams/) for full examples.
+The Codex plugin reads `LORE_UPSTREAM_EXTRA_HEADERS` from your environment and forwards its values through the Lore provider's `http_headers` TOML map. This is the path for corporate proxies, LiteLLM team-routing tokens, and Cloudflare AI Gateway. See the [custom upstreams guide](/docs/guides/custom-upstreams/) for full examples.
+
+The `lore_http` provider name is reserved for Lore's HTTP configuration. If you already use that name with custom authentication, rename that provider before running setup or `lore run`. Setup refuses unsupported inline or non-contiguous definitions of that provider rather than rewriting unrelated config. A default profile that selects another provider must have its `model_provider` override removed or set to `lore_http`; explicitly selecting another profile or passing your own `-c` overrides can also override Lore's configuration.
 
 ## Per-harness notes
 
