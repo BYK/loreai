@@ -69,7 +69,7 @@ describe("ContextWindowPane", () => {
     expect(injections.querySelector("a")?.getAttribute("href")).toBe(
       "/ui/projects/p/knowledge/spec-k1",
     );
-    expect(injections).toHaveTextContent("(entry removed)");
+    expect(injections).toHaveTextContent("version unavailable");
     expect(injections).toHaveTextContent("cache 1,240 · pinned 96 tokens");
     const deltas = screen.getByTestId("context-deltas");
     expect(deltas).toHaveTextContent("seq 0");
@@ -94,6 +94,88 @@ describe("ContextWindowPane", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("No prompt updates.")).toBeInTheDocument();
     expect(screen.queryByText("Turns")).toBeNull();
+  });
+
+  it("distinguishes recorded versions and labels confidence as current", () => {
+    const context = empty();
+    context.knowledge.injections = [
+      {
+        logical_id: "old",
+        version_id: "v1",
+        version_status: "superseded",
+        title: "Original title",
+        category: "decision",
+        confidence: 0,
+        created_at: 1000,
+        credited: true,
+        verdict: "pass",
+      },
+      {
+        logical_id: "new",
+        version_id: "v2",
+        version_status: "current",
+        title: "Current title",
+        category: "gotcha",
+        confidence: 0.7,
+        created_at: 2000,
+        credited: false,
+        verdict: null,
+      },
+      {
+        logical_id: "legacy",
+        version_id: null,
+        version_status: "unknown",
+        title: null,
+        category: null,
+        confidence: null,
+        created_at: 3000,
+        credited: false,
+        verdict: null,
+      },
+      {
+        logical_id: "pruned",
+        version_id: "v3",
+        version_status: "unavailable",
+        title: null,
+        category: null,
+        confidence: null,
+        created_at: 4000,
+        credited: false,
+        verdict: null,
+      },
+    ] as SessionContext["knowledge"]["injections"];
+    mount({ context });
+    const pane = screen.getByTestId("context-injections");
+    expect(pane).toHaveTextContent("Earlier version");
+    expect(pane).toHaveTextContent("Current version");
+    expect(pane).toHaveTextContent("version unknown");
+    expect(pane).toHaveTextContent("version unavailable");
+    expect(pane).toHaveTextContent("Current confidence: 0%");
+    expect(pane).toHaveTextContent("Current confidence: 70%");
+    const link = screen.getByRole("link", { name: "Original title" });
+    expect(link).toHaveAttribute("href", HREF("old"));
+    expect(link).toHaveAttribute("title", "Open current memory");
+    expect(pane.querySelectorAll("a")).toHaveLength(2);
+  });
+
+  it("treats missing provenance from older gateways as unknown", () => {
+    const context = empty();
+    context.knowledge.injections = [
+      {
+        logical_id: "legacy",
+        title: null,
+        category: null,
+        confidence: null,
+        created_at: 1000,
+        credited: false,
+        verdict: null,
+      },
+    ];
+    mount({ context });
+    expect(screen.getByTestId("context-injections")).toHaveTextContent(
+      "version unknown",
+    );
+    expect(screen.queryByText(/entry removed/)).toBeNull();
   });
 
   it("shows the layer badge without turns when context.layer is set", () => {

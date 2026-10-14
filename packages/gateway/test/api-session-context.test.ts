@@ -197,10 +197,10 @@ async function seed(tag: string) {
   db()
     .query(
       `INSERT INTO knowledge_session_injections
-         (session_id, logical_id, project_id, created_at, credited, verdict)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (session_id, logical_id, project_id, created_at, credited, verdict, version_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(sid, logical, projectId, 111, 1, "pass");
+    .run(sid, logical, projectId, 111, 1, "pass", entry);
 
   // One well-formed delta + one pre-v100 row (raw INSERT, no created_at).
   appendSessionPromptDelta({
@@ -244,6 +244,7 @@ async function seed(tag: string) {
     projectId,
     sid,
     logical,
+    entry,
     base: `/api/v1/sessions/${sid}/context?path=${encodeURIComponent(projectPath)}`,
   };
 }
@@ -271,7 +272,7 @@ describe("GET /api/v1/sessions/:id/context", () => {
   });
 
   it("returns the full context shape for a seeded session", async () => {
-    const { base, sid, projectPath, logical } = await seed("full");
+    const { base, sid, projectPath, logical, entry } = await seed("full");
     const res = await api(base);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ContextBody;
@@ -310,6 +311,8 @@ describe("GET /api/v1/sessions/:id/context", () => {
     expect(body.knowledge.injections).toEqual([
       {
         logical_id: logical,
+        version_id: entry,
+        version_status: "current",
         title: "Ctx entry",
         category: "decision",
         confidence: 1,
@@ -354,6 +357,33 @@ describe("GET /api/v1/sessions/:id/context", () => {
         .bySession(projectPath, sid)
         .some((m) => m.id === turn.message_id),
     ).toBe(true);
+  });
+
+  it("returns the captured revision after a credited memory is edited", async () => {
+    const { base, entry, logical } = await seed("revision");
+    const { ltm } = await import("@loreai/core");
+    ltm.update(entry, {
+      title: "Replacement title",
+      category: "gotcha",
+      content: "Replacement",
+      confidence: 0.4,
+    });
+    const response = await api(base);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ContextBody;
+    expect(body.knowledge.injections).toEqual([
+      {
+        logical_id: logical,
+        version_id: entry,
+        version_status: "superseded",
+        title: "Ctx entry",
+        category: "decision",
+        confidence: 0.4,
+        created_at: 111,
+        credited: true,
+        verdict: "pass",
+      },
+    ]);
   });
 
   it("leaves the legacy GET /sessions/:id body unchanged for the same session", async () => {

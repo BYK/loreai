@@ -21,6 +21,13 @@ import {
 } from "./db";
 import { sql } from "./sql";
 import { loadForSession } from "./distillation";
+import { currentTenantId } from "./tenant";
+
+type InjectionVersionStatus =
+  | "current"
+  | "superseded"
+  | "unknown"
+  | "unavailable";
 
 export type SessionContextTurn = {
   message_id: string;
@@ -60,8 +67,12 @@ export type SessionContext = {
     stable_tokens: number | null;
     injections: Array<{
       logical_id: string;
+      /** Captured immutable version; null for legacy receipts. */
+      version_id: string | null;
+      version_status: InjectionVersionStatus;
       title: string | null;
       category: string | null;
+      /** Current logical entry's mutable score, never a historical snapshot. */
       confidence: number | null;
       created_at: number;
       credited: boolean;
@@ -175,6 +186,8 @@ export function sessionContext(
   const injections = sql
     .all<{
       logical_id: string;
+      version_id: string | null;
+      version_status: InjectionVersionStatus;
       title: string | null;
       category: string | null;
       confidence: number | null;
@@ -183,19 +196,26 @@ export function sessionContext(
       verdict: string | null;
     }>(
       db(),
-      sql`SELECT i.logical_id, k.title, k.category,
-               CASE WHEN k.logical_id IS NULL THEN NULL
-                    ELSE COALESCE(m.confidence, 1.0) END AS confidence,
+      sql`SELECT i.logical_id, i.version_id,
+               CASE WHEN i.version_id IS NULL THEN 'unknown'
+                    WHEN k.id IS NULL THEN 'unavailable'
+                    WHEN k.is_current = 1 THEN 'current'
+                    ELSE 'superseded' END AS version_status,
+               k.title, k.category, current_entry.confidence,
                i.created_at, i.credited, i.verdict
           FROM knowledge_session_injections i
-          LEFT JOIN knowledge k ON k.logical_id = i.logical_id
-               AND k.is_current = 1 AND k.is_deleted = 0
-          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
+          LEFT JOIN knowledge k ON k.id = i.version_id AND k.logical_id = i.logical_id
+               AND k.project_id = i.project_id AND k.tenant_id = ${currentTenantId()}
+               AND k.is_deleted = 0
+          LEFT JOIN knowledge_current current_entry ON current_entry.logical_id = i.logical_id
+               AND current_entry.project_id = i.project_id AND current_entry.tenant_id = ${currentTenantId()}
          WHERE i.session_id = ${sessionID} AND i.project_id = ${pid}
          ORDER BY i.created_at, i.logical_id`,
     )
     .map((row) => ({
       logical_id: row.logical_id,
+      version_id: row.version_id,
+      version_status: row.version_status,
       title: row.title,
       category: row.category,
       confidence: row.confidence,

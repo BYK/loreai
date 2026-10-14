@@ -383,6 +383,36 @@ describe("contract violations", () => {
     expect(ok.ok).toBe(true);
     if (ok.ok) expect(ok.value).toEqual(sample);
 
+    for (const version_status of [
+      "current",
+      "superseded",
+      "unknown",
+      "unavailable",
+    ]) {
+      const withVersion = structuredClone(sample);
+      Object.assign(withVersion.knowledge.injections[0]!, {
+        version_id: "v1",
+        version_status,
+      });
+      const parsed = safeParseContract(
+        "/sessions/s/context",
+        sessionContext,
+        withVersion,
+      );
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.value).toEqual(withVersion);
+    }
+    for (const invalid of [
+      { version_id: 42 },
+      { version_status: "invented" },
+    ]) {
+      const badVersion = structuredClone(sample);
+      Object.assign(badVersion.knowledge.injections[0]!, invalid);
+      expect(
+        safeParseContract("/sessions/s/context", sessionContext, badVersion).ok,
+      ).toBe(false);
+    }
+
     const broken = structuredClone(sample);
     (broken as Record<string, unknown>).layer = "2";
     const bad = safeParseContract(

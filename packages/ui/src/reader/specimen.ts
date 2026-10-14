@@ -164,6 +164,8 @@ export const READER_SPECIMEN_CONTEXT: SessionContext = {
     injections: [
       {
         logical_id: "spec-k1",
+        version_id: "spec-k1-v1",
+        version_status: "superseded",
         title: "Keep SQLite as the only store",
         category: "decision",
         confidence: 0.92,
@@ -173,6 +175,8 @@ export const READER_SPECIMEN_CONTEXT: SessionContext = {
       },
       {
         logical_id: "spec-k2",
+        version_id: "spec-k2-v1",
+        version_status: "current",
         title: "FTS5 triggers must be recreated after schema changes",
         category: "gotcha",
         confidence: 0.8,
@@ -182,6 +186,8 @@ export const READER_SPECIMEN_CONTEXT: SessionContext = {
       },
       {
         logical_id: "spec-k3",
+        version_id: "spec-k3-v1",
+        version_status: "unavailable",
         title: null,
         category: null,
         confidence: null,
