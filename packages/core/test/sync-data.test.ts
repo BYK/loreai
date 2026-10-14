@@ -217,6 +217,70 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     });
   });
 
+  test.each(["title", "category", "content"] as const)(
+    "a remote %s append preserves the local team approval",
+    (field) => {
+      const row = remoteRow(`approved-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      expect(ltm.approveForTeam(row.id, "local-reviewer")).toBe(true);
+      const approval = () =>
+        db()
+          .query(
+            "SELECT approval_status, approved_by, approved_at FROM knowledge_current WHERE logical_id = ?",
+          )
+          .get(row.id);
+      const before = approval();
+      applyRemoteKnowledge({
+        ...row,
+        [field]: field === "category" ? "gotcha" : "Edited value",
+      });
+      expect(versions(row.id)).toHaveLength(2);
+      expect(approval()).toEqual(before);
+    },
+  );
+
+  test("appends copy local metadata without accepting remote approval or provenance", () => {
+    const row = remoteRow("local-version-metadata", "same body");
+    applyRemoteKnowledge(row);
+    expect(ltm.rejectForTeam(row.id)).toBe(true);
+    // These are local metadata columns, deliberately absent from the sync
+    // payload contract. Seed the existing device's receipt/provenance values.
+    const local = {
+      approval_status: "rejected",
+      approved_by: null,
+      approved_at: null,
+      promoted_at: 123,
+      source_user_id: "local-user",
+      source_entry_id: "local-source",
+      last_accessed_at: 456,
+      worker_provider_id: "local-provider",
+      worker_model_id: "local-model",
+    };
+    const cols = Object.keys(local);
+    db()
+      .query(
+        `UPDATE knowledge SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      )
+      .run(...Object.values(local), row.id);
+    const forged = Object.fromEntries(
+      cols.map((c) => [c, c.endsWith("_at") ? 999 : "remote-forgery"]),
+    );
+    applyRemoteKnowledge({
+      ...row,
+      title: "New revision",
+      ...forged,
+      approval_status: "approved",
+    });
+    expect(
+      db()
+        .query(
+          `SELECT ${cols.join(", ")} FROM knowledge_current WHERE logical_id = ?`,
+        )
+        .get(row.id),
+    ).toEqual(local);
+    expect(versions(row.id)).toHaveLength(2);
+  });
+
   test("delete → death-cert (no live current); re-delete is a no-op", () => {
     applyRemoteKnowledge(remoteRow("d1", "body"));
     applyRemoteKnowledgeDelete("d1");

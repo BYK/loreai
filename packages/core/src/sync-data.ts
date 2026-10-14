@@ -2210,14 +2210,34 @@ export function applyRemoteMetaCrdt(row: Record<string, unknown>): void {
   });
 }
 
-/** Insert one knowledge version row from a synced-column source `src`. */
+// Device-local approval and provenance follow live versions, as in
+// appendVersion. They must never be accepted from a remote payload.
+const LOCAL_KNOWLEDGE_VERSION_COLUMNS = [
+  "approval_status",
+  "approved_by",
+  "approved_at",
+  "promoted_at",
+  "source_user_id",
+  "source_entry_id",
+  "last_accessed_at",
+  "worker_provider_id",
+  "worker_model_id",
+] as const;
+
+/** Insert a version from synced values and optional trusted local metadata. */
 function insertKnowledgeVersion(
   src: Record<string, unknown>,
   syncCols: string[],
   ident: { id: string; logicalId: string; version: number; isDeleted: 0 | 1 },
+  localSource?: Record<string, unknown>,
 ): void {
   const vals: Record<string, unknown> = {};
   for (const c of syncCols) vals[c] = src[c];
+  if (localSource) {
+    for (const c of LOCAL_KNOWLEDGE_VERSION_COLUMNS) {
+      if (c in localSource) vals[c] = localSource[c];
+    }
+  }
   vals.id = ident.id;
   vals.logical_id = ident.logicalId;
   vals.version = ident.version;
@@ -2360,12 +2380,17 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
           "UPDATE knowledge SET is_current = 0 WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
         )
         .run(LOCAL_TENANT_ID, logicalId);
-      insertKnowledgeVersion(source, appendCols, {
-        id: uuidv7(),
-        logicalId,
-        version: (agg.maxV ?? 0) + 1,
-        isDeleted: 0,
-      });
+      insertKnowledgeVersion(
+        source,
+        appendCols,
+        {
+          id: uuidv7(),
+          logicalId,
+          version: (agg.maxV ?? 0) + 1,
+          isDeleted: 0,
+        },
+        cur,
+      );
     }),
   );
 }
