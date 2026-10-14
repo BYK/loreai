@@ -42,6 +42,7 @@ function insertToolCall(
 }
 
 function getEntry(id: string): {
+  id: string;
   logical_id: string;
   confidence: number;
   cross_project: number;
@@ -51,11 +52,12 @@ function getEntry(id: string): {
   return db()
     .query(
       // confidence lives on the knowledge_meta register now (A2 3b), keyed by logical_id.
-      `SELECT k.logical_id, m.confidence, k.cross_project, k.category, k.project_id
+      `SELECT k.id, k.logical_id, m.confidence, k.cross_project, k.category, k.project_id
          FROM knowledge k JOIN knowledge_meta m ON m.logical_id = k.logical_id
         WHERE k.id = ?`,
     )
     .get(id) as {
+    id: string;
     logical_id: string;
     confidence: number;
     cross_project: number;
@@ -224,7 +226,12 @@ describe("outcome-reward: recordSessionInjections", () => {
     const e = makeProjectEntry("inj-1", 0.5);
     const entry = getEntry(e);
     ltm.recordSessionInjections("sess-rec", PROJECT, [
-      { logical_id: entry.logical_id, cross_project: 0, category: "pattern" },
+      {
+        id: entry.id,
+        logical_id: entry.logical_id,
+        cross_project: 0,
+        category: "pattern",
+      },
       { logical_id: "shared-x", cross_project: 1, category: "pattern" },
       { logical_id: "lat-x", cross_project: 0, category: "lat.md" },
       { logical_id: undefined, cross_project: 0, category: "pattern" },
@@ -240,7 +247,14 @@ describe("outcome-reward: recordSessionInjections", () => {
   test("is idempotent and never resets the credited flag on re-injection", () => {
     const e = makeProjectEntry("inj-2", 0.5);
     const lid = getEntry(e).logical_id;
-    const inj = [{ logical_id: lid, cross_project: 0, category: "pattern" }];
+    const inj = [
+      {
+        id: getEntry(e).id,
+        logical_id: lid,
+        cross_project: 0,
+        category: "pattern",
+      },
+    ];
     ltm.recordSessionInjections("sess-idem", PROJECT, inj);
     // Simulate a credit having happened.
     db()
@@ -287,6 +301,7 @@ describe("outcome-reward: creditSessionOutcome", () => {
     const entry = getEntry(id);
     ltm.recordSessionInjections(session, PROJECT, [
       {
+        id: entry.id,
         logical_id: entry.logical_id,
         cross_project: entry.cross_project,
         category: entry.category,
@@ -392,10 +407,10 @@ describe("outcome-reward: creditSessionOutcome", () => {
     // Force an injection row (recordSessionInjections would normally skip it).
     db()
       .query(
-        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
-         VALUES (?, ?, ?, ?, 0)`,
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, version_id)
+         VALUES (?, ?, ?, ?, 0, ?)`,
       )
-      .run("sx", entry.logical_id, pid, Date.now());
+      .run("sx", entry.logical_id, pid, Date.now(), entry.id);
     insertToolCall(pid, { session: "sx", status: "error", verifier: 1 });
     ltm.creditSessionOutcome("sx", PROJECT);
     expect(getEntry(e).confidence).toBe(0.5); // unchanged — shared knowledge protected
@@ -435,12 +450,9 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     session: string,
     verdict: "pass" | "fail",
   ): void {
-    db()
-      .query(
-        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
-         VALUES (?, ?, ?, ?, 0)`,
-      )
-      .run(session, logicalId, pid, Date.now());
+    const selected = ltm.getByLogical(logicalId);
+    if (!selected) throw new Error("expected current memory snapshot");
+    ltm.recordSessionInjections(session, PROJECT, [selected]);
     insertToolCall(pid, {
       session,
       status: verdict === "pass" ? "completed" : "error",
@@ -469,10 +481,10 @@ describe("outcome-reward: outcomeImpact (observability, #497 follow-up)", () => 
     creditOnce(lid, "i-pass", "pass");
     db()
       .query(
-        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict)
-         VALUES (?, ?, ?, ?, 0, NULL)`,
+        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict, version_id)
+         VALUES (?, ?, ?, ?, 0, NULL, ?)`,
       )
-      .run("i-later-uncredited", lid, pid, Date.now() + 60_000);
+      .run("i-later-uncredited", lid, pid, Date.now() + 60_000, getEntry(e).id);
 
     const impact = ltm.outcomeImpact(lid);
     expect(impact.passes).toBe(1);
@@ -516,12 +528,9 @@ describe("outcome-reward: outcomeImpactMany (batched N+1 fix, LOREAI-GATEWAY-3D)
     session: string,
     verdict: "pass" | "fail",
   ): void {
-    db()
-      .query(
-        `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited)
-         VALUES (?, ?, ?, ?, 0)`,
-      )
-      .run(session, logicalId, pid, Date.now());
+    const selected = ltm.getByLogical(logicalId);
+    if (!selected) throw new Error("expected current memory snapshot");
+    ltm.recordSessionInjections(session, PROJECT, [selected]);
     insertToolCall(pid, {
       session,
       status: verdict === "pass" ? "completed" : "error",

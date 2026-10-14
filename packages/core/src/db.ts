@@ -2485,6 +2485,22 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- projects, including historical versions.
   CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
   `,
+  `
+  -- Version 104: pin outcome feedback to the knowledge version actually
+  -- exposed (#2054). Legacy provenance is unknown; never guess a backfill.
+  -- Recreate a lost local receipt table before ALTER during upgrade as well
+  -- as on ordinary recovery of an already-current schema.
+  CREATE TABLE IF NOT EXISTS knowledge_session_injections (
+    session_id TEXT NOT NULL,
+    logical_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    credited INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT,
+    PRIMARY KEY (session_id, logical_id)
+  );
+  ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4447,6 +4463,7 @@ function recoverMissingObjects(database: Database) {
       created_at  INTEGER NOT NULL,
       credited    INTEGER NOT NULL DEFAULT 0,
       verdict     TEXT,
+      version_id  TEXT,
       PRIMARY KEY (session_id, logical_id)
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
@@ -4921,6 +4938,12 @@ function recoverMissingObjects(database: Database) {
       if (!icols.some((c) => c.name === "verdict")) {
         database.exec(
           "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        );
+      }
+      // Version 104: missing exposure provenance remains NULL on recovery.
+      if (!icols.some((c) => c.name === "version_id")) {
+        database.exec(
+          "ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;",
         );
       }
       database.exec(
