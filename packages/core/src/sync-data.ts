@@ -32,6 +32,8 @@ import {
   withTransaction,
 } from "./db";
 import { putWrappedScopeKey } from "./crypto/keystore";
+import { deleteEmbeddings } from "./db/vec-store";
+import * as embedding from "./embedding";
 import {
   onKnowledgeDeleted,
   onKnowledgeTeamPromotionChanged,
@@ -2309,7 +2311,7 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
   const syncCols = columns("knowledge").filter(
     (c) => !PAYLOAD_EXCLUDE.has(c) && c in row,
   );
-  withApplying(() =>
+  const insertedId = withApplying(() =>
     withTransaction(() => {
       const agg = db()
         .query(
@@ -2333,7 +2335,7 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
           version: 1,
           isDeleted: 0,
         });
-        return;
+        return logicalId;
       }
       if (
         cur &&
@@ -2380,19 +2382,41 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
           "UPDATE knowledge SET is_current = 0 WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
         )
         .run(LOCAL_TENANT_ID, logicalId);
+      if (cur) deleteEmbeddings(db(), "knowledge", [String(cur.id)]);
+      const id = uuidv7();
       insertKnowledgeVersion(
         source,
         appendCols,
         {
-          id: uuidv7(),
+          id,
           logicalId,
           version: (agg.maxV ?? 0) + 1,
           isDeleted: 0,
         },
         cur,
       );
+      return id;
     }),
   );
+  // Queue derived work only after the write committed. Suppression belongs to
+  // the eventual vector store, never to the asynchronous provider request.
+  if (insertedId && embedding.isAvailable()) {
+    const current = db()
+      .query(
+        "SELECT title, content FROM knowledge_current WHERE tenant_id = ? AND id = ?",
+      )
+      .get(LOCAL_TENANT_ID, insertedId) as {
+      title: string;
+      content: string;
+    } | null;
+    if (current)
+      embedding.embedKnowledgeEntry(
+        insertedId,
+        current.title,
+        current.content,
+        { suppressSyncCapture: true },
+      );
+  }
 }
 
 /**
@@ -2426,6 +2450,7 @@ export function applyRemoteKnowledgeDelete(logicalId: string): void {
       const syncCols = columns("knowledge").filter(
         (c) => !PAYLOAD_EXCLUDE.has(c) && c in cur,
       );
+      deleteEmbeddings(db(), "knowledge", [String(cur.id)]);
       insertKnowledgeVersion(cur, syncCols, {
         id: uuidv7(),
         logicalId,

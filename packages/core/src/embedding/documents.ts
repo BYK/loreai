@@ -1,6 +1,6 @@
 /** Best-effort document embedding and token-batched write operations. */
 
-import { db } from "../db";
+import { db, isCurrentDatabase, withSavepoint, withSyncApplying } from "../db";
 import { storeEmbedding } from "../db/vec-store";
 import { config } from "../config";
 import { currentTenantId } from "../tenant";
@@ -89,11 +89,33 @@ function embedDocument(
   id: string,
   text: string,
   label: string,
+  options?: { suppressSyncCapture?: boolean },
 ): void {
   if (!isAvailable()) return;
+  const connection = db();
+  const tenant = currentTenantId();
   trackDocEmbed(
     embed([text], "document")
-      .then(([vector]) => storeEmbedding(db(), table, id, vector))
+      .then(([vector]) => {
+        if (!isCurrentDatabase(connection)) return;
+        const store = () =>
+          withSavepoint("document_embedding", () => {
+            // Keep eligibility and the write in one snapshot: a slower request
+            // must not resurrect a demoted/deleted or differently owned vector.
+            if (
+              table === "knowledge" &&
+              !connection
+                .query(
+                  "SELECT 1 FROM knowledge WHERE id = ? AND tenant_id = ? AND is_current = 1 AND is_deleted = 0",
+                )
+                .get(id, tenant)
+            )
+              return;
+            storeEmbedding(connection, table, id, vector);
+          });
+        if (options?.suppressSyncCapture) withSyncApplying(store);
+        else store();
+      })
       .catch((error) => {
         if (!isExpectedBestEffortEmbeddingError(error))
           log.error(`embedding failed for ${label}`, id, ":", error);
@@ -105,8 +127,15 @@ export function embedKnowledgeEntry(
   id: string,
   title: string,
   content: string,
+  options?: { suppressSyncCapture?: boolean },
 ): void {
-  embedDocument("knowledge", id, `${title}\n${content}`, "knowledge entry");
+  embedDocument(
+    "knowledge",
+    id,
+    `${title}\n${content}`,
+    "knowledge entry",
+    options,
+  );
 }
 
 export function embedEntity(
