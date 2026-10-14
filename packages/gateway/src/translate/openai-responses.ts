@@ -1,3 +1,4 @@
+import { extractProviderHeader } from "../config";
 import {
   isServerOwnedResponsesSearch,
   nativeResponsesCall,
@@ -112,10 +113,26 @@ function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
 // OpenAI Responses API → GatewayRequest
 // ---------------------------------------------------------------------------
 
+/** Codex sends its account header when using ChatGPT rather than an API key.
+ * Nonempty explicit routing remains authoritative, including invalid values
+ * rejected later. Empty route headers retain their existing absent semantics.
+ */
+function usesCodexChatGPT(headers: Record<string, string>): boolean {
+  if (headers["x-lore-provider"]) {
+    return extractProviderHeader(headers) === "openai-codex";
+  }
+  if (headers["x-lore-upstream-url"]) return false;
+  return (
+    Boolean(headers["chatgpt-account-id"]?.trim()) &&
+    extractAuth(headers)?.scheme === "bearer"
+  );
+}
+
 export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  if (usesCodexChatGPT(headers)) return parseOpenAICodexRequest(body, headers);
   const boundary = parseContextBoundary(headers, "openai-responses");
   const input = rawInput(body);
   const parsed = parseInputItems(input);
@@ -354,7 +371,10 @@ export function parseOpenAIResponsesRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
-  return parseStreamedRequest(chunks, responsesSpec(headers, false));
+  return parseStreamedRequest(
+    chunks,
+    responsesSpec(headers, usesCodexChatGPT(headers)),
+  );
 }
 
 /**

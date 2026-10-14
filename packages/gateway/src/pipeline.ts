@@ -7798,7 +7798,7 @@ function captureLegacyGlobalAuth(
  * retain the exact route intent used by forwardToUpstream.
  */
 function resolveRequestUpstreamRoute(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
@@ -7821,6 +7821,15 @@ function resolveRequestUpstreamRoute(
     // Explicit request routing is cache-only. An unknown untrusted provider
     // must fail closed without triggering side-channel network activity.
     providerRoute = lookupProviderRoute(providerID, false);
+  }
+  if (
+    !providerRoute &&
+    req.codex === true &&
+    providerHeader === undefined &&
+    !headerUpstream
+  ) {
+    providerID = "openai-codex";
+    providerRoute = resolveProviderRoute(providerID);
   }
   if (
     !providerRoute &&
@@ -8115,7 +8124,7 @@ function assertCrossProviderProvenance(
 
 /** Test-only access to the pure foreground route resolver. */
 export function resolveRequestUpstreamRouteForTest(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   return resolveRequestUpstreamRoute(req, config);
