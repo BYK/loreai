@@ -150,7 +150,7 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     ).toBe("sensitive");
   });
 
-  test.each(["title", "category"])(
+  test.each(["title", "category"] as const)(
     "a %s-only remote edit appends once without re-push",
     (field) => {
       enableSync("basic");
@@ -180,7 +180,7 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     },
   );
 
-  test.each(["title", "category"])(
+  test.each(["title", "category"] as const)(
     "partial %s edits retain the other version fields",
     (field) => {
       const row = remoteRow(`partial-${field}`, "same body");
