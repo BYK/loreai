@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
+import fc from "fast-check";
 import { db, ensureProject, getKV } from "../src/db";
 import * as ltm from "../src/ltm";
 
@@ -121,16 +122,64 @@ describe("A2 3b-2a: confidence PN-counter register", () => {
     expect(crdtRows(id)[0].neg).toBeCloseTo(0.6, 6);
   });
 
-  test("ACCEPTED hysteresis: update(confidence) on a BANKED entry lands above target, converges on a 2nd pass", () => {
-    const id = mk("BankedSet", 1.0); // base 1.0
-    ltm.reinforce(id, 0.2); // banks +0.2 (reads 1.0)
-    ltm.update(id, { confidence: 0.4 }); // delta = 0.4 − read(1.0) = −0.6 → neg 0.6
-    // clamp(1.0 + 0.2 − 0.6) = 0.6: the banked +0.2 absorbs part of the cut, so the
-    // value lands ABOVE the requested 0.4 — the accepted cost of a faithful additive
-    // CRDT (counters clamp only at read), NOT a per-step clamp. A re-apply converges.
-    expect(meta(id).confidence).toBeCloseTo(0.6, 6);
-    ltm.update(id, { confidence: 0.4 }); // delta = 0.4 − read(0.6) = −0.2 → neg 0.8
-    expect(meta(id).confidence).toBeCloseTo(0.4, 6); // now exact
+  test.each(
+    [1, -1].flatMap((delta) =>
+      [0, 0.5, 1].map((target) => ({ delta, target })),
+    ),
+  )(
+    "sets $target exactly after a saturating delta of $delta",
+    ({ delta, target }) => {
+      const id = mk("SaturatedSet", 0.5);
+      ltm.reinforce(id, delta); // underlying total is 1.5 or -0.5
+      const before = crdtRows(id)[0];
+
+      ltm.update(id, { confidence: target });
+
+      expect(meta(id).confidence).toBeCloseTo(target, 6);
+      expect(meta(id).base_confidence).toBe(0.5);
+      const after = crdtRows(id)[0];
+      expect(after.replica_id).toBe(before.replica_id);
+      expect(after.pos).toBeGreaterThanOrEqual(before.pos);
+      expect(after.neg).toBeGreaterThanOrEqual(before.neg);
+      // Boundary targets must cancel the hidden overshoot too, so a subsequent
+      // ordinary reinforcement/penalty starts at the explicitly requested value.
+      expect(0.5 + after.pos - after.neg).toBeCloseTo(target, 6);
+      ltm.rematerializeConfidence(id, Date.now());
+      expect(meta(id).confidence).toBeCloseTo(target, 6);
+
+      ltm.update(id, { confidence: target });
+      expect(crdtRows(id)).toEqual([after]);
+    },
+  );
+
+  test("explicit targets remain exact after arbitrary additive evidence", () => {
+    let caseIndex = 0;
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 20 }),
+        fc.array(fc.integer({ min: -20, max: 20 }), {
+          minLength: 1,
+          maxLength: 12,
+        }),
+        fc.integer({ min: 0, max: 20 }),
+        (initial, deltas, requested) => {
+          const id = mk(`PropertySet-${caseIndex++}`, initial / 20);
+          for (const delta of deltas) ltm.reinforce(id, delta / 10);
+          const before = crdtRows(id)[0] ?? { pos: 0, neg: 0 };
+
+          ltm.update(id, { confidence: requested / 20 });
+
+          expect(meta(id).confidence).toBeCloseTo(requested / 20, 6);
+          expect(meta(id).base_confidence).toBe(initial / 20);
+          const after = crdtRows(id)[0] ?? { pos: 0, neg: 0 };
+          expect(after.pos).toBeGreaterThanOrEqual(before.pos);
+          expect(after.neg).toBeGreaterThanOrEqual(before.neg);
+          ltm.rematerializeConfidence(id, Date.now());
+          expect(meta(id).confidence).toBeCloseTo(requested / 20, 6);
+        },
+      ),
+      { numRuns: 50 },
+    );
   });
 
   test("penalizeStaleReferences records a DURABLE counter delta (survives re-materialization)", () => {
