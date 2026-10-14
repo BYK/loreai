@@ -2486,10 +2486,25 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
   `,
   `
-  -- Version 104: provider budgets are replaced by automatic subscription
-  -- pacing with a per-account switch (#2045). No-op marker: the delete of the
-  -- 'provider_budgets' kv_meta row runs in migrate() by
-  -- RETIRED_KV_KEY_BY_MIGRATION_INDEX, like the earlier retired budget keys.
+  -- Version 104: pin outcome feedback to the knowledge version actually
+  -- exposed (#2054). Legacy provenance is unknown; never guess a backfill.
+  -- Recreate a lost local receipt table before ALTER during upgrade as well
+  -- as on ordinary recovery of an already-current schema.
+  CREATE TABLE IF NOT EXISTS knowledge_session_injections (
+    session_id TEXT NOT NULL,
+    logical_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    credited INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT,
+    PRIMARY KEY (session_id, logical_id)
+  );
+  ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;
+  `,
+  `
+  -- Version 105: provider budgets are replaced by automatic subscription
+  -- pacing with a per-account switch (#2045). The JS migration preserves
+  -- explicit opt-outs before deleting the retired KV row.
   SELECT 1;
   `,
 ]);
@@ -2522,13 +2537,12 @@ const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
 const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
 const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
-// Retired kv_meta rows deleted by version 102 (daily budget, #1927) and
-// version 104 (provider budgets, #2045). kv_meta can be missing on a damaged
-// database, so the delete is guarded rather than plain migration SQL.
+// The v102 daily budget is retired here. The v105 provider-budget migration
+// copies explicit opt-outs and deletes its key atomically in its JS step.
 const RETIRED_KV_KEY_BY_MIGRATION_INDEX = new Map<number, string>([
   [101, "daily_budget"], // 0-based index of version-102
-  [103, "provider_budgets"], // 0-based index of version-104
 ]);
+const PROVIDER_BUDGETS_MIGRATION_INDEX = 104; // 0-based index of version-105
 
 /**
  * Add durable tenant ownership without re-keying or deleting historical local
@@ -4462,6 +4476,7 @@ function recoverMissingObjects(database: Database) {
       created_at  INTEGER NOT NULL,
       credited    INTEGER NOT NULL DEFAULT 0,
       verdict     TEXT,
+      version_id  TEXT,
       PRIMARY KEY (session_id, logical_id)
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
@@ -4936,6 +4951,12 @@ function recoverMissingObjects(database: Database) {
       if (!icols.some((c) => c.name === "verdict")) {
         database.exec(
           "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        );
+      }
+      // Version 104: missing exposure provenance remains NULL on recovery.
+      if (!icols.some((c) => c.name === "version_id")) {
+        database.exec(
+          "ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;",
         );
       }
       database.exec(

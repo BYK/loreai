@@ -619,7 +619,7 @@ describe("buildIdleWorkHandler", () => {
       }
     ).logical_id;
     ltm.recordSessionInjections(sessionID, projectPath, [
-      { logical_id: logicalId, cross_project: 0, category: "pattern" },
+      { id, logical_id: logicalId, cross_project: 0, category: "pattern" },
     ]);
     // A verifier tool call; the caller sets its final status (completed/error).
     db()

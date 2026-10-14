@@ -149,10 +149,17 @@ describe("curator consolidate — focusCategory merge", () => {
     ) =>
       db()
         .query(
-          `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict)
-           VALUES (?, ?, ?, ?, 1, ?)`,
+          `INSERT INTO knowledge_session_injections (session_id, logical_id, project_id, created_at, credited, verdict, version_id)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
         )
-        .run(session, logicalId, pid, Date.now(), verdict);
+        .run(
+          session,
+          logicalId,
+          pid,
+          Date.now(),
+          verdict,
+          ltm.getByLogical(logicalId)?.id ?? null,
+        );
     recordVerdict(aLogical, "s1", "pass");
     recordVerdict(aLogical, "s2", "pass");
     recordVerdict(bLogical, "s3", "fail");

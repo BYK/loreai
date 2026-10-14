@@ -174,6 +174,81 @@ describe("revision-checked knowledge editing", () => {
     expect(ltm.getByLogical(id)?.updated_by).toBe("reviewer");
   });
 
+  test.each([0.5, -1.5])(
+    "confidence-only edits reach their target after a saturating delta of %s",
+    (delta) => {
+      const id = createEntry();
+      ltm.reinforce(id, delta);
+      const result = knowledgeEdit.editKnowledge(id, {
+        expectedRevision: 1,
+        actor: "reviewer",
+        confidence: 0.35,
+      });
+
+      expect(result.revision).toBe(1);
+      expect(result.changed).toEqual(["confidence"]);
+      expect(ltm.versionHistory(id)).toHaveLength(1);
+      expect(ltm.getByLogical(id)?.confidence).toBeCloseTo(0.35);
+      expect(ltm.getByLogical(id)?.updated_by).toBe("reviewer");
+      ltm.rematerializeConfidence(id, Date.now());
+      expect(ltm.getByLogical(id)?.confidence).toBeCloseTo(0.35);
+    },
+  );
+
+  test.each([
+    { delta: 0.5, target: 1, nextDelta: -0.1, expected: 0.9 },
+    { delta: -1.5, target: 0, nextDelta: 0.1, expected: 0.1 },
+  ])("explicit boundary edits cancel hidden overshoot: %j", (input) => {
+    const id = createEntry();
+    ltm.reinforce(id, input.delta);
+    expect(ltm.getByLogical(id)?.confidence).toBe(input.target);
+
+    const result = knowledgeEdit.editKnowledge(id, {
+      expectedRevision: 1,
+      actor: "reviewer",
+      confidence: input.target,
+    });
+
+    expect(result.changed).toEqual(["confidence"]);
+    expect(result.revision).toBe(1);
+    expect(ltm.versionHistory(id)).toHaveLength(1);
+    ltm.reinforce(id, input.nextDelta);
+    expect(ltm.getByLogical(id)?.confidence).toBeCloseTo(input.expected);
+  });
+
+  test.each([
+    { deltas: [0.15, -0.15] },
+    { deltas: [-3.15] },
+    { deltas: [-31.2] },
+    { deltas: [-4095.1] },
+  ])("roundoff at a confidence boundary stays a no-op: %j", ({ deltas }) => {
+    const id = createEntry();
+    for (const delta of deltas) ltm.reinforce(id, delta);
+    knowledgeEdit.editKnowledge(id, {
+      expectedRevision: 1,
+      actor: "reviewer",
+      confidence: 1,
+    });
+    expect(ltm.getByLogical(id)?.confidence).toBe(1);
+    const counters = () =>
+      db()
+        .query("SELECT pos, neg FROM knowledge_meta_crdt WHERE logical_id = ?")
+        .all(id);
+    const before = counters();
+    exportLoreFile.mockClear();
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = knowledgeEdit.editKnowledge(id, {
+        expectedRevision: 1,
+        actor: "reviewer",
+        confidence: 1,
+      });
+      expect(result.changed).toEqual([]);
+      expect(exportLoreFile).not.toHaveBeenCalled();
+      expect(counters()).toEqual(before);
+    }
+  });
+
   test("scope changes append cross-project state and can be restored", () => {
     const id = createEntry();
     const shared = knowledgeEdit.editKnowledge(id, {
@@ -290,6 +365,14 @@ describe("revision-checked knowledge editing", () => {
       title,
     });
     expect(result.changed).toEqual([]);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+
+    const sameConfidence = knowledgeEdit.editKnowledge(id, {
+      expectedRevision: 1,
+      actor: "reviewer",
+      confidence: 1,
+    });
+    expect(sameConfidence.changed).toEqual([]);
     expect(exportLoreFile).not.toHaveBeenCalled();
 
     expectEditError(

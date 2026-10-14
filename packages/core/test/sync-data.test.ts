@@ -1395,6 +1395,37 @@ describe("applyRemoteMeta / applyRemoteMetaCrdt — convergent confidence (A2 3b
     expect(crdtCount(id, "B")).toBe(1);
   });
 
+  test.each([
+    { pos: 1, neg: 0 },
+    { pos: 0, neg: 1 },
+  ])(
+    "explicit confidence edits cancel observed peer overshoot: %j",
+    (counter) => {
+      const id = mk(0.5);
+      ltm.reinforce(id, 0.1);
+      const peer = {
+        logical_id: id,
+        replica_id: "B",
+        ...counter,
+        updated_at: 1,
+      };
+      applyRemoteMetaCrdt(peer);
+
+      ltm.update(id, { confidence: 0.4 });
+      expect(conf(id)).toBeCloseTo(0.4, 6);
+      expect(base(id)).toBe(0.5);
+      // Replaying already-observed evidence must not undo the correction.
+      applyRemoteMetaCrdt(peer);
+      expect(conf(id)).toBeCloseTo(0.4, 6);
+      expect(crdtCount(id, "B")).toBe(1);
+
+      // New peer evidence still merges additively; an explicit local set does not
+      // reset peer counters or introduce last-writer-wins semantics.
+      applyRemoteMetaCrdt({ ...peer, pos: counter.pos + 0.1, updated_at: 2 });
+      expect(conf(id)).toBeCloseTo(0.5, 6);
+    },
+  );
+
   test("three replicas' independent deltas all sum into the converged value", () => {
     const id = mk(0.5);
     ltm.reinforce(id, 0.1); // local
