@@ -36,7 +36,7 @@ function insertToolCall(
       opts.status === "error" ? "command_failed" : null,
       null,
       0,
-      1000 + callSeq,
+      Date.now(),
       opts.verifier ?? null,
     );
 }

@@ -598,19 +598,42 @@ export function sessionVerifierVerdict(
   projectPath: string,
   sessionID: string,
 ): SessionVerifierVerdict {
+  return sessionVerifierVerdictsAfter(projectPath, sessionID, [-Infinity])[0];
+}
+
+/**
+ * Evaluate many exposure windows in one scan. A tool call's created_at is its
+ * first seed time, retained across result updates and history replays. Exclude
+ * checks started before exposure even when their results arrived afterwards.
+ * Within each window, the latest failure/pass timestamps suffice to answer
+ * whether ANY matching outcome exists; failure still dominates within it.
+ */
+export function sessionVerifierVerdictsAfter(
+  projectPath: string,
+  sessionID: string,
+  exposureTimes: readonly number[],
+): SessionVerifierVerdict[] {
+  if (exposureTimes.length === 0) return [];
   const pid = ensureProject(projectPath);
   const row = db()
     .query(
       `SELECT
-         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS fails,
-         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS passes
+         MAX(CASE WHEN status = 'error' THEN created_at END) AS last_fail_at,
+         MAX(CASE WHEN status = 'completed' THEN created_at END) AS last_pass_at
        FROM tool_calls
        WHERE project_id = ? AND session_id = ? AND verifier = 1`,
     )
-    .get(pid, sessionID) as { fails: number | null; passes: number | null };
-  if ((row?.fails ?? 0) > 0) return "fail";
-  if ((row?.passes ?? 0) > 0) return "pass";
-  return "none";
+    .get(pid, sessionID) as {
+    last_fail_at: number | null;
+    last_pass_at: number | null;
+  };
+  return exposureTimes.map((exposedAt) => {
+    if (row.last_fail_at !== null && row.last_fail_at >= exposedAt)
+      return "fail";
+    if (row.last_pass_at !== null && row.last_pass_at >= exposedAt)
+      return "pass";
+    return "none";
+  });
 }
 
 // ---------------------------------------------------------------------------

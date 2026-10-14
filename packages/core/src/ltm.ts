@@ -49,7 +49,7 @@ import {
   FUZZY_MIN_QUERY,
   FUZZY_RECALL_CAP,
 } from "./fuzzy";
-import { sessionVerifierVerdict } from "./tool-trace";
+import { sessionVerifierVerdictsAfter } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
   extractReferences,
@@ -2415,20 +2415,21 @@ export function recordSessionInjections(
 
 /** Outcome of crediting one session's injected entries. */
 export type OutcomeCreditResult = {
+  /** Aggregate of the credited windows; fail if any received a failure. */
   verdict: "pass" | "fail" | "none";
-  /** Number of injected entries whose confidence was adjusted. */
+  /** Number of injection rows credited, including entries already at the cap. */
   credited: number;
 };
 
 /**
- * Credit a session's injected knowledge entries by its verifier verdict (#497).
- * Runs at idle. Within-session co-occurrence: entries that were in-context when
- * the session's verifiers passed get a small (capped) boost; entries in-context
- * when verifiers failed get a larger penalty. Applied at most once per entry per
- * session (the `credited` flag), so a later idle tick won't re-credit.
+ * Credit a session's injected knowledge entries by verifier co-occurrence
+ * (#497, #2052). Each entry considers only checks seeded at or after its first
+ * injection. Passing windows get a small (capped) boost; windows with failures
+ * get a larger penalty. Runs at idle, at most once per entry per session (the
+ * `credited` flag), so a later idle tick won't re-credit.
  *
  * Invariants:
- *  - `none` verdict (no verifier ran) is a no-op — never guess.
+ *  - A window without a verifier outcome stays uncredited for a later check.
  *  - cross_project (shared) entries are never touched (the injection log already
  *    excludes them; the UPDATE re-asserts `cross_project = 0` as a backstop).
  *  - the boost is clamped to OUTCOME_BOOST_CEILING; the penalty floors at 0.
@@ -2442,17 +2443,25 @@ export function creditSessionOutcome(
   const pid = ensureProject(projectPath);
   const uncredited = db()
     .query(
-      `SELECT logical_id FROM knowledge_session_injections
+      `SELECT logical_id, created_at FROM knowledge_session_injections
        WHERE session_id = ? AND project_id = ? AND credited = 0`,
     )
-    .all(sessionID, pid) as { logical_id: string }[];
+    .all(sessionID, pid) as { logical_id: string; created_at: number }[];
   if (uncredited.length === 0) return { verdict: "none", credited: 0 };
 
-  const verdict = sessionVerifierVerdict(projectPath, sessionID);
-  if (verdict === "none") return { verdict, credited: 0 };
+  const verdicts = sessionVerifierVerdictsAfter(
+    projectPath,
+    sessionID,
+    uncredited.map((entry) => entry.created_at),
+  );
+  const groups: Record<"pass" | "fail", string[]> = { pass: [], fail: [] };
+  for (let i = 0; i < uncredited.length; i++) {
+    const verdict = verdicts[i];
+    if (verdict !== "none") groups[verdict].push(uncredited[i].logical_id);
+  }
+  const credited = groups.pass.length + groups.fail.length;
+  if (credited === 0) return { verdict: "none", credited: 0 };
 
-  const ids = uncredited.map((r) => r.logical_id);
-  const placeholders = ids.map(() => "?").join(",");
   const now = Date.now();
   // Apply the confidence adjustment and the credited-flag write atomically, so a
   // crash between them can't re-credit (double-adjust) on restart.
@@ -2467,52 +2476,62 @@ export function creditSessionOutcome(
     // gate via knowledge_current (pins is_current=1 AND is_deleted=0, exposes the
     // materialized confidence). cross_project = 0 is a real backstop (a PROMOTED
     // entry keeps its origin project_id but has cross_project = 1 — never adjust it).
-    // PASS additionally only rescues under-confident entries (confidence <
-    // OUTCOME_BOOST_CEILING) and the delta is capped so the boost never lifts an
-    // entry above that ceiling — preserved by computing min(REWARD, CEILING−conf)
-    // per entry. FAIL drives down by OUTCOME_PENALTY (materialize clamps at 0).
-    const eligible = (
-      verdict === "pass"
-        ? db()
+    // Group windows by outcome. Chunk ID lists below SQLite's historical
+    // 999-variable minimum, including the fixed project/session/verdict binds.
+    // Neutral windows are absent from both groups and must not be consumed.
+    for (const verdict of ["pass", "fail"] as const) {
+      const group = groups[verdict];
+      for (let offset = 0; offset < group.length; offset += 900) {
+        const ids = group.slice(offset, offset + 900);
+        const placeholders = ids.map(() => "?").join(",");
+        // PASS rescues under-confident entries without lifting above the boost
+        // ceiling. FAIL drives down by OUTCOME_PENALTY (materialize floors at 0).
+        const eligible = (
+          verdict === "pass"
+            ? db()
+                .query(
+                  `SELECT logical_id, confidence FROM knowledge_current
+                    WHERE cross_project = 0 AND project_id = ? AND confidence < ?
+                      AND logical_id IN (${placeholders})`,
+                )
+                .all(pid, OUTCOME_BOOST_CEILING, ...ids)
+            : db()
+                .query(
+                  `SELECT logical_id, confidence FROM knowledge_current
+                    WHERE cross_project = 0 AND project_id = ?
+                      AND logical_id IN (${placeholders})`,
+                )
+                .all(pid, ...ids)
+        ) as { logical_id: string; confidence: number }[];
+        for (const e of eligible) {
+          const delta =
+            verdict === "pass"
+              ? Math.min(OUTCOME_REWARD, OUTCOME_BOOST_CEILING - e.confidence)
+              : -OUTCOME_PENALTY;
+          applyConfidenceDelta(e.logical_id, delta, now);
+          // Both verdicts reset the decay clock.
+          db()
             .query(
-              `SELECT logical_id, confidence FROM knowledge_current
-                WHERE cross_project = 0 AND project_id = ? AND confidence < ?
-                  AND logical_id IN (${placeholders})`,
+              "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
             )
-            .all(pid, OUTCOME_BOOST_CEILING, ...ids)
-        : db()
-            .query(
-              `SELECT logical_id, confidence FROM knowledge_current
-                WHERE cross_project = 0 AND project_id = ?
-                  AND logical_id IN (${placeholders})`,
-            )
-            .all(pid, ...ids)
-    ) as { logical_id: string; confidence: number }[];
-    for (const e of eligible) {
-      const delta =
-        verdict === "pass"
-          ? Math.min(OUTCOME_REWARD, OUTCOME_BOOST_CEILING - e.confidence)
-          : -OUTCOME_PENALTY;
-      applyConfidenceDelta(e.logical_id, delta, now);
-      // Both verdicts reset the decay clock (the entry was demonstrably in use).
-      db()
-        .query(
-          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
-        )
-        .run(now, e.logical_id);
-    }
+            .run(now, e.logical_id);
+        }
 
-    // Mark this session's injections credited (so a later idle tick is a no-op)
-    // and record the verdict for per-entry "knowledge impact" stats (#497).
-    db()
-      .query(
-        `UPDATE knowledge_session_injections SET credited = 1, verdict = ?
-         WHERE session_id = ? AND project_id = ? AND credited = 0`,
-      )
-      .run(verdict, sessionID, pid);
+        // Credit only this outcome's windows. Entries without a post-exposure
+        // result remain available for later feedback and impact stats stay per
+        // entry rather than inheriting the session-wide verdict.
+        db()
+          .query(
+            `UPDATE knowledge_session_injections SET credited = 1, verdict = ?
+             WHERE session_id = ? AND project_id = ? AND credited = 0
+               AND logical_id IN (${placeholders})`,
+          )
+          .run(verdict, sessionID, pid, ...ids);
+      }
+    }
   });
 
-  return { verdict, credited: ids.length };
+  return { verdict: groups.fail.length > 0 ? "fail" : "pass", credited };
 }
 
 /** Per-entry outcome co-occurrence stats for the reward loop (#497). */
