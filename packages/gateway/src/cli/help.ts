@@ -157,7 +157,7 @@ Examples:
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated
-  lore setup                    # Auto-detect and configure installed apps
+  lore setup                    # Auto-detect CLIs and Codex desktop, report skipped apps
   lore setup codex              # Configure Codex to use lore
   lore setup codex -r http://remote:3207  # Configure Codex with a remote gateway
   lore setup opencode --no-plugin  # Configure OpenCode without installing the @loreai/opencode plugin
