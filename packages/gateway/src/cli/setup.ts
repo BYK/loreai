@@ -54,6 +54,7 @@ import {
 } from "../lifecycle-lock";
 import { readGatewayProcessFile } from "../pidfile";
 import { detectAgents } from "./agents";
+import { findCodexSetupEvidence } from "./setup-discovery";
 import {
   refreshJsonBackup,
   parseStableJsonBackup,
@@ -1466,17 +1467,8 @@ function isTopLevel(lines: string[], index: number): boolean {
 // Codex setup
 // ---------------------------------------------------------------------------
 
-function setupCodex(baseUrl: string, guard: SetupGuard): void {
-  guard.assertOwned();
-  const configPath = codexConfigPath();
-  const configDir = join(homedir(), ".codex");
-
-  guard.assertOwned();
-  ensureTrustedDirectory(configDir);
-
-  const existingFile = readTrustedTextFile(configPath, { allowMissing: true });
-  const content = existingFile?.text ?? "";
-
+/** Pure preparation shared by discovery preflight and the guarded writer. */
+function prepareCodexSetupConfig(content: string, baseUrl: string): string {
   // Capture a commented backup block from the ORIGINAL content (before lore's
   // writes), recording the values lore is about to set so undo can revert only
   // if the file still holds them. Then apply lore's changes and prepend it.
@@ -1487,7 +1479,19 @@ function setupCodex(baseUrl: string, guard: SetupGuard): void {
     [CODEX_PROVIDER_BACKUP_KEY]: codexProviderValue(content, baseUrl),
   });
   const updated = updateCodexConfig(prepared.content, baseUrl);
-  const final = prependTomlBackupBlock(updated, prepared.block);
+  return prependTomlBackupBlock(updated, prepared.block);
+}
+
+function setupCodex(baseUrl: string, guard: SetupGuard): void {
+  guard.assertOwned();
+  const configPath = codexConfigPath();
+  const configDir = join(homedir(), ".codex");
+
+  guard.assertOwned();
+  ensureTrustedDirectory(configDir);
+
+  const existingFile = readTrustedTextFile(configPath, { allowMissing: true });
+  const final = prepareCodexSetupConfig(existingFile?.text ?? "", baseUrl);
   guard.assertOwned();
   atomicWriteTrustedFile(configPath, final, {
     expectedIdentity: existingFile?.identity ?? null,
@@ -3400,11 +3404,54 @@ async function commandSetupLocked(
     return { baseUrl, remoteUrl, authenticatedPort };
   }
 
-  // No app name — auto-detect
+  // Setup supports desktop clients; launching through `lore run` still needs a CLI.
   const detected = detectAgents();
-  const setupTargets = SUPPORTED_APPS.filter((app) =>
-    detected.some((d) => d.def.name === app.agentName),
-  );
+  const setupTargets = SUPPORTED_APPS.filter((app) => {
+    if (detected.some((d) => d.def.name === app.agentName)) return true;
+    if (app.agentName === "codex") {
+      const configPath = codexConfigPath();
+      let evidence: ReturnType<typeof findCodexSetupEvidence>;
+      let failureReason = "unsafe config path";
+      try {
+        evidence = findCodexSetupEvidence(configPath, (path, error) => {
+          const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+          console.error(
+            `[lore] Could not inspect Codex desktop app at ${path} (${code}); continuing discovery.`,
+          );
+        });
+        if (evidence) {
+          failureReason = "unreadable config";
+          const existingFile = readTrustedTextFile(configPath, {
+            allowMissing: true,
+          });
+          failureReason = "invalid or conflicting config or Lore backup";
+          prepareCodexSetupConfig(existingFile?.text ?? "", baseUrl);
+        }
+      } catch (error) {
+        // A rejected optional target must not block healthy agents. Do not
+        // fall back to desktop evidence or bypass the trusted config writer.
+        const code = (error as NodeJS.ErrnoException)?.code;
+        const detail =
+          typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code)
+            ? `${failureReason}; ${code}`
+            : failureReason;
+        console.error(
+          `[lore] Skipped Codex: could not safely inspect config at ${configPath} (${detail}). Fix the reported config issue, then run \`lore setup codex\`.`,
+        );
+        return false;
+      }
+      if (evidence) {
+        console.log(
+          `[lore] Detected Codex ${evidence.kind} at ${evidence.path}; configuring without a CLI on PATH.`,
+        );
+        return true;
+      }
+    }
+    console.log(
+      `[lore] Skipped ${app.displayName}: ${app.agentName === "codex" ? "CLI not found on PATH and no desktop app or config detected" : "CLI not found on PATH"}. Run \`lore setup ${app.agentName}\` to configure explicitly.`,
+    );
+    return false;
+  });
 
   if (setupTargets.length === 0) {
     const supported = SUPPORTED_APPS.map(

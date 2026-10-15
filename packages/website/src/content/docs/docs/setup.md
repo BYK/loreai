@@ -34,9 +34,9 @@ lore setup codex -p 8080       # Configure Codex to talk to a gateway on a non-d
 lore setup codex -r http://remote:3207  # Configure Codex for a remote gateway
 ```
 
-If no app is given, `lore setup` scans `$PATH` for supported apps and configures whichever ones it finds. If nothing matches, it prints the supported app list and exits with a non-zero status — it never modifies a config file unless it found a matching installed app. When you pass an explicit app name, `setup` proceeds even if the binary is missing on `$PATH` (prints a warning and writes the config anyway). This is intentional so you can pre-configure Codex on a workstation where the binary lives elsewhere, or write the config before installing the binary.
+If no app is given, `lore setup` scans `$PATH` for supported CLIs. It also recognizes an existing `~/.codex/config.toml` on any platform. On macOS, it checks `~/Applications` and `/Applications` for Codex Desktop or ChatGPT with bundled Codex support, so the desktop client can be configured without a CLI on `$PATH`.
 
-If the named app isn't installed (for example, `lore setup codex` on a machine without the Codex binary), the command prints a warning and proceeds with the configuration. The intent is to let you set up Codex on a workstation where the binary lives elsewhere, or to pre-configure before installing the binary.
+Setup prints each skipped app, its detection reason, and the explicit `lore setup <app>` command. Errors inspecting optional desktop app locations are reported while discovery continues. If Codex has no CLI on `$PATH`, discovery also preflights its config without writing: unsafe or unreadable paths, invalid TOML, conflicting providers, or invalid Lore backup metadata cause Codex to be reported and skipped so other detected agents can still be configured. Diagnostics identify the validation stage and any filesystem error code without printing config contents. Fix the reported issue before retrying `lore setup codex`; explicit setup and all configuration writes retain the same safety checks. If nothing is detected, setup exits with a non-zero status without changing configuration. An explicit app name proceeds even when the CLI is missing, allowing you to configure an app installed elsewhere or prepare its configuration before installation.
 
 ## Supported apps
 
