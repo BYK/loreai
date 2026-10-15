@@ -150,6 +150,137 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     ).toBe("sensitive");
   });
 
+  test.each(["title", "category"] as const)(
+    "a %s-only remote edit appends once without re-push",
+    (field) => {
+      enableSync("basic");
+      const row = remoteRow(`immutable-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        ...row,
+        [field]: field === "title" ? "Remote title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        db()
+          .query("SELECT title, category FROM knowledge WHERE id = ?")
+          .get(row.id),
+      ).toEqual({ title: "AK", category: "decision" });
+      const current = currentKnowledgeRow(row.id)!;
+      expect(current[field]).toBe(changed[field]);
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        readOutbox(0).filter(
+          (entry) =>
+            entry.table_name === "knowledge" && entry.row_id === row.id,
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test.each(["title", "category"] as const)(
+    "partial %s edits retain the other version fields",
+    (field) => {
+      const row = remoteRow(`partial-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        id: row.id,
+        content: row.content,
+        [field]: field === "title" ? "Partial title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(currentKnowledgeRow(row.id)).toMatchObject({
+        project_id: row.project_id,
+        content: row.content,
+        title: field === "title" ? "Partial title" : "AK",
+        category: field === "category" ? "gotcha" : "decision",
+      });
+    },
+  );
+
+  test("partial metadata pulls do not invent absent title/category changes", () => {
+    const row = remoteRow("partial-metadata", "same body");
+    applyRemoteKnowledge(row);
+    applyRemoteKnowledge({
+      id: row.id,
+      content: row.content,
+      sensitivity: "sensitive",
+    });
+    expect(versions(row.id)).toHaveLength(1);
+    expect(currentKnowledgeRow(row.id)).toMatchObject({
+      title: "AK",
+      category: "decision",
+      sensitivity: "sensitive",
+    });
+  });
+
+  test.each(["title", "category", "content"] as const)(
+    "a remote %s append preserves the local team approval",
+    (field) => {
+      const row = remoteRow(`approved-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      expect(ltm.approveForTeam(row.id, "local-reviewer")).toBe(true);
+      const approval = () =>
+        db()
+          .query(
+            "SELECT approval_status, approved_by, approved_at FROM knowledge_current WHERE logical_id = ?",
+          )
+          .get(row.id);
+      const before = approval();
+      applyRemoteKnowledge({
+        ...row,
+        [field]: field === "category" ? "gotcha" : "Edited value",
+      });
+      expect(versions(row.id)).toHaveLength(2);
+      expect(approval()).toEqual(before);
+    },
+  );
+
+  test("appends copy local metadata without accepting remote approval or provenance", () => {
+    const row = remoteRow("local-version-metadata", "same body");
+    applyRemoteKnowledge(row);
+    expect(ltm.rejectForTeam(row.id)).toBe(true);
+    // These are local metadata columns, deliberately absent from the sync
+    // payload contract. Seed the existing device's receipt/provenance values.
+    const local = {
+      approval_status: "rejected",
+      approved_by: null,
+      approved_at: null,
+      promoted_at: 123,
+      source_user_id: "local-user",
+      source_entry_id: "local-source",
+      last_accessed_at: 456,
+      worker_provider_id: "local-provider",
+      worker_model_id: "local-model",
+    };
+    const cols = Object.keys(local);
+    db()
+      .query(
+        `UPDATE knowledge SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      )
+      .run(...Object.values(local), row.id);
+    const forged = Object.fromEntries(
+      cols.map((c) => [c, c.endsWith("_at") ? 999 : "remote-forgery"]),
+    );
+    applyRemoteKnowledge({
+      ...row,
+      title: "New revision",
+      ...forged,
+      approval_status: "approved",
+    });
+    expect(
+      db()
+        .query(
+          `SELECT ${cols.join(", ")} FROM knowledge_current WHERE logical_id = ?`,
+        )
+        .get(row.id),
+    ).toEqual(local);
+    expect(versions(row.id)).toHaveLength(2);
+  });
+
   test("delete → death-cert (no live current); re-delete is a no-op", () => {
     applyRemoteKnowledge(remoteRow("d1", "body"));
     applyRemoteKnowledgeDelete("d1");
