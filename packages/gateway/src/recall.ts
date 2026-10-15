@@ -20,6 +20,7 @@
 import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
   RECALL_TOOL_INPUT_SCHEMA,
@@ -53,13 +54,41 @@ import { reportRecallDiagnostic } from "./recall-diagnostics";
 // Tool definition
 // ---------------------------------------------------------------------------
 
+const GATEWAY_RECALL_TOOL_BRAND = Symbol("lore.gateway-recall-tool");
+
+type BrandedGatewayRecallTool = GatewayTool & {
+  readonly [GATEWAY_RECALL_TOOL_BRAND]: true;
+};
+
+function brandGatewayRecallTool(tool: GatewayTool): BrandedGatewayRecallTool {
+  return { ...tool, [GATEWAY_RECALL_TOOL_BRAND]: true };
+}
+
+function hasGatewayRecallBrand(tool: GatewayTool): boolean {
+  return (
+    (tool as Partial<BrandedGatewayRecallTool>)[GATEWAY_RECALL_TOOL_BRAND] ===
+    true
+  );
+}
+
+function withoutGatewayRecallBrand(tool: GatewayTool): GatewayTool {
+  const { [GATEWAY_RECALL_TOOL_BRAND]: _brand, ...unbranded } =
+    tool as GatewayTool & {
+      [GATEWAY_RECALL_TOOL_BRAND]?: true;
+    };
+  return unbranded;
+}
+
+// Description decoration is gateway-owned. Brand only exact contracts before
+// decoration so matching names or client-supplied ownership flags never grant
+// the private marker/replay path.
 /** Gateway representation of the shared recall tool contract. */
-export const RECALL_GATEWAY_TOOL: GatewayTool = {
+export const RECALL_GATEWAY_TOOL = brandGatewayRecallTool({
   name: CORE_RECALL_TOOL_NAME,
   description: RECALL_TOOL_DESCRIPTION,
   gatewayOwned: true,
   inputSchema: RECALL_TOOL_INPUT_SCHEMA,
-};
+});
 
 export const RECALL_TOOL_NAME = CORE_RECALL_TOOL_NAME;
 
@@ -602,11 +631,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     !isValidRecallQuery(input.query) ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
-      !isValidRecallId((item.input as Record<string, unknown>).id)) ||
+      !isValidRecallId((item.input as Record<string, unknown>).id) &&
+      !isRecallDetailRef((item.input as Record<string, unknown>).id)) ||
     ((item.input as Record<string, unknown>).ids !== undefined &&
       (!Array.isArray((item.input as Record<string, unknown>).ids) ||
         !((item.input as Record<string, unknown>).ids as unknown[]).every(
-          (id: unknown) => isValidRecallId(id),
+          (id: unknown) => isValidRecallId(id) || isRecallDetailRef(id),
         ))) ||
     ((item.input as Record<string, unknown>).detailOffset !== undefined &&
       (!Number.isSafeInteger(
@@ -624,12 +654,16 @@ function isStoredRecall(value: unknown): value is StoredRecall {
   }
   const ids = input.ids;
   if (
-    (typeof input.id === "string" && !isValidRecallId(input.id)) ||
+    (typeof input.id === "string" &&
+      !isValidRecallId(input.id) &&
+      !isRecallDetailRef(input.id)) ||
     (ids !== undefined &&
       (!Array.isArray(ids) ||
         ids.length === 0 ||
         ids.length > MAX_RECALL_BATCH_IDS ||
-        !ids.every((id): id is string => isValidRecallId(id)))) ||
+        !ids.every(
+          (id): id is string => isValidRecallId(id) || isRecallDetailRef(id),
+        ))) ||
     (input.id !== undefined && ids !== undefined) ||
     ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
       typeof input.id !== "string") ||
@@ -1038,24 +1072,116 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+function schemaEquals(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((value, index) => schemaEquals(value, right[index]))
+    );
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && schemaEquals(left[key], right[key]),
+    )
+  );
+}
+
+function normalizeRecallScopeSchema(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.anyOf)) return value;
+  const values = value.anyOf.map((member) => {
+    if (!isRecord(member)) return null;
+    const keys = Object.keys(member).sort();
+    if (
+      keys.some((key) => key !== "const" && key !== "type") ||
+      member.type !== "string" ||
+      typeof member.const !== "string"
+    ) {
+      return null;
+    }
+    return member.const;
+  });
+  const expected = ["all", "session", "project", "knowledge"];
+  if (
+    values.some((scope) => scope === null) ||
+    values.length !== expected.length ||
+    new Set(values).size !== expected.length ||
+    expected.some((scope) => !values.includes(scope))
+  ) {
+    return value;
+  }
+  const scopeKeys = Object.keys(value).sort();
+  if (
+    scopeKeys.some((key) => key !== "anyOf" && key !== "description") ||
+    value.description !== RECALL_TOOL_INPUT_SCHEMA.properties.scope.description
+  ) {
+    return value;
+  }
+  return RECALL_TOOL_INPUT_SCHEMA.properties.scope;
+}
+
+function hasCanonicalRecallInputSchema(tool: GatewayTool): boolean {
+  if (!isRecord(tool.inputSchema) || !isRecord(tool.inputSchema.properties)) {
+    return false;
+  }
+  const hasRootAnyOf = Object.hasOwn(tool.inputSchema, "anyOf");
+  const expected: Record<string, unknown> = {
+    type: RECALL_TOOL_INPUT_SCHEMA.type,
+    properties: RECALL_TOOL_INPUT_SCHEMA.properties,
+    additionalProperties: RECALL_TOOL_INPUT_SCHEMA.additionalProperties,
+  };
+  if (hasRootAnyOf) expected.anyOf = RECALL_TOOL_INPUT_SCHEMA.anyOf;
+  const actual = {
+    ...tool.inputSchema,
+    properties: {
+      ...tool.inputSchema.properties,
+      scope: normalizeRecallScopeSchema(tool.inputSchema.properties.scope),
+    },
+  };
+  return schemaEquals(actual, expected);
+}
+
 /**
- * Preserve the gateway's private marker/replay path for native host tools.
- * Matching the shared name and description lets the gateway own execution
- * without injecting a duplicate or treating Lore results as client-owned output.
+ * Only tools created inside this gateway module can own gateway marker replay.
+ * A wire definition is caller-controlled, even when its public contract is an
+ * exact copy of the shared host tool; JSON cannot carry this private brand.
  */
 export function markNativeRecallTool(tools: GatewayTool[]): GatewayTool[] {
-  return tools.map((tool) =>
-    tool.name === RECALL_TOOL_NAME &&
-    tool.description === RECALL_GATEWAY_TOOL.description
-      ? { ...tool, gatewayOwned: true }
-      : tool,
-  );
+  return tools.map((tool) => {
+    if (tool.name !== RECALL_TOOL_NAME) return tool;
+    if (
+      hasGatewayRecallBrand(tool) &&
+      tool.strict !== true &&
+      tool.responsesBuiltin === undefined &&
+      hasCanonicalRecallInputSchema(tool)
+    ) {
+      // The private brand proves gateway ownership; normalize its public flag
+      // on trusted clones instead of treating that caller-visible flag as proof.
+      return tool.gatewayOwned === true
+        ? tool
+        : { ...tool, gatewayOwned: true };
+    }
+    return tool.gatewayOwned === true || hasGatewayRecallBrand(tool)
+      ? { ...withoutGatewayRecallBrand(tool), gatewayOwned: false }
+      : tool;
+  });
 }
 
 /** Check whether the gateway injected and owns the recall tool. */
 export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
   return tools.some(
-    (tool) => tool.name === RECALL_TOOL_NAME && tool.gatewayOwned === true,
+    (tool) =>
+      tool.gatewayOwned === true &&
+      hasGatewayRecallBrand(tool) &&
+      tool.name === RECALL_TOOL_NAME &&
+      tool.strict !== true &&
+      tool.responsesBuiltin === undefined &&
+      hasCanonicalRecallInputSchema(tool),
   );
 }
 
@@ -1169,6 +1295,7 @@ export async function executeRecall(
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
+      detailRefs: true,
       llm,
       signal,
       searchConfig: cfg.search,

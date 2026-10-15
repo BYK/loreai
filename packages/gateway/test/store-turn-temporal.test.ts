@@ -354,7 +354,7 @@ describe("storeTurnTemporal (#1084)", () => {
     }
     const recallID = placeholder.text.match(/\(t:([^)]*)\)$/)?.[1];
     expect(recallID).toMatch(/^lore_tm_v1_/);
-    expect(recallById(`t:${recallID}`)).toContain(
+    expect(recallById(`t:${recallID}`, { projectPath: PROJECT })).toContain(
       "DISTINCTIVE_TOOL_OUTPUT_XYZ",
     );
   });
@@ -671,7 +671,9 @@ describe("storeTurnTemporal (#1084)", () => {
         }),
       ]);
       expect(markerRecallID(migratedLore)).toBe(legacyUserID);
-      expect(recallById(`t:${legacyUserID}`)).toContain(toolOutput);
+      expect(recallById(`t:${legacyUserID}`, { projectPath })).toContain(
+        toolOutput,
+      );
       expect(
         db()
           .query(

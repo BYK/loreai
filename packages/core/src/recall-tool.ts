@@ -4,6 +4,7 @@ import {
   MAX_RECALL_DETAIL_CHARS,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_QUERY_CHARS,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
   RECALL_PARAM_DESCRIPTIONS,
@@ -137,7 +138,11 @@ export function parseRecallToolArguments(
   ) {
     return { valid: false, error: "Recall scope is invalid." };
   }
-  if (idValue !== undefined && !isValidRecallId(idValue)) {
+  if (
+    idValue !== undefined &&
+    !isValidRecallId(idValue) &&
+    !isRecallDetailRef(idValue)
+  ) {
     return { valid: false, error: "Recall id is invalid." };
   }
   if (
@@ -145,7 +150,9 @@ export function parseRecallToolArguments(
     (!Array.isArray(idsValue) ||
       idsValue.length < 1 ||
       idsValue.length > MAX_RECALL_BATCH_IDS ||
-      !Array.from(idsValue).every(isValidRecallId))
+      !Array.from(idsValue).every(
+        (id) => isValidRecallId(id) || isRecallDetailRef(id),
+      ))
   ) {
     return { valid: false, error: "Recall ids are invalid." };
   }
@@ -238,6 +245,8 @@ export function createRecallToolExecutor(
         sessionID: context.sessionID,
         knowledgeEnabled: cfg.knowledge.enabled,
         searchConfig: cfg.search,
+        // Opaque detail references are session-bound capabilities.
+        detailRefs: Boolean(context.sessionID?.trim()),
         recordTransfers: true,
         signal: context.signal,
       });

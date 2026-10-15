@@ -73,6 +73,20 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
     spy.mockRestore();
   });
 
+  test("enables opaque detail references for agent-facing recall", async () => {
+    const block: GatewayToolUseBlock = {
+      type: "tool_use",
+      id: "toolu_detail_ref",
+      name: RECALL_TOOL_NAME,
+      input: { query: "detail lookup", scope: "project" },
+    };
+
+    await executeRecall(block, "/tmp/proj", "sess");
+
+    expect(capturedInputs[0]?.detailRefs).toBe(true);
+    spy.mockRestore();
+  });
+
   test.each([
     {
       mode: "query",

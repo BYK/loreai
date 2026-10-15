@@ -18,7 +18,7 @@ import * as entities from "./entities";
 import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { db, ensureProject, projectName } from "./db";
 import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
@@ -34,6 +34,7 @@ import {
 } from "./search";
 import {
   assertValidRecallQuery,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
   MAX_RECALL_ID_CHARS,
@@ -45,7 +46,11 @@ import {
 } from "./read-offload";
 import { inline } from "./markdown";
 
-export { isValidRecallId, MAX_RECALL_ID_CHARS } from "./recall-limits";
+export {
+  isRecallDetailRef,
+  isValidRecallId,
+  MAX_RECALL_ID_CHARS,
+} from "./recall-limits";
 
 function reportRecallDiagnostic(
   message: string,
@@ -100,6 +105,8 @@ export type RecallInput = {
   sessionID?: string;
   /** Whether to include long-term knowledge results. Default `true`. */
   knowledgeEnabled?: boolean;
+  /** Add opaque, request-session-bound handles for truncated agent-tool results. */
+  detailRefs?: boolean;
   /** Optional LLM client for query expansion (if `config.search.queryExpansion`). */
   llm?: LLMClient;
   /** Abort in-flight query expansion when the owning client disconnects. */
@@ -161,6 +168,21 @@ export type RecallRun = {
   result: RecallResult;
   coverage: RecallCoverage[];
 };
+
+type RecallDetailRef = {
+  sourceId: string;
+  tenantId: string;
+  projectId: string;
+  scope: RecallScope;
+  sessionID?: string;
+  expiresAt: number;
+};
+
+// This bounded, process-local map is the only bridge from opaque detail refs
+// to source IDs; refs never serialize the underlying ID or cross scope.
+const MAX_RECALL_DETAIL_REFS = 512;
+const RECALL_DETAIL_REF_TTL_MS = 30 * 60 * 1000;
+const recallDetailRefs = new Map<string, RecallDetailRef>();
 
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
@@ -418,6 +440,8 @@ type FormatConfig = Omit<typeof DEFAULT_FORMAT_CONFIG, "alreadyInLtmIds"> & {
   // counts hits already in the model's LTM context and appends a hint line so
   // the model doesn't treat redundant recall as new information.
   alreadyInLtmIds?: ReadonlySet<string>;
+  /** Private resolver; rendered handles never contain the underlying source ID. */
+  createDetailRef?: (tagged: TaggedResult) => string;
 };
 
 /**
@@ -613,11 +637,19 @@ function formatFusedResults(
         lines.push(`#### ${SOURCE_LABELS[currentSource]}`);
       }
 
+      const detailRef =
+        getFullContentLength(r.item) > r.charBudget
+          ? config.createDetailRef?.(r.item)
+          : undefined;
+      const detailRefCost = detailRef
+        ? ` [detail ref: \`${detailRef}\`]`.length
+        : 0;
       const line = renderResultLine(
         r.item,
-        r.charBudget,
+        Math.max(0, r.charBudget - detailRefCost),
         anchorsByLogicalId,
         filesByLogicalId,
+        detailRef,
       );
       lines.push(line);
     }
@@ -631,7 +663,9 @@ function formatFusedResults(
   lines.push(`---`);
   if (anyTruncated) {
     lines.push(
-      `*${kept.length} of ${totalFound} results shown. Use recall with id parameter to see full content of truncated results.*`,
+      config.createDetailRef
+        ? `*${kept.length} of ${totalFound} results shown. Use the opaque \`r:\` detail ref printed after a truncated result to inspect its detail.*`
+        : `*${kept.length} of ${totalFound} results shown; some result details are truncated.*`,
     );
   } else {
     lines.push(`*${kept.length} of ${totalFound} results shown.*`);
@@ -750,33 +784,6 @@ function getFullContentLength(tagged: TaggedResult): number {
 }
 
 /** Render a single result as a markdown list item line. */
-/**
- * Fetch source message IDs for a distillation segment.
- * Returns a compact list of IDs that can be used with the recall tool
- * to fetch full message details on demand.
- */
-function getDistillationSourceIds(distillId: string): string[] {
-  try {
-    const row = db()
-      .query(
-        `SELECT d.source_ids
-           FROM distillations d
-           JOIN projects p ON p.id = d.project_id
-          WHERE p.tenant_id = ? AND d.id = ?`,
-      )
-      .get(currentTenantId(), distillId) as { source_ids: string } | null;
-    if (!row?.source_ids) return [];
-    if (row.source_ids.length > MAX_RECALL_BATCH_CHARS) return [];
-    const parsed: unknown = JSON.parse(row.source_ids);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((sourceId): sourceId is string => isValidRecallId(sourceId))
-      .slice(0, MAX_RECALL_BATCH_IDS);
-  } catch {
-    return [];
-  }
-}
-
 /** Render an entry's resolved code anchors as a compact ` \u21b3 a, b` suffix the
  *  agent can jump to instead of grepping. Empty/absent → "". Symbol anchors get a
  *  trailing `()` so they read as identifiers. */
@@ -802,9 +809,9 @@ function renderResultLine(
   charBudget: number,
   anchorsByLogicalId?: Map<string, ltm.KnowledgeRefAnchor[]>,
   filesByLogicalId?: Map<string, string[]>,
+  detailRef?: string,
 ): string {
-  const id = taggedResultKey(tagged);
-
+  const detailRefSuffix = detailRef ? ` [detail ref: \`${detailRef}\`]` : "";
   switch (tagged.source) {
     case "knowledge": {
       const k = tagged.item;
@@ -817,8 +824,7 @@ function renderResultLine(
         charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
-      const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${anchors}${files}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${files}${detailRefSuffix}`;
     }
     case "cross-knowledge": {
       const k = tagged.item;
@@ -831,8 +837,7 @@ function renderResultLine(
         charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
-      const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${anchors}${files}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${files}${detailRefSuffix}`;
     }
     case "distillation": {
       const d = tagged.item;
@@ -842,26 +847,7 @@ function renderResultLine(
         d.r_compression != null && d.r_compression < 1.0 ? "[lossy] " : "";
       const fullText = inline(d.observations);
       const content = truncateAtSentence(fullText, charBudget);
-      const wasTruncated = fullText.length > charBudget;
-      // Include source message IDs so the LLM can fetch full details
-      // via the recall tool when the summary lacks specifics.
-      const sourceIds = getDistillationSourceIds(d.id);
-      const sourceRefParts: string[] = [];
-      const sourceRefBudget = Math.max(0, charBudget - content.length);
-      let sourceRefLength = " (sources: ".length + 1;
-      for (const sourceId of sourceIds) {
-        const part = `t:${sourceId}`;
-        const nextLength =
-          sourceRefLength + part.length + (sourceRefParts.length > 0 ? 2 : 0);
-        if (nextLength > sourceRefBudget) break;
-        sourceRefParts.push(part);
-        sourceRefLength = nextLength;
-      }
-      const sourceRef =
-        sourceRefParts.length > 0
-          ? ` (sources: ${sourceRefParts.join(", ")})`
-          : "";
-      return `- ${compressionHint}${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
+      return `- ${compressionHint}${content}${detailRefSuffix}`;
     }
     case "temporal": {
       const m = tagged.item;
@@ -869,8 +855,7 @@ function renderResultLine(
       const contentBudget = Math.max(40, charBudget - prefix.length);
       const fullText = inline(m.content);
       const content = truncateAtSentence(fullText, contentBudget);
-      const wasTruncated = fullText.length > contentBudget;
-      return `- ${prefix}${content}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${prefix}${content}${detailRefSuffix}`;
     }
     case "lat-section": {
       const s = tagged.item;
@@ -880,8 +865,7 @@ function renderResultLine(
         ? inline(s.first_paragraph)
         : inline(s.content);
       const content = truncateAtSentence(fullText, contentBudget);
-      const wasTruncated = fullText.length > contentBudget;
-      return `- ${heading}${content}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${heading}${content}${detailRefSuffix}`;
     }
     case "entity": {
       const e = tagged.item;
@@ -894,8 +878,7 @@ function renderResultLine(
         .join(" \u2014 ");
       const detailBudget = Math.max(40, charBudget - head.length - 2);
       const detail = truncateAtSentence(inline(detailFull), detailBudget);
-      const wasTruncated = inline(detailFull).length > detailBudget;
-      return `- ${head}${detail ? `: ${detail}` : ""}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${head}${detail ? `: ${detail}` : ""}${detailRefSuffix}`;
     }
   }
 }
@@ -913,6 +896,7 @@ function renderResultLine(
 export async function searchRecall(
   input: RecallInput,
 ): Promise<ScoredTaggedResult[]> {
+  validateRecallScope(input);
   input.signal?.throwIfAborted();
   assertValidRecallQuery(input.query);
   const abortable = async <T>(promise: Promise<T>): Promise<T> => {
@@ -1838,124 +1822,183 @@ export async function searchRecall(
 }
 
 // ---------------------------------------------------------------------------
-// Recall by ID — fetch full untruncated content of a specific result
+// Recall detail — fetch a bounded, scope-checked page of a specific result
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch the full content of a single result by its source-prefixed ID.
+ * Fetch a bounded detail page for a result inside the supplied project scope.
  *
  * IDs use the format `prefix:uuid` where prefix is one of:
  *   k: (knowledge), xk: (cross-knowledge), d: (distillation),
  *   t: (temporal), lat: (lat-section), e: (entity).
  */
-export function recallById(id: string): string {
-  if (!isValidRecallId(id)) return "Invalid recall id.";
-  const colonIdx = id.indexOf(":");
-  if (colonIdx < 1) return `No entry found for id: ${id}`;
+export function recallById(
+  id: string,
+  input: RecallDetailOptions = {},
+): string {
+  return recallByIdWithMetadata(id, input).result;
+}
 
-  const prefix = id.slice(0, colonIdx);
-  const rawId = id.slice(colonIdx + 1);
+type RecallDetailOptions = Partial<
+  Pick<
+    RecallInput,
+    | "detailOffset"
+    | "detailLimit"
+    | "projectPath"
+    | "scope"
+    | "sessionID"
+    | "knowledgeEnabled"
+    | "detailRefs"
+  >
+>;
 
-  switch (prefix) {
-    case "k":
-    case "xk": {
-      // Resolve a current OR superseded version id / logical_id to the current
-      // entry (A2, #823) — a recalled id may be the stable logical_id.
-      const entry = ltm.get(rawId) ?? ltm.getByLogical(ltm.logicalIdOf(rawId));
-      if (!entry) return `No entry found for id: ${id}`;
-      const detailAnchors = renderAnchors(
-        ltm.knowledgeRefAnchors([entry.logical_id]).get(entry.logical_id),
-      );
-      // D2c PR-2: file-path associations, parallel to the anchor line. Same
-      // batch-loader path as the main recall surface — keeps the rendering
-      // semantics consistent (sorted, capped at MAX_RECALL_FILES_PER_ENTRY).
-      const detailFiles = renderFiles(
-        ltm.knowledgeFileRefsBatch([entry.logical_id]).get(entry.logical_id),
-      );
-      return [
-        `## Recall Detail: ${id}`,
-        ``,
-        `#### Knowledge`,
-        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}${detailAnchors}${detailFiles}`,
-      ].join("\n");
-    }
-    case "d": {
-      const row = db()
-        .query(
-          `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id,
-                  d.c_norm, d.r_compression
-             FROM distillations d JOIN projects p ON p.id = d.project_id
-            WHERE p.tenant_id = ? AND d.id = ?`,
-        )
-        .get(currentTenantId(), rawId) as Distillation | null;
-      if (!row) return `No entry found for id: ${id}`;
-      return [
-        `## Recall Detail: ${id}`,
-        ``,
-        `#### Distilled`,
-        `${inline(row.observations)}`,
-      ].join("\n");
-    }
-    case "t": {
-      const row = db()
-        .query(
-          `SELECT t.id, t.project_id, t.session_id, t.role, t.content, t.tokens,
-                  t.distilled, t.created_at, t.metadata
-             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
-            WHERE p.tenant_id = ? AND t.id = ?`,
-        )
-        .get(currentTenantId(), rawId) as temporal.TemporalMessage | null;
-      if (!row) return `No entry found for id: ${id}`;
-      return [
-        `## Recall Detail: ${id}`,
-        ``,
-        `#### Conversation`,
-        `(${row.role}, ${relativeAge(row.created_at)}, session: ${row.session_id.slice(0, 8)})`,
-        ``,
-        `${inline(row.content)}`,
-      ].join("\n");
-    }
-    case "lat": {
-      const row = db()
-        .query(
-          `SELECT l.id, l.project_id, l.file, l.heading, l.depth, l.content,
-                  l.content_hash, l.first_paragraph, l.updated_at
-             FROM lat_sections l JOIN projects p ON p.id = l.project_id
-            WHERE p.tenant_id = ? AND l.id = ?`,
-        )
-        .get(currentTenantId(), rawId) as latReader.LatSection | null;
-      if (!row) return `No entry found for id: ${id}`;
-      return [
-        `## Recall Detail: ${id}`,
-        ``,
-        `#### Reference`,
-        `**${inline(row.file)} \u00A7 ${inline(row.heading)}**`,
-        ``,
-        `${inline(row.content)}`,
-      ].join("\n");
-    }
-    case "e": {
-      const ent = entities.getWithAliases(rawId);
-      if (!ent) return `No entry found for id: ${id}`;
-      const lines = [
-        `## Recall Detail: ${id}`,
-        ``,
-        `#### People & Entities`,
-        entities.formatForPrompt([ent]),
-      ];
-      // formatForPrompt only renders relations relative to a self entity in the
-      // passed array; for a single non-self entity it omits them — append
-      // explicitly so the drill-down isn't less informative than the summary.
-      const relations = entities.formatRelationsForPrompt(rawId);
-      if (relations) lines.push(``, `Relations: ${relations}`);
-      return lines.join("\n");
-    }
-    default:
-      return `Unknown source prefix "${prefix}" in id: ${id}`;
+type RecallDetailContext = {
+  projectId: string;
+  scope: RecallScope;
+  sessionID?: string;
+};
+
+function validateRecallScope(
+  input: Pick<RecallDetailOptions, "scope" | "sessionID">,
+): void {
+  const scope = input.scope ?? "all";
+  if (!["all", "session", "project", "knowledge"].includes(scope)) {
+    throw new Error("Recall scope is invalid.");
+  }
+  if (scope === "session" && !input.sessionID?.trim()) {
+    throw new Error("Recall session scope requires a session ID.");
   }
 }
 
-type RecallDetailOptions = Pick<RecallInput, "detailOffset" | "detailLimit">;
+function recallDetailContext(
+  input: RecallDetailOptions,
+): RecallDetailContext | null {
+  const scope = input.scope ?? "all";
+  validateRecallScope(input);
+  if (!input.projectPath) return null;
+  return {
+    projectId: ensureProject(input.projectPath),
+    scope,
+    ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+  };
+}
+
+function detailScopeAllowsPrefix(
+  prefix: string,
+  context: RecallDetailContext,
+  input: RecallDetailOptions,
+): boolean {
+  if ((prefix === "k" || prefix === "xk") && input.knowledgeEnabled === false) {
+    return false;
+  }
+  // Keep detail access aligned with the source gates in searchRecall().
+  switch (prefix) {
+    case "k":
+      return context.scope !== "session";
+    case "xk":
+      return context.scope === "all";
+    case "d":
+    case "t":
+      return context.scope !== "knowledge";
+    case "lat":
+      return context.scope !== "session";
+    case "e":
+      return context.scope === "all" || context.scope === "project";
+    default:
+      return false;
+  }
+}
+
+function createRecallDetailRef(
+  tagged: TaggedResult,
+  input: RecallInput,
+): string {
+  const now = Date.now();
+  for (const [ref, detail] of recallDetailRefs) {
+    if (detail.expiresAt <= now) recallDetailRefs.delete(ref);
+  }
+  while (recallDetailRefs.size >= MAX_RECALL_DETAIL_REFS) {
+    const oldest = recallDetailRefs.keys().next().value;
+    if (oldest === undefined) break;
+    recallDetailRefs.delete(oldest);
+  }
+
+  const ref = `r:${randomUUID()}`;
+  recallDetailRefs.set(ref, {
+    sourceId: taggedResultKey(tagged),
+    tenantId: currentTenantId(),
+    projectId: ensureProject(input.projectPath),
+    scope: input.scope ?? "all",
+    ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+    expiresAt: now + RECALL_DETAIL_REF_TTL_MS,
+  });
+  return ref;
+}
+
+function resolveRecallDetailRef(
+  ref: string,
+  input: RecallDetailOptions,
+): { sourceId: string; scope: RecallScope; sessionID?: string } | null {
+  const detail = recallDetailRefs.get(ref);
+  if (!detail) return null;
+  if (detail.expiresAt <= Date.now()) {
+    recallDetailRefs.delete(ref);
+    return null;
+  }
+
+  const context = recallDetailContext(input);
+  // Opaque handles keep the producing session boundary in every recall scope.
+  if (
+    !context ||
+    detail.tenantId !== currentTenantId() ||
+    detail.projectId !== context.projectId ||
+    (input.scope !== undefined && detail.scope !== context.scope) ||
+    detail.sessionID !== context.sessionID
+  ) {
+    return null;
+  }
+
+  const prefix = detail.sourceId.slice(0, detail.sourceId.indexOf(":"));
+  const boundContext = {
+    ...context,
+    scope: detail.scope,
+    ...(detail.sessionID ? { sessionID: detail.sessionID } : {}),
+  };
+  return detailScopeAllowsPrefix(prefix, boundContext, input)
+    ? {
+        sourceId: detail.sourceId,
+        scope: detail.scope,
+        ...(detail.sessionID ? { sessionID: detail.sessionID } : {}),
+      }
+    : null;
+}
+
+function knowledgeDetailVisibility(
+  prefix: "k" | "xk",
+  projectId: string,
+): { sql: string; parameters: string[] } {
+  if (prefix === "xk") {
+    return {
+      sql: "project_id IS NOT NULL AND project_id <> ? AND cross_project = 0",
+      parameters: [projectId],
+    };
+  }
+  return {
+    sql: "(project_id = ? OR project_id IS NULL OR cross_project = 1)",
+    parameters: [projectId],
+  };
+}
+
+function entityDetailVisibility(
+  context: RecallDetailContext,
+  alias = "",
+): { sql: string; parameters: Array<string | number> } {
+  const column = (name: string) => (alias ? `${alias}.${name}` : name);
+  return {
+    sql: `(${column("project_id")} = ? OR ${column("project_id")} IS NULL OR ${column("cross_project")} = 1 OR (? = 1 AND ${column("entity_type")} = 'repo'))`,
+    parameters: [context.projectId, context.scope === "all" ? 1 : 0],
+  };
+}
 
 function normalizeDetailOptions(input: RecallDetailOptions): {
   offset: number;
@@ -1980,11 +2023,14 @@ function normalizeDetailOptions(input: RecallDetailOptions): {
 
 function sourceCoverage(
   id: string,
+  input: RecallDetailOptions,
 ): Omit<RecallCoverage, "offset" | "length" | "complete"> | null {
   const colon = id.indexOf(":");
   if (colon < 1) return null;
   const prefix = id.slice(0, colon);
   const rawId = id.slice(colon + 1);
+  const context = recallDetailContext(input);
+  if (!context || !detailScopeAllowsPrefix(prefix, context, input)) return null;
   const fingerprint = (value: string) =>
     createHash("sha256").update(value).digest("hex");
   switch (prefix) {
@@ -1993,14 +2039,23 @@ function sourceCoverage(
       // Coverage lookup must stay cheap: resolve a historical version to its
       // logical ID, then read only identity/revision metadata. Hydrating the
       // content happens once later, in the detail renderer.
-      const logicalId = ltm.logicalIdOf(rawId);
+      const visibility = knowledgeDetailVisibility(prefix, context.projectId);
+      const version = db()
+        .query(
+          `SELECT logical_id FROM knowledge
+            WHERE tenant_id = ? AND id = ? AND ${visibility.sql}`,
+        )
+        .get(currentTenantId(), rawId, ...visibility.parameters) as {
+        logical_id: string;
+      } | null;
+      const logicalId = version?.logical_id ?? rawId;
       const entry = db()
         .query(
           `SELECT id, logical_id, updated_at
              FROM knowledge_current
-            WHERE tenant_id = ? AND logical_id = ?`,
+            WHERE tenant_id = ? AND logical_id = ? AND ${visibility.sql}`,
         )
-        .get(currentTenantId(), logicalId) as {
+        .get(currentTenantId(), logicalId, ...visibility.parameters) as {
         id: string;
         logical_id: string;
         updated_at: number;
@@ -2012,13 +2067,21 @@ function sourceCoverage(
       };
     }
     case "d": {
+      const sessionID = context.scope === "session" ? context.sessionID : null;
       const row = db()
         .query(
           `SELECT d.id, d.created_at
              FROM distillations d JOIN projects p ON p.id = d.project_id
-            WHERE p.tenant_id = ? AND d.id = ?`,
+            WHERE p.tenant_id = ? AND d.project_id = ? AND d.id = ?
+              AND (? IS NULL OR d.session_id = ?)`,
         )
-        .get(currentTenantId(), rawId) as {
+        .get(
+          currentTenantId(),
+          context.projectId,
+          rawId,
+          sessionID,
+          sessionID,
+        ) as {
         id: string;
         created_at: number;
       } | null;
@@ -2030,13 +2093,21 @@ function sourceCoverage(
         : null;
     }
     case "t": {
+      const sessionID = context.scope === "session" ? context.sessionID : null;
       const row = db()
         .query(
           `SELECT t.id, t.created_at
              FROM temporal_messages t JOIN projects p ON p.id = t.project_id
-            WHERE p.tenant_id = ? AND t.id = ?`,
+            WHERE p.tenant_id = ? AND t.project_id = ? AND t.id = ?
+              AND (? IS NULL OR t.session_id = ?)`,
         )
-        .get(currentTenantId(), rawId) as {
+        .get(
+          currentTenantId(),
+          context.projectId,
+          rawId,
+          sessionID,
+          sessionID,
+        ) as {
         id: string;
         created_at: number;
       } | null;
@@ -2052,9 +2123,9 @@ function sourceCoverage(
         .query(
           `SELECT l.id, l.content_hash
              FROM lat_sections l JOIN projects p ON p.id = l.project_id
-            WHERE p.tenant_id = ? AND l.id = ?`,
+            WHERE p.tenant_id = ? AND l.project_id = ? AND l.id = ?`,
         )
-        .get(currentTenantId(), rawId) as {
+        .get(currentTenantId(), context.projectId, rawId) as {
         id: string;
         content_hash: string;
       } | null;
@@ -2063,11 +2134,13 @@ function sourceCoverage(
         : null;
     }
     case "e": {
+      const visibility = entityDetailVisibility(context);
       const entity = db()
         .query(
-          "SELECT e.id, e.updated_at FROM entities e WHERE e.tenant_id = ? AND e.id = ?",
+          `SELECT e.id, e.updated_at FROM entities e
+            WHERE e.tenant_id = ? AND e.id = ? AND ${visibility.sql}`,
         )
-        .get(currentTenantId(), rawId) as {
+        .get(currentTenantId(), rawId, ...visibility.parameters) as {
         id: string;
         updated_at: number;
       } | null;
@@ -2084,7 +2157,6 @@ function sourceCoverage(
 }
 
 function detailPage(
-  id: string,
   coverage: Omit<RecallCoverage, "offset" | "length" | "complete">,
   header: string,
   content: string,
@@ -2102,7 +2174,7 @@ function detailPage(
   const complete = end >= totalLength;
   const suffix = complete
     ? ""
-    : `\n\n[Detail truncated after characters ${start}-${end} of ${totalLength}. Call recall again with id \`${id}\` and detailOffset ${end}.]`;
+    : `\n\n[Detail truncated after characters ${start}-${end} of ${totalLength}. Call recall again with the same id and detailOffset ${end}.]`;
   return {
     result: `${header}\n\n${inline(content)}${afterContent}${suffix}`,
     coverage: [
@@ -2127,12 +2199,25 @@ export function recallByIdWithMetadata(
   input: RecallDetailOptions = {},
 ): RecallRun {
   const { offset, limit } = normalizeDetailOptions(input);
-  if (!isValidRecallId(id)) {
+  if (!isValidRecallId(id) && !isRecallDetailRef(id)) {
     return { result: "Invalid recall id.", coverage: [] };
   }
-  const coverage = sourceCoverage(id);
-  if (!coverage)
-    return { result: `No entry found for id: ${id}`, coverage: [] };
+  if (id.startsWith("r:")) {
+    const detailRef = resolveRecallDetailRef(id, input);
+    if (!detailRef)
+      return { result: "No matching recall detail.", coverage: [] };
+    // The opaque reference is only a scope-bound lookup handle; resolve it
+    // privately, then run the same source visibility checks as a direct ID.
+    return recallByIdWithMetadata(detailRef.sourceId, {
+      ...input,
+      scope: input.scope ?? detailRef.scope,
+      sessionID: input.sessionID ?? detailRef.sessionID,
+    });
+  }
+  const context = recallDetailContext(input);
+  if (!context) return { result: "No matching recall detail.", coverage: [] };
+  const coverage = sourceCoverage(id, input);
+  if (!coverage) return { result: "No matching recall detail.", coverage: [] };
 
   const colon = id.indexOf(":");
   const prefix = id.slice(0, colon);
@@ -2140,22 +2225,37 @@ export function recallByIdWithMetadata(
   switch (prefix) {
     case "k":
     case "xk": {
-      const logicalId = ltm.logicalIdOf(rawId);
+      const visibility = knowledgeDetailVisibility(prefix, context.projectId);
+      const version = db()
+        .query(
+          `SELECT logical_id FROM knowledge
+            WHERE tenant_id = ? AND id = ? AND ${visibility.sql}`,
+        )
+        .get(currentTenantId(), rawId, ...visibility.parameters) as {
+        logical_id: string;
+      } | null;
+      const logicalId = version?.logical_id ?? rawId;
       const row = db()
         .query(
           `SELECT substr(title, 1, 256) AS title, category,
                   length(content) AS content_length,
                   substr(content, ? + 1, ?) AS content_page
              FROM knowledge_current
-            WHERE tenant_id = ? AND logical_id = ?`,
+            WHERE tenant_id = ? AND logical_id = ? AND ${visibility.sql}`,
         )
-        .get(offset, limit, currentTenantId(), logicalId) as {
+        .get(
+          offset,
+          limit,
+          currentTenantId(),
+          logicalId,
+          ...visibility.parameters,
+        ) as {
         title: string;
         category: string;
         content_length: number;
         content_page: string;
       } | null;
-      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      if (!row) return { result: "No matching recall detail.", coverage: [] };
       // Detail pages must retain the same code-navigation metadata as search
       // previews. Both helpers are bounded batch lookups (at most three of
       // each) and do not hydrate the entry body.
@@ -2166,9 +2266,8 @@ export function recallByIdWithMetadata(
         ltm.knowledgeFileRefsBatch([logicalId]).get(logicalId),
       );
       return detailPage(
-        id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### Knowledge\n- **${inline(row.title)}** (${row.category}):`,
+        `## Recall Detail\n\n#### Knowledge\n- **${inline(row.title)}** (${row.category}):`,
         row.content_page,
         row.content_length,
         offset,
@@ -2176,48 +2275,66 @@ export function recallByIdWithMetadata(
       );
     }
     case "d": {
+      const sessionID = context.scope === "session" ? context.sessionID : null;
       const row = db()
         .query(
           `SELECT length(d.observations) AS content_length,
                   substr(d.observations, ? + 1, ?) AS content_page
              FROM distillations d JOIN projects p ON p.id = d.project_id
-            WHERE p.tenant_id = ? AND d.id = ?`,
+            WHERE p.tenant_id = ? AND d.project_id = ? AND d.id = ?
+              AND (? IS NULL OR d.session_id = ?)`,
         )
-        .get(offset, limit, currentTenantId(), rawId) as {
+        .get(
+          offset,
+          limit,
+          currentTenantId(),
+          context.projectId,
+          rawId,
+          sessionID,
+          sessionID,
+        ) as {
         content_length: number;
         content_page: string;
       } | null;
-      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      if (!row) return { result: "No matching recall detail.", coverage: [] };
       return detailPage(
-        id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### Distilled`,
+        "## Recall Detail\n\n#### Distilled",
         row.content_page,
         row.content_length,
         offset,
       );
     }
     case "t": {
+      const sessionID = context.scope === "session" ? context.sessionID : null;
       const row = db()
         .query(
           `SELECT t.role, substr(t.session_id, 1, 8) AS session_id,
                   t.created_at, length(t.content) AS content_length,
                   substr(t.content, ? + 1, ?) AS content_page
              FROM temporal_messages t JOIN projects p ON p.id = t.project_id
-            WHERE p.tenant_id = ? AND t.id = ?`,
+            WHERE p.tenant_id = ? AND t.project_id = ? AND t.id = ?
+              AND (? IS NULL OR t.session_id = ?)`,
         )
-        .get(offset, limit, currentTenantId(), rawId) as {
+        .get(
+          offset,
+          limit,
+          currentTenantId(),
+          context.projectId,
+          rawId,
+          sessionID,
+          sessionID,
+        ) as {
         role: string;
         session_id: string;
         created_at: number;
         content_length: number;
         content_page: string;
       } | null;
-      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      if (!row) return { result: "No matching recall detail.", coverage: [] };
       return detailPage(
-        id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### Conversation\n(${row.role}, ${relativeAge(row.created_at)}, session: ${row.session_id})`,
+        `## Recall Detail\n\n#### Conversation\n(${row.role}, ${relativeAge(row.created_at)})`,
         row.content_page,
         row.content_length,
         offset,
@@ -2231,31 +2348,31 @@ export function recallByIdWithMetadata(
                   length(l.content) AS content_length,
                   substr(l.content, ? + 1, ?) AS content_page
              FROM lat_sections l JOIN projects p ON p.id = l.project_id
-            WHERE p.tenant_id = ? AND l.id = ?`,
+            WHERE p.tenant_id = ? AND l.project_id = ? AND l.id = ?`,
         )
-        .get(offset, limit, currentTenantId(), rawId) as {
+        .get(offset, limit, currentTenantId(), context.projectId, rawId) as {
         file: string;
         heading: string;
         content_length: number;
         content_page: string;
       } | null;
-      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      if (!row) return { result: "No matching recall detail.", coverage: [] };
       return detailPage(
-        id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### Reference\n**${inline(row.file)} § ${inline(row.heading)}**`,
+        `## Recall Detail\n\n#### Reference\n**${inline(row.file)} § ${inline(row.heading)}**`,
         row.content_page,
         row.content_length,
         offset,
       );
     }
     case "e": {
+      const visibility = entityDetailVisibility(context);
       const row = db()
         .query(
           `SELECT entity_type, substr(canonical_name, 1, ?) AS canonical_name,
                   length(COALESCE(metadata, '')) AS content_length,
                   substr(COALESCE(metadata, ''), ? + 1, ?) AS content_page
-             FROM entities WHERE tenant_id = ? AND id = ?`,
+             FROM entities WHERE tenant_id = ? AND id = ? AND ${visibility.sql}`,
         )
         .get(
           MAX_RECALL_ENTITY_LABEL_CHARS,
@@ -2263,13 +2380,14 @@ export function recallByIdWithMetadata(
           limit,
           currentTenantId(),
           rawId,
+          ...visibility.parameters,
         ) as {
         entity_type: string;
         canonical_name: string;
         content_length: number;
         content_page: string;
       } | null;
-      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      if (!row) return { result: "No matching recall detail.", coverage: [] };
       // Preserve the useful parts of legacy entity drill-down without calling
       // the unbounded entity hydrators: aliases and relations are independently
       // capped and all untrusted display fields are clipped in SQLite.
@@ -2293,6 +2411,8 @@ export function recallByIdWithMetadata(
           (alias) => `${inline(alias.alias_type)}:${inline(alias.alias_value)}`,
         )
         .join(", ");
+      const relationEntityAVisibility = entityDetailVisibility(context, "ea");
+      const relationEntityBVisibility = entityDetailVisibility(context, "eb");
       const relations = db()
         .query(
           `SELECT r.relation,
@@ -2302,6 +2422,8 @@ export function recallByIdWithMetadata(
              JOIN entities eb ON eb.id = r.entity_b
             WHERE ea.tenant_id = ? AND eb.tenant_id = ?
               AND (r.entity_a = ? OR r.entity_b = ?)
+              AND ${relationEntityAVisibility.sql}
+              AND ${relationEntityBVisibility.sql}
             ORDER BY r.relation, other_name LIMIT ?`,
         )
         .all(
@@ -2311,6 +2433,8 @@ export function recallByIdWithMetadata(
           currentTenantId(),
           rawId,
           rawId,
+          ...relationEntityAVisibility.parameters,
+          ...relationEntityBVisibility.parameters,
           MAX_RECALL_ENTITY_RELATIONS,
         ) as Array<{ relation: string; other_name: string }>;
       const relationInfo = relations.length
@@ -2322,9 +2446,8 @@ export function recallByIdWithMetadata(
             .join(", ")}`
         : "";
       return detailPage(
-        id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### People & Entities\n**${inline(row.canonical_name)}** (${row.entity_type})${aliasInfo ? ` (aliases: ${aliasInfo})` : ""}`,
+        `## Recall Detail\n\n#### People & Entities\n**${inline(row.canonical_name)}** (${row.entity_type})${aliasInfo ? ` (aliases: ${aliasInfo})` : ""}`,
         row.content_page,
         row.content_length,
         offset,
@@ -2333,7 +2456,7 @@ export function recallByIdWithMetadata(
     }
     default:
       return {
-        result: `Unknown source prefix "${prefix}" in id: ${id}`,
+        result: "No matching recall detail.",
         coverage: [],
       };
   }
@@ -2352,12 +2475,17 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
 export async function runRecallWithMetadata(
   input: RecallInput,
 ): Promise<RecallRun> {
+  validateRecallScope(input);
   input.signal?.throwIfAborted();
   assertValidRecallQuery(input.query);
   if (input.id && input.ids) {
     throw new Error("Recall id and ids cannot be used together");
   }
-  if (input.id !== undefined && !isValidRecallId(input.id)) {
+  if (
+    input.id !== undefined &&
+    !isValidRecallId(input.id) &&
+    !isRecallDetailRef(input.id)
+  ) {
     throw new Error(
       `Recall id must be a non-empty string no longer than ${MAX_RECALL_ID_CHARS} characters`,
     );
@@ -2378,48 +2506,90 @@ export async function runRecallWithMetadata(
     const seenSources = new Set<string>();
     const coverage: RecallCoverage[] = [];
     const sections: string[] = [];
-    let remaining = MAX_RECALL_BATCH_CHARS;
+    const header = "## Recall Details";
+    const omissionNotice =
+      "Some requested details were omitted by the batch output limit; fetch them separately.";
+    const omissionReserve = 2 + codePointLength(omissionNotice);
+    let outputLength = codePointLength(header);
+    let omitted = false;
     for (const requestedId of input.ids) {
       input.signal?.throwIfAborted();
-      if (typeof requestedId !== "string" || !isValidRecallId(requestedId)) {
+      if (
+        typeof requestedId !== "string" ||
+        (!isValidRecallId(requestedId) && !isRecallDetailRef(requestedId))
+      ) {
         throw new Error(
           `Recall ids must contain non-empty strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
         );
       }
       if (seenRequests.has(requestedId)) continue;
       seenRequests.add(requestedId);
-      if (remaining <= 0) {
-        sections.push(
-          `### Detail: ${requestedId}\nOutcome: omitted — batch output limit reached; fetch this ID separately.`,
-        );
+      if (outputLength + 2 + omissionReserve >= MAX_RECALL_BATCH_CHARS) {
+        omitted = true;
         continue;
       }
       // Resolve aliases before reading/rendering content, so k:<version> and
       // k:<logical-id> do not hydrate the same source twice in one batch.
-      const canonical = sourceCoverage(requestedId);
+      const canonical = sourceCoverage(requestedId, input);
       if (canonical && seenSources.has(canonical.identity)) continue;
-      const detail = recallByIdWithMetadata(requestedId, {
-        detailLimit: Math.min(DEFAULT_RECALL_DETAIL_CHARS, remaining),
-      });
-      const source = detail.coverage[0];
+      const sectionNumber = sections.length + 1;
+      const render = (detailLimit: number) => {
+        const detail = recallByIdWithMetadata(requestedId, {
+          ...input,
+          detailLimit,
+        });
+        const source = detail.coverage[0];
+        const outcome = source
+          ? source.complete
+            ? "delivered"
+            : "partial — fetch the reported remaining range"
+          : "unavailable";
+        const section = `### Detail ${sectionNumber}\nOutcome: ${outcome}\n\n${detail.result}`;
+        return { source, section };
+      };
+      let detailLimit = Math.min(
+        DEFAULT_RECALL_DETAIL_CHARS,
+        MAX_RECALL_BATCH_CHARS - outputLength - 2 - omissionReserve,
+      );
+      let rendered = render(detailLimit);
+      const fits = (section: string) =>
+        outputLength + 2 + codePointLength(section) + omissionReserve <=
+        MAX_RECALL_BATCH_CHARS;
+      if (!fits(rendered.section)) {
+        // Measure the rendered page, not just its source-content limit: the
+        // detail header and continuation note also consume response budget.
+        let low = 1;
+        let high = detailLimit - 1;
+        let best: typeof rendered | undefined;
+        while (low <= high) {
+          const candidateLimit = Math.floor((low + high) / 2);
+          const candidate = render(candidateLimit);
+          if (fits(candidate.section)) {
+            best = candidate;
+            low = candidateLimit + 1;
+          } else {
+            high = candidateLimit - 1;
+          }
+        }
+        if (best) rendered = best;
+      }
+      if (!fits(rendered.section)) {
+        omitted = true;
+        continue;
+      }
+      const { source } = rendered;
       if (source && seenSources.has(source.identity)) continue;
       if (source) {
         seenSources.add(source.identity);
         coverage.push(source);
       }
-      const outcome = source
-        ? source.complete
-          ? "delivered"
-          : "partial — fetch the reported remaining range"
-        : "unavailable";
-      sections.push(
-        `### Detail: ${requestedId}\nOutcome: ${outcome}\n\n${detail.result}`,
-      );
-      remaining -= Math.min(remaining, codePointLength(detail.result));
+      sections.push(rendered.section);
+      outputLength += 2 + codePointLength(rendered.section);
     }
     input.signal?.throwIfAborted();
+    const result = [header, ...sections].join("\n\n");
     return {
-      result: ["## Recall Details", ...sections].join("\n\n"),
+      result: omitted ? `${result}\n\n${omissionNotice}` : result,
       coverage,
     };
   }
@@ -2486,6 +2656,12 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
     absoluteFloor:
       recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
     alreadyInLtmIds: input.alreadyInLtmIds,
+    ...(input.detailRefs
+      ? {
+          createDetailRef: (tagged: TaggedResult) =>
+            createRecallDetailRef(tagged, input),
+        }
+      : {}),
   });
   let out = formatted.result;
 
@@ -2513,7 +2689,7 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
   "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, the people/services/tools the user works with, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. When the user refers to a project, repository, person, service, or tool by name — especially one not already visible in your context — call recall to resolve it before searching the filesystem or assuming you must explore. Searches long-term knowledge, known entities (people, orgs, services, tools — with their aliases and relationships), distilled history, and raw message archives. When your context has been compressed, the distilled summaries are lossy — specific details (exact error messages, rejected alternatives, file paths, numerical values) are likely omitted, so use recall to verify any specific claim before answering questions about what happened, what was considered, or what the exact values were. IMPORTANT — for values that live in the repository (current code, config, styles, exact line contents): memory is a POINTER, not the source of truth. A remembered value can be stale once the file changes, so use recall to find WHERE something is (the file path / file:line / symbol), then READ that file for the current value — or use git history for what it used to be. Do not answer a current-code question from memory alone when you can read the file." +
-  '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass one ID to `id`, or several already-known IDs to the bounded `ids` list, to retrieve details. `id` and `ids` are mutually exclusive and ignore `query`. Detail output is bounded: when a result reports a remaining offset, call `id` again with `detailOffset` to retrieve the next range. Distillations marked "lossy" have lost specific details — use IDs to drill down.' +
+  '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers and tool result placeholders. A truncated search result includes an opaque `r:` detail ref; pass it as `id` to inspect that result without exposing its source ID. Source IDs already visible in your context can also be passed to `id`, or several can be batched with `ids`. `id` and `ids` are mutually exclusive and ignore `query`. Detail output is bounded: when a result reports a remaining offset, call `id` again with `detailOffset` to retrieve the next range. Distillations marked "lossy" have lost specific details — use IDs to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
 /** Standard parameter descriptions reused by each host adapter. */
@@ -2522,7 +2698,7 @@ export const RECALL_PARAM_DESCRIPTIONS = {
     "What to search for — be specific. Include keywords, file names, or concepts.",
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
-  id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123', 'e:abc123' for an entity). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",
+  id: "Fetch full content using a source-prefixed ID already visible in context or the opaque r: detail ref printed beside a truncated result. A detail ref only works in the project and session that produced it, and expires after 30 minutes or process restart. When id is provided, query is ignored.",
   ids: "Fetch details for up to 8 already-known source IDs in their listed order. Duplicate/alias sources are returned once. Mutually exclusive with id; query is ignored.",
   detailOffset:
     "For a single id detail only: the character offset reported by a truncated prior result. Starts at 0.",

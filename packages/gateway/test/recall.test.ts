@@ -73,6 +73,7 @@ import type {
   GatewayContentBlock,
   GatewayResponse,
   GatewayRequest,
+  GatewayTool,
   GatewayToolUseBlock,
   RecallStore,
   StoredRecall,
@@ -522,6 +523,25 @@ describe("hasGatewayRecallTool", () => {
     ).toBe(false);
     expect(hasGatewayRecallTool([RECALL_GATEWAY_TOOL])).toBe(true);
   });
+
+  test("keeps the configured reminder variant owned without trusting client flags", () => {
+    const decoratedTool = {
+      ...RECALL_GATEWAY_TOOL,
+      description: `${RECALL_GATEWAY_TOOL.description}\n\n${LORE_COMMIT_REMINDER}`,
+    };
+    expect(hasGatewayRecallTool([decoratedTool])).toBe(true);
+
+    const clientTool: GatewayTool = {
+      name: decoratedTool.name,
+      description: decoratedTool.description,
+      inputSchema: decoratedTool.inputSchema,
+      gatewayOwned: true,
+    };
+    const [markedClientTool] = markNativeRecallTool([clientTool]);
+
+    expect(markedClientTool.gatewayOwned).toBe(false);
+    expect(hasGatewayRecallTool([markedClientTool])).toBe(false);
+  });
 });
 
 describe("shared recall tool contract", () => {
@@ -532,19 +552,77 @@ describe("shared recall tool contract", () => {
 });
 
 describe("markNativeRecallTool", () => {
-  test("marks the exact shared host definition as gateway-owned", () => {
-    const nativeTool = { ...RECALL_GATEWAY_TOOL, gatewayOwned: false };
+  test("does not trust an exact caller-supplied copy of the shared contract", () => {
+    const nativeTool = JSON.parse(
+      JSON.stringify(RECALL_GATEWAY_TOOL),
+    ) as GatewayTool;
+    delete nativeTool.gatewayOwned;
     const marked = markNativeRecallTool([nativeTool]);
 
-    expect(marked[0].gatewayOwned).toBe(true);
-    expect(hasGatewayRecallTool(marked)).toBe(true);
-    expect(nativeTool.gatewayOwned).toBe(false);
+    expect(marked[0]).toBe(nativeTool);
+    expect(marked[0].gatewayOwned).toBeUndefined();
+    expect(hasGatewayRecallTool(marked)).toBe(false);
+  });
+
+  test("rejects a caller-supplied ownership flag on the exact shared contract", () => {
+    const nativeTool = JSON.parse(
+      JSON.stringify(RECALL_GATEWAY_TOOL),
+    ) as GatewayTool;
+    nativeTool.gatewayOwned = true;
+
+    const marked = markNativeRecallTool([nativeTool]);
+
+    expect(marked[0].gatewayOwned).toBe(false);
+    expect(hasGatewayRecallTool(marked)).toBe(false);
+  });
+
+  test("does not trust a caller copy when a host omits root anyOf", () => {
+    const { anyOf: _anyOf, ...hostSchema } = RECALL_TOOL_INPUT_SCHEMA;
+    const nativeTool = {
+      ...JSON.parse(JSON.stringify(RECALL_GATEWAY_TOOL)),
+      gatewayOwned: false,
+      inputSchema: hostSchema,
+    };
+
+    expect(markNativeRecallTool([nativeTool])[0].gatewayOwned).toBe(false);
+    expect(hasGatewayRecallTool(markNativeRecallTool([nativeTool]))).toBe(
+      false,
+    );
+  });
+
+  test.each([
+    [
+      "a broadened parameter contract",
+      {
+        inputSchema: {
+          ...RECALL_TOOL_INPUT_SCHEMA,
+          additionalProperties: true,
+        },
+      },
+    ],
+    ["strict Responses validation", { strict: true }],
+    [
+      "a provider-owned built-in",
+      { responsesBuiltin: "web_search_preview" as const },
+    ],
+  ])("does not claim %s", (_label, changes) => {
+    const nativeTool = {
+      ...RECALL_GATEWAY_TOOL,
+      ...changes,
+      gatewayOwned: false,
+    };
+
+    const marked = markNativeRecallTool([nativeTool]);
+
+    expect(marked[0].gatewayOwned).toBe(false);
+    expect(hasGatewayRecallTool(marked)).toBe(false);
   });
 
   test("preserves a client-owned tool with the same name but another definition", () => {
-    const clientTool = {
-      ...RECALL_GATEWAY_TOOL,
+    const clientTool: GatewayTool = {
+      name: RECALL_GATEWAY_TOOL.name,
       description: "Client-owned recall tool",
+      inputSchema: {},
       gatewayOwned: false,
     };
 
@@ -557,6 +635,16 @@ describe("markNativeRecallTool", () => {
 });
 
 describe("shouldEnableRecallMarkerReplay", () => {
+  test("does not treat an exact caller tool contract as gateway-owned", () => {
+    const callerTool = JSON.parse(
+      JSON.stringify(RECALL_GATEWAY_TOOL),
+    ) as GatewayTool;
+    delete callerTool.gatewayOwned;
+    const tools = markNativeRecallTool([callerTool]);
+
+    expect(shouldEnableRecallMarkerReplay(tools)).toBe(false);
+  });
+
   test("replays persisted markers when the next turn has no tools", () => {
     const store: RecallStore = new Map([
       [recallStoreKey("test query", "all"), makeStoredRecall()],

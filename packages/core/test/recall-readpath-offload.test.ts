@@ -610,22 +610,31 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
 
   test("checks cancellation again after synchronous ID detail retrieval", async () => {
     const controller = new AbortController();
-    const logicalIdSpy = vi.spyOn(ltm, "logicalIdOf").mockImplementation(() => {
-      controller.abort(new DOMException("client disconnected", "AbortError"));
-      return "missing";
+    const id = ltm.create({
+      projectPath: PROJ,
+      scope: "project",
+      category: "gotcha",
+      title: "Recall detail cancellation",
+      content: "The detail read completes before cancellation is checked.",
     });
+    const anchorSpy = vi
+      .spyOn(ltm, "knowledgeRefAnchors")
+      .mockImplementation(() => {
+        controller.abort(new DOMException("client disconnected", "AbortError"));
+        return new Map();
+      });
     try {
       await expect(
         runRecall({
           query: "",
-          id: "k:missing",
+          id: `k:${id}`,
           projectPath: PROJ,
           signal: controller.signal,
         }),
       ).rejects.toMatchObject({ name: "AbortError" });
-      expect(logicalIdSpy).toHaveBeenCalledWith("missing");
+      expect(anchorSpy).toHaveBeenCalledWith([id]);
     } finally {
-      logicalIdSpy.mockRestore();
+      anchorSpy.mockRestore();
     }
   });
 

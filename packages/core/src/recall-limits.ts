@@ -1,6 +1,13 @@
 export const MAX_RECALL_QUERY_CHARS = 512;
 export const MAX_RECALL_ID_CHARS = 256;
 
+export function isRecallDetailRef(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    /^r:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)
+  );
+}
+
 export function isValidRecallId(id: unknown): id is string {
   if (
     typeof id !== "string" ||

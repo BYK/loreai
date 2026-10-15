@@ -165,9 +165,15 @@ describe("durable remote tenant storage isolation", () => {
       expect(ltm.get(projectKnowledgeId)).toBeNull();
       expect(ltm.get(globalKnowledgeId)).toBeNull();
       expect(entities.get(entityId)).toBeNull();
-      expect(recallById(`k:${projectKnowledgeId}`)).toContain("No entry found");
-      expect(recallById(`e:${entityId}`)).toContain("No entry found");
-      expect(recallById(`t:${temporalId}`)).toContain("No entry found");
+      expect(
+        recallById(`k:${projectKnowledgeId}`, { projectPath: path }),
+      ).toContain("No matching recall detail");
+      expect(recallById(`e:${entityId}`, { projectPath: path })).toContain(
+        "No matching recall detail",
+      );
+      expect(recallById(`t:${temporalId}`, { projectPath: path })).toContain(
+        "No matching recall detail",
+      );
 
       const recall = await runRecall({
         query: secret,
@@ -210,7 +216,9 @@ describe("durable remote tenant storage isolation", () => {
         scope: "all",
       });
       expect(recall).toContain(secret);
-      expect(recallById(`t:${temporalId}`)).toContain(secret);
+      expect(recallById(`t:${temporalId}`, { projectPath: path })).toContain(
+        secret,
+      );
       expect(
         ltm.contradictionExists(projectKnowledgeId, globalKnowledgeId),
       ).toBe(true);

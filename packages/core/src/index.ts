@@ -109,6 +109,7 @@ export {
   MAX_RECALL_QUERY_CHARS,
   isValidRecallQuery,
   assertValidRecallQuery,
+  isRecallDetailRef,
   isValidRecallId,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_DETAIL_CHARS,

@@ -53,6 +53,7 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
 } from "@loreai/core";
@@ -10276,7 +10277,11 @@ export function streamResponsesRecallAware(
         `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
       );
     }
-    if (idValue !== undefined && !isValidRecallId(idValue)) {
+    if (
+      idValue !== undefined &&
+      !isValidRecallId(idValue) &&
+      !isRecallDetailRef(idValue)
+    ) {
       throw new InvalidRecallArguments("id_type", "id must be a string");
     }
     if (
@@ -10284,7 +10289,7 @@ export function streamResponsesRecallAware(
       (!Array.isArray(idsValue) ||
         idsValue.length === 0 ||
         idsValue.length > MAX_RECALL_BATCH_IDS ||
-        idsValue.some((id) => !isValidRecallId(id)))
+        idsValue.some((id) => !isValidRecallId(id) && !isRecallDetailRef(id)))
     ) {
       throw new InvalidRecallArguments(
         "ids_type",
@@ -21162,7 +21167,8 @@ async function handleConversationTurnPrepared(
   // persisted anchors. The gateway injects its own recall tool only when the
   // client has tools but no recall tool, so this decision is made before any
   // marker expansion mutates the request.
-  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(req.tools);
+  const replayTools = markNativeRecallTool(req.tools);
+  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(replayTools);
 
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
@@ -21177,9 +21183,7 @@ async function handleConversationTurnPrepared(
     gatewayRecallEnabled: gatewayRecallForRequest,
   });
   if (expanded) {
-    reportRecallDiagnostic(
-      `expanded recall markers for session ${sessionID.slice(0, 16)}`,
-    );
+    reportRecallDiagnostic("expanded recall markers");
   }
   if (recallStoreChanged) {
     saveSessionTracking(sessionID, {
