@@ -272,4 +272,64 @@ describe("automatic setup discovery", () => {
     expect(fs.lstatSync(configPath()).isDirectory()).toBe(true);
     expect(output.join("\n")).not.toContain("Codex configured");
   });
+
+  it
+    .skipIf(process.platform === "win32")
+    .each([
+      ['api_key = "secret-do-not-print\n'],
+      ['[model_providers.lore_http]\nenv_key = "secret-do-not-print"\n'],
+      ['profile = "custom"\n[profiles.custom]\nmodel_provider = "custom"\n'],
+      ["# end lore setup backup\n"],
+    ])(
+    "skips unconfigurable Codex content and configures another agent (%#)",
+    async (content) => {
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(configPath(), content);
+      writeFileSync(join(home, "claude"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      await setup();
+      const claude = JSON.parse(
+        readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+      );
+      expect(claude.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3299");
+      expect(readFileSync(configPath(), "utf8")).toBe(content);
+      const text = output.join("\n");
+      expect(text).toContain("Skipped Codex:");
+      expect(text).toContain("invalid or conflicting config");
+      expect(text).toContain("lore setup codex");
+      expect(text).not.toContain("secret-do-not-print");
+      expect(text).not.toContain("Codex configured");
+      expect(process.exitCode ?? 0).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each([
+    ["lstatSync", "EIO"],
+    ["openSync", "EACCES"],
+  ] as const)(
+    "reports %s config errors without leaking exception details",
+    async (operation, code) => {
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(configPath(), 'model = "untouched"\n');
+      const deniedConfig = configPath();
+      const actualFs =
+        await vi.importActual<typeof import("node:fs")>("node:fs");
+      vi.spyOn(fs, operation).mockImplementation((...args: unknown[]) => {
+        if (String(args[0]) === deniedConfig) {
+          throw Object.assign(new Error("secret-do-not-print"), { code });
+        }
+        return Reflect.apply(actualFs[operation], actualFs, args);
+      });
+      writeFileSync(join(home, "claude"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      await setup();
+      expect(output.join("\n")).toContain("Claude Code configured");
+      expect(output.join("\n")).toContain("Skipped Codex:");
+      expect(output.join("\n")).toContain(code);
+      expect(output.join("\n")).not.toContain("secret-do-not-print");
+      expect(process.exitCode ?? 0).toBe(0);
+    },
+  );
 });
