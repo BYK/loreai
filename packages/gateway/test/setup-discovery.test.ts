@@ -196,10 +196,80 @@ describe("automatic setup discovery", () => {
     },
   );
 
-  it("still rejects unsafe config evidence before configuring any app", async () => {
+  it
+    .skipIf(process.platform === "win32")
+    .each(["directory", "symlinked parent", "different owner"])(
+    "skips a Codex config with %s and configures another agent",
+    async (kind) => {
+      vi.mocked(os.platform).mockReturnValue("darwin");
+      // Desktop evidence must not reselect Codex after its config is rejected.
+      const appPath = join(home, "Applications", "Codex.app", "Contents");
+      mkdirSync(appPath, { recursive: true });
+      writeFileSync(join(appPath, "Info.plist"), "fixture");
+      if (kind === "directory") {
+        mkdirSync(configPath(), { recursive: true });
+      } else if (kind === "symlinked parent") {
+        const target = join(home, "managed-codex");
+        mkdirSync(target);
+        writeFileSync(join(target, "config.toml"), 'model = "untouched"\n');
+        symlinkSync(target, join(home, ".codex"));
+      } else {
+        mkdirSync(join(home, ".codex"));
+        writeFileSync(configPath(), 'model = "untouched"\n');
+        const unownedParent = join(home, ".codex");
+        const actualFs =
+          await vi.importActual<typeof import("node:fs")>("node:fs");
+        vi.spyOn(fs, "lstatSync").mockImplementation((...args) => {
+          const stat = Reflect.apply(actualFs.lstatSync, actualFs, args);
+          if (stat && String(args[0]) === unownedParent) {
+            return Object.assign(stat, {
+              uid: typeof stat.uid === "bigint" ? stat.uid + 1n : stat.uid + 1,
+            });
+          }
+          return stat;
+        });
+      }
+      writeFileSync(join(home, "claude"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o755,
+      });
+      await setup();
+      const claude = JSON.parse(
+        readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+      );
+      expect(claude.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3299");
+      const text = output.join("\n");
+      expect(text).toContain("Skipped Codex: could not safely inspect config");
+      expect(text).toContain(configPath());
+      expect(text).toContain("lore setup codex");
+      expect(text).not.toContain("Codex configured");
+      expect(text).not.toContain("Detected Codex");
+      expect(existsSync(`${configPath()}.lore-backup`)).toBe(false);
+      if (kind !== "directory") {
+        expect(readFileSync(configPath(), "utf8")).toBe(
+          'model = "untouched"\n',
+        );
+      }
+      expect(process.exitCode ?? 0).toBe(0);
+    },
+  );
+
+  it("reports an unsafe Codex config and fails when there are no viable targets", async () => {
     mkdirSync(configPath(), { recursive: true });
-    await expect(setup()).rejects.toThrow("expected a regular file");
-    expect(output.join("\n")).not.toContain("continuing discovery");
-    expect(existsSync(join(home, ".claude", "settings.json"))).toBe(false);
+    await setup();
+    expect(output.join("\n")).toContain(
+      "Skipped Codex: could not safely inspect config",
+    );
+    expect(output.join("\n")).toContain("No supported apps detected");
+    expect(process.exitCode).toBe(1);
+    expect(fs.lstatSync(configPath()).isDirectory()).toBe(true);
+  });
+
+  it("still rejects unsafe config paths for explicit Codex setup", async () => {
+    mkdirSync(configPath(), { recursive: true });
+    await expect(
+      commandSetup(["codex"], { port: 3299, noPlugin: true }),
+    ).rejects.toThrow("expected a regular file");
+    expect(fs.lstatSync(configPath()).isDirectory()).toBe(true);
+    expect(output.join("\n")).not.toContain("Codex configured");
   });
 });

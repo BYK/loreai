@@ -40,7 +40,7 @@ export function findCodexSetupEvidence(
         }
       } catch (error) {
         // Optional installation hints must not block other candidates or agents.
-        // Config trust failures above still propagate to the setup caller.
+        // Config trust failures propagate so the caller can skip this target.
         reportProbeError?.(path, error);
       }
     }

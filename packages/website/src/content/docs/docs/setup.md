@@ -36,7 +36,7 @@ lore setup codex -r http://remote:3207  # Configure Codex for a remote gateway
 
 If no app is given, `lore setup` scans `$PATH` for supported CLIs. It also recognizes an existing `~/.codex/config.toml` on any platform. On macOS, it checks `~/Applications` and `/Applications` for Codex Desktop or ChatGPT with bundled Codex support, so the desktop client can be configured without a CLI on `$PATH`.
 
-Setup prints each skipped app, its detection reason, and the explicit `lore setup <app>` command. Errors inspecting optional desktop app locations are reported while discovery continues; unsafe configuration files still stop setup. If nothing is detected, it exits with a non-zero status without changing configuration. An explicit app name proceeds even when the CLI is missing, allowing you to configure an app installed elsewhere or prepare its configuration before installation.
+Setup prints each skipped app, its detection reason, and the explicit `lore setup <app>` command. Errors inspecting optional desktop app locations are reported while discovery continues. If Codex has no CLI on `$PATH` and its config cannot be safely inspected, automatic discovery reports and skips Codex so other detected agents can still be configured. Fix the rejected config path, permissions, or ownership before retrying `lore setup codex`; explicit setup and all configuration writes retain the same safety checks. If nothing is detected, setup exits with a non-zero status without changing configuration. An explicit app name proceeds even when the CLI is missing, allowing you to configure an app installed elsewhere or prepare its configuration before installation.
 
 ## Supported apps
 

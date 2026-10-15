@@ -3406,15 +3406,23 @@ async function commandSetupLocked(
   const setupTargets = SUPPORTED_APPS.filter((app) => {
     if (detected.some((d) => d.def.name === app.agentName)) return true;
     if (app.agentName === "codex") {
-      const evidence = findCodexSetupEvidence(
-        codexConfigPath(),
-        (path, error) => {
+      const configPath = codexConfigPath();
+      let evidence: ReturnType<typeof findCodexSetupEvidence>;
+      try {
+        evidence = findCodexSetupEvidence(configPath, (path, error) => {
           const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
           console.error(
             `[lore] Could not inspect Codex desktop app at ${path} (${code}); continuing discovery.`,
           );
-        },
-      );
+        });
+      } catch {
+        // A rejected optional target must not block healthy agents. Do not
+        // fall back to desktop evidence or bypass the trusted config writer.
+        console.error(
+          `[lore] Skipped Codex: could not safely inspect config at ${configPath}. Fix the config path, permissions, or ownership, then run \`lore setup codex\`.`,
+        );
+        return false;
+      }
       if (evidence) {
         console.log(
           `[lore] Detected Codex ${evidence.kind} at ${evidence.path}; configuring without a CLI on PATH.`,
