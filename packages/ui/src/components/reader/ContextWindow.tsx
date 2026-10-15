@@ -13,7 +13,7 @@ import { A } from "@solidjs/router";
 import { StateCard } from "~/components/lore/StateCard";
 import { Badge } from "~/components/ui/badge";
 import { isApiError } from "~/lib/api";
-import { formatWhen } from "~/lib/format";
+import { formatConfidence, formatWhen } from "~/lib/format";
 import type {
   SessionContext,
   SessionContextDelta,
@@ -29,6 +29,13 @@ const LAYER_LABEL = [
   "tool-output stripped",
   "emergency",
 ] as const;
+
+const VERSION_LABEL = {
+  current: "Current version",
+  superseded: "Earlier version",
+  unknown: "Version unknown",
+  unavailable: "Version unavailable",
+} as const;
 
 function layerLabel(layer: number): string {
   return `Layer ${layer} · ${LAYER_LABEL[layer] ?? "unknown"}`;
@@ -165,19 +172,39 @@ const InjectionsSection: Component<{
                     when={i.title !== null}
                     fallback={
                       <span class="text-muted">
-                        {i.logical_id} (entry removed)
+                        {i.logical_id} (
+                        {i.version_status === "unavailable"
+                          ? "version unavailable"
+                          : "version unknown"}
+                        )
                       </span>
                     }
                   >
-                    <A
-                      class="text-accent underline"
-                      href={props.knowledgeHref(i.logical_id)}
+                    <Show
+                      when={i.current_version_id !== null}
+                      fallback={<span>{i.title}</span>}
                     >
-                      {i.title}
-                    </A>
+                      <A
+                        class="text-accent underline"
+                        href={props.knowledgeHref(i.logical_id)}
+                        title="Open current memory"
+                      >
+                        {i.title}
+                      </A>
+                    </Show>
+                  </Show>
+                  <Show when={i.title !== null}>
+                    <Badge variant="outline">
+                      {VERSION_LABEL[i.version_status ?? "unknown"]}
+                    </Badge>
                   </Show>
                   <Show when={i.category}>
                     {(c) => <Badge variant="outline">{c()}</Badge>}
+                  </Show>
+                  <Show when={i.confidence !== null}>
+                    <span class="text-muted">
+                      Current confidence: {formatConfidence(i.confidence!)}
+                    </span>
                   </Show>
                   <Show when={i.credited}>
                     <Badge variant="teal">credited</Badge>
