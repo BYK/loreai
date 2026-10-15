@@ -858,7 +858,7 @@ export function finalizeResponsesAcc(
 
   for (const index of sortedIndices) {
     const raw = state.rawItems.get(index);
-    const native = raw ? nativeResponsesCall(raw) : null;
+    const native = raw ? nativeResponsesCall(raw, "response") : null;
     if (native) {
       content.push(native);
       continue;

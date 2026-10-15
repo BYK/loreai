@@ -19,6 +19,7 @@ export function isServerOwnedResponsesSearch(
 /** Native call envelopes stay attached to normalized tool parts during compression. */
 export function nativeResponsesCall(
   raw: Record<string, unknown>,
+  mode: "request" | "response" = "request",
 ): GatewayToolUseBlock | null {
   if (isServerOwnedResponsesSearch(raw)) return null;
   const custom = raw.type === "custom_tool_call";
@@ -46,7 +47,10 @@ export function nativeResponsesCall(
     try {
       normalizedInput = JSON.parse(args as string);
     } catch {
-      throw new InvalidCrossProviderRequestError();
+      if (mode === "request") throw new InvalidCrossProviderRequestError();
+      // A token-limited upstream response can end inside its JSON arguments.
+      // Keep the string for accounting and exact native fallback replay.
+      envelope.arguments = args;
     }
   }
   return {
@@ -79,7 +83,10 @@ export function responsesCallItem(
     ...envelope,
     call_id: block.id,
     name: block.name,
-    arguments: JSON.stringify(block.input),
+    arguments:
+      typeof envelope.arguments === "string"
+        ? envelope.arguments
+        : JSON.stringify(block.input),
   };
 }
 

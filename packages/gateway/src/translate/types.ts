@@ -50,7 +50,7 @@ export type GatewayToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
-  /** Native Responses call kind and namespace, excluding the mutable input. */
+  /** Native Responses envelope; partial JSON retains its original wire arguments. */
   responsesCall?: Record<string, unknown>;
   /**
    * Provider-native tool-call part retained for response egress when it carries

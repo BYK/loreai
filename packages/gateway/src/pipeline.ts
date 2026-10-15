@@ -16472,6 +16472,7 @@ export function accumulateResponsesNonStreamJSON(
         throw new Error("malformed Responses response item identity");
       }
       identities.add(itemId);
+      const native = nativeResponsesCall(item, "response");
       if (item.type === "message") {
         const msgContent = item.content as
           | Array<Record<string, unknown>>
@@ -16490,8 +16491,7 @@ export function accumulateResponsesNonStreamJSON(
             }
           }
         }
-      } else if (nativeResponsesCall(item)) {
-        const native = nativeResponsesCall(item)!;
+      } else if (native) {
         if (identities.has(native.id))
           throw new Error("malformed Responses response tool identity");
         identities.add(native.id);
