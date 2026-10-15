@@ -140,6 +140,11 @@ export const sessionContext = type({
     stable_tokens: "number | null",
     injections: type({
       logical_id: "string",
+      // Additive fields: older gateways omit provenance. Confidence remains
+      // the current logical entry's score, even for a superseded version.
+      "version_id?": "string | null",
+      "current_version_id?": "string | null",
+      "version_status?": "'current' | 'superseded' | 'unknown' | 'unavailable'",
       title: "string | null",
       category: "string | null",
       confidence: "number | null",
