@@ -85,7 +85,9 @@ export function filterTaskKnowledge<T extends Candidate>(
         );
       }
       default:
-        throw new Error("Invalid knowledge category in task filter");
+        // Markdown imports and the knowledge API accept free-form categories.
+        // This admission rule covers only the built-in cases above; keep others.
+        return true;
     }
   });
 }

@@ -9,6 +9,10 @@ import {
 import { runRecall } from "../src/recall";
 import { db, ensureProject } from "../src/db";
 import { uuidv7 } from "uuidv7";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { importLoreFile, LORE_FILE } from "../src/agents-file";
 
 const PROJECT = "/test/task-admission-filter";
 const originalFilter = config().knowledge.taskFilter;
@@ -27,6 +31,46 @@ function vectors(ids: readonly string[]) {
 }
 
 describe("task-filtered passive knowledge", () => {
+  it.each(["Security", "Operations", "Mixed Case"])(
+    "preserves imported %s facts alongside normal filtered selection",
+    async (heading) => {
+      const projectPath = mkdtempSync(join(tmpdir(), "lore-task-category-"));
+      try {
+        writeFileSync(
+          join(projectPath, LORE_FILE),
+          `## Long-term Knowledge\n\n### ${heading}\n\n<!-- lore:${uuidv7()} -->\n* **Audit boundary**: Keep auditors read access when rotating labels.\n`,
+        );
+        importLoreFile(projectPath);
+        const imported = ltm
+          .forProject(projectPath)
+          .find((entry) => entry.title === "Audit boundary")!;
+        expect(imported.category).toBe(heading.toLowerCase());
+        const omitted = ltm.create({
+          projectPath,
+          scope: "project",
+          category: "decision",
+          title: "Ledger topology",
+          content: "Ledger batches keep the original topology.",
+        });
+        vectors([imported.id, omitted]);
+        config().knowledge.taskFilter = true;
+        const selected = await ltm.forSession(
+          projectPath,
+          "custom-category",
+          800,
+          {
+            contextHint: "Repair ledger batching.",
+            includeContextSources: [],
+            deferEffects: true,
+          },
+        );
+        expect(selected.map((entry) => entry.id)).toEqual([imported.id]);
+      } finally {
+        rmSync(projectPath, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("enables the filter by default and leaves rejected facts available by full ID", async () => {
     const projectPath = `${PROJECT}/default`;
     expect(config().knowledge.taskFilter).toBe(true);

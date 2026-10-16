@@ -117,14 +117,24 @@ describe("checkpoint-time task admission", () => {
     expect(filterTaskKnowledge([fact], "", "unrelated cue")).toEqual([fact]);
   });
 
-  it("rejects an unexpected category", () => {
-    expect(() =>
-      filterTaskKnowledge(
-        [entry("unexpected", "Title", "Content")],
-        "Repair ledger batching.",
-      ),
-    ).toThrow("Invalid knowledge category");
-  });
+  it.each(["security", "operations", "mixed case"])(
+    "preserves the free-form category %s without disabling ordinary admission",
+    (category) => {
+      const custom = entry(
+        category,
+        "Audit boundary",
+        "Keep auditors read access.",
+      );
+      const omitted = entry(
+        "decision",
+        "Ledger topology",
+        "A compact description.",
+      );
+      expect(
+        filterTaskKnowledge([custom, omitted], "Repair ledger batching."),
+      ).toEqual([custom]);
+    },
+  );
 
   it("always returns an ordered subset without changing its input", () => {
     fc.assert(
@@ -137,6 +147,9 @@ describe("checkpoint-time task admission", () => {
               "decision",
               "pattern",
               "preference",
+              "security",
+              "operations",
+              "mixed case",
             ),
             title: fc.string(),
             content: fc.string(),

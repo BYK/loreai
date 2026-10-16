@@ -4369,13 +4369,18 @@ describe("Pipeline — streaming responses", () => {
         req.rawHeaders["x-lore-project"] = projectPath;
         return req;
       };
-      await (
-        await handleRequest(request("begin session"), loadLocalConfig())
-      ).text();
+      const firstResponse = await handleRequest(
+        request("begin session"),
+        loadLocalConfig(),
+      );
+      expect(firstResponse.status).toBe(200);
+      await firstResponse.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       const second = request("continue with the pinned read failure");
-      await (await handleRequest(second, loadLocalConfig())).text();
+      const secondResponse = await handleRequest(second, loadLocalConfig());
+      expect(secondResponse.status).toBe(200);
+      await secondResponse.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
