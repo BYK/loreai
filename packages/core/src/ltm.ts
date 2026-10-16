@@ -17,6 +17,7 @@ import {
   readStorageMode,
 } from "./db/vec-store";
 import { config } from "./config";
+import { filterTaskKnowledge } from "./knowledge-task-filter";
 import { recomputeEntityRank } from "./entities";
 import {
   ftsQuery,
@@ -3218,6 +3219,9 @@ export async function forSession(
   // cost. Emitted at each real-work return.
   const timer = new ReadPathTimer();
   const architectureInjection = config().knowledge.architectureInjection;
+  const taskFilter = config().knowledge.taskFilter;
+  if (typeof taskFilter !== "boolean")
+    throw new Error("Invalid knowledge task filter");
   if (
     architectureInjection !== "ranked" &&
     architectureInjection !== "reserved"
@@ -3382,6 +3386,7 @@ export async function forSession(
   // fall back to the last distillation if neither source has a task to score.
   const contextHint = options?.contextHint?.trim();
   let sessionContext = taskHintExcerpt(contextHint ?? "", 4_096);
+  const admissionTask = { text: contextHint ?? "" };
   if (!sessionContext && sessionID) {
     type TaskRow = {
       id: string;
@@ -3441,6 +3446,7 @@ export async function forSession(
       .map((text) => taskHintExcerpt(text, 2_048))
       .join("\n")
       .trim();
+    admissionTask.text = sessionContext;
     if (!sessionContext) {
       const distRow = db()
         .query(
@@ -3690,7 +3696,7 @@ export async function forSession(
   // The formatter receives the same budget. Shared packing costs ensure no
   // selected entry disappears before its injection effects are recorded.
   let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
-  const result: KnowledgeEntry[] = [];
+  const packed: KnowledgeEntry[] = [];
   const packedIds = new Set<string>();
 
   // Only the legacy reserved mode packs architecture first. Ranked mode lets
@@ -3706,7 +3712,7 @@ export async function forSession(
     if (used >= archBudget + KNOWLEDGE_HEADER_OVERHEAD_TOKENS) break;
     const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue; // hard cap: never exceed total budget
-    result.push(entry);
+    packed.push(entry);
     packedIds.add(entry.id);
     used += cost;
   }
@@ -3717,7 +3723,7 @@ export async function forSession(
     if (packedIds.has(entry.id)) continue;
     const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue;
-    result.push(entry);
+    packed.push(entry);
     used += cost;
   }
 
@@ -3742,7 +3748,7 @@ export async function forSession(
       });
       if (used + cost > maxTokens) continue;
       // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
-      result.push({
+      packed.push({
         id: section.id,
         logical_id: section.id, // synthetic lat.md entry: its own logical identity
         tenant_id: currentTenantId(),
@@ -3775,6 +3781,13 @@ export async function forSession(
     }
   }
 
+  // Filter after packing: rejected slots never refill, and the overflow sink
+  // must exclude the original packed set rather than resurface rejected facts.
+  // A distilled fallback is not an authoritative task for this second pass.
+  const result = taskFilter
+    ? filterTaskKnowledge(packed, admissionTask.text)
+    : packed;
+
   // --- 7. Record cross-project transfer metrics (issue #506) ---
   // An entry counts as a "transfer" when it was injected into a project that is
   // NOT its origin: cross_project=1 AND a non-null project_id != pid. Global
@@ -3794,13 +3807,19 @@ export async function forSession(
   // lat.md row, which has no recall id.
   if (options?.overflowSink) {
     options.signal?.throwIfAborted();
-    const selectedIds = new Set(result.map((e) => e.id));
-    for (const { entry } of allScored) {
-      // Recalled-context synthetics are not knowledge rows — keep the ToC
-      // (rendered as "other relevant knowledge") knowledge-only.
-      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
-      if (!selectedIds.has(entry.id)) options.overflowSink.push(entry);
-    }
+    const selectedIds = new Set(packed.map((e) => e.id));
+    const overflow = allScored
+      .map(({ entry }) => entry)
+      .filter(
+        (entry) =>
+          entry.category !== RECALLED_CONTEXT_CATEGORY &&
+          !selectedIds.has(entry.id),
+      );
+    options.overflowSink.push(
+      ...(taskFilter
+        ? filterTaskKnowledge(overflow, admissionTask.text)
+        : overflow),
+    );
   }
 
   timer.emit("forSession", projectEntries.length + crossEntries.length);

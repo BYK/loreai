@@ -21631,6 +21631,7 @@ async function handleConversationTurnPrepared(
           projectPath,
           cfg.knowledge.contextSources,
           taskSelection.identity,
+          cfg.knowledge.taskFilter,
         );
         let cached = ltmSessionCache.get(sessionID);
         const taskShift =
@@ -21737,6 +21738,7 @@ async function handleConversationTurnPrepared(
                       selectionRevision,
                       [...stickyIds].sort(),
                       cfg.knowledge.contextSources,
+                      cfg.knowledge.taskFilter,
                     ]),
                   )
                   .digest("hex")}`
@@ -22257,6 +22259,7 @@ async function handleConversationTurnPrepared(
         projectPath,
         cfg.knowledge.contextSources,
         taskSelection.identity,
+        cfg.knowledge.taskFilter,
       );
       // Step 6 may already have saved refreshRevision to the session cache.
       // Preserve its task-switch decision when Layer 4 replaces that turn's
@@ -24955,10 +24958,16 @@ function taskSelectionRevision(
   projectPath: string,
   contextSources: Parameters<typeof ltm.selectionRevision>[1],
   taskHint: string,
+  taskFilter: boolean,
 ): string {
-  const revision = ltm.selectionRevision(projectPath, contextSources);
+  // A policy toggle must refresh a cached selection and admit its newly
+  // eligible facts through a new delta. Existing prefix and replay bytes stay
+  // frozen, just as they do when the user changes the selected task.
+  const revision = `${ltm.selectionRevision(projectPath, contextSources)}:filter:${Number(taskFilter)}`;
   return taskHint
-    ? `${revision}:task:${createHash("sha256").update(taskHint).digest("hex")}`
+    ? `${revision}:task:${createHash("sha256")
+        .update(JSON.stringify([taskHint, taskFilter]))
+        .digest("hex")}`
     : revision;
 }
 

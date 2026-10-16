@@ -36,6 +36,8 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
   let spies: Array<{ mockRestore: () => void }> = [];
 
   beforeEach(() => {
+    // Isolate source folding and its shared budget from knowledge admission.
+    config().knowledge.taskFilter = false;
     pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);

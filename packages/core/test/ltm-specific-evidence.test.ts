@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { ltm, temporal } from "../src/index";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { config, ltm, temporal } from "../src/index";
 import type { KnowledgeEntry } from "../src/ltm";
 import * as prompt from "../src/prompt";
 import * as embedding from "../src/embedding";
@@ -8,6 +8,11 @@ import * as references from "../src/references";
 const PROJECT = "/test/specific-knowledge-evidence";
 
 afterEach(() => vi.restoreAllMocks());
+
+beforeEach(() => {
+  // Rank eligible evidence without applying the separate admission policy.
+  config().knowledge.taskFilter = false;
+});
 
 describe("specific task evidence in passive knowledge ranking", () => {
   it.each(["knowledge", "temporal"] as const)(

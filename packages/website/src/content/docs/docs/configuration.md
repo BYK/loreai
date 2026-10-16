@@ -144,6 +144,7 @@ Long-term knowledge (curator, entity injection) controls.
 | `contextSources` | array<enum> | `["distillation"]` |  | Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: ["distillation"]; add "temporal" for raw messages; [] = off. |
 | `minRelevance` | number | `0.35` | min 0, max 1 | Minimum cosine similarity for a vector-only knowledge match to be surfaced into a session. FTS keyword matches bypass it. 0 disables. Default: 0.35. |
 | `architectureInjection` | enum | `"ranked"` |  | Architecture in passive knowledge injection: "ranked" (default) competes by relevance with other entries; "reserved" restores the 20% first-pass allocation. Explicit category reads and recall remain available. |
+| `taskFilter` | boolean | `true` |  | Filter contextual knowledge with checkpoint-time task anchors after budget packing. Keeps preferences and explicit recall available. Set false to retain implicit semantic-only matches and contextual decisions/patterns. Default: true. |
 
 
 ## `curator`

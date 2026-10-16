@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { config } from "../src/config";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
@@ -10,6 +10,11 @@ import {
 
 const projectPath = "/test/ltm/architecture-injection";
 const originalMode = config().knowledge.architectureInjection;
+
+beforeEach(() => {
+  // Compare architecture allocation before the independent task filter.
+  config().knowledge.taskFilter = false;
+});
 
 afterEach(() => {
   config().knowledge.architectureInjection = originalMode;

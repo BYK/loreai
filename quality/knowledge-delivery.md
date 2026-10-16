@@ -54,14 +54,56 @@ Passive ranking first prefers exact file and symbol references named in the
 current task, then the existing confidence-weighted hybrid score and ID
 tiebreak. It uses the existing reference extractor; line numbers do not
 change file identity, and symbol names never prefix-match. Tasks without
-code references retain the existing ordering. This changes ranking, not
-candidate eligibility: FTS, vector, and project safety-net matches remain
-eligible, including implicit conventions without a named code target.
+code references retain the existing ordering. The reference pass changes
+ranking, not candidate eligibility: FTS, vector, and project safety-net
+matches enter the same candidate pool, including implicit conventions.
 
 The optional reference pass parses at most 4,096 UTF-16 code units per task or
 entry, 65,536 units in total, and 128 candidates. It bounds source text before
 concatenation. Exhaustion discards partial evidence and restores hybrid
 ordering for the whole eligible pool.
+
+## Default task filter
+
+`knowledge.taskFilter` defaults to `true`. After budget packing, the
+checkpoint-time lexical rule admits contextual knowledge as follows:
+
+- Gotchas need a distinctive task word in the title, two in the body, or
+  15–34 distinct non-stopwords in the body.
+- Architecture needs a distinctive task word in the title or two in the body.
+- Contextual decisions and patterns are omitted.
+
+Preferences, explicit recall, recalled conversation context, and `lat.md`
+remain available. Omission never deletes or changes a knowledge entry.
+Rejected slots never refill, and rejected packed entries never reappear
+as overflow hints. The frozen project catalog remains available for recall.
+
+The filter uses the current user task, not distilled fallback text or later
+work. It parses at most 4,096 UTF-16 units per title or body, 65,536 units
+in total, and 128 entries per pool. Long tasks use a head-and-tail excerpt
+within the same 4,096-unit bound. Missing tasks, unsupported non-ASCII task
+words, and work-limit exhaustion preserve the whole pool and its ordering.
+
+This rule can omit a needed implicit convention. The earlier offline replay
+retained 46 of 50 judged-needed entries and removed 80 of 232 judged-irrelevant
+selections. Those are selection counts, not delivery, completion, or cost
+results. The original labelled corpus is no longer available, so these are
+historical results for the exploratory rule, not a fresh retention result for
+this bounded implementation. Disable the filter to retain semantic-only
+matches and contextual decisions and patterns:
+
+```json
+{
+  "knowledge": {
+    "taskFilter": false
+  }
+}
+```
+
+Changing the setting recomputes a warm session's selection. Newly admitted
+facts use a new durable delta; the setting never rewrites the existing system
+prefix or replayed blocks. Filtering never retracts previously delivered text
+or suppresses updates to entries already surfaced in the session.
 
 ## Outcome evaluation
 
