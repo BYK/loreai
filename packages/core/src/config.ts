@@ -464,6 +464,12 @@ export const LoreConfig = z.object({
         .describe(
           'Architecture in passive knowledge injection: "ranked" (default) competes by relevance with other entries; "reserved" restores the 20% first-pass allocation. Explicit category reads and recall remain available.',
         ),
+      taskFilter: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Filter contextual knowledge with checkpoint-time task anchors after budget packing. Keeps preferences and explicit recall available. Set false to retain implicit semantic-only matches and contextual decisions/patterns. Default: true.",
+        ),
     })
     .default({
       enabled: true,
@@ -474,6 +480,7 @@ export const LoreConfig = z.object({
       contextSources: ["distillation"],
       minRelevance: 0.35,
       architectureInjection: "ranked",
+      taskFilter: true,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z
