@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importLoreFile, LORE_FILE } from "../src/agents-file";
+import { store } from "../src/temporal";
 
 const PROJECT = "/test/task-admission-filter";
 const originalFilter = config().knowledge.taskFilter;
@@ -31,6 +32,106 @@ function vectors(ids: readonly string[]) {
 }
 
 describe("task-filtered passive knowledge", () => {
+  it.each(
+    [
+      "ok",
+      "okay",
+      "yes",
+      "sure",
+      "thanks",
+      "thank you",
+      "go ahead",
+      "continue",
+      "same task",
+      "THANKS!",
+    ].flatMap((text) =>
+      ["hint", "stored user"].map((source) => ({ text, source })),
+    ),
+  )(
+    "preserves packed and overflow fallback for $source acknowledgment $text",
+    async ({ text, source }) => {
+      const projectPath = `${PROJECT}/ack/${uuidv7()}`;
+      const sessionID = uuidv7();
+      const ids = ["decision", "pattern", "gotcha", "architecture"].map(
+        (category) =>
+          ltm.create({
+            projectPath,
+            scope: "project",
+            category,
+            title: `Ledger ${category}`,
+            content: "Commit batches before clearing pending records.",
+          }),
+      );
+      if (source === "stored user") {
+        store({
+          projectPath,
+          info: {
+            id: uuidv7(),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+          },
+          parts: [{ type: "text", text }],
+        });
+      }
+      vectors(ids);
+      const entries = ids.map((id) => ltm.get(id)!);
+      const budget =
+        KNOWLEDGE_HEADER_OVERHEAD_TOKENS +
+        Math.max(...entries.map(knowledgeEntryTokenCost));
+      const select = async (enabled: boolean) => {
+        config().knowledge.taskFilter = enabled;
+        const overflow: ltm.KnowledgeEntry[] = [];
+        const packed = await ltm.forSession(projectPath, sessionID, budget, {
+          ...(source === "hint" ? { contextHint: text } : {}),
+          includeContextSources: [],
+          overflowSink: overflow,
+          deferEffects: true,
+        });
+        return {
+          packed: packed.map((entry) => entry.id),
+          overflow: overflow.map((entry) => entry.id),
+        };
+      };
+      const unfiltered = await select(false);
+      expect(unfiltered.packed.length).toBeGreaterThan(0);
+      expect(unfiltered.overflow.length).toBeGreaterThan(0);
+      expect(new Set([...unfiltered.packed, ...unfiltered.overflow])).toEqual(
+        new Set(ids),
+      );
+      expect(await select(true)).toEqual(unfiltered);
+    },
+  );
+
+  it.each(["repair ledger", "fix ledger"])(
+    "still filters the short distinct task %s",
+    async (task) => {
+      const projectPath = `${PROJECT}/short/${uuidv7()}`;
+      const omitted = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "decision",
+        title: "Ledger topology",
+        content: "Keep the original topology.",
+      });
+      const retained = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Ledger settlement",
+        content: "Commit batches before clearing records.",
+      });
+      vectors([omitted, retained]);
+      config().knowledge.taskFilter = true;
+      const selected = await ltm.forSession(projectPath, "short-task", 800, {
+        contextHint: task,
+        includeContextSources: [],
+        deferEffects: true,
+      });
+      expect(selected.map((entry) => entry.id)).toEqual([retained]);
+    },
+  );
+
   it.each(["Security", "Operations", "Mixed Case"])(
     "preserves imported %s facts alongside normal filtered selection",
     async (heading) => {

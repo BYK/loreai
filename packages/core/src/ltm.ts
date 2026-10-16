@@ -3473,6 +3473,10 @@ export async function forSession(
       sessionContext.trim(),
     );
 
+  // Scoring treats acknowledgments as no new task. Admission must preserve
+  // that same fallback for both packed entries and overflow hints.
+  const admissionContext = bareAcknowledgment ? "" : admissionTask.text;
+
   if (
     !projectEntries.length &&
     !crossEntries.length &&
@@ -3785,7 +3789,7 @@ export async function forSession(
   // must exclude the original packed set rather than resurface rejected facts.
   // A distilled fallback is not an authoritative task for this second pass.
   const result = taskFilter
-    ? filterTaskKnowledge(packed, admissionTask.text)
+    ? filterTaskKnowledge(packed, admissionContext)
     : packed;
 
   // --- 7. Record cross-project transfer metrics (issue #506) ---
@@ -3817,7 +3821,7 @@ export async function forSession(
       );
     options.overflowSink.push(
       ...(taskFilter
-        ? filterTaskKnowledge(overflow, admissionTask.text)
+        ? filterTaskKnowledge(overflow, admissionContext)
         : overflow),
     );
   }
