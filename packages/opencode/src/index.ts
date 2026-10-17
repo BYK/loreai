@@ -20,6 +20,7 @@ import {
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "./internal";
+import { createRecallTool } from "./recall-tool";
 
 /**
  * Lore plugin for OpenCode — transparent LLM proxy routing.
@@ -439,7 +440,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         applyLoreProviderConfig(cfg, gatewayBase);
       },
 
-      tool: {},
+      tool: loreDisabled ? {} : { recall: createRecallTool() },
 
       // Inject per-request identifiers so the gateway can distinguish meta
       // requests (title generation, summary agents, etc.) from real

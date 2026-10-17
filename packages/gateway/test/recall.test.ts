@@ -9,7 +9,7 @@
  *  - Response stripping
  */
 import { describe, test, expect, vi } from "vitest";
-import { log } from "@loreai/core";
+import { log, RECALL_TOOL_INPUT_SCHEMA } from "@loreai/core";
 import {
   LORE_COMMIT_REMINDER,
   accumulateOpenAINonStreamJSON,
@@ -29,6 +29,7 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
+  markNativeRecallTool,
   hasGatewayRecallTool,
   shouldEnableRecallMarkerReplay,
   buildRecallFollowUpRequest,
@@ -520,6 +521,38 @@ describe("hasGatewayRecallTool", () => {
       ]),
     ).toBe(false);
     expect(hasGatewayRecallTool([RECALL_GATEWAY_TOOL])).toBe(true);
+  });
+});
+
+describe("shared recall tool contract", () => {
+  test("gateway injection uses the core schema without adapter-specific drift", () => {
+    expect(RECALL_GATEWAY_TOOL.name).toBe(RECALL_TOOL_NAME);
+    expect(RECALL_GATEWAY_TOOL.inputSchema).toEqual(RECALL_TOOL_INPUT_SCHEMA);
+  });
+});
+
+describe("markNativeRecallTool", () => {
+  test("marks the exact shared host definition as gateway-owned", () => {
+    const nativeTool = { ...RECALL_GATEWAY_TOOL, gatewayOwned: false };
+    const marked = markNativeRecallTool([nativeTool]);
+
+    expect(marked[0].gatewayOwned).toBe(true);
+    expect(hasGatewayRecallTool(marked)).toBe(true);
+    expect(nativeTool.gatewayOwned).toBe(false);
+  });
+
+  test("preserves a client-owned tool with the same name but another definition", () => {
+    const clientTool = {
+      ...RECALL_GATEWAY_TOOL,
+      description: "Client-owned recall tool",
+      gatewayOwned: false,
+    };
+
+    const marked = markNativeRecallTool([clientTool]);
+
+    expect(marked[0]).toBe(clientTool);
+    expect(marked[0].gatewayOwned).toBe(false);
+    expect(hasGatewayRecallTool(marked)).toBe(false);
   });
 });
 
