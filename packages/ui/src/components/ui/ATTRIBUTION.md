@@ -14,7 +14,7 @@ Copyright (c) 2023 Stefan E-K
 ```
 
 Copied files: `button.tsx`, `dialog.tsx`, `select.tsx`, `text-field.tsx`,
-`badge.tsx`, `separator.tsx`. Kobalte (`@kobalte/core`) supplies the headless
+`badge.tsx`, `separator.tsx`, `tabs.tsx`. Kobalte (`@kobalte/core`) supplies the headless
 behaviour; the copied files only add class strings.
 
 ## Local modifications (Tailwind 4 port)
