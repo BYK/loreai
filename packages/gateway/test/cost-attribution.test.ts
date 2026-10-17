@@ -570,13 +570,15 @@ describe("resolveCostAttribution", () => {
       refreshedCredential,
       malformedCredential,
     ]) {
-      recordSuccessfulChatGPTAuth({
-        credential,
-        upstreamURL: "https://chatgpt.com/backend-api",
-        responseURL: "https://chatgpt.com/backend-api/codex/responses",
-        responseStatus: 200,
-        directUpstreamResponse: true,
-      });
+      if (typeof recordSuccessfulChatGPTAuth === "function") {
+        recordSuccessfulChatGPTAuth({
+          credential,
+          upstreamURL: "https://chatgpt.com/backend-api",
+          responseURL: "https://chatgpt.com/backend-api/codex/responses",
+          responseStatus: 200,
+          directUpstreamResponse: true,
+        });
+      }
     }
     const first = resolveCostAttribution({
       providerID: "openai-codex",

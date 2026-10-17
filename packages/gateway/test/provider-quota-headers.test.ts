@@ -1,9 +1,9 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, vi } from "vitest";
 import {
   parseProviderQuotaHeaders,
   observeProviderQuotaHeaders,
 } from "../src/provider-quota-headers";
-import { db, close, getKV, listProviderQuotas } from "@loreai/core";
+import { db, close, getKV, listProviderQuotas, log } from "@loreai/core";
 import type { CostAttribution } from "../src/cost-attribution";
 import {
   _pacingTrackerSizesForTest,
@@ -11,6 +11,7 @@ import {
   capturePacingEpoch,
   setPacingEnabled,
 } from "../src/provider-budgets";
+import * as providerBudgets from "../src/provider-budgets";
 
 const NOW = 1_800_000_000_000; // fixed observation instant (ms)
 
@@ -289,6 +290,34 @@ describe("observeProviderQuotaHeaders", () => {
     );
     quotas = listProviderQuotas().filter((q) => q.window === "5h");
     expect(quotas[0].usedPercent).toBe(50);
+  });
+
+  test("throwing pacing diagnostics do not skip accepted quota persistence", () => {
+    const recordRequest = vi
+      .spyOn(providerBudgets, "recordForegroundRequest")
+      .mockImplementation(() => {
+        throw new Error("synthetic optional pacing failure");
+      });
+    const diagnostic = vi.spyOn(log, "info").mockImplementation((message) => {
+      if (message === "provider pacing observation failed") {
+        throw new Error("synthetic diagnostic sink failure");
+      }
+    });
+
+    try {
+      expect(
+        observeProviderQuotaHeaders(
+          headers({ "anthropic-ratelimit-unified-5h-utilization": "0.5" }),
+          attribution,
+          NOW,
+          NOW,
+        ),
+      ).toBe(true);
+      expect(listProviderQuotas()).toHaveLength(1);
+    } finally {
+      recordRequest.mockRestore();
+      diagnostic.mockRestore();
+    }
   });
 
   test("persists quota after a pacing switch invalidates the request generation", () => {
