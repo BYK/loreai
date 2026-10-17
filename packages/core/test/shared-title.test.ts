@@ -381,7 +381,7 @@ describe("shared title normalization and conflict handling", () => {
     expect(currentRow(existing).content).toBe("Curator update content");
   });
 
-  test("rejects a move into shared scope without changing rows or transfers", () => {
+  test("rejects a shared entry move with a title conflict without changing rows or transfers", () => {
     const suffix = uuidv7();
     const title = `X ${suffix}`;
     const sourceProject = project(`move-source-${uuidv7()}`);
@@ -392,8 +392,15 @@ describe("shared title normalization and conflict handling", () => {
       crossProject: true,
       id: uuidv7(),
     });
+    // Model legacy shared duplicates; a private project move retains its scope
+    // and must not enter the shared-title conflict guard.
+    makeLegacyShared(target, title);
     const sourceProjectId = ensureProject(sourceProject);
     const before = currentRow(target);
+    expect(before).toMatchObject({
+      project_id: sourceProjectId,
+      cross_project: 1,
+    });
     db()
       .query(
         `INSERT INTO knowledge_transfers
@@ -422,6 +429,44 @@ describe("shared title normalization and conflict handling", () => {
         )
         .all(target),
     ).toEqual(transfersBefore);
+  });
+
+  test("moves private knowledge past a shared title conflict while preserving foreign transfers", () => {
+    const title = `Private move ${uuidv7()}`;
+    const sourceProject = project(`private-source-${uuidv7()}`);
+    const targetProject = project(`private-target-${uuidv7()}`);
+    const foreignProject = project(`private-foreign-${uuidv7()}`);
+    const target = createEntry(title, sourceProject, {
+      crossProject: true,
+      id: uuidv7(),
+    });
+    ltm.recordTransfer({
+      knowledgeId: target,
+      recalledInProjectId: ensureProject(foreignProject),
+    });
+    knowledgeEdit.editKnowledge(target, {
+      expectedRevision: 1,
+      actor: "test",
+      scope: "project",
+    });
+    const shared = createEntry(title, foreignProject, {
+      crossProject: true,
+      id: uuidv7(),
+    });
+    const before = currentRow(target);
+    const sharedBefore = currentRow(shared);
+    const transfersBefore = ltm.transfersFor(target);
+    expect(before.cross_project).toBe(0);
+    expect(transfersBefore).toHaveLength(1);
+
+    expect(data.reassignKnowledge(target, targetProject)).toBe(true);
+
+    expect(currentRow(target)).toEqual({
+      ...before,
+      project_id: ensureProject(targetProject),
+    });
+    expect(currentRow(shared)).toEqual(sharedBefore);
+    expect(ltm.transfersFor(target)).toEqual(transfersBefore);
   });
 
   test("reports legacy shared duplicates without mutating entries", () => {

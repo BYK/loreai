@@ -501,6 +501,55 @@ describe("GET /api/v1/entities/rebuild", () => {
 });
 
 describe("GET/PATCH /api/v1/contradictions", () => {
+  it.each([
+    { decision: "keep-a", remaining: 1 },
+    { decision: "keep-b", remaining: 1 },
+    { decision: "keep-both", remaining: 2 },
+  ] as const)(
+    "returns fresh project and global counts after $decision with warm caches",
+    async ({ decision, remaining }) => {
+      const pair = await seedContradictionPair(
+        `cached-${decision}-${randomUUID()}`,
+      );
+      // Keep both reads within the five-second cache TTL even on a slow runner.
+      const dateNow = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+      try {
+        type ProjectCount = { id: string; knowledge_count: number };
+        type Stats = { knowledge_count: number };
+        const before = await apiJSON<ProjectCount[]>("/api/v1/projects");
+        expect(
+          before.find((project) => project.id === pair.projectId)
+            ?.knowledge_count,
+        ).toBe(2);
+        const statsBefore = await apiJSON<Stats>("/api/v1/stats");
+
+        const response = await api(
+          `/api/v1/contradictions/${pair.a}/${pair.b}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ decision }),
+          },
+        );
+        expect(response.status).toBe(200);
+
+        const after = await apiJSON<ProjectCount[]>("/api/v1/projects");
+        const statsAfter = await apiJSON<Stats>("/api/v1/stats");
+        expect
+          .soft(
+            after.find((project) => project.id === pair.projectId)
+              ?.knowledge_count,
+          )
+          .toBe(remaining);
+        expect
+          .soft(statsAfter.knowledge_count)
+          .toBe(statsBefore.knowledge_count - (2 - remaining));
+      } finally {
+        dateNow.mockRestore();
+      }
+    },
+  );
+
   it("shows the newest 25 pairs and exposes the next older after a decision", async () => {
     const baseTime = Date.now();
     let detectionTime = baseTime;
