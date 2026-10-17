@@ -4,6 +4,7 @@ import {
   getGitRemote,
   discoverWorkspaceRoot,
   installFetchInterceptor,
+  RECALL_TOOL_NAME,
 } from "@loreai/core";
 // Helpers live in a separate module so they are NOT re-exported from this
 // plugin entry. OpenCode's legacy plugin loader invokes every function
@@ -17,6 +18,7 @@ import {
   isLoopbackUrl,
   prepareLocalUiAssets,
   probeGateway,
+  shouldRegisterNativeRecallTool,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "./internal";
@@ -194,6 +196,7 @@ const sessionParent = new Map<
     lastSeenAt: number;
   }
 >();
+const sessionInfoLookups = new Map<string, Promise<void>>();
 
 /** OpenCode's default title before it generates a real one. */
 const PLACEHOLDER_TITLE_RE = /^new session\b/i;
@@ -239,10 +242,10 @@ function applySessionInfo(
  * cached and never throw, so a transient error is retried on the next turn
  * rather than permanently latching a real sub-agent as "not a sub-agent".
  */
-async function resolveSessionInfo(
+function resolveSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
-): Promise<{ parentID: string | null; title: string | null }> {
+): { parentID: string | null; title: string | null } {
   const cached = sessionParent.get(sessionID);
   if (cached) {
     cached.lastSeenAt = Date.now();
@@ -260,31 +263,44 @@ async function resolveSessionInfo(
     if (!needsRefetch) {
       return { parentID: cached.parentID, title: cached.title };
     }
-    try {
-      const res = await client.session.get({ path: { id: sessionID } });
-      applySessionInfo(cached, res.data);
-    } catch {
-      // Keep the cached values — a transient failure is not a reason to
-      // drop a title we already know.
-    }
+    fetchSessionInfo(client, sessionID);
     return { parentID: cached.parentID, title: cached.title };
   }
-  try {
-    const res = await client.session.get({ path: { id: sessionID } });
-    const entry = {
-      parentID: null,
-      title: null,
-      titleFetchedAt: 0,
-      lastSeenAt: Date.now(),
-    };
-    applySessionInfo(entry, res.data);
-    sessionParent.set(sessionID, entry);
-    reapStaleSessionParent();
-    return { parentID: entry.parentID, title: entry.title };
-  } catch {
-    // Best-effort: never break or slow the request path on a lookup failure.
-    return { parentID: null, title: null };
-  }
+  fetchSessionInfo(client, sessionID);
+  return { parentID: null, title: null };
+}
+
+function fetchSessionInfo(
+  client: PluginInput["client"],
+  sessionID: string,
+): void {
+  if (sessionInfoLookups.has(sessionID)) return;
+
+  // Session metadata is optional: never await it on a provider request. A
+  // failed lookup stays uncached so a later turn can retry it.
+  let lookup: Promise<void>;
+  lookup = Promise.resolve()
+    .then(() => client.session.get({ path: { id: sessionID } }))
+    .then((res) => {
+      const entry = sessionParent.get(sessionID) ?? {
+        parentID: null,
+        title: null,
+        titleFetchedAt: 0,
+        lastSeenAt: Date.now(),
+      };
+      applySessionInfo(entry, res.data);
+      sessionParent.set(sessionID, entry);
+      reapStaleSessionParent();
+    })
+    .catch(() => {
+      // Metadata failures must not escape into request handling.
+    })
+    .finally(() => {
+      if (sessionInfoLookups.get(sessionID) === lookup) {
+        sessionInfoLookups.delete(sessionID);
+      }
+    });
+  sessionInfoLookups.set(sessionID, lookup);
 }
 
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
@@ -440,7 +456,10 @@ export const LorePlugin: Plugin = async (ctx) => {
         applyLoreProviderConfig(cfg, gatewayBase);
       },
 
-      tool: loreDisabled ? {} : { recall: createRecallTool() },
+      tool:
+        loreDisabled || !shouldRegisterNativeRecallTool(gatewayBase)
+          ? {}
+          : { [RECALL_TOOL_NAME]: createRecallTool() },
 
       // Inject per-request identifiers so the gateway can distinguish meta
       // requests (title generation, summary agents, etc.) from real
@@ -461,10 +480,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // parentID; forward it as the `x-parent-session-id` signal the gateway
         // already understands (Claude Code sends this natively). Resolution is
         // cached and never blocks or throws on failure.
-        const sessionInfo = await resolveSessionInfo(
-          ctx.client,
-          input.sessionID,
-        );
+        const sessionInfo = resolveSessionInfo(ctx.client, input.sessionID);
         if (sessionInfo.parentID) {
           output.headers["x-parent-session-id"] = sessionInfo.parentID;
         }

@@ -1,9 +1,13 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { tool } from "@opencode-ai/plugin/tool";
 import type { ToolContext } from "@opencode-ai/plugin/tool";
 import {
   RECALL_TOOL_DESCRIPTION,
   RECALL_TOOL_INPUT_SCHEMA,
+  discoverWorkspaceRoot,
   type RecallToolExecutor,
 } from "@loreai/core";
 import { createRecallTool } from "../src/recall-tool";
@@ -59,5 +63,41 @@ describe("OpenCode recall tool", () => {
       {},
       expect.objectContaining({ projectPath: "/project/worktree" }),
     );
+  });
+
+  test("resolves nested workspace paths and preserves the gateway session ID", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-opencode-recall-"));
+    try {
+      const nested = join(root, "packages", "app");
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(
+        join(root, ".lore.json"),
+        JSON.stringify({ workspaces: ["packages/*"] }),
+      );
+      const execute = vi.fn<RecallToolExecutor>(async () => "memory results");
+      const recall = createRecallTool(execute);
+      const context = {
+        ...makeToolContext(),
+        directory: root,
+        worktree: nested,
+      };
+
+      await recall.execute(
+        { query: "session memory", scope: "session" },
+        context,
+      );
+
+      expect(execute).toHaveBeenCalledWith(
+        { query: "session memory", scope: "session" },
+        {
+          projectPath: root,
+          sessionID: context.sessionID,
+          signal: context.abort,
+        },
+      );
+      expect(discoverWorkspaceRoot(nested)).toBe(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

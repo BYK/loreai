@@ -78,4 +78,38 @@ describe("recall detail references", () => {
     );
     expect(wrongScope).not.toContain(marker);
   });
+
+  test("does not emit a detail ref when only an oversized title exceeds budget", async () => {
+    const projectPath = `/test/recall-detail-ref/${randomUUID()}`;
+    const sessionID = randomUUID();
+    const marker = `oversized-title-${randomUUID()}`;
+    const title = `${marker} ${"title".repeat(48)}`;
+    createKnowledge({
+      projectPath,
+      category: "gotcha",
+      title,
+      content: "Short body.",
+      scope: "project",
+    });
+
+    const baseConfig = config();
+    const result = await runRecallWithMetadata({
+      query: marker,
+      projectPath,
+      sessionID,
+      scope: "knowledge",
+      detailRefs: true,
+      searchConfig: {
+        ...baseConfig.search,
+        queryExpansion: false,
+        embeddings: { ...baseConfig.search.embeddings, enabled: false },
+        recall: { ...baseConfig.search.recall, charBudget: 80 },
+      },
+    });
+
+    expect(result.result).toContain(`**${title}**`);
+    expect(result.result).toContain("Short body.");
+    expect(result.result).not.toContain("detail ref:");
+    expect(result.result).toContain("*1 of 1 results shown.*");
+  });
 });

@@ -7,6 +7,8 @@
  * what URL/headers/body the gateway would receive.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   installFetchInterceptor,
   interceptUrlForProtocol,
@@ -15,6 +17,25 @@ import { digestChain } from "../src/chain-digest";
 import { encodeContextBoundary } from "../src/context-boundary";
 
 const GATEWAY = "http://127.0.0.1:3207";
+const nativeFetch = globalThis.fetch;
+
+async function listen(
+  server: ReturnType<typeof createServer>,
+): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  return (server.address() as AddressInfo).port;
+}
+
+async function closeServer(
+  server: ReturnType<typeof createServer>,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
 
 type Captured = { url: string; init: RequestInit | undefined };
 
@@ -24,11 +45,13 @@ describe("installFetchInterceptor — end-to-end routing", () => {
   let realFetch: typeof globalThis.fetch;
   let observedAuthorization: string | null;
   let observedApiKey: string | null;
+  let additionalHeaders: Record<string, string>;
 
   beforeEach(() => {
     captured = null;
     observedAuthorization = null;
     observedApiKey = null;
+    additionalHeaders = {};
     // Stub the underlying fetch so the interceptor calls into our capture.
     realFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       captured = {
@@ -47,6 +70,7 @@ describe("installFetchInterceptor — end-to-end routing", () => {
     cleanup = installFetchInterceptor({
       gatewayBase: GATEWAY,
       getHeaders: () => ({
+        ...additionalHeaders,
         "x-lore-session-id": "sess-123",
         "x-lore-project": "/home/me/proj",
       }),
@@ -101,6 +125,71 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(headerVal("x-lore-session-id")).toBe("sess-123");
       expect(headerVal("x-lore-project")).toBe("/home/me/proj");
       expect(observedAuthorization).toBe("Bearer sk-test");
+    });
+
+    test("does not follow redirects when sending remote gateway credentials", async () => {
+      additionalHeaders["x-lore-gateway-token"] = "remote-gateway-secret";
+      await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-4", messages: [] }),
+        redirect: "follow",
+      });
+
+      expect(headerVal("x-lore-gateway-token")).toBe("remote-gateway-secret");
+      expect(captured?.init?.redirect).toBe("manual");
+    });
+
+    test("does not follow a direct-gateway redirect off-origin", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const gateway = createServer((_request, response) => {
+        response.writeHead(302, {
+          location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+        });
+        response.end();
+      });
+      const gatewayPort = await listen(gateway);
+      const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const response = await fetch(`${gatewayBase}/v1/messages`, {
+          headers: { "x-lore-gateway-token": "remote-gateway-secret" },
+          redirect: "follow",
+        });
+        expect(response.status).toBe(302);
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(gateway);
+        await closeServer(hostile);
+      }
+    });
+
+    test("does not classify a host sharing the gateway URL prefix as direct", async () => {
+      const gatewayBase = "https://gateway.example";
+      additionalHeaders["x-lore-gateway-token"] = "remote-gateway-secret";
+      cleanup();
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({ ...additionalHeaders }),
+      });
+
+      await fetch("https://gateway.example.attacker/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude", messages: [] }),
+      });
+
+      expect(captured?.url).toBe(`${gatewayBase}/v1/messages`);
+      expect(headerVal("x-lore-gateway-token")).toBe("remote-gateway-secret");
     });
 
     test("observes auth on requests already targeting the gateway", async () => {

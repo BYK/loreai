@@ -14,7 +14,7 @@ import {
   type RecallScope,
 } from "./recall";
 
-export const RECALL_TOOL_NAME = "recall";
+export const RECALL_TOOL_NAME = "lore_recall";
 
 export const RECALL_TOOL_SCOPES = [
   "all",
@@ -238,7 +238,7 @@ export function createRecallToolExecutor(
 
     try {
       const cfg = getConfig();
-      return await run({
+      const result = await run({
         ...parsed.value,
         query: parsed.value.query ?? "",
         projectPath: context.projectPath,
@@ -247,9 +247,11 @@ export function createRecallToolExecutor(
         searchConfig: cfg.search,
         // Opaque detail references are session-bound capabilities.
         detailRefs: Boolean(context.sessionID?.trim()),
-        recordTransfers: true,
+        // Recall queries are transient input, not transfer telemetry.
+        recordTransfers: false,
         signal: context.signal,
       });
+      return context.signal?.aborted ? "Recall was cancelled." : result;
     } catch {
       // Never surface private query, provider, configuration, or exception text.
       return context.signal?.aborted

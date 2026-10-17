@@ -475,6 +475,7 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   markNativeRecallTool,
+  appendNativeRecallToolReminder,
   hasGatewayRecallTool,
   shouldEnableRecallMarkerReplay,
   runRecallFollowUpStreaming,
@@ -6491,11 +6492,14 @@ function getOrCreateSession(
         tokenCount: persisted.stableLtmTokens,
       });
     }
-    // Restore the recall store (v46) so historical recall markers still expand
-    // to their original tool_use + tool_result pair after a restart, instead of
-    // leaking upstream as raw marker text and rewriting that message.
+    // Restore only anchor replay state. Query text is never durable; normalize
+    // legacy/corrupt rows here as a second boundary in addition to migration 105.
     if (persisted?.recallStore != null) {
       state.recallStore = deserializeRecallStore(persisted.recallStore);
+      const sanitizedRecallStore = serializeRecallStore(state.recallStore);
+      if (sanitizedRecallStore !== persisted.recallStore) {
+        saveSessionTracking(sessionID, { recallStore: sanitizedRecallStore });
+      }
     }
     if (persisted?.lastUpstream != null) {
       try {
@@ -13491,7 +13495,8 @@ export function streamResponsesRecallAware(
             ) {
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
+                item?.type === "function_call" &&
+                item?.name === RECALL_TOOL_NAME;
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
@@ -14847,7 +14852,10 @@ export function streamResponsesRecallAware(
               const visibleResp = {
                 ...finalResp,
                 content: finalResp.content.map((block) => {
-                  if (block.type !== "tool_use" || block.name !== "recall") {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.name !== RECALL_TOOL_NAME
+                  ) {
                     return block;
                   }
                   return {
@@ -22613,9 +22621,15 @@ async function handleConversationTurnPrepared(
   };
 
   // Native host adapters register Lore recall through their own tool registry.
-  // Mark its shared definition as gateway-owned so hosted calls keep the same
-  // private execution, continuation, and marker/replay path.
+  // Preserve host ownership; only the gateway's private brand can authorize
+  // gateway execution or marker replay.
   modifiedReq.tools = markNativeRecallTool(modifiedReq.tools);
+  if (cfg.knowledge.enabled && cfg.loreFile.enabled) {
+    modifiedReq.tools = appendNativeRecallToolReminder(
+      modifiedReq.tools,
+      LORE_COMMIT_REMINDER,
+    );
+  }
 
   // --- 8b. Inject recall tool (with git reminder appended to description) ---
   // Only inject if the client doesn't already have a native recall tool and

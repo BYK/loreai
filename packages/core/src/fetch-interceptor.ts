@@ -11,6 +11,7 @@
  */
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
+import { GATEWAY_AUTH_HEADER } from "./credential-headers";
 import {
   CONTEXT_BOUNDARY_CAPABILITY_HEADER,
   CONTEXT_BOUNDARY_CAPABILITY_VALUE,
@@ -394,14 +395,18 @@ function prepareBoundaryRequest(
   // the source-checkpoint namespace reserved for generation requests.
   headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
   const endpoint = boundaryEndpoint(pathname);
-  if (!endpoint) return { attached: false, init: { ...init, headers } };
+  if (!endpoint) {
+    return { attached: false, init: prepareGatewayFetchInit(init, headers) };
+  }
   const sessionID = headers.get("x-lore-session-id");
-  if (!sessionID) return { attached: false, init: { ...init, headers } };
+  if (!sessionID) {
+    return { attached: false, init: prepareGatewayFetchInit(init, headers) };
+  }
   headers.set(
     CONTEXT_BOUNDARY_CAPABILITY_HEADER,
     CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   );
-  const fullInit: RequestInit = { ...init, headers };
+  const fullInit = prepareGatewayFetchInit(init, headers);
   pruneContextBoundaries();
   const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
   const cached = contextBoundaries.get(key);
@@ -439,12 +444,44 @@ function prepareBoundaryRequest(
     return {
       boundaryKey: key,
       attached: true,
-      init: { ...init, headers: elidedHeaders, body: JSON.stringify(body) },
+      init: {
+        ...prepareGatewayFetchInit(init, elidedHeaders),
+        body: JSON.stringify(body),
+      },
     };
   } catch {
     contextBoundaries.delete(key);
     return { boundaryKey: key, attached: false, init: fullInit };
   }
+}
+
+function prepareGatewayFetchInit(
+  init: RequestInit | undefined,
+  headers: Headers,
+): RequestInit {
+  const prepared: RequestInit = { ...init, headers };
+  if (headers.has(GATEWAY_AUTH_HEADER) && prepared.redirect !== "error") {
+    // Fetch may forward non-standard headers across cross-origin redirects.
+    // Never let the remote-gateway credential escape its configured origin.
+    prepared.redirect = "manual";
+  }
+  return prepared;
+}
+
+function isDirectGatewayRequest(upstream: URL, gatewayBase: string): boolean {
+  let gateway: URL;
+  try {
+    gateway = new URL(gatewayBase);
+  } catch {
+    return false;
+  }
+  if (upstream.origin !== gateway.origin) return false;
+  const basePath = gateway.pathname.replace(/\/+$/, "");
+  return (
+    basePath === "" ||
+    upstream.pathname === basePath ||
+    upstream.pathname.startsWith(`${basePath}/`)
+  );
 }
 
 function updateContextBoundary(
@@ -776,7 +813,8 @@ export function installFetchInterceptor(
 
     // Never intercept requests already going to the gateway, but still observe
     // their auth so in-process extensions can scope side-channel requests.
-    if (url.startsWith(gatewayBase)) {
+    // Parsed origin and path checks avoid treating a hostile prefix host as the gateway.
+    if (isDirectGatewayRequest(upstream, gatewayBase)) {
       const directHeaders = new Headers(
         init?.headers ??
           (typeof input !== "string" && !(input instanceof URL)
@@ -784,7 +822,7 @@ export function installFetchInterceptor(
             : undefined),
       );
       observeRequestHeaders(directHeaders, config);
-      return originalFetch(input, init);
+      return originalFetch(input, prepareGatewayFetchInit(init, directHeaders));
     }
 
     // Never intercept local requests (could be local LLM or gateway itself)
@@ -847,10 +885,7 @@ export function installFetchInterceptor(
         fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
         const retry = await originalFetch(
           rewrittenFetchInput(input, rewrite.gatewayUrl),
-          {
-            ...init,
-            headers: fullHeaders,
-          },
+          prepareGatewayFetchInit(init, fullHeaders),
         );
         return updateContextBoundary(
           retry,
@@ -907,7 +942,7 @@ export function installFetchInterceptor(
           void response.body?.cancel().catch(() => {});
           const retry = await originalFetch(
             rewrittenFetchInput(input, rewrite.gatewayUrl),
-            { ...init, headers },
+            prepareGatewayFetchInit(init, headers),
           );
           return updateContextBoundary(
             retry,

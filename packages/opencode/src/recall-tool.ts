@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin/tool";
 import type { ToolDefinition } from "@opencode-ai/plugin/tool";
 import {
   executeRecallTool,
+  discoverWorkspaceRoot,
   RECALL_TOOL_INPUT_SCHEMA,
   RECALL_TOOL_SCOPES,
   RECALL_TOOL_DESCRIPTION,
@@ -58,7 +59,9 @@ export function createRecallTool(
     },
     async execute(args, context) {
       return execute(args, {
-        projectPath: context.worktree || context.directory,
+        projectPath: discoverWorkspaceRoot(
+          context.worktree || context.directory,
+        ),
         sessionID: context.sessionID,
         signal: context.abort,
       });

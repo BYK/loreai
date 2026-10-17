@@ -67,6 +67,8 @@ export LORE_GATEWAY_AUTH_TOKEN='<token configured on the gateway>'
 
 The plugin injects the token as `x-lore-gateway-token` only for `LORE_REMOTE_URL`. It is never used as provider authentication or put in the URL.
 
+The shared native recall tool is named `lore_recall`. When `LORE_REMOTE_URL` points to a remote gateway, the plugin leaves recall registration to that gateway instead of exposing a competing local tool. Recall query text is omitted from durable replay state.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:

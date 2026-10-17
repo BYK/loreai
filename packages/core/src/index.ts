@@ -19,6 +19,7 @@ export * as crypto from "./crypto";
 // Stateful, db-backed key store (C-2, #825): account identity, per-scope DEKs, escrow.
 export * as keystore from "./crypto/keystore";
 export * as references from "./references";
+export { isRemoteGatewayTarget } from "./remote-gateway";
 export {
   DirectFsResolver,
   NoopResolver,

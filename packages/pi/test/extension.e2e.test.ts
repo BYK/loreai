@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
   RECALL_TOOL_DESCRIPTION,
@@ -172,6 +175,21 @@ describe("pi extension — e2e against a real gateway", () => {
     });
   });
 
+  test("does not register a local recall tool for a remote gateway", async () => {
+    const previousEnv = { ...process.env };
+    try {
+      process.env.LORE_REMOTE_URL = baseURL;
+      delete process.env.LORE_GATEWAY_URL;
+      const remoteMock = createMockPi();
+      await lorePiExtension(
+        remoteMock.pi as unknown as Parameters<typeof lorePiExtension>[0],
+      );
+      expect(remoteMock.tools).toHaveLength(0);
+    } finally {
+      process.env = previousEnv;
+    }
+  });
+
   test("points Anthropic providers at the gateway root and OpenAI at /v1", () => {
     const byName = new Map(mock.registrations.map((r) => [r.name, r.config]));
     expect(byName.get("anthropic")?.baseUrl).toBe(baseURL);
@@ -203,22 +221,31 @@ describe("pi extension — e2e against a real gateway", () => {
   });
 
   test("re-registers when cwd changes without changing the session id", async () => {
-    const before = mock.registrations.length;
-    const onStart = mock.handlers.get("session_start");
-    await onStart?.(
-      {},
-      {
-        cwd: "/tmp/lore-pi-other-project",
-        sessionManager: {
-          getSessionFile: () => "/tmp/lore-pi-e2e-session.json",
+    const root = mkdtempSync(join(tmpdir(), "lore-pi-workspace-"));
+    try {
+      const nested = join(root, "apps", "app");
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(
+        join(root, ".lore.json"),
+        JSON.stringify({ workspaces: ["apps/*"] }),
+      );
+      const before = mock.registrations.length;
+      const onStart = mock.handlers.get("session_start");
+      await onStart?.(
+        {},
+        {
+          cwd: nested,
+          sessionManager: {
+            getSessionFile: () => "/tmp/lore-pi-e2e-session.json",
+          },
         },
-      },
-    );
-    const after = mock.registrations.slice(before);
-    expect(after.length).toBeGreaterThan(0);
-    expect(after[0].config.headers["x-lore-project"]).toBe(
-      "/tmp/lore-pi-other-project",
-    );
+      );
+      const after = mock.registrations.slice(before);
+      expect(after.length).toBeGreaterThan(0);
+      expect(after[0].config.headers["x-lore-project"]).toBe(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("compaction for an unrouted session falls back gracefully (real /v1/compact)", async () => {

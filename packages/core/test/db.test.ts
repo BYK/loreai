@@ -113,6 +113,78 @@ describe("db", () => {
     expect(names).toContain("temporal_embedding_parked");
   });
 
+  test("redacts persisted recall queries while preserving anchor replay", () => {
+    const connection = db();
+    const anchorId = "123e4567-e89b-42d3-a456-426614174000";
+    const anchorContextId = "a".repeat(64);
+    const legacyQuery = "private legacy recall query";
+    const anchorQuery = "private anchored recall query";
+    const anchorValue = {
+      toolUseId: "call-anchor",
+      anchorId,
+      anchorContextId,
+      input: { query: anchorQuery, scope: "all" },
+      result: "anchored recall result",
+    };
+    const anchorRecord: [string, typeof anchorValue] = [
+      `anchor:${anchorId}`,
+      anchorValue,
+    ];
+    connection
+      .query(
+        "INSERT INTO session_state (session_id, updated_at, recall_store) VALUES (?, ?, ?)",
+      )
+      .run(
+        "recall-redaction",
+        Date.now(),
+        JSON.stringify([
+          [
+            `all:${legacyQuery}`,
+            {
+              toolUseId: "call-legacy",
+              input: { query: legacyQuery, scope: "all" },
+              result: "legacy recall result",
+            },
+          ],
+          anchorRecord,
+          "malformed non-array entry",
+        ]),
+      );
+    connection
+      .query(
+        "INSERT INTO session_state (session_id, updated_at, recall_store) VALUES (?, ?, ?)",
+      )
+      .run("recall-invalid-json", Date.now(), "{invalid");
+    connection
+      .query("UPDATE schema_version SET version = ?")
+      .run(MIGRATIONS.length - 1);
+    close();
+
+    const migrated = db();
+    const loadRecallStore = (sessionId: string): string => {
+      const row = migrated
+        .query("SELECT recall_store FROM session_state WHERE session_id = ?")
+        .get(sessionId) as { recall_store: string };
+      return row.recall_store;
+    };
+    const persisted = loadRecallStore("recall-redaction");
+    expect(persisted).not.toContain(legacyQuery);
+    expect(persisted).not.toContain(anchorQuery);
+    expect(JSON.parse(persisted)).toEqual([
+      [
+        `anchor:${anchorId}`,
+        {
+          ...anchorValue,
+          input: {
+            query: "[recall query omitted from persistent state]",
+            scope: "all",
+          },
+        },
+      ],
+    ]);
+    expect(loadRecallStore("recall-invalid-json")).toBe("[]");
+  });
+
   test("upgrades v95 with a source-owned fair-retry park", () => {
     const connection = db();
     connection.exec(`DROP TABLE temporal_embedding_parked;

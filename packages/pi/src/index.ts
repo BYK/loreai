@@ -29,7 +29,13 @@
  * Pure/testable logic (gateway discovery, provider-registration shaping,
  * session-id derivation, the compaction request) lives in `./internal.ts`.
  */
-import { getGitRemote, installFetchInterceptor, log } from "@loreai/core";
+import {
+  getGitRemote,
+  discoverWorkspaceRoot,
+  installFetchInterceptor,
+  isRemoteGatewayTarget,
+  log,
+} from "@loreai/core";
 import type {
   ExtensionAPI,
   SessionBeforeCompactEvent,
@@ -115,7 +121,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   // Session tracking — used for provider header injection and compaction.
   // ---------------------------------------------------------------------------
 
-  let projectPath = process.cwd();
+  let projectPath = discoverWorkspaceRoot(process.cwd());
   let currentSessionID = sessionIDFor(undefined);
   // The harness's own session name (user-set via /name) — forwarded as
   // x-lore-session-title so the gateway can persist it (#1921).
@@ -123,12 +129,14 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let compactAuthHeaders: Record<string, string> = {};
   const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
 
-  pi.registerTool(
-    createPiRecallTool(() => ({
-      projectPath,
-      sessionID: currentSessionID,
-    })),
-  );
+  if (!isRemoteGatewayTarget(gatewayBase)) {
+    pi.registerTool(
+      createPiRecallTool(() => ({
+        projectPath,
+        sessionID: currentSessionID,
+      })),
+    );
+  }
 
   let cachedGitRemote = getGitRemote(projectPath) ?? "";
 
@@ -201,7 +209,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
 
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
     currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
-    const nextProjectPath = ctx.cwd;
+    const nextProjectPath = discoverWorkspaceRoot(ctx.cwd);
     const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
     if (newID !== currentSessionID || nextProjectPath !== projectPath) {
       currentSessionID = newID;

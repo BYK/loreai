@@ -67,7 +67,9 @@ export LORE_REMOTE_URL=https://lore.example.com
 export LORE_GATEWAY_AUTH_TOKEN='<token configured on the gateway>'
 ```
 
-The extension injects the token as `x-lore-gateway-token` on provider calls and `/v1/compact`. It is never used as provider authentication or put in the URL.
+The extension injects the token as `x-lore-gateway-token` only when provider calls or `/v1/compact` target the URL configured by `LORE_REMOTE_URL`. It is never used as provider authentication or put in the URL.
+
+The shared native recall tool is named `lore_recall`. When `LORE_REMOTE_URL` points to a remote gateway, the extension leaves recall registration to that gateway instead of exposing a competing local tool. Recall query text is omitted from durable replay state.
 
 ## Companion packages
 

@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { LorePlugin } from "../src/index";
 
 interface MockOpts {
@@ -81,6 +81,18 @@ async function headersFor(
   return output.headers;
 }
 
+async function waitForHeader(
+  hooks: Hooks,
+  sessionID: string,
+  name: string,
+  expected: string,
+): Promise<void> {
+  await vi.waitFor(async () => {
+    const headers = await headersFor(hooks, sessionID);
+    expect(headers[name]).toBe(expected);
+  });
+}
+
 describe("OpenCode plugin — sub-agent detection (#1300)", () => {
   let tmpDirs: string[] = [];
   function makeTmp(label: string): string {
@@ -107,19 +119,29 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     const hooks = await initPlugin(dir, client);
 
     const headers = await headersFor(hooks, "sa-child-1");
-    expect(headers["x-parent-session-id"]).toBe("sa-parent-1");
-    // Sanity: the normal session header is still the child's own id.
     expect(headers["x-lore-session-id"]).toBe("sa-child-1");
+    await waitForHeader(
+      hooks,
+      "sa-child-1",
+      "x-parent-session-id",
+      "sa-parent-1",
+    );
   });
 
   test("primary session (no parentID) emits no x-parent-session-id", async () => {
+    const calls: string[] = [];
     const dir = makeTmp("primary");
-    const client = createMockClient({ parents: {} });
+    const client = createMockClient({ parents: {}, calls });
     const hooks = await initPlugin(dir, client);
 
     const headers = await headersFor(hooks, "primary-1");
     expect(headers["x-parent-session-id"]).toBeUndefined();
     expect(headers["x-lore-session-id"]).toBe("primary-1");
+    await vi.waitFor(() => expect(calls).toEqual(["primary-1"]));
+    expect((await headersFor(hooks, "primary-1"))["x-parent-session-id"]).toBe(
+      undefined,
+    );
+    expect(calls).toEqual(["primary-1"]);
   });
 
   test("parent lookup is cached — session.get runs once across turns", async () => {
@@ -131,10 +153,14 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     });
     const hooks = await initPlugin(dir, client);
 
-    for (let i = 0; i < 3; i++) {
-      const headers = await headersFor(hooks, "cache-child");
-      expect(headers["x-parent-session-id"]).toBe("cache-parent");
-    }
+    await headersFor(hooks, "cache-child");
+    await waitForHeader(
+      hooks,
+      "cache-child",
+      "x-parent-session-id",
+      "cache-parent",
+    );
+    await headersFor(hooks, "cache-child");
     expect(calls.filter((id) => id === "cache-child")).toHaveLength(1);
   });
 
@@ -152,9 +178,41 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     expect(h1["x-parent-session-id"]).toBeUndefined();
     expect(h1["x-lore-session-id"]).toBe("retry-child");
 
-    // Turn 2: server recovers — the failure was not cached, so it resolves now.
+    // The first failure is not cached; once the server recovers, a later turn
+    // retries and the following turn observes the refreshed metadata.
     down = false;
-    const h2 = await headersFor(hooks, "retry-child");
-    expect(h2["x-parent-session-id"]).toBe("retry-parent");
+    await headersFor(hooks, "retry-child");
+    await waitForHeader(
+      hooks,
+      "retry-child",
+      "x-parent-session-id",
+      "retry-parent",
+    );
+  });
+
+  test("a stalled session lookup never blocks provider headers", async () => {
+    const dir = makeTmp("stalled");
+    const client = createMockClient({});
+    let rejectLookup: ((reason?: unknown) => void) | undefined;
+    client.session.get = () =>
+      new Promise<never>((_resolve, reject) => {
+        rejectLookup = reject;
+      });
+    const hooks = await initPlugin(dir, client);
+
+    vi.useFakeTimers();
+    try {
+      const result = Promise.race([
+        headersFor(hooks, "stalled-child").then(() => "settled" as const),
+        new Promise<"blocked">((resolve) => {
+          setTimeout(() => resolve("blocked"), 100);
+        }),
+      ]);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(result).resolves.toBe("settled");
+    } finally {
+      vi.useRealTimers();
+      rejectLookup?.(new Error("test cleanup"));
+    }
   });
 });

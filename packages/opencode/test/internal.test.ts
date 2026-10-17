@@ -8,6 +8,7 @@ import {
   isLoopbackUrl,
   prepareLocalUiAssets,
   shouldForwardUpstreamExtraHeader,
+  shouldRegisterNativeRecallTool,
   surfaceGatewayUnavailable,
 } from "../src/internal";
 
@@ -161,6 +162,19 @@ describe("remote gateway access headers", () => {
         ANTHROPIC_API_KEY: "provider-key",
       }),
     ).toEqual({});
+  });
+
+  test("registers a native recall tool only for local gateway ownership", () => {
+    expect(
+      shouldRegisterNativeRecallTool("http://127.0.0.1:3207", {
+        LORE_REMOTE_URL: "https://lore.example",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRegisterNativeRecallTool("https://lore.example/", {
+        LORE_REMOTE_URL: "https://lore.example",
+      }),
+    ).toBe(false);
   });
 
   test.each([

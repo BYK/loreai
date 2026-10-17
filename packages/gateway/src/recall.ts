@@ -92,6 +92,9 @@ export const RECALL_GATEWAY_TOOL = brandGatewayRecallTool({
 
 export const RECALL_TOOL_NAME = CORE_RECALL_TOOL_NAME;
 
+// Durable replay needs the result and anchor, never the free-form search input.
+const PERSISTED_RECALL_QUERY = "[recall query omitted from persistent state]";
+
 /**
  * Prevent an Anthropic-compatible model from issuing parallel recall calls.
  * Explicitly disabling tools remains authoritative; malformed or missing
@@ -495,16 +498,35 @@ export function parseRecallMarker(
 }
 
 /**
- * Serialize a recall store to JSON for cross-restart persistence.
+ * Serialize anchored recall results for cross-restart persistence.
  *
  * The store is in-memory per session; without persistence a gateway restart
  * loses it, so historical recall markers can no longer be expanded into their
  * tool_use + tool_result pair and instead leak upstream as raw marker TEXT —
  * rewriting that (deep) assistant message and busting the prompt cache
- * (ses_14b9bf3d… incident). Persisting + restoring keeps expansion byte-stable.
+ * (ses_14b9bf3d… incident). Durable anchors preserve replay structure while
+ * replacing the original query with a fixed placeholder. Pre-anchor
+ * query-keyed records are omitted because replaying them requires that query.
  */
 export function serializeRecallStore(store: RecallStore): string {
-  return JSON.stringify([...store.entries()]);
+  const entries: Array<[string, StoredRecall]> = [];
+  for (const [key, value] of store) {
+    if (
+      !key.startsWith("anchor:") ||
+      !isStoredRecall(value) ||
+      !isValidRecallStoreEntry(key, value)
+    ) {
+      continue;
+    }
+    entries.push([
+      key,
+      {
+        ...value,
+        input: { ...value.input, query: PERSISTED_RECALL_QUERY },
+      },
+    ]);
+  }
+  return JSON.stringify(entries);
 }
 
 /** Add one record without evicting a still-live replay anchor. */
@@ -566,13 +588,20 @@ export function deserializeRecallStore(json: string): RecallStore {
         Array.isArray(entry) &&
         entry.length === 2 &&
         typeof entry[0] === "string" &&
+        entry[0].startsWith("anchor:") &&
         entry[1] &&
         typeof entry[1] === "object" &&
         isStoredRecall(entry[1]) &&
         isValidRecallStoreEntry(entry[0], entry[1])
       ) {
         try {
-          addRecallStoreEntry(store, entry[0], entry[1]);
+          addRecallStoreEntry(store, entry[0], {
+            ...entry[1],
+            input: {
+              ...entry[1].input,
+              query: PERSISTED_RECALL_QUERY,
+            },
+          });
         } catch {
           break;
         }
@@ -1169,6 +1198,28 @@ export function markNativeRecallTool(tools: GatewayTool[]): GatewayTool[] {
     return tool.gatewayOwned === true || hasGatewayRecallBrand(tool)
       ? { ...withoutGatewayRecallBrand(tool), gatewayOwned: false }
       : tool;
+  });
+}
+
+/** Add the knowledge-file reminder without granting gateway tool ownership. */
+export function appendNativeRecallToolReminder(
+  tools: GatewayTool[],
+  reminder: string,
+): GatewayTool[] {
+  if (!reminder.trim()) return tools;
+  const suffix = `\n\n${reminder}`;
+  return tools.map((tool) => {
+    const description = tool.description;
+    if (
+      tool.name !== RECALL_TOOL_NAME ||
+      typeof description !== "string" ||
+      (description !== RECALL_TOOL_DESCRIPTION &&
+        description !== `${RECALL_TOOL_DESCRIPTION}${suffix}`)
+    ) {
+      return tool;
+    }
+    if (description.endsWith(suffix)) return tool;
+    return { ...tool, description: `${description}${suffix}` };
   });
 }
 

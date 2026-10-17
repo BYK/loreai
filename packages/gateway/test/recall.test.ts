@@ -30,6 +30,7 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   markNativeRecallTool,
+  appendNativeRecallToolReminder,
   hasGatewayRecallTool,
   shouldEnableRecallMarkerReplay,
   buildRecallFollowUpRequest,
@@ -190,7 +191,7 @@ function bindReplayEntries(req: GatewayRequest, store: RecallStore): void {
 
 describe("RECALL_GATEWAY_TOOL", () => {
   test("has correct name and schema", () => {
-    expect(RECALL_GATEWAY_TOOL.name).toBe("recall");
+    expect(RECALL_GATEWAY_TOOL.name).toBe(RECALL_TOOL_NAME);
     expect(RECALL_GATEWAY_TOOL.description).toBeTruthy();
     const schema = RECALL_GATEWAY_TOOL.inputSchema;
     expect(schema.type).toBe("object");
@@ -495,13 +496,13 @@ describe("hasOtherToolUse", () => {
 });
 
 describe("clientHasRecallTool", () => {
-  test("returns true when client has recall tool", () => {
+  test("leaves the generic recall name available to caller-owned tools", () => {
     expect(
       clientHasRecallTool([
         { name: "Read", description: "Read a file", inputSchema: {} },
         { name: "recall", description: "Search memory", inputSchema: {} },
       ]),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("returns false when client has no recall tool", () => {
@@ -620,7 +621,7 @@ describe("markNativeRecallTool", () => {
 
   test("preserves a client-owned tool with the same name but another definition", () => {
     const clientTool: GatewayTool = {
-      name: RECALL_GATEWAY_TOOL.name,
+      name: "recall",
       description: "Client-owned recall tool",
       inputSchema: {},
       gatewayOwned: false,
@@ -631,6 +632,31 @@ describe("markNativeRecallTool", () => {
     expect(marked[0]).toBe(clientTool);
     expect(marked[0].gatewayOwned).toBe(false);
     expect(hasGatewayRecallTool(marked)).toBe(false);
+    expect(RECALL_GATEWAY_TOOL.name).toBe("lore_recall");
+    expect(shouldEnableRecallMarkerReplay(marked)).toBe(true);
+  });
+});
+
+describe("appendNativeRecallToolReminder", () => {
+  test("adds the enabled knowledge reminder without granting ownership", () => {
+    const nativeTool = JSON.parse(
+      JSON.stringify(RECALL_GATEWAY_TOOL),
+    ) as GatewayTool;
+    delete nativeTool.gatewayOwned;
+
+    const [withReminder] = appendNativeRecallToolReminder(
+      [nativeTool],
+      LORE_COMMIT_REMINDER,
+    );
+
+    expect(withReminder.description).toBe(
+      `${RECALL_GATEWAY_TOOL.description}\n\n${LORE_COMMIT_REMINDER}`,
+    );
+    expect(hasGatewayRecallTool([withReminder])).toBe(false);
+    expect(
+      appendNativeRecallToolReminder([withReminder], LORE_COMMIT_REMINDER)[0]
+        .description,
+    ).toBe(withReminder.description);
   });
 });
 
@@ -671,12 +697,12 @@ describe("shouldEnableRecallMarkerReplay", () => {
     });
   });
 
-  test("does not replay markers for a client-owned recall collision", () => {
+  test("does not confuse a client-owned recall tool with Lore's tool", () => {
     expect(
       shouldEnableRecallMarkerReplay([
-        { name: RECALL_TOOL_NAME, description: "client", inputSchema: {} },
+        { name: "recall", description: "client", inputSchema: {} },
       ]),
-    ).toBe(false);
+    ).toBe(true);
     expect(shouldEnableRecallMarkerReplay([RECALL_GATEWAY_TOOL])).toBe(true);
   });
 });
@@ -877,14 +903,16 @@ describe("parseRecallMarker", () => {
 });
 
 describe("serializeRecallStore / deserializeRecallStore", () => {
-  test("round-trips a populated store (cross-restart persistence, v46)", () => {
+  test("persists anchored replays without their private query text", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174000";
+    const privateQuery = 'sync tiers "pro" max';
     const store: RecallStore = new Map([
       [
-        'all:sync tiers "pro" max',
+        `anchor:${anchorId}`,
         {
           toolUseId: "toolu_1",
-          anchorId: "resp_1:0:toolu_1",
-          input: { query: 'sync tiers "pro" max', scope: "all" },
+          anchorId,
+          input: { query: privateQuery, scope: "all" },
           position: 2,
           result: "## Results\n\n* entry one\n* entry two",
           anchorContextId: "1".repeat(64),
@@ -892,18 +920,38 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
         },
       ],
       [
-        "id:k:abc123",
+        `all:${privateQuery}`,
         {
-          toolUseId: "toolu_2",
-          input: { query: "", scope: "all", id: "k:abc123" },
+          toolUseId: "toolu_legacy",
+          input: { query: privateQuery, scope: "all" },
+          position: 1,
+          result: "legacy result",
+        },
+      ],
+      [
+        "id:k:private-detail",
+        {
+          toolUseId: "toolu_detail",
+          input: { query: "", scope: "all", id: "k:private-detail" },
           position: 0,
           result: "detail body",
-          anchorContextId: "2".repeat(64),
         },
       ],
     ]);
-    const restored = deserializeRecallStore(serializeRecallStore(store));
-    expect(restored).toEqual(store);
+    const serialized = serializeRecallStore(store);
+    expect(serialized).not.toContain(privateQuery);
+    expect(serialized).not.toContain("private-detail");
+
+    const restored = deserializeRecallStore(serialized);
+    expect(restored.size).toBe(1);
+    expect(restored.get(`anchor:${anchorId}`)).toMatchObject({
+      anchorId,
+      input: {
+        query: "[recall query omitted from persistent state]",
+        scope: "all",
+      },
+      result: "## Results\n\n* entry one\n* entry two",
+    });
   });
 
   test("deserialize tolerates corrupt / empty blobs", () => {
@@ -926,13 +974,14 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
         ]),
       ).size,
     ).toBe(0);
-    // Entries missing required fields are dropped, valid ones kept.
+    // Entries missing required fields are dropped, valid anchor records kept.
     const mixed = JSON.stringify([
       ["bad", { toolUseId: 123 }],
       [
-        "all:q",
+        "anchor:123e4567-e89b-42d3-a456-426614174001",
         {
           toolUseId: "t",
+          anchorId: "123e4567-e89b-42d3-a456-426614174001",
           input: { query: "q" },
           position: 0,
           result: "r",
@@ -942,7 +991,9 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     ]);
     const restored = deserializeRecallStore(mixed);
     expect(restored.size).toBe(1);
-    expect(restored.get("all:q")?.result).toBe("r");
+    expect(
+      restored.get("anchor:123e4567-e89b-42d3-a456-426614174001")?.result,
+    ).toBe("r");
 
     const oversized = makeStoredRecall({
       input: { query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) },
@@ -963,27 +1014,33 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     ).not.toThrow();
   });
 
-  test("restores pre-anchor query-keyed entries without weakening anchor validation", () => {
+  test("drops legacy query-keyed entries and replays redacted anchors", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174099";
     const legacy = {
       toolUseId: "legacy-tool",
       input: { query: "old query", scope: "all" },
       position: 0,
       result: "old result",
     };
+    const anchorKey = `anchor:${anchorId}`;
     const restored = deserializeRecallStore(
       JSON.stringify([
         ["all:old query", legacy],
         [
-          "anchor:123e4567-e89b-42d3-a456-426614174099",
+          anchorKey,
           {
             ...legacy,
-            anchorId: "123e4567-e89b-42d3-a456-426614174099",
+            anchorId,
+            anchorContextId: "3".repeat(64),
           },
         ],
       ]),
     );
-    expect(restored.get("all:old query")).toEqual(legacy);
+    expect(restored.has("all:old query")).toBe(false);
     expect(restored.size).toBe(1);
+    expect(restored.get(anchorKey)?.input.query).toBe(
+      "[recall query omitted from persistent state]",
+    );
 
     expect(
       deserializeRecallStore(JSON.stringify([["all:wrong query", legacy]]))
@@ -994,31 +1051,38 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
       {
         role: "assistant",
         content: [
-          { type: "text", text: buildRecallMarker("old query", "all") },
+          {
+            type: "text",
+            text: buildAnchoredRecallMarker(
+              "old query",
+              "all",
+              undefined,
+              undefined,
+              anchorId,
+            ),
+          },
         ],
       },
     ]);
+    bindCanonicalAnchors(req, restored);
     expect(expandRecallMarkers(req, restored)).toBe(true);
-    expect(req.messages[0].content[0]).toMatchObject({
-      type: "tool_use",
-      id: "legacy-tool",
-      name: RECALL_TOOL_NAME,
-    });
-    expect(req.messages[1].content[0]).toMatchObject({
-      type: "tool_result",
-      toolUseId: "legacy-tool",
-    });
+    expect(
+      req.messages.flatMap((message) => message.content),
+    ).not.toContainEqual(expect.objectContaining({ type: "tool_use" }));
+    expect(JSON.stringify(req.messages)).not.toContain("lore-recall:");
   });
 
   test.each(["xyz", "A".repeat(64), "g".repeat(64)])(
-    "rejects query-keyed entry with malformed context hash %s",
+    "rejects anchored entry with malformed context hash %s",
     (anchorContextId) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174001";
       const restored = deserializeRecallStore(
         JSON.stringify([
           [
-            "all:old query",
+            `anchor:${anchorId}`,
             {
               toolUseId: "legacy-tool",
+              anchorId,
               input: { query: "old query", scope: "all" },
               position: 0,
               result: "old result",
@@ -1058,16 +1122,20 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
   test("bounds restored stores", () => {
     const entries = Array.from(
       { length: MAX_RECALL_STORE_ENTRIES + 1 },
-      (_, i) => [
-        `all:query-${i}`,
-        {
-          toolUseId: `tool-${i}`,
-          input: { query: `query-${i}` },
-          position: 0,
-          result: "result",
-          anchorContextId: "4".repeat(64),
-        },
-      ],
+      (_, i) => {
+        const anchorId = `123e4567-e89b-42d3-a456-${i.toString(16).padStart(12, "0")}`;
+        return [
+          `anchor:${anchorId}`,
+          {
+            toolUseId: `tool-${i}`,
+            anchorId,
+            input: { query: `query-${i}` },
+            position: 0,
+            result: "result",
+            anchorContextId: "4".repeat(64),
+          },
+        ];
+      },
     );
     expect(deserializeRecallStore(JSON.stringify(entries)).size).toBe(
       MAX_RECALL_STORE_ENTRIES,
@@ -1200,8 +1268,8 @@ describe("buildRecallFollowUpRequest", () => {
   });
 
   test.each([
-    ["anthropic", { type: "tool", name: "recall" }],
-    ["openai-responses", { type: "function", name: "recall" }],
+    ["anthropic", { type: "tool", name: RECALL_TOOL_NAME }],
+    ["openai-responses", { type: "function", name: RECALL_TOOL_NAME }],
   ] as const)(
     "final %s continuation preserves cached tools and controls",
     (protocol, choice) => {
@@ -1209,7 +1277,11 @@ describe("buildRecallFollowUpRequest", () => {
         [],
         [
           { name: "Read", description: "Read", inputSchema: {} },
-          { name: "recall", description: "Recall", inputSchema: {} },
+          {
+            name: RECALL_TOOL_NAME,
+            description: "Recall",
+            inputSchema: {},
+          },
         ],
       );
       req.protocol = protocol;
@@ -1234,7 +1306,10 @@ describe("buildRecallFollowUpRequest", () => {
       expect(JSON.stringify(follow.messages.at(-1))).toContain(
         "The recall budget for this turn has been used",
       );
-      expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
+      expect(req.tools.map((tool) => tool.name)).toEqual([
+        "Read",
+        RECALL_TOOL_NAME,
+      ]);
       expect(req.metadata.tool_choice).toBe(choice);
       expect(req.extras?.tool_choice).toBe(choice);
     },
@@ -1259,10 +1334,13 @@ describe("buildRecallFollowUpRequest", () => {
   });
 
   test.each([
-    ["anthropic", { tool_choice: { type: "tool", name: "recall" } }],
-    ["openai", { tool_choice: { type: "function", name: "recall" } }],
-    ["openai-responses", { tool_choice: { type: "function", name: "recall" } }],
-    ["vertex", { tool_choice: { type: "tool", name: "recall" } }],
+    ["anthropic", { tool_choice: { type: "tool", name: RECALL_TOOL_NAME } }],
+    ["openai", { tool_choice: { type: "function", name: RECALL_TOOL_NAME } }],
+    [
+      "openai-responses",
+      { tool_choice: { type: "function", name: RECALL_TOOL_NAME } },
+    ],
+    ["vertex", { tool_choice: { type: "tool", name: RECALL_TOOL_NAME } }],
     ["gemini", { toolConfig: { functionCallingConfig: { mode: "ANY" } } }],
   ] as const)(
     "builds an isolated %s recovery request without recall or forced controls",
@@ -1272,7 +1350,11 @@ describe("buildRecallFollowUpRequest", () => {
         [{ role: "user", content: [{ type: "text", text: "finish" }] }],
         [
           { name: "Read", description: "Read", inputSchema: {} },
-          { name: "recall", description: "Recall", inputSchema: {} },
+          {
+            name: RECALL_TOOL_NAME,
+            description: "Recall",
+            inputSchema: {},
+          },
         ],
       );
       request.protocol = protocol;
@@ -1281,7 +1363,7 @@ describe("buildRecallFollowUpRequest", () => {
         cachedContent: "cachedContents/private",
       };
       request.extras = {
-        tool_choice: { type: "function", name: "recall" },
+        tool_choice: { type: "function", name: RECALL_TOOL_NAME },
         prompt_cache_key: "private-cache-key",
       };
       const original = structuredClone(request);
@@ -1330,14 +1412,14 @@ describe("buildRecallFollowUpRequest", () => {
         expect.objectContaining({
           type: "tool_use",
           id: recall.id,
-          name: "recall",
+          name: RECALL_TOOL_NAME,
         }),
       );
       expect(recovery.messages.at(-1)?.content).toContainEqual(
         expect.objectContaining({
           type: "tool_result",
           toolUseId: recall.id,
-          toolName: "recall",
+          toolName: RECALL_TOOL_NAME,
           content: expect.arrayContaining([
             { type: "text", text: "accepted recall result" },
             expect.objectContaining({
@@ -2577,7 +2659,11 @@ describe("runRecallRecovery", () => {
         [],
         [
           { name: "Read", description: "Read", inputSchema: {} },
-          { name: "recall", description: "Recall", inputSchema: {} },
+          {
+            name: RECALL_TOOL_NAME,
+            description: "Recall",
+            inputSchema: {},
+          },
         ],
       );
       request.codex = stream;
@@ -2710,7 +2796,7 @@ describe("expandRecallMarkers", () => {
     expect(req.messages[1].content[0]).toMatchObject({
       type: "tool_use",
       id: "call_recall",
-      name: "recall",
+      name: RECALL_TOOL_NAME,
     });
     expect(req.messages[2].content[0]).toMatchObject({
       type: "tool_result",
@@ -3505,7 +3591,9 @@ describe("expandRecallMarkers", () => {
 
     expect(expandRecallMarkers(req, store)).toBe(true);
     expect(req.messages[0].content[0]).toMatchObject({ name: "write" });
-    expect(req.messages[1].content[0]).toMatchObject({ name: "recall" });
+    expect(req.messages[1].content[0]).toMatchObject({
+      name: RECALL_TOOL_NAME,
+    });
   });
 
   test("never expands a canonical anchor without provenance", () => {
@@ -3567,7 +3655,9 @@ describe("expandRecallMarkers", () => {
     const assistant = req.messages[1];
     expect(assistant.content).toHaveLength(3);
     expect(assistant.content[1].type).toBe("tool_use");
-    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
 
     // User message should have recall tool_result inserted
     const user = req.messages[2];
@@ -3917,7 +4007,9 @@ describe("expandRecallMarkers", () => {
     const assistant = req.messages[1];
     expect(assistant.content).toHaveLength(3); // text + recall tool_use + Read tool_use
     expect(assistant.content[1].type).toBe("tool_use");
-    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe("recall");
+    expect((assistant.content[1] as GatewayToolUseBlock).name).toBe(
+      RECALL_TOOL_NAME,
+    );
     expect(assistant.content[2].type).toBe("tool_use");
     expect((assistant.content[2] as GatewayToolUseBlock).name).toBe("Read");
 
@@ -4038,7 +4130,7 @@ describe("replaceRecallWithMarker", () => {
       const call = {
         type: "tool_use" as const,
         id: `call_${providerId}`,
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: { query: "memory" },
       };
       return replaceRecallWithMarker({
@@ -4078,7 +4170,7 @@ describe("replaceRecallWithMarker", () => {
       const call = {
         type: "tool_use" as const,
         id: `call_recall_${turn}`,
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: { query: "same search" },
       };
       return replaceRecallWithMarker({
@@ -4103,7 +4195,7 @@ describe("replaceRecallWithMarker", () => {
     const recall = {
       type: "tool_use" as const,
       id: "call_recall",
-      name: "recall",
+      name: RECALL_TOOL_NAME,
       input: { query: "memory" },
     };
     const read = {
@@ -4443,7 +4535,17 @@ describe("final recall continuation output", () => {
     [[{ type: "text", text: "   " }], false],
     [[{ type: "text", text: "answer" }], true],
     [[{ type: "tool_use", id: "call", name: "Read", input: {} }], true],
-    [[{ type: "tool_use", id: "call", name: "recall", input: {} }], false],
+    [
+      [
+        {
+          type: "tool_use",
+          id: "call",
+          name: RECALL_TOOL_NAME,
+          input: {},
+        },
+      ],
+      false,
+    ],
     [
       [
         {

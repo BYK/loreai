@@ -26,6 +26,7 @@ import type {
   GatewayUsage,
 } from "./types";
 import { sanitizeCodexRateLimitEvents } from "../codex-rate-limits";
+import { hasGatewayRecallTool } from "../recall";
 import {
   blocksToText,
   forwardClientHeaders,
@@ -1135,11 +1136,9 @@ export function buildOpenAIResponsesUpstreamRequest(
       if (t.responsesBuiltin === "web_search_preview") {
         return { type: "web_search_preview" };
       }
-      if (
-        t.name !== "recall" ||
-        t.gatewayOwned !== true ||
-        t.inputSchema.additionalProperties !== false
-      ) {
+      // The public gatewayOwned flag is caller-controlled; strict projection
+      // requires the exact tool branded by the gateway's private ownership check.
+      if (!hasGatewayRecallTool([t])) {
         return {
           type: "function",
           name: t.name,

@@ -2501,6 +2501,44 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   );
   ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;
   `,
+  `
+  -- Version 105: recall queries are transient input and must not remain in
+  -- durable session state. Keep only anchor-keyed replay records, replacing
+  -- their input query with a fixed marker; legacy query-keyed records cannot
+  -- be replayed without the query and are discarded.
+  UPDATE session_state
+     SET recall_store = '[]'
+   WHERE recall_store IS NOT NULL AND NOT json_valid(recall_store);
+  UPDATE session_state
+     SET recall_store = COALESCE((
+       SELECT json_group_array(json(entry_json))
+         FROM (
+           SELECT json_array(
+                    json_extract(entry.array_value, '$[0]'),
+                    json(json_set(
+                      json_extract(entry.array_value, '$[1]'),
+                      '$.input.query',
+                      '[recall query omitted from persistent state]'
+                    ))
+                  ) AS entry_json
+             FROM (
+               SELECT entry.key,
+                      entry.type,
+                      CASE WHEN entry.type = 'array'
+                           THEN entry.value ELSE '[]' END AS array_value
+                 FROM json_each(session_state.recall_store) AS entry
+             ) AS entry
+            WHERE entry.type = 'array'
+              AND json_type(entry.array_value, '$[0]') = 'text'
+              AND json_extract(entry.array_value, '$[0]') LIKE 'anchor:%'
+              AND json_type(entry.array_value, '$[1]') = 'object'
+              AND json_type(entry.array_value, '$[1].input') = 'object'
+              AND json_type(entry.array_value, '$[1].input.query') = 'text'
+            ORDER BY CAST(entry.key AS INTEGER)
+         )
+     ), '[]')
+   WHERE recall_store IS NOT NULL AND json_valid(recall_store);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS

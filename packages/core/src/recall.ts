@@ -637,10 +637,14 @@ function formatFusedResults(
         lines.push(`#### ${SOURCE_LABELS[currentSource]}`);
       }
 
-      const detailRef =
-        getFullContentLength(r.item) > r.charBudget
-          ? config.createDetailRef?.(r.item)
-          : undefined;
+      const detailRef = isResultContentTruncated(
+        r.item,
+        r.charBudget,
+        anchorsByLogicalId,
+        filesByLogicalId,
+      )
+        ? config.createDetailRef?.(r.item)
+        : undefined;
       const detailRefCost = detailRef
         ? ` [detail ref: \`${detailRef}\`]`.length
         : 0;
@@ -656,8 +660,13 @@ function formatFusedResults(
   }
 
   // Footer
-  const anyTruncated = tiered.some(
-    (r) => getFullContentLength(r.item) > r.charBudget,
+  const anyTruncated = tiered.some((r) =>
+    isResultContentTruncated(
+      r.item,
+      r.charBudget,
+      anchorsByLogicalId,
+      filesByLogicalId,
+    ),
   );
   lines.push(``);
   lines.push(`---`);
@@ -759,30 +768,6 @@ function entitySummaryParts(item: entities.EntityWithAliases): {
   return { aliasesText, metaText, relationsText };
 }
 
-/** Get the full content length of a tagged result (before truncation). */
-function getFullContentLength(tagged: TaggedResult): number {
-  switch (tagged.source) {
-    case "knowledge":
-    case "cross-knowledge":
-      return tagged.item.title.length + tagged.item.content.length + 4; // **: :
-    case "distillation":
-      return tagged.item.observations.length;
-    case "temporal":
-      return tagged.item.content.length;
-    case "lat-section":
-      return tagged.item.heading.length + tagged.item.content.length;
-    case "entity": {
-      const p = entitySummaryParts(tagged.item);
-      return (
-        tagged.item.canonical_name.length +
-        p.aliasesText.length +
-        p.metaText.length +
-        p.relationsText.length
-      );
-    }
-  }
-}
-
 /** Render a single result as a markdown list item line. */
 /** Render an entry's resolved code anchors as a compact ` \u21b3 a, b` suffix the
  *  agent can jump to instead of grepping. Empty/absent → "". Symbol anchors get a
@@ -802,6 +787,77 @@ function renderAnchors(anchors?: ltm.KnowledgeRefAnchor[]): string {
 function renderFiles(paths?: string[]): string {
   if (!paths || paths.length === 0) return "";
   return ` \u21b3 files: ${paths.join(", ")}`;
+}
+
+function isResultContentTruncated(
+  tagged: TaggedResult,
+  charBudget: number,
+  anchorsByLogicalId?: Map<string, ltm.KnowledgeRefAnchor[]>,
+  filesByLogicalId?: Map<string, string[]>,
+): boolean {
+  let content: string;
+  let contentBudget: number;
+
+  switch (tagged.source) {
+    case "knowledge": {
+      const k = tagged.item;
+      const titlePart = `**${inline(k.title)}** (${relativeAge(k.updated_at)}${k.match === "fuzzy" ? ", approximate" : ""}): `;
+      const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const files = renderFiles(filesByLogicalId?.get(k.logical_id));
+      content = inline(k.content);
+      contentBudget = Math.max(
+        40,
+        charBudget - titlePart.length - anchors.length - files.length,
+      );
+      break;
+    }
+    case "cross-knowledge": {
+      const k = tagged.item;
+      const titlePart = `**${inline(k.title)}** (${relativeAge(k.updated_at)}, from: ${tagged.projectLabel}): `;
+      const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const files = renderFiles(filesByLogicalId?.get(k.logical_id));
+      content = inline(k.content);
+      contentBudget = Math.max(
+        40,
+        charBudget - titlePart.length - anchors.length - files.length,
+      );
+      break;
+    }
+    case "distillation":
+      content = inline(tagged.item.observations);
+      contentBudget = charBudget;
+      break;
+    case "temporal": {
+      const prefix = `(${tagged.item.role}, ${relativeAge(tagged.item.created_at)}) `;
+      content = inline(tagged.item.content);
+      contentBudget = Math.max(40, charBudget - prefix.length);
+      break;
+    }
+    case "lat-section": {
+      const heading = `**${inline(tagged.item.file)} \u00A7 ${inline(tagged.item.heading)}**: `;
+      content = inline(tagged.item.first_paragraph || tagged.item.content);
+      contentBudget = Math.max(40, charBudget - heading.length);
+      break;
+    }
+    case "entity": {
+      const typeLabel =
+        tagged.item.entity_type === "self"
+          ? "person, you"
+          : tagged.item.entity_type;
+      const head = `**${inline(tagged.item.canonical_name)}** (${typeLabel})`;
+      const { aliasesText, metaText, relationsText } = entitySummaryParts(
+        tagged.item,
+      );
+      const detailFull = [aliasesText, metaText, relationsText]
+        .filter(Boolean)
+        .join(" \u2014 ");
+      content = inline(detailFull);
+      contentBudget = Math.max(40, charBudget - head.length - 2);
+      break;
+    }
+  }
+
+  return truncateAtSentence(content, contentBudget) !== content;
 }
 
 function renderResultLine(

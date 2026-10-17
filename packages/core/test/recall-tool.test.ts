@@ -11,7 +11,7 @@ import {
 
 describe("shared recall tool contract", () => {
   test("defines one bounded, provider-neutral schema", () => {
-    expect(RECALL_TOOL_NAME).toBe("recall");
+    expect(RECALL_TOOL_NAME).toBe("lore_recall");
     expect(RECALL_TOOL_SCOPES).toEqual([
       "all",
       "session",
@@ -89,9 +89,37 @@ describe("shared recall tool contract", () => {
       sessionID: "session-1",
       knowledgeEnabled: true,
       searchConfig: search,
-      recordTransfers: true,
+      detailRefs: true,
+      recordTransfers: false,
       signal,
     });
+  });
+
+  test("does not return results after cancellation settles an accepted lookup", async () => {
+    const search = {} as unknown as LoreConfig["search"];
+    const cfg = {
+      knowledge: { enabled: false },
+      search,
+    } as unknown as LoreConfig;
+    const controller = new AbortController();
+    let resolveRun: ((value: string) => void) | undefined;
+    const run = vi.fn(
+      (_input: RecallInput) =>
+        new Promise<string>((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+    const execute = createRecallToolExecutor(run, () => cfg);
+
+    const pending = execute(
+      { query: "private query" },
+      { projectPath: "/project", signal: controller.signal },
+    );
+    controller.abort();
+    resolveRun?.("private recall results");
+
+    await expect(pending).resolves.toBe("Recall was cancelled.");
+    expect(run).toHaveBeenCalledOnce();
   });
 
   test("returns safe failures and honors cancellation", async () => {
