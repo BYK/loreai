@@ -569,4 +569,140 @@ describe("ModelTidesUpload", () => {
       }).disabled,
     ).toBe(true);
   });
+  it.each([
+    ["Review upload…", "Review upload", "upload"],
+    ["Share", "Share report publicly", "share"],
+    ["Unshare", "Hide public link", "unshare"],
+    ["Contribute", "Contribute to the community aggregate", "contribute"],
+    ["Withdraw", "Withdraw from the community aggregate", "withdraw"],
+    ["Delete report", "Delete Model Tides report", "delete"],
+    ["Rotate key", "Rotate the private key", "rotate"],
+  ])(
+    "keeps %s gated on exact YES and serializes its reviewed action",
+    async (triggerLabel, title, action) => {
+      const postModelUsageUpload = vi
+        .fn<ApiClient["postModelUsageUpload"]>()
+        .mockResolvedValue({ id: storedReport.id });
+      const postModelUsageUploadAction = vi
+        .fn<ApiClient["postModelUsageUploadAction"]>()
+        .mockResolvedValue({ id: storedReport.id });
+      const deleteModelUsageUpload = vi
+        .fn<ApiClient["deleteModelUsageUpload"]>()
+        .mockResolvedValue({ id: storedReport.id });
+      mountPage(
+        clientWith({
+          getModelUsage: async () => usageData,
+          getModelUsageUpload: async () =>
+            uploadState({
+              report: {
+                ...storedReport,
+                published: action !== "share",
+                inAggregate: action === "withdraw",
+              },
+            }),
+          postModelUsageUpload,
+          postModelUsageUploadAction,
+          deleteModelUsageUpload,
+        }),
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: triggerLabel }),
+      );
+      const dialog = await screen.findByRole("alertdialog", { name: title });
+      const input = within(dialog).getByRole("textbox", {
+        name: "Type YES to confirm",
+      });
+      const confirm = within(dialog).getByRole("button", { name: "Confirm" });
+      for (const value of ["", "yes", "YES ", " YES", "Yes"]) {
+        fireEvent.input(input, { target: { value } });
+        expect(confirm).toBeDisabled();
+      }
+      fireEvent.input(input, { target: { value: "YES" } });
+      expect(confirm).toBeEnabled();
+      fireEvent.click(confirm);
+      await waitFor(() =>
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+      );
+      if (action === "upload") {
+        expect(postModelUsageUpload).toHaveBeenCalledWith({
+          confirm: "YES",
+          snapshot_sha256: "a".repeat(64),
+          reviewed_revision: 7,
+        });
+      } else if (action === "delete") {
+        expect(deleteModelUsageUpload).toHaveBeenCalledWith({ confirm: "YES" });
+      } else {
+        expect(postModelUsageUploadAction).toHaveBeenCalledWith(action, {
+          confirm: "YES",
+          ...(["share", "contribute"].includes(action)
+            ? { reviewed_revision: 7 }
+            : {}),
+        });
+      }
+      expect(
+        postModelUsageUpload.mock.calls.length +
+          postModelUsageUploadAction.mock.calls.length +
+          deleteModelUsageUpload.mock.calls.length,
+      ).toBe(1);
+    },
+  );
+
+  it("keeps upload review open while pending and retries an error with the reviewed hash", async () => {
+    let reject: ((error: Error) => void) | undefined;
+    const postModelUsageUpload = vi
+      .fn<ApiClient["postModelUsageUpload"]>()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, fail) => {
+            reject = fail;
+          }),
+      )
+      .mockResolvedValue({ id: storedReport.id });
+    mountPage(
+      clientWith({
+        getModelUsage: async () => usageData,
+        getModelUsageUpload: async () => uploadState(),
+        postModelUsageUpload,
+      }),
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "Review upload…",
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Review upload",
+    });
+    fireEvent.input(
+      within(dialog).getByRole("textbox", { name: "Type YES to confirm" }),
+      { target: { value: "YES" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    expect(
+      within(dialog).getByRole("button", { name: "Working…" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Dismiss" }));
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("alertdialog")).toBe(dialog);
+    reject?.(new Error("Upload failed; try again"));
+    expect(
+      await within(dialog).findByText("Upload failed; try again"),
+    ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    expect(postModelUsageUpload).toHaveBeenCalledTimes(2);
+    expect(postModelUsageUpload).toHaveBeenLastCalledWith({
+      confirm: "YES",
+      snapshot_sha256: "a".repeat(64),
+    });
+    fireEvent.click(trigger);
+    expect(
+      await screen.findByRole("textbox", { name: "Type YES to confirm" }),
+    ).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+  });
 });

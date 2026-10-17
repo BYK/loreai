@@ -25,6 +25,11 @@ export const ConfirmDialog: Component<{
   destructive?: boolean;
   /** Disable both buttons while the action is in flight. */
   pending?: boolean;
+  /** Additional caller-owned validation; cancellation remains available. */
+  confirmDisabled?: boolean;
+  pendingLabel?: string;
+  contentTestId?: string;
+  confirmTestId?: string;
   /** Rendered between the description and the buttons (e.g. an inline error notice). */
   children?: JSX.Element;
   onConfirm: () => void;
@@ -36,7 +41,11 @@ export const ConfirmDialog: Component<{
       if (!open && !props.pending) props.onCancel();
     }}
   >
-    <DialogContent role="alertdialog" aria-label={props.title}>
+    <DialogContent
+      role="alertdialog"
+      aria-label={props.title}
+      data-testid={props.contentTestId}
+    >
       <DialogHeader>
         <DialogTitle>{props.title}</DialogTitle>
         <DialogDescription>{props.description}</DialogDescription>
@@ -52,10 +61,13 @@ export const ConfirmDialog: Component<{
         </Button>
         <Button
           variant={props.destructive ? "destructive" : "default"}
-          disabled={props.pending}
+          disabled={props.pending || props.confirmDisabled}
+          data-testid={props.confirmTestId}
           onClick={props.onConfirm}
         >
-          {props.pending ? "Working…" : props.confirmLabel}
+          {props.pending
+            ? (props.pendingLabel ?? "Working…")
+            : props.confirmLabel}
         </Button>
       </DialogFooter>
     </DialogContent>
