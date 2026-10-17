@@ -127,19 +127,19 @@ test.describe("project actions (UI-08)", () => {
       .getByRole("button", { name: "Move sessions…" })
       .click();
     const dialog = page.getByRole("dialog");
-    await dialog.getByRole("checkbox", { name: new RegExp(sessionId) }).check();
-    const target = dialog.getByRole("button", { name: "Target project" });
+    const target = dialog.getByRole("combobox", { name: "Target project" });
     await expect(target).toBeEnabled();
-    await target.click();
-    // The Kobalte Select popup portals outside the dialog — which the modal
-    // dialog marks aria-hidden — so role queries can't see the options, and
-    // with many seeded projects "lore" sits outside the listbox scrollport,
-    // so a normal click cannot scroll it into view. dispatchEvent still runs
-    // the item's real click handler.
-    await page
-      .locator("[role='option']")
-      .filter({ hasText: "lore" })
-      .dispatchEvent("click");
+    await expect(target).toHaveAttribute("aria-expanded", "false");
+    await dialog.getByRole("checkbox", { name: new RegExp(sessionId) }).check();
+    // Every fixture path contains "lore-ui-e2e"; include the project suffix
+    // so keyboard selection does not depend on recency among tied path hits.
+    await target.fill("projects/lroe");
+    await expect(dialog.getByRole("option", { name: /^lore/ })).toContainText(
+      "Approximate match",
+    );
+    await target.press("ArrowDown");
+    await target.press("Enter");
+    await expect(target).toHaveValue("lore");
     await dialog.getByRole("button", { name: /Move \d+ session/ }).click();
     await expect(
       page.getByTestId("project-actions").getByTestId("action-notice-result"),
@@ -149,7 +149,7 @@ test.describe("project actions (UI-08)", () => {
     await expect(page.getByRole("link", { name: sessionId })).toBeVisible();
   });
 
-  test("move dialog keeps focus trapped after the target select closes", async ({
+  test("move dialog keeps focus trapped after the target picker closes", async ({
     page,
   }) => {
     const scratchId = await projectIdByName(page, "scratch");
@@ -159,10 +159,13 @@ test.describe("project actions (UI-08)", () => {
     await page.keyboard.press("Escape");
     await actions.getByRole("button", { name: "Move sessions…" }).click();
     const dialog = page.getByRole("dialog");
-    const target = dialog.getByRole("button", { name: "Target project" });
+    const target = dialog.getByRole("combobox", { name: "Target project" });
     await expect(target).toBeEnabled();
-    await target.click();
+    await target.fill("lroe");
+    await expect(dialog.getByRole("option", { name: /^lore/ })).toBeVisible();
     await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await expect(target).toHaveAttribute("aria-expanded", "false");
     for (let i = 0; i < 15; i++) {
       await page.keyboard.press("Tab");
       const inside = await page.evaluate(
@@ -170,6 +173,53 @@ test.describe("project actions (UI-08)", () => {
       );
       expect(inside, `Tab ${i} left the dialog`).toBe(true);
     }
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("target search accepts paths and revokes selection on a no-match query", async ({
+    page,
+  }) => {
+    await gotoProject(page, "lore");
+    await page
+      .getByTestId("project-actions")
+      .getByRole("button", { name: "Move sessions…" })
+      .click();
+    const dialog = page.getByRole("dialog");
+    const target = dialog.getByRole("combobox", { name: "Target project" });
+    await target.fill("projects/scratch");
+    const option = dialog.getByRole("option", { name: "scratch", exact: true });
+    await expect(option).toContainText("/projects/scratch");
+    await expect(option).not.toContainText("Approximate match");
+    if (test.info().project.name.startsWith("mobile")) {
+      await option.tap();
+    } else {
+      await option.click();
+    }
+    await expect(target).toHaveValue("scratch");
+    await target.fill("zzzzzzzzzz");
+    await expect(dialog.getByRole("status")).toHaveText(
+      "No matching projects.",
+    );
+    await expect(dialog.getByRole("option")).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: /Move \d+ session/ }),
+    ).toBeDisabled();
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth <=
+          document.documentElement.clientWidth,
+      ),
+    ).toBe(true);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await page
+      .getByTestId("project-actions")
+      .getByRole("button", { name: "Move sessions…" })
+      .click();
+    await expect(
+      page.getByRole("combobox", { name: "Target project" }),
+    ).toHaveValue("");
   });
 
   test("merge duplicates reports none on the seeded data", async ({ page }) => {
