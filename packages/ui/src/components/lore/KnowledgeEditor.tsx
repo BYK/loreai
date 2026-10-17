@@ -4,6 +4,7 @@ import {
   Show,
   createEffect,
   createSignal,
+  createUniqueId,
   onCleanup,
   onMount,
 } from "solid-js";
@@ -27,6 +28,7 @@ import {
   TextFieldInput,
   TextFieldLabel,
   TextFieldTextArea,
+  textFieldInputClass,
 } from "~/components/ui/text-field";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { StateCard } from "~/components/lore/StateCard";
@@ -114,6 +116,7 @@ export const KnowledgeEditor: Component<{
   const [content, setContent] = createSignal("");
   const [category, setCategory] =
     createSignal<(typeof CATEGORIES)[number]>("decision");
+  const confidenceInputId = `confidence-${createUniqueId()}`;
   const [confidenceText, setConfidenceText] = createSignal("0.8");
   const [confidenceEdited, setConfidenceEdited] = createSignal(false);
   const confidence = () => {
@@ -706,25 +709,26 @@ export const KnowledgeEditor: Component<{
                 </For>
               </select>
             </label>
-            <TextField
-              class="text-sm"
-              value={confidenceText()}
-              name="confidence"
-              required
-            >
-              <TextFieldLabel>
+            <TextField class="text-sm" required>
+              <TextFieldLabel for={confidenceInputId}>
                 Confidence (
                 {confidence() === undefined
                   ? "enter 0 to 1"
                   : formatConfidence(confidence() ?? 0)}
                 )
               </TextFieldLabel>
-              <TextFieldInput
-                class="bg-surface"
+              {/* Kobalte writes input.value after every input event, erasing
+                  native number-editing states such as a leading decimal point. */}
+              <input
+                class={textFieldInputClass("bg-surface")}
+                id={confidenceInputId}
+                name="confidence"
                 type="number"
+                required
                 min="0"
                 max="1"
                 step="any"
+                value={confidenceText()}
                 onInput={(event) => {
                   setConfidenceText(event.currentTarget.value);
                   setConfidenceEdited(true);
