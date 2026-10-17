@@ -1,3 +1,4 @@
+import { InvalidCrossProviderRequestError } from "./translate/errors";
 /**
  * Converts raw Anthropic API messages (as they appear in request/response
  * bodies) into `@loreai/core`'s `LoreMessageWithParts` shape for temporal
@@ -81,11 +82,17 @@ function hashBlocks(
         h.update(`thinking:${block.thinking}`);
         break;
       case "tool_use":
+        if (block.responsesCall)
+          h.update(`responses-call:${JSON.stringify(block.responsesCall)}:`);
         h.update(
           `tool_use:${block.id}:${block.name}:${JSON.stringify(block.input)}`,
         );
         break;
       case "tool_result":
+        if (block.responsesOutput)
+          h.update(
+            `responses-output:${JSON.stringify(block.responsesOutput)}:`,
+          );
         h.update(`tool_result:${block.toolUseId}:${block.toolName ?? ""}:`);
         hashBlocks(h, block.content);
         break;
@@ -225,6 +232,7 @@ function contentBlockToPart(
         type: "tool",
         tool: block.name,
         callID: block.id,
+        ...(block.responsesCall ? { responsesCall: block.responsesCall } : {}),
         state: { status: "pending", input: block.input },
       } satisfies LoreToolPart;
 
@@ -249,6 +257,9 @@ function contentBlockToPart(
         tool: "result",
         ...(block.toolName ? { toolName: block.toolName } : undefined),
         callID: block.toolUseId,
+        ...(block.responsesOutput
+          ? { responsesOutput: block.responsesOutput }
+          : {}),
         // Propagate the error flag so downstream consumers (structured
         // tool-call trace, gradient) can distinguish failed tool results.
         state: block.isError
@@ -466,6 +477,7 @@ export function resolveToolResults(
       blocks?: LoreContentBlock[];
       nativeResponsesOutputArray?: true;
       toolName?: string;
+      responsesOutput?: Record<string, unknown>;
       isError: boolean;
     }
   >();
@@ -479,6 +491,7 @@ export function resolveToolResults(
             blocks: part.state.blocks,
             nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
             toolName: part.toolName,
+            responsesOutput: part.responsesOutput,
             isError: false,
           });
         } else if (part.state.status === "error") {
@@ -487,6 +500,7 @@ export function resolveToolResults(
             blocks: part.state.blocks,
             nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
             toolName: part.toolName,
+            responsesOutput: part.responsesOutput,
             isError: true,
           });
         }
@@ -505,6 +519,19 @@ export function resolveToolResults(
       ) {
         const result = resultsByCallID.get(part.callID);
         if (result) {
+          const callType = part.responsesCall?.type ?? "function_call";
+          const outputType =
+            result.responsesOutput?.type ?? "function_call_output";
+          const expectedOutput =
+            callType === "tool_search_call"
+              ? "tool_search_output"
+              : callType === "custom_tool_call"
+                ? "custom_tool_call_output"
+                : "function_call_output";
+          if (outputType !== expectedOutput)
+            throw new InvalidCrossProviderRequestError();
+          if (result.responsesOutput)
+            part.responsesOutput = result.responsesOutput;
           if (result.toolName) part.toolName = result.toolName;
           part.state = result.isError
             ? {

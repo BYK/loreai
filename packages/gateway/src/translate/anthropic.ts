@@ -1,3 +1,7 @@
+import {
+  assertNoNativeResponsesTools,
+  assertPortableResponsesResponse,
+} from "./responses-tools";
 /**
  * Anthropic ↔ Gateway translation layer.
  *
@@ -768,6 +772,7 @@ export function buildAnthropicRequest(
   headers: Record<string, string>;
   body: unknown;
 } {
+  assertNoNativeResponsesTools(req);
   if (req.extras?.response_format !== undefined) {
     const format = req.extras.response_format;
     if (
@@ -1096,6 +1101,7 @@ export function parseAnthropicResponseJSON(
 export function buildAnthropicNonStreamResponse(
   resp: GatewayResponse,
 ): unknown {
+  assertPortableResponsesResponse(resp);
   const u = resp.usage ?? ZERO_USAGE;
   const usage: Record<string, number> = {
     input_tokens: u.inputTokens,

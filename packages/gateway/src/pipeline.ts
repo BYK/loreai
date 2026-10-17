@@ -1,3 +1,7 @@
+import {
+  assertNoNativeResponsesTools,
+  nativeResponsesCall,
+} from "./translate/responses-tools";
 /**
  * Core request processing pipeline for the Lore gateway.
  *
@@ -7820,7 +7824,7 @@ function captureLegacyGlobalAuth(
  * retain the exact route intent used by forwardToUpstream.
  */
 function resolveRequestUpstreamRoute(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
@@ -7843,6 +7847,17 @@ function resolveRequestUpstreamRoute(
     // Explicit request routing is cache-only. An unknown untrusted provider
     // must fail closed without triggering side-channel network activity.
     providerRoute = lookupProviderRoute(providerID, false);
+  }
+  if (
+    !providerRoute &&
+    req.codex === true &&
+    req.rawHeaders["chatgpt-account-id"]?.trim() &&
+    extractAuth(req.rawHeaders)?.scheme === "bearer" &&
+    providerHeader === undefined &&
+    !headerUpstream
+  ) {
+    providerID = "openai-codex";
+    providerRoute = resolveProviderRoute(providerID);
   }
   if (
     !providerRoute &&
@@ -7958,6 +7973,8 @@ function assertCrossProviderRequestControls(
   effectiveProtocol: EffectiveUpstreamProtocol,
 ): void {
   const extras = req.extras;
+  if (effectiveProtocol !== "openai-responses")
+    assertNoNativeResponsesTools(req);
   if (
     ((req.protocol === "openai" && effectiveProtocol !== "openai") ||
       (req.protocol === "openai-responses" &&
@@ -7970,7 +7987,7 @@ function assertCrossProviderRequestControls(
   if (
     req.protocol === "openai-responses" &&
     effectiveProtocol !== "openai-responses" &&
-    (req.tools.some((tool) => tool.responsesBuiltin !== undefined) ||
+    (req.tools.some((tool) => tool.responsesNative !== undefined) ||
       (extras &&
         (Object.hasOwn(extras, "parallel_tool_calls") ||
           Object.hasOwn(extras, "truncation"))) ||
@@ -8135,7 +8152,7 @@ function assertCrossProviderProvenance(
 
 /** Test-only access to the pure foreground route resolver. */
 export function resolveRequestUpstreamRouteForTest(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   return resolveRequestUpstreamRoute(req, config);
@@ -8229,9 +8246,12 @@ async function forwardToUpstream(
     !headerUpstream &&
     effectiveProtocol === "openai-responses" &&
     ((providerRoute && providerRoute.protocol === "openai") ||
-      (!providerRoute && modelRoute?.protocol === "openai"))
+      (!providerRoute &&
+        modelRoute?.protocol === "openai" &&
+        modelRoute.url !== "https://api.openai.com"))
   ) {
-    // A Chat-only provider route cannot represent Responses output controls.
+    // OpenAI model prefixes support both Chat and Responses. Other Chat-only
+    // destinations cannot represent Responses output controls.
     throw new InvalidCrossProviderRequestError();
   }
 
@@ -9080,7 +9100,8 @@ export function buildStreamingResponse(
                 currentResp.content.filter(
                   (block) =>
                     block.type === "tool_use" &&
-                    block.name === RECALL_TOOL_NAME,
+                    block.name === RECALL_TOOL_NAME &&
+                    block.responsesCall === undefined,
                 ).length > 1
               ) {
                 throw new RecallContinuationFailure("parallel_recall");
@@ -10692,6 +10713,7 @@ export function streamResponsesRecallAware(
       if (
         item.type === "function_call" &&
         item.name === RECALL_TOOL_NAME &&
+        item.namespace === undefined &&
         item.status !== undefined &&
         item.status !== "in_progress" &&
         item.status !== "completed"
@@ -11179,6 +11201,7 @@ export function streamResponsesRecallAware(
           }
           if (
             item.name === RECALL_TOOL_NAME &&
+            item.namespace === undefined &&
             item?.status !== undefined &&
             item.status !== "completed"
           ) {
@@ -13415,7 +13438,9 @@ export function streamResponsesRecallAware(
                 event === "response.output_item.done") &&
               (parsed.item as Record<string, unknown> | undefined)?.type ===
                 "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+              (parsed.item as Record<string, unknown>).name ===
+                RECALL_TOOL_NAME &&
+              (parsed.item as Record<string, unknown>).namespace === undefined
             ) {
               recallDetected = true;
             }
@@ -13448,7 +13473,8 @@ export function streamResponsesRecallAware(
               (index, item) => {
                 if (
                   item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
+                  item.name !== RECALL_TOOL_NAME ||
+                  item.namespace !== undefined
                 ) {
                   return;
                 }
@@ -13485,7 +13511,9 @@ export function streamResponsesRecallAware(
             ) {
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
+                item?.type === "function_call" &&
+                item?.name === "recall" &&
+                item?.namespace === undefined;
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
@@ -13646,7 +13674,9 @@ export function streamResponsesRecallAware(
                     !Array.isArray(item) &&
                     (item as Record<string, unknown>).type ===
                       "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                    (item as Record<string, unknown>).name ===
+                      RECALL_TOOL_NAME &&
+                    (item as Record<string, unknown>).namespace === undefined,
                 )
               ) {
                 recallDetected = true;
@@ -13659,6 +13689,7 @@ export function streamResponsesRecallAware(
                     if (
                       item.type !== "function_call" ||
                       item.name !== RECALL_TOOL_NAME ||
+                      item.namespace !== undefined ||
                       (!recallIndices.has(outputIndex) &&
                         !unresolvedToolIndices.has(outputIndex))
                     ) {
@@ -13672,7 +13703,10 @@ export function streamResponsesRecallAware(
                   },
                   (outputIndex, item) => {
                     if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
+                    if (
+                      item.name === RECALL_TOOL_NAME &&
+                      item.namespace === undefined
+                    ) {
                       collectCompletedRecall(
                         state,
                         outputIndex,
@@ -14228,7 +14262,8 @@ export function streamResponsesRecallAware(
                               | undefined;
                             if (
                               item?.type === "function_call" &&
-                              item.name === RECALL_TOOL_NAME
+                              item.name === RECALL_TOOL_NAME &&
+                              item.namespace === undefined
                             ) {
                               contRecallIndices.add(ci);
                               resolvingRecallTool = true;
@@ -14373,7 +14408,8 @@ export function streamResponsesRecallAware(
                                 (outputIndex, item) => {
                                   if (
                                     item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
+                                    item.name !== RECALL_TOOL_NAME ||
+                                    item.namespace !== undefined
                                   ) {
                                     return;
                                   }
@@ -14384,7 +14420,10 @@ export function streamResponsesRecallAware(
                                 },
                                 (outputIndex, item) => {
                                   if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
+                                  if (
+                                    item.name === RECALL_TOOL_NAME &&
+                                    item.namespace === undefined
+                                  ) {
                                     collectCompletedRecall(
                                       contState,
                                       outputIndex,
@@ -14841,7 +14880,11 @@ export function streamResponsesRecallAware(
               const visibleResp = {
                 ...finalResp,
                 content: finalResp.content.map((block) => {
-                  if (block.type !== "tool_use" || block.name !== "recall") {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.name !== "recall" ||
+                    block.responsesCall !== undefined
+                  ) {
                     return block;
                   }
                   return {
@@ -15514,7 +15557,8 @@ export function streamResponsesRecallAware(
           failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
             (item) =>
               item.type !== "function_call" ||
-              (item.name !== RECALL_TOOL_NAME &&
+              ((item.name !== RECALL_TOOL_NAME ||
+                item.namespace !== undefined) &&
                 ![item.id, item.call_id].some(
                   (identity) =>
                     typeof identity === "string" &&
@@ -16454,6 +16498,7 @@ export function accumulateResponsesNonStreamJSON(
         throw new Error("malformed Responses response item identity");
       }
       identities.add(itemId);
+      const native = nativeResponsesCall(item, "response");
       if (item.type === "message") {
         const msgContent = item.content as
           | Array<Record<string, unknown>>
@@ -16472,6 +16517,11 @@ export function accumulateResponsesNonStreamJSON(
             }
           }
         }
+      } else if (native) {
+        if (identities.has(native.id))
+          throw new Error("malformed Responses response tool identity");
+        identities.add(native.id);
+        content.push(native);
       } else if (item.type === "function_call") {
         let input: unknown = {};
         if (typeof item.arguments === "string") {
@@ -22613,7 +22663,7 @@ async function handleConversationTurnPrepared(
   // A provider-owned built-in cannot execute recall, and a client's explicit
   // parallel-tool setting must not be replaced by our serial recall policy.
   if (
-    modifiedReq.tools.some((tool) => tool.responsesBuiltin === undefined) &&
+    modifiedReq.tools.some((tool) => tool.responsesNative === undefined) &&
     // Native Gemini built-ins are replayed as an exact tool set. Adding recall
     // here would change the set and invalidate that replay.
     !modifiedReq.metadata.geminiNativeTools &&
@@ -23316,7 +23366,9 @@ async function handleConversationTurnPrepared(
       if (
         currentResp.content.filter(
           (block) =>
-            block.type === "tool_use" && block.name === RECALL_TOOL_NAME,
+            block.type === "tool_use" &&
+            block.name === RECALL_TOOL_NAME &&
+            block.responsesCall === undefined,
         ).length > 1
       )
         return failRecall("parallel_recall");
@@ -24528,6 +24580,8 @@ export function loreMessagesToGateway(
             tool: string;
             callID: string;
             toolName?: string;
+            responsesCall?: Record<string, unknown>;
+            responsesOutput?: Record<string, unknown>;
             state: {
               status: string;
               input?: unknown;
@@ -24543,6 +24597,9 @@ export function loreMessagesToGateway(
             content.push({
               type: "tool_result",
               toolUseId: toolPart.callID,
+              ...(toolPart.responsesOutput
+                ? { responsesOutput: toolPart.responsesOutput }
+                : {}),
               ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
               content: toolResultContent(toolPart.state),
               ...(toolPart.state.nativeResponsesOutputArray
@@ -24556,6 +24613,9 @@ export function loreMessagesToGateway(
               id: toolPart.callID,
               name: toolPart.tool,
               input: toolPart.state.input ?? {},
+              ...(toolPart.responsesCall
+                ? { responsesCall: toolPart.responsesCall }
+                : {}),
             });
             // Completed/error tool parts: queue a tool_result for the next
             // user message. This reconstructs the Anthropic API's split-
@@ -24564,6 +24624,9 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                ...(toolPart.responsesOutput
+                  ? { responsesOutput: toolPart.responsesOutput }
+                  : {}),
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
                 ...(toolPart.state.nativeResponsesOutputArray
@@ -24574,6 +24637,9 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                ...(toolPart.responsesOutput
+                  ? { responsesOutput: toolPart.responsesOutput }
+                  : {}),
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
                 ...(toolPart.state.nativeResponsesOutputArray
@@ -24709,7 +24775,9 @@ export function loreMessagesToGateway(
           block.type === "opaque" &&
           block.responsesItem === true &&
           block.requestOnly !== true &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       );
     const provenance =
       allowProvenance ||
@@ -24760,7 +24828,9 @@ export function loreMessagesToGateway(
         (block) =>
           block.type === "opaque" &&
           block.responsesItem &&
-          block.raw.type === "function_call_output" &&
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ) &&
           (Object.keys(block.raw).some(
             (key) => !["type", "call_id", "output"].includes(key),
           ) ||
@@ -24780,7 +24850,9 @@ export function loreMessagesToGateway(
         (block) =>
           block.type === "opaque" &&
           block.responsesItem &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       )
     ) {
       throw new InvalidCrossProviderRequestError();

@@ -1,3 +1,10 @@
+import { extractProviderHeader } from "../config";
+import {
+  isServerOwnedResponsesSearch,
+  nativeResponsesCall,
+  responsesCallItem,
+  responsesOutputItem,
+} from "./responses-tools";
 /**
  * OpenAI Responses API ↔ Gateway translation layer.
  *
@@ -106,10 +113,26 @@ function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
 // OpenAI Responses API → GatewayRequest
 // ---------------------------------------------------------------------------
 
+/** Codex sends its account header when using ChatGPT rather than an API key.
+ * Nonempty explicit routing remains authoritative, including invalid values
+ * rejected later. Empty route headers retain their existing absent semantics.
+ */
+function usesCodexChatGPT(headers: Record<string, string>): boolean {
+  if (headers["x-lore-provider"]) {
+    return extractProviderHeader(headers) === "openai-codex";
+  }
+  if (headers["x-lore-upstream-url"]) return false;
+  return (
+    Boolean(headers["chatgpt-account-id"]?.trim()) &&
+    extractAuth(headers)?.scheme === "bearer"
+  );
+}
+
 export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  if (usesCodexChatGPT(headers)) return parseOpenAICodexRequest(body, headers);
   const boundary = parseContextBoundary(headers, "openai-responses");
   const input = rawInput(body);
   const parsed = parseInputItems(input);
@@ -160,15 +183,22 @@ function parseOpenAIResponsesRequestInternal(
       throw new InvalidCrossProviderRequestError();
     }
     const tool = t as Record<string, unknown>;
-    if (tool.type === "web_search_preview") {
-      if (Object.keys(tool).some((key) => key !== "type")) {
-        throw new InvalidCrossProviderRequestError();
-      }
+    if (
+      [
+        "web_search_preview",
+        "web_search",
+        "custom",
+        "namespace",
+        "tool_search",
+      ].includes(String(tool.type))
+    ) {
+      // These definitions have provider-owned schemas (including grammars and
+      // nested namespaces). Replay them verbatim only on Responses routes.
       return {
-        name: "web_search_preview",
-        description: "",
+        name: asString(tool.name) || asString(tool.type),
+        description: asString(tool.description),
         inputSchema: {},
-        responsesBuiltin: "web_search_preview",
+        responsesNative: tool,
       };
     }
     if (
@@ -341,7 +371,10 @@ export function parseOpenAIResponsesRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
-  return parseStreamedRequest(chunks, responsesSpec(headers, false));
+  return parseStreamedRequest(
+    chunks,
+    responsesSpec(headers, usesCodexChatGPT(headers)),
+  );
 }
 
 /**
@@ -543,8 +576,13 @@ function createInputItemsBuilder(): {
         // have one system field, so preserve their priority there.
         if (
           Object.keys(raw).some(
-            (key) => key !== "type" && key !== "role" && key !== "content",
-          )
+            (key) =>
+              key !== "type" &&
+              key !== "role" &&
+              key !== "content" &&
+              key !== "id",
+          ) ||
+          (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id))
         ) {
           throw new InvalidCrossProviderRequestError();
         }
@@ -578,6 +616,7 @@ function createInputItemsBuilder(): {
         // Keep the original wire shape, including string content and an
         // omitted `type`. The joined text above is only for translation.
         elevatedItems.push({
+          ...(typeof raw.id === "string" ? { id: raw.id } : {}),
           ...(raw.type === undefined ? {} : { type: "message" }),
           role: msgRole,
           content: Array.isArray(raw.content)
@@ -653,9 +692,23 @@ function createInputItemsBuilder(): {
       return;
     }
 
-    if (itemType === "function_call") {
+    if (isServerOwnedResponsesSearch(raw)) {
       sawConversationItem = true;
-      portableResponsesFunctionCall(raw);
+      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+      return;
+    }
+
+    if (
+      itemType === "function_call" ||
+      itemType === "custom_tool_call" ||
+      itemType === "tool_search_call"
+    ) {
+      sawConversationItem = true;
+      const nativeCall = nativeResponsesCall(raw);
+      if (itemType === "function_call") {
+        const { namespace: _namespace, ...portable } = raw;
+        portableResponsesFunctionCall(portable);
+      }
       // Function call from assistant — maps to tool_use.
       //
       // The Responses API emits each parallel tool call as its OWN
@@ -667,7 +720,7 @@ function createInputItemsBuilder(): {
       // tool_result blocks. Coalesce consecutive function_call items into one
       // assistant message so an N-tool-call turn keeps its N tool_use blocks
       // together (and matched by the coalesced tool_result message below).
-      const toolUseBlock: GatewayContentBlock = {
+      const toolUseBlock: GatewayContentBlock = nativeCall ?? {
         type: "tool_use",
         id: asString(raw.call_id ?? raw.id),
         name: asString(raw.name),
@@ -702,17 +755,41 @@ function createInputItemsBuilder(): {
       return;
     }
 
-    if (itemType === "function_call_output") {
+    if (
+      itemType === "function_call_output" ||
+      itemType === "custom_tool_call_output" ||
+      itemType === "tool_search_output"
+    ) {
       if (pendingReasoning.length > 0) {
         // A result cannot cross a pending assistant reasoning item: the
         // normalized tool pair cannot represent that native item order.
         throw new InvalidCrossProviderRequestError();
       }
       sawConversationItem = true;
-      assertResponsesToolOutputEnvelope(raw);
-      if (Array.isArray(raw.output)) {
-        raw.output.forEach(assertToolOutputPart);
-      }
+      const {
+        output: _output,
+        tools: _tools,
+        call_id: _callId,
+        ...envelope
+      } = raw;
+      const nativeOutput =
+        itemType !== "function_call_output" ? envelope : undefined;
+      if (itemType === "tool_search_output" && !Array.isArray(raw.tools))
+        throw new InvalidCrossProviderRequestError();
+      const output =
+        itemType === "tool_search_output"
+          ? JSON.stringify(raw.tools)
+          : raw.output;
+      assertResponsesToolOutputEnvelope(
+        itemType === "function_call_output"
+          ? raw
+          : {
+              type: "function_call_output",
+              call_id: raw.call_id,
+              output,
+            },
+      );
+      if (Array.isArray(output)) output.forEach(assertToolOutputPart);
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
       //
@@ -724,14 +801,15 @@ function createInputItemsBuilder(): {
       // flattening the whole array to "".
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
+        ...(nativeOutput ? { responsesOutput: nativeOutput } : {}),
         toolUseId: asString(raw.call_id),
-        ...(Array.isArray(raw.output)
+        ...(Array.isArray(output)
           ? { nativeResponsesOutputArray: true as const }
           : {}),
         // Cited text remains visible to memory and search; the complete
         // annotated output is retained only in request-only item provenance.
-        content: Array.isArray(raw.output)
-          ? raw.output.flatMap((part: Record<string, unknown>) =>
+        content: Array.isArray(output)
+          ? output.flatMap((part: Record<string, unknown>) =>
               part.type === "output_text" &&
               typeof part.text === "string" &&
               (part.text === "" ||
@@ -740,7 +818,7 @@ function createInputItemsBuilder(): {
                 ? [{ type: "text" as const, text: part.text }]
                 : parseMessageContent([part]),
             )
-          : parseMessageContent(raw.output),
+          : parseMessageContent(output),
       };
       const provenanceBlock: GatewayContentBlock = {
         type: "opaque",
@@ -1132,9 +1210,7 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Add tools in Responses API format
   if (req.tools.length > 0) {
     body.tools = req.tools.map((t) => {
-      if (t.responsesBuiltin === "web_search_preview") {
-        return { type: "web_search_preview" };
-      }
+      if (t.responsesNative) return t.responsesNative;
       if (
         t.name !== "recall" ||
         t.gatewayOwned !== true ||
@@ -1430,12 +1506,9 @@ function buildResponsesInput(
           ],
         });
       } else if (block.type === "tool_use") {
-        appendItem({
-          type: "function_call",
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
-        });
+        if (block.responsesCall && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
+        appendItem(responsesCallItem(block));
       } else if (block.type === "tool_result") {
         if (block.isError) throw new InvalidCrossProviderRequestError();
         if (
@@ -1450,23 +1523,27 @@ function buildResponsesInput(
             throw new InvalidCrossProviderRequestError();
           });
           output.forEach(assertToolOutputPart);
-          appendItem({
-            type: "function_call_output",
-            call_id: block.toolUseId,
-            output,
-          });
+          appendItem(
+            responsesOutputItem(block.responsesOutput, block.toolUseId, output),
+          );
           continue;
         }
         requireTextOnlyToolResult(block);
         // Text-only results from other protocols use a string projection.
         // Native multi-part results take the array path above, even when a
         // compaction boundary deliberately drops their source provenance.
-        appendItem({
-          type: "function_call_output",
-          call_id: block.toolUseId,
-          output: blocksToText(block.content),
-        });
+        if (block.responsesOutput && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
+        appendItem(
+          responsesOutputItem(
+            block.responsesOutput,
+            block.toolUseId,
+            blocksToText(block.content),
+          ),
+        );
       } else if (block.type === "opaque") {
+        if (block.responsesItem && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
         if (
           (block.requestOnly && source !== "openai-responses") ||
           block.raw.type === "thinking" ||
@@ -1581,12 +1658,9 @@ function buildOpenAIResponsesNonStreamResponse(
         textContent += block.text;
       } else if (block.type === "tool_use") {
         functionCalls.push({
-          type: "function_call",
           id: `fc_${block.id}`,
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
           status: "completed",
+          ...responsesCallItem(block),
         });
       }
     }
@@ -1988,53 +2062,15 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
             outputIndex++;
           } else if (block.type === "tool_use") {
-            const callId = block.id;
-            const itemId = `fc_${callId}`;
-            const args = JSON.stringify(block.input);
-
-            // output_item.added
-            emit("response.output_item.added", {
-              type: "response.output_item.added",
-              output_index: outputIndex,
-              item: {
-                type: "function_call",
-                id: itemId,
-                call_id: callId,
-                name: block.name,
-                arguments: "",
-                status: "in_progress",
-              },
-            });
-
-            // function_call_arguments.delta
-            emit("response.function_call_arguments.delta", {
-              type: "response.function_call_arguments.delta",
-              item_id: itemId,
-              output_index: outputIndex,
-              delta: args,
-            });
-
-            // function_call_arguments.done
-            emit("response.function_call_arguments.done", {
-              type: "response.function_call_arguments.done",
-              item_id: itemId,
-              output_index: outputIndex,
-              arguments: args,
-            });
-
-            // output_item.done
-            emit("response.output_item.done", {
-              type: "response.output_item.done",
-              output_index: outputIndex,
-              item: {
-                type: "function_call",
-                id: itemId,
-                call_id: callId,
-                name: block.name,
-                arguments: args,
+            emitRawResponsesOutputItemLifecycle(
+              emit,
+              {
+                id: `fc_${block.id}`,
                 status: "completed",
+                ...responsesCallItem(block),
               },
-            });
+              outputIndex,
+            );
 
             outputIndex++;
           }
@@ -2076,12 +2112,9 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
                 }
                 if (block.type === "tool_use") {
                   return {
-                    type: "function_call",
                     id: `fc_${block.id}`,
-                    call_id: block.id,
-                    name: block.name,
-                    arguments: JSON.stringify(block.input),
                     status: "completed",
+                    ...responsesCallItem(block),
                   };
                 }
                 return null;

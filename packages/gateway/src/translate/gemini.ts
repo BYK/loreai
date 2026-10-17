@@ -1,3 +1,7 @@
+import {
+  assertNoNativeResponsesTools,
+  assertPortableResponsesResponse,
+} from "./responses-tools";
 /**
  * Google Gemini (native `generateContent`) ↔ Gateway translation layer.
  *
@@ -558,6 +562,7 @@ export function buildGeminiUpstreamRequest(
   req: GatewayRequest,
   upstreamBase: string,
 ): { url: string; headers: Record<string, string>; body: unknown } {
+  assertNoNativeResponsesTools(req);
   const responseFormat = req.extras?.response_format;
   if (
     (responseFormat !== undefined &&
@@ -817,6 +822,7 @@ function toGeminiFinishReason(stopReason: string): string {
 export function buildGeminiResponseBody(
   resp: GatewayResponse,
 ): Record<string, unknown> {
+  assertPortableResponsesResponse(resp);
   const usage = resp.usage ?? ZERO_USAGE;
   const inclusiveInputTokens = safeTokenSum(
     [
