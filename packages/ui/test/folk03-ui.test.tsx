@@ -1171,6 +1171,35 @@ describe("ConflictsPage", () => {
 });
 
 describe("TeamParityActions", () => {
+  it("keeps required team-name constraints and retains the controlled draft on cancel and reopen", async () => {
+    const createTeam = vi.fn<ApiClient["createTeam"]>();
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({ createTeam }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New team" }));
+    const dialog = await screen.findByTestId("team-create-dialog");
+    const name = within(dialog).getByLabelText("Team name") as HTMLInputElement;
+    expect(name).toBeRequired();
+    expect(name).toHaveAttribute("maxlength", "120");
+    expect(name.validity.valueMissing).toBe(true);
+    fireEvent.input(name, { target: { value: "Draft team" } });
+    expect(name).toHaveValue("Draft team");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(createTeam).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "New team" }));
+    expect(await screen.findByTestId("team-create-name")).toHaveValue(
+      "Draft team",
+    );
+  });
+
   it("keeps New team errors in its dialog", async () => {
     const createTeam = vi.fn<ApiClient["createTeam"]>(async () => {
       throw new ApiError(

@@ -22,6 +22,12 @@ import { formatConfidence, formatWhen } from "~/lib/format";
 import { duplicatesHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
+import {
+  TextField,
+  TextFieldInput,
+  TextFieldLabel,
+  TextFieldTextArea,
+} from "~/components/ui/text-field";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { StateCard } from "~/components/lore/StateCard";
 import {
@@ -621,13 +627,10 @@ export const KnowledgeEditor: Component<{
           onSubmit={(event) => void save(event)}
         >
           <div class="grid gap-3 sm:grid-cols-2">
-            <label class="grid gap-1 text-sm font-medium">
-              Title
-              <input
-                class="h-10 rounded-md border border-input bg-surface px-3 text-sm"
-                name="title"
-                required
-                value={title()}
+            <TextField class="text-sm" value={title()} name="title" required>
+              <TextFieldLabel>Title</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => {
                   setTitle(event.currentTarget.value);
                   setDirty(true);
@@ -683,7 +686,7 @@ export const KnowledgeEditor: Component<{
                   </span>
                 )}
               </Show>
-            </label>
+            </TextField>
             <label class="grid gap-1 text-sm font-medium">
               Category
               <select
@@ -703,21 +706,25 @@ export const KnowledgeEditor: Component<{
                 </For>
               </select>
             </label>
-            <label class="grid gap-1 text-sm font-medium">
-              Confidence (
-              {confidence() === undefined
-                ? "enter 0 to 1"
-                : formatConfidence(confidence() ?? 0)}
-              )
-              <input
-                class="h-10 rounded-md border border-input bg-surface px-3 text-sm"
-                name="confidence"
+            <TextField
+              class="text-sm"
+              value={confidenceText()}
+              name="confidence"
+              required
+            >
+              <TextFieldLabel>
+                Confidence (
+                {confidence() === undefined
+                  ? "enter 0 to 1"
+                  : formatConfidence(confidence() ?? 0)}
+                )
+              </TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 type="number"
-                required
                 min="0"
                 max="1"
                 step="any"
-                value={confidenceText()}
                 onInput={(event) => {
                   setConfidenceText(event.currentTarget.value);
                   setConfidenceEdited(true);
@@ -725,7 +732,7 @@ export const KnowledgeEditor: Component<{
                   setSuccess("");
                 }}
               />
-            </label>
+            </TextField>
             <fieldset class="grid gap-2 border-0 p-0 text-sm font-medium">
               <legend>Scope</legend>
               <label class="flex items-center gap-2 font-normal">
@@ -764,20 +771,17 @@ export const KnowledgeEditor: Component<{
               </Show>
             </fieldset>
           </div>
-          <label class="grid gap-1 text-sm font-medium">
-            Content
-            <textarea
-              class="min-h-40 rounded-md border border-input bg-surface px-3 py-2 text-sm leading-relaxed"
-              name="content"
-              required
-              value={content()}
+          <TextField class="text-sm" value={content()} name="content" required>
+            <TextFieldLabel>Content</TextFieldLabel>
+            <TextFieldTextArea
+              class="min-h-40 bg-surface leading-relaxed"
               onInput={(event) => {
                 setContent(event.currentTarget.value);
                 setDirty(true);
                 setSuccess("");
               }}
             />
-          </label>
+          </TextField>
           <Show when={conflict()}>
             <div
               class="rounded-md border border-gold/40 bg-gold-soft px-3 py-2 text-sm"
