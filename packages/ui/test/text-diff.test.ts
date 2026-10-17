@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import { diffText } from "~/lib/text-diff";
@@ -52,6 +52,44 @@ describe("diffText", () => {
     expect(diffText("old ".repeat(1000), "new ".repeat(1000))).toBeNull();
   });
 
+  it("preserves the input-size boundary and unchanged-text fast path", () => {
+    expect(diffText("a".repeat(10_000), "b".repeat(10_000))).not.toBeNull();
+    expect(diffText("a".repeat(10_000), "b".repeat(10_001))).toBeNull();
+    const unchanged = "a".repeat(20_001);
+    expect(diffText(unchanged, unchanged)).toEqual([
+      { kind: "equal", text: unchanged },
+    ]);
+  });
+
+  it("preserves the token-pair budget boundary", () => {
+    expect(diffText("!".repeat(499), "!".repeat(498) + "?")).not.toBeNull();
+    expect(diffText("!".repeat(499), "!".repeat(500))).toBeNull();
+  });
+
+  it("falls back when the edit budget is exceeded", () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      expect(diffText("", "!".repeat(1000))).toEqual([
+        { kind: "added", text: "!".repeat(1000) },
+      ]);
+      expect(diffText("", "!".repeat(1001))).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("falls back when the time budget expires", () => {
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValue(26);
+    try {
+      expect(diffText("old", "new")).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("reconstructs both originals across arbitrary edits", () => {
     fc.assert(
       fc.property(
@@ -73,6 +111,45 @@ describe("diffText", () => {
           ).toBe(after);
         },
       ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("preserves Unicode tokens and whitespace across arbitrary edits", () => {
+    const text = fc
+      .array(
+        fc.constantFrom(
+          "猫",
+          "犬",
+          "é",
+          "e\u0301",
+          "Привет",
+          "🧑🏽‍💻",
+          " ",
+          "\r\n",
+          "\t",
+          "<",
+          "_",
+        ),
+        { maxLength: 30 },
+      )
+      .map((parts) => parts.join(""));
+    fc.assert(
+      fc.property(text, text, (before, after) => {
+        const changes = diffText(before, after)!;
+        expect(
+          changes
+            .filter((part) => part.kind !== "added")
+            .map((part) => part.text)
+            .join(""),
+        ).toBe(before);
+        expect(
+          changes
+            .filter((part) => part.kind !== "removed")
+            .map((part) => part.text)
+            .join(""),
+        ).toBe(after);
+      }),
       { numRuns: 200 },
     );
   });
