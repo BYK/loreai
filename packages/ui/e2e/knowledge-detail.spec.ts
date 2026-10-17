@@ -44,6 +44,44 @@ async function fileLinkProjectAndEntry(page: Page) {
 }
 
 test.describe("knowledge detail provenance and history", () => {
+  test("compares consecutive versions and offers a keyboard-accessible full-text view", async ({
+    page,
+  }) => {
+    const { project, live } = await projectAndEntry(page);
+    await page.route(
+      `**/api/v1/knowledge/${live.id}/versions`,
+      async (route) => {
+        const response = await route.fetch();
+        const history = await response.json();
+        for (const version of history.versions) {
+          version.content = version.is_current
+            ? "Use WAL journaling.\nKeep lexical recall."
+            : "Use rollback journaling.\nKeep lexical recall.";
+        }
+        await route.fulfill({ response, json: history });
+      },
+    );
+    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    const current = page.getByTestId("knowledge-version-2");
+    await current.locator("summary").click();
+    const content = current.getByTestId("version-content");
+    await expect(content.locator("del")).toHaveText("rollback");
+    await expect(content.locator("ins")).toHaveText("WAL");
+    const fullText = current.getByRole("button", {
+      name: "Full text",
+      exact: true,
+    });
+    await fullText.focus();
+    await page.keyboard.press("Enter");
+    await expect(fullText).toHaveAttribute("aria-pressed", "true");
+    await expect(content).toHaveText(
+      "Use WAL journaling.\nKeep lexical recall.",
+    );
+    await expect(content.locator("ins, del")).toHaveCount(0);
+    await current.getByRole("button", { name: "Changes", exact: true }).click();
+    await expect(content.locator("del")).toHaveText("rollback");
+  });
+
   test("shows current and superseded versions with old content", async ({
     page,
   }) => {
