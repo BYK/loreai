@@ -17,6 +17,10 @@ import {
 import { setUpstreamFetchOverrideForTest } from "../src/fetch";
 import { authFingerprint } from "../src/auth";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
+import {
+  _resetCostAttributionForTest,
+  recordSuccessfulAnthropicOAuthAuth,
+} from "../src/cost-attribution";
 import { db, isProviderQuotaStale, listProviderQuotas } from "@loreai/core";
 
 const quotaHeaders = {
@@ -27,14 +31,31 @@ const quotaHeaders = {
   "anthropic-ratelimit-unified-status": "allowed",
 };
 
+const TEST_ANTHROPIC_OAUTH_CREDENTIAL = {
+  scheme: "bearer",
+  value: "sk-ant-oat01-test-token",
+} as const;
+
+function trustTestAnthropicOAuthCredential(): void {
+  recordSuccessfulAnthropicOAuthAuth({
+    credential: TEST_ANTHROPIC_OAUTH_CREDENTIAL,
+    upstreamURL: "https://api.anthropic.com/v1/messages",
+    responseURL: "https://api.anthropic.com/v1/messages",
+    responseStatus: 200,
+    directUpstreamResponse: true,
+  });
+}
+
 let harness: Harness | undefined;
 afterEach(async () => {
   await harness?.teardown();
   harness = undefined;
+  _resetCostAttributionForTest();
 });
 
 it("persists upstream quota headers without touching the client response", async () => {
   db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
   const fixtures = [
     makeFixtureEntry({
       seq: 0,
@@ -92,8 +113,60 @@ it("persists upstream quota headers without touching the client response", async
   }
 });
 
+it("captures quota on the first successful Anthropic OAuth response", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "First OAuth request" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...quotaHeaders,
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "First OAuth request" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-first-request" },
+    );
+    await response.text();
+    expect(response.status).toBe(200);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+  expect(
+    listProviderQuotas().filter(
+      (quota) =>
+        quota.provider === "anthropic" && quota.authKind === "subscription",
+    ),
+  ).toHaveLength(2);
+});
+
 it("keeps a later-started quota observation when responses complete out of order", async () => {
   db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
   const fixtures = makeConversationFixtures([
     { userMessage: "Older request", assistantText: "Older response" },
     { userMessage: "Newer request", assistantText: "Newer response" },
@@ -306,6 +379,7 @@ function deferred<T>(): {
 
 it("attributes quota headers to the session credential on the provisional path", async () => {
   db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
   const fixtures = makeConversationFixtures([
     { userMessage: "Hello", assistantText: "Hello back" },
     { userMessage: "Continue", assistantText: "Continuing" },
@@ -346,10 +420,8 @@ it("attributes quota headers to the session credential on the provisional path",
 
   db().exec("DELETE FROM provider_quotas");
 
-  // A new canonical session id routes the turn through the provisional
-  // verification path. Even though this request carries an api-key-shaped
-  // credential, quota capture must attribute it to the session (OAuth →
-  // subscription, same account) via the forwarded sessionID.
+  // A new canonical session ID and the old alias cannot transfer OAuth
+  // attribution to a different API-key credential.
   const response = await harness.chat(request, null, {
     authorization: "Bearer sk-ant-api03-test-token",
     "x-claude-code-session-id": alias,
@@ -361,11 +433,11 @@ it("attributes quota headers to the session credential on the provisional path",
   const quotas = listProviderQuotas().filter((q) => q.provider === "anthropic");
   expect(quotas.length).toBeGreaterThan(0);
   for (const q of quotas) {
-    expect(q.authKind).toBe("subscription");
+    expect(q.authKind).toBe("api_key");
   }
 });
 
-it("does not let caller-selected account headers churn Codex quota attribution", async () => {
+it("caller-selected Codex headers do not establish subscription quota attribution", async () => {
   db().exec("DELETE FROM provider_quotas");
   harness = await createHarness({ fixtures: [] });
   setUpstreamInterceptor(async () => {
@@ -411,10 +483,9 @@ it("does not let caller-selected account headers churn Codex quota attribution",
   const headers = {
     "content-type": "application/json",
     authorization: "Bearer chatgpt-oauth-token",
-    // api.openai.com resolves provider "openai" without self-identifying as
-    // the ChatGPT subscription backend; the Codex route establishes the
-    // subscription, while request account IDs remain untrusted forwarding hints.
-    "x-lore-upstream-url": "https://api.openai.com",
+    // The backend is caller-selected and the response is intercepted, so
+    // neither can establish authenticated subscription state.
+    "x-lore-upstream-url": "https://chatgpt.com/backend-api/codex",
     "chatgpt-account-id": "acct-xyz",
     "x-lore-project": projectPath,
     "x-session-id": "codex-before-plugin",
@@ -447,17 +518,78 @@ it("does not let caller-selected account headers churn Codex quota attribution",
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "openai");
   expect(quotas.length).toBeGreaterThan(0);
+  const expectedAccount = authFingerprint({
+    scheme: "bearer",
+    value: "chatgpt-oauth-token",
+  }).slice(0, 12);
   for (const q of quotas) {
-    expect(q.authKind).toBe("subscription");
+    expect(q.authKind).toBe("api_key");
     expect(q.window).not.toBe("0m");
-    expect(q.account).toBe(
-      authFingerprint({ scheme: "bearer", value: "chatgpt-oauth-token" }).slice(
-        0,
-        12,
-      ),
-    );
+    expect(q.account).toBe(expectedAccount);
     expect(q.account).not.toBe("acct-xyz");
     expect(q.account).not.toBe("caller-selected-second-account");
+  }
+});
+
+it("records Codex subscription auth only after direct ChatGPT success", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  harness = await createHarness({ fixtures: [] });
+  _resetCostAttributionForTest();
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const upstream = buildOpenAIResponsesResponse(
+      {
+        id: "resp_authenticated_codex",
+        model: "gpt-5",
+        content: [{ type: "text", text: "Authenticated response" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 12, outputTokens: 3 },
+      },
+      true,
+    );
+    return new Response(await upstream.text(), {
+      headers: {
+        "content-type": "text/event-stream",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "23",
+        "x-codex-primary-reset-at": "2000000000",
+        "x-codex-secondary-window-minutes": "0",
+      },
+    });
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    const projectPath = dirname(harness.dbPath);
+    const response = await harness.request("/v1/codex/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer verified-codex-token",
+        "x-lore-upstream-url": "https://chatgpt.com/backend-api/codex",
+        "x-lore-project": projectPath,
+        "x-session-id": "direct-codex-auth",
+      },
+      body: JSON.stringify({
+        model: "gpt-5",
+        stream: true,
+        instructions: DEFAULT_SYSTEM + "\nWorking directory: " + projectPath,
+        input: [{ role: "user", content: "Authenticate subscription" }],
+        tools: [],
+      }),
+    });
+    await response.text();
+    expect(response.status).toBe(200);
+
+    const quotas = listProviderQuotas().filter(
+      (row) => row.provider === "openai",
+    );
+    expect(quotas.length).toBeGreaterThan(0);
+    expect(quotas.every((row) => row.authKind === "subscription")).toBe(true);
+    expect(quotas.every((row) => row.account === "default")).toBe(true);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
   }
 });
 

@@ -1,13 +1,16 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import * as core from "@loreai/core";
 import {
   db,
+  MAX_PROVIDER_PACING_GENERATIONS,
   listProviderQuotas,
   upsertProviderQuota,
   type ProviderQuotaRow,
 } from "@loreai/core";
 import {
   MAX_PACING_DELAY_MS,
-  PACING_DISABLED_REASON,
+  capturePacingEpoch,
+  capturePacingGeneration,
   _resetPacingTrackerForTest,
   _pacingTrackerSizesForTest,
   computePacingDelayMs,
@@ -21,7 +24,6 @@ import {
   parsePacingSetting,
   recordForegroundRequest,
   recordQuotaObservation,
-  registerPacingWait,
   sessionBudgetMatch,
   setPacingEnabled,
   type BudgetMatch,
@@ -30,6 +32,7 @@ import {
 import { observeProviderQuotaHeaders } from "../src/provider-quota-headers";
 import {
   cacheAnthropicOrganizationFromResponse,
+  recordSuccessfulChatGPTAuth,
   _resetCostAttributionForTest,
   resolveCostAttribution,
 } from "../src/cost-attribution";
@@ -69,6 +72,11 @@ function quotaRow(overrides: Partial<ProviderQuotaRow> = {}): ProviderQuotaRow {
     observedAt: NOW - 60_000,
     ...overrides,
   };
+}
+
+function observeQuota(row: ProviderQuotaRow): void {
+  upsertProviderQuota(row);
+  recordQuotaObservation(row);
 }
 
 /** Window with `u` used, `T` ms to reset and observed rate `ρ · s`. */
@@ -154,7 +162,7 @@ describe("pacing delay formula", () => {
     expect(status?.current_rate).toBeCloseTo(24, 9);
     expect(status?.sustainable_rate).toBeCloseTo(16, 9);
     expect(status?.ratio).toBeCloseTo(1.5, 9);
-    expect(status?.delay_ms).toBeCloseTo(5_000, 6);
+    expect(status?.recommended_extra_gap_ms).toBeCloseTo(5_000, 6);
   });
 
   test("an observed-rate window applies its held delay, whatever ρ is now", () => {
@@ -164,14 +172,17 @@ describe("pacing delay formula", () => {
       NOW,
     );
     // Still throttling: the held delay is being applied.
-    expect(below).toMatchObject({ throttling: true, delay_ms: 7_000 });
+    expect(below).toMatchObject({
+      throttling: true,
+      recommended_extra_gap_ms: 7_000,
+    });
     expect(
       evaluatePacingWindow(
         windowAt(50, 2 * HOUR, 0.95, "5h", FIVE_H, 0),
         10_000,
         NOW,
       ),
-    ).toMatchObject({ throttling: false, delay_ms: 0 });
+    ).toMatchObject({ throttling: false, recommended_extra_gap_ms: 0 });
   });
 
   test("the larger of the two windows wins", () => {
@@ -229,7 +240,7 @@ describe("pacingDelayMs (quota rows + tracker)", () => {
     expect(evaluateProviderPacing(NOW)).toEqual([
       expect.objectContaining({
         enabled: false,
-        delay_ms: 0,
+        recommended_extra_gap_ms: 0,
         throttling: false,
       }),
     ]);
@@ -241,6 +252,143 @@ describe("pacingDelayMs (quota rows + tracker)", () => {
     });
     expect(getPacingSettings()).toEqual([]);
     expect(pacingDelayMs(MATCH, NOW)).toBe(MAX_PACING_DELAY_MS);
+  });
+
+  test("disable, late observations, and re-enable cannot restore stale pacing", () => {
+    gapOf(10_000);
+    observeQuota(
+      quotaRow({
+        usedPercent: 10,
+        observedAt: NOW - 10 * 60_000,
+        resetsAt: NOW + HOUR,
+      }),
+    );
+    observeQuota(
+      quotaRow({
+        usedPercent: 40,
+        observedAt: NOW - 5 * 60_000,
+        resetsAt: NOW + HOUR,
+      }),
+    );
+    const held = pacingDelayMs(MATCH, NOW);
+    expect(held).toBeGreaterThan(0);
+
+    const firstRequestGeneration = capturePacingGeneration(MATCH);
+    const secondRequestGeneration = capturePacingGeneration(MATCH);
+    const firstPacingEpoch = capturePacingEpoch(MATCH);
+    expect(firstRequestGeneration).not.toBeNull();
+    expect(secondRequestGeneration).toBe(firstRequestGeneration);
+    expect(firstPacingEpoch).not.toBeNull();
+    const attribution = {
+      provider: MATCH.provider,
+      authKind: "subscription" as const,
+      account: MATCH.account,
+    };
+    const reset = Math.floor((NOW + HOUR) / 1000);
+    const headers = (utilization: string) =>
+      new Headers({
+        "anthropic-ratelimit-unified-5h-utilization": utilization,
+        "anthropic-ratelimit-unified-5h-reset": String(reset),
+      });
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: false,
+      }),
+    ).toBe(true);
+
+    expect(
+      observeProviderQuotaHeaders(
+        headers("0.80"),
+        attribution,
+        NOW + 60_000,
+        NOW + 60_000,
+        firstPacingEpoch,
+      ),
+    ).toBe(true);
+    expect(
+      listProviderQuotas().find(
+        (row) =>
+          row.provider === MATCH.provider &&
+          row.account === MATCH.account &&
+          row.window === "5h",
+      )?.usedPercent,
+    ).toBe(80);
+    recordForegroundRequest(MATCH, NOW + 70_000, secondRequestGeneration);
+    expect(_pacingTrackerSizesForTest()).toEqual({
+      rateTracks: 0,
+      requestGaps: 0,
+    });
+
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      observeProviderQuotaHeaders(
+        headers("0.90"),
+        attribution,
+        NOW + 120_000,
+        NOW + 120_000,
+        firstPacingEpoch,
+      ),
+    ).toBe(true);
+    expect(
+      listProviderQuotas().find(
+        (row) =>
+          row.provider === MATCH.provider &&
+          row.account === MATCH.account &&
+          row.window === "5h",
+      )?.usedPercent,
+    ).toBe(90);
+    recordForegroundRequest(MATCH, NOW + 130_000, secondRequestGeneration);
+    expect(_pacingTrackerSizesForTest()).toEqual({
+      rateTracks: 0,
+      requestGaps: 0,
+    });
+    expect(pacingDelayMs(MATCH, NOW + 130_000)).toBe(0);
+
+    const freshGeneration = capturePacingGeneration(MATCH);
+    const freshPacingEpoch = capturePacingEpoch(MATCH);
+    expect(freshGeneration).not.toBeNull();
+    expect(freshGeneration).not.toBe(firstRequestGeneration);
+    expect(freshPacingEpoch).not.toBeNull();
+    expect(freshPacingEpoch).not.toBe(firstPacingEpoch);
+    expect(
+      observeProviderQuotaHeaders(
+        headers("0.91"),
+        attribution,
+        NOW + 180_000,
+        NOW + 180_000,
+        freshPacingEpoch,
+      ),
+    ).toBe(true);
+    expect(_pacingTrackerSizesForTest().rateTracks).toBe(1);
+  });
+
+  test("provider-wide opt-outs apply to future accounts and allow exact overrides", () => {
+    expect(
+      setPacingEnabled({ provider: "anthropic", account: "*", enabled: false }),
+    ).toBe(true);
+    expect(isPacingEnabled("anthropic", "new-account")).toBe(false);
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(isPacingEnabled("anthropic", MATCH.account)).toBe(true);
+    expect(isPacingEnabled("anthropic", "new-account")).toBe(false);
+    expect(
+      evaluateProviderPacing(NOW).find(
+        (entry) => entry.account === MATCH.account,
+      ),
+    ).toMatchObject({ enabled: true });
   });
 
   test("disabling and re-enabling starts a fresh foreground cadence", () => {
@@ -262,26 +410,116 @@ describe("pacingDelayMs (quota rows + tracker)", () => {
     expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBeNull();
   });
 
-  test("disabling releases only that account's active pacing waits", () => {
-    const disabledWait = new AbortController();
-    const otherWait = new AbortController();
-    const unregisterDisabled = registerPacingWait(MATCH, disabledWait);
-    const unregisterOther = registerPacingWait(
-      { provider: "anthropic", account: "another-account" },
-      otherWait,
+  test("default-on no-op switch preserves the current foreground cadence", () => {
+    upsertProviderQuota(quotaRow());
+    gapOf(10_000);
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBe(10_000);
+
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBe(10_000);
+  });
+
+  test("provider-wide opt-out no-ops preserve settings capacity", () => {
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: "*",
+        enabled: false,
+      }),
+    ).toBe(true);
+
+    for (let index = 0; index < MAX_PROVIDER_PACING_GENERATIONS; index += 1) {
+      expect(
+        setPacingEnabled({
+          provider: MATCH.provider,
+          account: `account-${index}`,
+          enabled: false,
+        }),
+      ).toBe(true);
+    }
+    expect(getPacingSettings()).toEqual([
+      { provider: MATCH.provider, account: "*", enabled: false },
+    ]);
+  });
+
+  test("persisted generation capacity never blocks a repeated switch update", () => {
+    db()
+      .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
+      .run(
+        "provider_pacing",
+        JSON.stringify({
+          version: 1,
+          settings: [
+            {
+              provider: MATCH.provider,
+              account: MATCH.account,
+              enabled: false,
+            },
+          ],
+          generations: Array.from(
+            { length: MAX_PROVIDER_PACING_GENERATIONS },
+            (_value, index) => ({
+              provider: "other-provider",
+              account: `account-${index}`,
+              generation: 1,
+            }),
+          ),
+        }),
+      );
+
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: true,
+      }),
+    ).toBe(false);
+    expect(isPacingEnabled(MATCH.provider, MATCH.account)).toBe(false);
+  });
+
+  test("a new switch generation never reuses an older request-gap sample", () => {
+    const resetsAt = NOW + HOUR;
+    observeQuota(
+      quotaRow({
+        usedPercent: 10,
+        observedAt: NOW - 10 * 60_000,
+        resetsAt,
+      }),
     );
+    gapOf(10_000);
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBe(10_000);
 
-    setPacingEnabled({
-      provider: MATCH.provider,
-      account: MATCH.account,
-      enabled: false,
-    });
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: false,
+      }),
+    ).toBe(true);
+    expect(
+      setPacingEnabled({
+        provider: MATCH.provider,
+        account: MATCH.account,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(evaluateProviderPacing(NOW)[0]?.request_gap_ms).toBeNull();
 
-    expect(disabledWait.signal.aborted).toBe(true);
-    expect(disabledWait.signal.reason).toBe(PACING_DISABLED_REASON);
-    expect(otherWait.signal.aborted).toBe(false);
-    unregisterDisabled();
-    unregisterOther();
+    observeQuota(
+      quotaRow({
+        usedPercent: 20,
+        observedAt: NOW - 5 * 60_000,
+        resetsAt,
+      }),
+    );
+    observeQuota(quotaRow({ usedPercent: 30, observedAt: NOW, resetsAt }));
+    expect(pacingDelayMs(MATCH, NOW)).toBe(0);
   });
 
   test("API-key accounts are never paced", () => {
@@ -543,8 +781,16 @@ describe("rate tracker", () => {
       "x-codex-primary-reset-at": String((NOW + HOUR) / 1000),
       "x-codex-secondary-window-minutes": "0",
     });
+    recordSuccessfulChatGPTAuth({
+      credential,
+      upstreamURL: "https://chatgpt.com/backend-api",
+      responseURL: "https://chatgpt.com/backend-api/codex/responses",
+      responseStatus: 200,
+      directUpstreamResponse: true,
+    });
     const trustedAttribution = resolveCostAttribution({
       providerID: "openai-codex",
+      upstreamURL: "https://chatgpt.com/backend-api",
       credential,
       responseHeaders: quotaHeaders,
       requestHeaders: new Headers({ "chatgpt-account-id": "verified-account" }),
@@ -579,6 +825,7 @@ describe("rate tracker", () => {
     for (const index of Array.from({ length: 1_024 }, (_, index) => index)) {
       const attribution = resolveCostAttribution({
         providerID: "openai-codex",
+        upstreamURL: "https://chatgpt.com/backend-api",
         credential,
         responseHeaders: quotaHeaders,
         requestHeaders: new Headers({
@@ -650,6 +897,7 @@ describe("rate tracker", () => {
         sessionID: "session-established",
         observedAt: NOW,
         responseHeaders: acceptedHeaders,
+        directUpstreamResponse: true,
       });
     }
     expect(accepted).toBe(true);
@@ -681,6 +929,7 @@ describe("rate tracker", () => {
         sessionID: "session-established",
         observedAt: NOW - 1,
         responseHeaders: staleHeaders,
+        directUpstreamResponse: true,
       });
     }
     expect(staleAccepted).toBe(true);
@@ -716,6 +965,7 @@ describe("rate tracker", () => {
       sessionID,
       observedAt: NOW,
       responseHeaders: establishedHeaders,
+      directUpstreamResponse: true,
     });
     const established = sessionBudgetMatch(
       sessionID,
@@ -737,6 +987,7 @@ describe("rate tracker", () => {
         responseHeaders: new Headers({
           "anthropic-organization-id": `org-caller-${index}`,
         }),
+        directUpstreamResponse: true,
       });
     }
 
@@ -867,7 +1118,7 @@ describe("integral controller (held d_w)", () => {
     observe(row(0.1, NOW - 60_000, next));
     expect(status(NOW)?.windows[0]).toMatchObject({
       rate_source: "average",
-      delay_ms: 0,
+      recommended_extra_gap_ms: 0,
     });
     // The first observed sample integrates from 0, not from the old d_w.
     observe(row(0.1, NOW, next));
@@ -892,7 +1143,7 @@ describe("integral controller (held d_w)", () => {
       enabled: true,
     });
     expect(pacingDelayMs(MATCH, NOW)).toBe(0);
-    expect(status(NOW)?.windows[0]?.delay_ms).toBe(0);
+    expect(status(NOW)?.windows[0]?.recommended_extra_gap_ms).toBe(0);
     // Integration resumes from 0 on the next accepted sample.
     observe(row(16, NOW));
     recordForegroundRequest(MATCH, NOW);
@@ -901,6 +1152,27 @@ describe("integral controller (held d_w)", () => {
     const next = pacingDelayMs(MATCH, NOW + 60_000);
     expect(next).toBeGreaterThan(0);
     expect(next).toBeLessThanOrEqual(integrateHeldDelayMs(0, 10_000, 1e9));
+  });
+
+  test("disabled pacing reports no active curation pause at quota exhaustion", () => {
+    setPacingEnabled({
+      provider: "anthropic",
+      account: "acct1",
+      enabled: false,
+    });
+    observe(row(100, NOW));
+
+    expect(status(NOW)).toMatchObject({
+      enabled: false,
+      throttling: false,
+      recommended_extra_gap_ms: 0,
+      windows: [
+        expect.objectContaining({
+          throttling: false,
+          recommended_extra_gap_ms: 0,
+        }),
+      ],
+    });
   });
 
   test("re-enabling pacing does not restore a held delay from before disable", () => {
@@ -945,7 +1217,7 @@ describe("integral controller (held d_w)", () => {
     const w = status(NOW)?.windows[0];
     expect(w?.ratio).toBeGreaterThan(0.9);
     expect(w?.ratio).toBeLessThan(1);
-    expect(w?.delay_ms).toBeGreaterThan(0);
+    expect(w?.recommended_extra_gap_ms).toBeGreaterThan(0);
     expect(w?.throttling).toBe(true);
     expect(isCurationPacingPaused(MATCH, NOW)).toBe(true);
   });
@@ -958,7 +1230,7 @@ describe("integral controller (held d_w)", () => {
     observe(row(10 + 0.5 * s * hour, NOW));
     expect(status(NOW)?.windows[0]).toMatchObject({
       throttling: false,
-      delay_ms: 0,
+      recommended_extra_gap_ms: 0,
     });
     expect(isCurationPacingPaused(MATCH, NOW)).toBe(false);
   });
@@ -972,6 +1244,16 @@ describe("integral controller (held d_w)", () => {
 });
 
 describe("pacing settings", () => {
+  test("request-start epoch capture never reads SQLite synchronously", () => {
+    const getKV = vi.spyOn(core, "getKV");
+    try {
+      expect(capturePacingEpoch(MATCH)).toBe(0);
+      expect(getKV).not.toHaveBeenCalled();
+    } finally {
+      getKV.mockRestore();
+    }
+  });
+
   test("parsePacingSetting validates the toggle body", () => {
     expect(
       parsePacingSetting({
@@ -980,6 +1262,13 @@ describe("pacing settings", () => {
         enabled: false,
       }),
     ).toEqual({ provider: "anthropic", account: "a", enabled: false });
+    expect(
+      parsePacingSetting({
+        provider: "anthropic",
+        account: "*",
+        enabled: false,
+      }),
+    ).toEqual({ provider: "anthropic", account: "*", enabled: false });
     for (const bad of [
       null,
       [],
@@ -995,21 +1284,92 @@ describe("pacing settings", () => {
     }
   });
 
-  test("invalid and duplicate stored entries are dropped; missing means enabled", () => {
+  test.each([
+    [
+      "conflicting duplicate settings",
+      [
+        { provider: "anthropic", account: "a", enabled: true },
+        { provider: "anthropic", account: "a", enabled: false },
+      ],
+    ],
+    [
+      "unknown envelope fields",
+      { version: 1, settings: [], generations: [], future: true },
+    ],
+    [
+      "unknown generation fields",
+      {
+        version: 1,
+        settings: [],
+        generations: [
+          { provider: "anthropic", account: "a", generation: 1, future: true },
+        ],
+      },
+    ],
+  ])("fails closed on %s", (_case, storedState) => {
     db()
       .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
-      .run(
-        "provider_pacing",
-        JSON.stringify([
-          { provider: "anthropic", account: "a", enabled: false },
-          { provider: "anthropic", account: "a", enabled: true },
-          { provider: "anthropic", mode: "off" },
-        ]),
-      );
-    expect(getPacingSettings()).toEqual([
-      { provider: "anthropic", account: "a", enabled: false },
-    ]);
+      .run("provider_pacing", JSON.stringify(storedState));
+
+    expect(getPacingSettings()).toEqual([]);
     expect(isPacingEnabled("anthropic", "a")).toBe(false);
-    expect(isPacingEnabled("anthropic", "b")).toBe(true);
+    expect(isPacingEnabled("anthropic", "other")).toBe(false);
+  });
+
+  test("setting capacity rejects new identities without evicting established opt-outs", () => {
+    for (let index = 0; index < 250; index++) {
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: `account-${index}`,
+          enabled: false,
+        }),
+      ).toBe(true);
+    }
+    expect(
+      setPacingEnabled({
+        provider: "anthropic",
+        account: "account-250",
+        enabled: false,
+      }),
+    ).toBe(false);
+    expect(isPacingEnabled("anthropic", "account-0")).toBe(false);
+    expect(getPacingSettings()).toHaveLength(250);
+  });
+
+  test("bounded generations allow established updates and reject new identities", () => {
+    for (let index = 0; index < MAX_PROVIDER_PACING_GENERATIONS; index++) {
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: `generation-${index}`,
+          enabled: false,
+        }),
+      ).toBe(true);
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: `generation-${index}`,
+          enabled: true,
+        }),
+      ).toBe(true);
+    }
+
+    expect(
+      setPacingEnabled({
+        provider: "anthropic",
+        account: "generation-0",
+        enabled: false,
+      }),
+    ).toBe(true);
+    expect(
+      setPacingEnabled({
+        provider: "anthropic",
+        account: "new-opt-out",
+        enabled: false,
+      }),
+    ).toBe(false);
+    expect(isPacingEnabled("anthropic", "generation-0")).toBe(false);
+    expect(isPacingEnabled("anthropic", "new-opt-out")).toBe(true);
   });
 });

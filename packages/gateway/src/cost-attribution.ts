@@ -6,9 +6,12 @@
 
 import { createHash } from "node:crypto";
 import type { ProviderAuthKind } from "@loreai/core";
-import { authFingerprint, type AuthCredential } from "./auth";
-import { isChatGPTBackend } from "./chatgpt-backend";
-import { isClaudeCodeOAuthSession } from "./cch";
+import {
+  authFingerprint,
+  credentialTenantFingerprint,
+  type AuthCredential,
+} from "./auth";
+import { isCanonicalChatGPTBackend } from "./chatgpt-backend";
 import { providerForUpstreamURL } from "./config";
 
 export type CostAttribution = {
@@ -19,9 +22,132 @@ export type CostAttribution = {
 
 const MAX_ANTHROPIC_ACCOUNT_KEYS = 256;
 const MAX_ANTHROPIC_ORGANIZATION_ID_LENGTH = 128;
+const MAX_ANTHROPIC_SUBSCRIPTION_CREDENTIALS = 256;
+const MAX_OPENAI_SUBSCRIPTION_CREDENTIALS = 256;
 type AnthropicAccountCacheEntry = { account: string; observedAt: number };
 const anthropicAccounts = new Map<string, AnthropicAccountCacheEntry>();
 const anthropicSessionAccounts = new Map<string, AnthropicAccountCacheEntry>();
+const anthropicSubscriptionCredentials = new Set<string>();
+const openAISubscriptionCredentials = new Set<string>();
+
+function isCanonicalAnthropicBackend(value?: string): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.origin === "https://api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Trust an Anthropic OAuth credential only after it succeeds against the
+ * canonical API. A billing header or OAuth-looking token prefix alone is a
+ * caller-controlled signal and never establishes subscription auth.
+ */
+export function recordSuccessfulAnthropicOAuthAuth(input: {
+  credential?: AuthCredential | null;
+  upstreamURL?: string;
+  responseURL?: string;
+  responseStatus: number;
+  directUpstreamResponse: boolean;
+}): void {
+  const { credential } = input;
+  if (
+    !input.directUpstreamResponse ||
+    input.responseStatus < 200 ||
+    input.responseStatus >= 300 ||
+    !isCanonicalAnthropicBackend(input.upstreamURL) ||
+    !isCanonicalAnthropicBackend(input.responseURL) ||
+    credential?.scheme !== "bearer" ||
+    !credential.value.startsWith("sk-ant-oat")
+  ) {
+    return;
+  }
+
+  const fingerprint = credentialTenantFingerprint(credential);
+  if (
+    anthropicSubscriptionCredentials.has(fingerprint) ||
+    anthropicSubscriptionCredentials.size <
+      MAX_ANTHROPIC_SUBSCRIPTION_CREDENTIALS
+  ) {
+    anthropicSubscriptionCredentials.add(fingerprint);
+  }
+}
+
+/** True only for a credential accepted by Anthropic's canonical API. */
+export function isVerifiedAnthropicOAuthCredential(
+  credential?: AuthCredential | null,
+): boolean {
+  return (
+    credential?.scheme === "bearer" &&
+    anthropicSubscriptionCredentials.has(
+      credentialTenantFingerprint(credential),
+    )
+  );
+}
+
+/** Candidate predicate used only to snapshot pacing state before dispatch. */
+export function isPotentialAnthropicOAuthCredential(input: {
+  providerID?: string;
+  upstreamURL?: string;
+  credential?: AuthCredential | null;
+}): boolean {
+  return (
+    resolveProvider(input.providerID, input.upstreamURL) === "anthropic" &&
+    input.credential?.scheme === "bearer" &&
+    input.credential.value.startsWith("sk-ant-oat") &&
+    isCanonicalAnthropicBackend(input.upstreamURL)
+  );
+}
+
+/**
+ * Record a bearer credential only after a direct successful response from
+ * ChatGPT's canonical backend. Route IDs, caller-selected upstreams, and
+ * response headers alone never establish subscription authentication.
+ */
+export function recordSuccessfulChatGPTAuth(input: {
+  credential?: AuthCredential | null;
+  upstreamURL?: string;
+  responseURL?: string;
+  responseStatus: number;
+  directUpstreamResponse: boolean;
+}): void {
+  const { credential } = input;
+  if (
+    !input.directUpstreamResponse ||
+    input.responseStatus < 200 ||
+    input.responseStatus >= 300 ||
+    !isCanonicalChatGPTBackend(input.upstreamURL) ||
+    (input.responseURL !== undefined &&
+      input.responseURL !== "" &&
+      !isCanonicalChatGPTBackend(input.responseURL)) ||
+    credential?.scheme !== "bearer"
+  ) {
+    return;
+  }
+
+  const fingerprint = credentialTenantFingerprint(credential);
+  if (
+    openAISubscriptionCredentials.has(fingerprint) ||
+    openAISubscriptionCredentials.size < MAX_OPENAI_SUBSCRIPTION_CREDENTIALS
+  ) {
+    openAISubscriptionCredentials.add(fingerprint);
+  }
+}
+
+/** Candidate predicate used only to snapshot pacing state before dispatch. */
+export function isPotentialChatGPTSubscription(input: {
+  providerID?: string;
+  upstreamURL?: string;
+  credential?: AuthCredential | null;
+}): boolean {
+  return (
+    resolveProvider(input.providerID, input.upstreamURL) === "openai" &&
+    input.credential?.scheme === "bearer" &&
+    isCanonicalChatGPTBackend(input.upstreamURL)
+  );
+}
 
 function anthropicOrganizationKey(
   credential: AuthCredential | null | undefined,
@@ -110,6 +236,8 @@ function cachedAnthropicAccountForKeys(
 export function _resetCostAttributionForTest(): void {
   anthropicAccounts.clear();
   anthropicSessionAccounts.clear();
+  anthropicSubscriptionCredentials.clear();
+  openAISubscriptionCredentials.clear();
 }
 
 function providerFromHost(hostname: string, upstreamURL: string): string {
@@ -148,13 +276,6 @@ function resolveProvider(
   }
 }
 
-function hasHeaderPrefix(headers: Headers, prefix: string): boolean {
-  for (const name of headers.keys()) {
-    if (name.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
 function headerValue(
   headers: Headers | Record<string, string> | null | undefined,
   name: string,
@@ -174,6 +295,17 @@ function headerValue(
   return trimmed || null;
 }
 
+function anthropicOrganizationID(
+  headers: Headers | null | undefined,
+): string | null {
+  const organizationID = headerValue(headers, "anthropic-organization-id");
+  // Reject oversized provider values before they can select or cache an account.
+  return organizationID !== null &&
+    organizationID.length <= MAX_ANTHROPIC_ORGANIZATION_ID_LENGTH
+    ? organizationID
+    : null;
+}
+
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -186,8 +318,9 @@ function sha256(value: string): string {
  * - `authKind`: "subscription" for Anthropic OAuth (Claude Code) and ChatGPT
  *   Codex backends, else "api_key".
  * - `account`: a non-reversible key — never the raw credential. Use a cached
- *   Anthropic organization key when known, otherwise a credential fingerprint;
- *   use "default" only when neither identity is available.
+ *   Anthropic organization key when known, the stable default bucket for
+ *   subscriptions without a trusted account ID, and a credential fingerprint
+ *   for API-key traffic.
  */
 export function resolveCostAttribution(input: {
   sessionID?: string;
@@ -195,57 +328,54 @@ export function resolveCostAttribution(input: {
   upstreamURL?: string;
   credential?: AuthCredential | null;
   responseHeaders?: Headers | null;
+  responseURL?: string;
+  responseStatus?: number;
+  directUpstreamResponse?: boolean;
   /** Forwarding hints only; never use caller-supplied headers as account identity. */
   requestHeaders?: Headers | Record<string, string> | null;
 }): CostAttribution {
   const { sessionID, providerID, upstreamURL, credential, responseHeaders } =
     input;
   const provider = resolveProvider(providerID, upstreamURL);
+  const trustedAnthropicResponse =
+    input.directUpstreamResponse === true &&
+    input.responseStatus !== undefined &&
+    input.responseStatus >= 200 &&
+    input.responseStatus < 300 &&
+    isCanonicalAnthropicBackend(upstreamURL) &&
+    isCanonicalAnthropicBackend(input.responseURL);
   const responseAnthropicOrganizationID =
-    provider === "anthropic"
-      ? headerValue(responseHeaders, "anthropic-organization-id")
+    provider === "anthropic" && trustedAnthropicResponse
+      ? anthropicOrganizationID(responseHeaders)
       : null;
-  // The Codex route only exists for ChatGPT subscriptions.
-  const codexRoute = providerID?.trim().toLowerCase() === "openai-codex";
-  // Bearer JWT payloads are not signature-verified here. Their account claims
-  // are untrusted and must never select an identity or subscription auth kind.
+  // API-key credentials remain API-key traffic on every route and backend.
+  // A bearer credential is a subscription only at OpenAI's canonical backend;
+  // route IDs, caller headers, JWT claims, and response headers are not proof.
+  const openAISubscription =
+    provider === "openai" &&
+    credential?.scheme === "bearer" &&
+    isCanonicalChatGPTBackend(upstreamURL) &&
+    openAISubscriptionCredentials.has(credentialTenantFingerprint(credential));
+  const anthropicSubscription =
+    provider === "anthropic" &&
+    isCanonicalAnthropicBackend(upstreamURL) &&
+    isVerifiedAnthropicOAuthCredential(credential);
 
-  let authKind: ProviderAuthKind = "api_key";
-  if (provider === "anthropic") {
-    if (
-      (sessionID && isClaudeCodeOAuthSession(sessionID)) ||
-      credential?.value.startsWith("sk-ant-oat") === true ||
-      (responseHeaders &&
-        hasHeaderPrefix(responseHeaders, "anthropic-ratelimit-unified-"))
-    ) {
-      authKind = "subscription";
-    }
-  } else if (provider === "openai") {
-    if (
-      codexRoute ||
-      isChatGPTBackend(upstreamURL) ||
-      (responseHeaders && hasHeaderPrefix(responseHeaders, "x-codex-"))
-    ) {
-      authKind = "subscription";
-    }
-  }
+  const authKind: ProviderAuthKind =
+    anthropicSubscription || openAISubscription ? "subscription" : "api_key";
 
-  let account = "default";
-  if (authKind === "subscription") {
-    if (provider === "openai" && credential?.value) {
-      // Without a verified provider account claim, isolate pacing to this
-      // credential instead of sharing one default bucket across accounts.
-      account = authFingerprint(credential).slice(0, 12);
-    } else if (provider === "anthropic") {
-      account =
-        cachedAnthropicAccountForKeys(credential, sessionID) ??
+  // OpenAI has no trusted stable account ID here; token fingerprints split
+  // subscription state on credential rotation, and forwarded account hints are
+  // not identity proof, so subscriptions share the stable default bucket.
+  const account =
+    authKind === "subscription" && provider === "anthropic"
+      ? (cachedAnthropicAccountForKeys(credential, sessionID) ??
         (responseAnthropicOrganizationID
           ? sha256(responseAnthropicOrganizationID).slice(0, 12)
-          : "default");
-    }
-  } else if (credential?.value) {
-    account = authFingerprint(credential).slice(0, 12);
-  }
+          : "default"))
+      : authKind === "api_key" && credential?.value
+        ? authFingerprint(credential).slice(0, 12)
+        : "default";
 
   return { provider, authKind, account };
 }
@@ -257,12 +387,20 @@ export function cacheAnthropicOrganizationFromResponse(input: {
   sessionID?: string;
   observedAt: number;
   responseHeaders?: Headers | null;
+  upstreamURL?: string;
+  responseURL?: string;
+  directUpstreamResponse: boolean;
 }): void {
   if (input.provider !== "anthropic") return;
-  const organizationID = headerValue(
-    input.responseHeaders,
-    "anthropic-organization-id",
-  );
+  if (
+    !input.directUpstreamResponse ||
+    !isCanonicalAnthropicBackend(input.upstreamURL) ||
+    !isCanonicalAnthropicBackend(input.responseURL) ||
+    !isVerifiedAnthropicOAuthCredential(input.credential)
+  ) {
+    return;
+  }
+  const organizationID = anthropicOrganizationID(input.responseHeaders);
   if (organizationID) {
     rememberAnthropicOrganization(
       organizationID,

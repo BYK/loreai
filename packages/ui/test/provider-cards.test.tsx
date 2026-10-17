@@ -61,7 +61,7 @@ function pacingWindow(
     rate_source: "average",
     ratio: 0.23,
     throttling: false,
-    delay_ms: 0,
+    recommended_extra_gap_ms: 0,
     ...overrides,
   };
 }
@@ -72,7 +72,7 @@ function pacingRow(overrides: Partial<Pacing[number]> = {}): Pacing[number] {
     account: "a1b2c3d4e5f6",
     enabled: true,
     throttling: false,
-    delay_ms: 0,
+    recommended_extra_gap_ms: 0,
     request_gap_ms: 12_000,
     windows: [pacingWindow()],
     ...overrides,
@@ -232,13 +232,20 @@ describe("ProviderCards", () => {
 });
 
 describe("ProviderCards pacing", () => {
-  it("shows sustainable vs current rate, state and delay per window", () => {
+  it("shows sustainable rate and curation state without claiming request delays", () => {
     renderCards([providerRow()], [quotaRow()], [pacingRow()]);
     expect(screen.getByTestId("pacing-rates").textContent).toBe(
       "sustainable 35 pts/hcurrent 8.1 pts/h (window avg)",
     );
-    expect(screen.getByTestId("pacing-state").textContent).toBe("on pace");
-    expect(screen.getByTestId("pacing-delay").textContent).toBe("none");
+    expect(screen.getByTestId("pacing-state").textContent).toBe(
+      "within sustainable rate",
+    );
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "inactive",
+    );
+    expect(screen.getByTestId("pacing-control").textContent).toContain(
+      "Provider pacing never delays user requests.",
+    );
     expect(
       screen.getByRole("switch", { name: "Automatic pacing" }),
     ).toHaveAttribute("aria-checked", "true");
@@ -246,21 +253,21 @@ describe("ProviderCards pacing", () => {
     expect(screen.queryByText(/Edit budgets/)).toBeNull();
   });
 
-  it("says Lore is slowing requests and shows the delay while throttling", () => {
+  it("reports the curation pause without claiming to slow user requests", () => {
     renderCards(
       [providerRow()],
       [quotaRow()],
       [
         pacingRow({
           throttling: true,
-          delay_ms: 12_400,
+          recommended_extra_gap_ms: 12_400,
           windows: [
             pacingWindow({
               current_rate: 69.2,
               rate_source: "observed",
               ratio: 2,
               throttling: true,
-              delay_ms: 12_400,
+              recommended_extra_gap_ms: 12_400,
             }),
           ],
         }),
@@ -268,13 +275,23 @@ describe("ProviderCards pacing", () => {
     );
     const state = screen.getByTestId("pacing-state");
     expect(state.textContent).toBe(
-      "2.0× the sustainable rate — Lore is slowing requests",
+      "2.0× the sustainable rate — background curation paused",
     );
     expect(state.className).toContain("text-danger");
     expect(screen.getByTestId("pacing-rates").textContent).toBe(
       "sustainable 35 pts/hcurrent 69 pts/h",
     );
-    expect(screen.getByTestId("pacing-delay").textContent).toBe("12s");
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "active",
+    );
+    expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("12s");
+    expect(screen.queryByText("Current delay")).toBeNull();
+    expect(
+      screen.getByText(/gap estimate is informational only/i),
+    ).not.toBeNull();
+    expect(
+      screen.getByText(/Provider pacing never delays user requests/),
+    ).not.toBeNull();
   });
 
   it("hides pacing for a stale window", () => {
@@ -323,7 +340,7 @@ describe("ProviderCards pacing", () => {
     );
   });
 
-  it("a disabled account says pacing off and has no delay", () => {
+  it("a disabled account says pacing off and has no curation pause", () => {
     renderCards(
       [providerRow()],
       [quotaRow()],
@@ -336,6 +353,9 @@ describe("ProviderCards pacing", () => {
     );
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
     expect(screen.getByTestId("pacing-state").textContent).toBe("pacing off");
-    expect(screen.getByTestId("pacing-delay").textContent).toBe("off");
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "inactive",
+    );
+    expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("off");
   });
 });

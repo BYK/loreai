@@ -7,7 +7,7 @@ import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
 import {
   displayProvider,
-  formatDelay,
+  formatExtraGap,
   formatDuration,
   formatRate,
   formatResetCountdown,
@@ -196,18 +196,33 @@ const PacingControl: Component<{
           />
         </button>
       </div>
-      <Row label="Current delay">
+      <Row label="Estimated extra request gap (informational)">
+        <span data-testid="pacing-extra-gap">
+          {props.pacing.enabled
+            ? formatExtraGap(props.pacing.recommended_extra_gap_ms)
+            : "off"}
+        </span>
+      </Row>
+      <Row label="Quota-based curation pause">
         <span
-          class={props.pacing.delay_ms > 0 ? "text-danger" : ""}
-          data-testid="pacing-delay"
+          class={
+            props.pacing.enabled && props.pacing.throttling
+              ? "text-danger"
+              : "text-muted"
+          }
+          data-testid="pacing-curation-state"
         >
-          {props.pacing.enabled ? formatDelay(props.pacing.delay_ms) : "off"}
+          {props.pacing.enabled && props.pacing.throttling
+            ? "active"
+            : "inactive"}
         </span>
       </Row>
       <p class="text-[11px] text-muted">
         {props.pacing.enabled
-          ? "Spreads quota evenly to each reset by slowing requests that run ahead of the sustainable rate."
-          : "Unlimited speed: requests are never slowed for this account."}
+          ? "Quota pressure pauses non-urgent background curation. "
+          : "Quota-based pauses for non-urgent background curation are off. "}
+        The gap estimate is informational only. Provider pacing never delays
+        user requests.
       </p>
       <Show when={error()}>
         <p class="text-[11px] text-danger" role="alert">

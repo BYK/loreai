@@ -8,13 +8,14 @@
  * - observed rate `r` = EWMA of `Δu/Δt` over successive in-memory quota
  *   observations (samples with `Δt ≥ 60 s`, reset when `resetsAt` changes or
  *   `u` drops); with fewer than 2 samples `r = u / (L - T)`;
- * - `u ≥ 100` → maximum delay; `r ≤ s` → none; otherwise `ρ = r / s` and the
- *   request waits `g · (ρ - 1)`, `g` = EWMA of the gaps between the account's
- *   foreground requests.
+ * - `u ≥ 100` → maximum gap recommendation; `ρ = r / s > 1` pauses background
+ *   curation; `g` is the EWMA of observed foreground-request gaps, used only to
+ *   estimate the controller's held extra gap.
  *
- * The largest window delay wins, capped at {@link MAX_PACING_DELAY_MS}.
- * Curation is paused while the account is throttling; distillation and the
- * cache warmer never are. API-key accounts have no reset window: no pacing.
+ * The largest window recommendation wins, capped at {@link MAX_PACING_DELAY_MS}.
+ * It never delays a request. Curation pauses while the account is throttling;
+ * distillation and the cache warmer never do. API-key accounts have no reset
+ * window and are never paced.
  */
 
 import {
@@ -22,6 +23,8 @@ import {
   setKV,
   isProviderQuotaStale,
   listProviderQuotas,
+  MAX_PROVIDER_PACING_SETTINGS,
+  MAX_PROVIDER_PACING_GENERATIONS,
   type ProviderAuthKind,
   type ProviderQuotaRow,
 } from "@loreai/core";
@@ -39,6 +42,18 @@ export type PacingSetting = {
   enabled: boolean;
 };
 
+type PacingGenerationEntry = {
+  provider: string;
+  account: string;
+  generation: number;
+};
+
+type PacingState = {
+  settings: PacingSetting[];
+  generations: PacingGenerationEntry[];
+  valid: boolean;
+};
+
 export type BudgetMatch = {
   provider: string;
   auth_kind: ProviderAuthKind;
@@ -53,7 +68,7 @@ export type PacingWindowInput = {
   windowMs: number;
   /** EWMA of observed Δu/Δt, or null with fewer than 2 samples. */
   observedRate: number | null;
-  /** Held integral delay `d_w` (ms); applies only with an observed rate. */
+  /** Held integral extra-gap recommendation `d_w` (ms); needs an observed rate. */
   heldDelayMs: number;
 };
 
@@ -69,7 +84,8 @@ export type PacingWindowStatus = {
   /** `r / s`; null when the rate is unknown. */
   ratio: number | null;
   throttling: boolean;
-  delay_ms: number;
+  /** Estimate only; provider pacing never waits this long before dispatch. */
+  recommended_extra_gap_ms: number;
 };
 
 export type ProviderPacingStatus = {
@@ -77,14 +93,14 @@ export type ProviderPacingStatus = {
   account: string;
   enabled: boolean;
   throttling: boolean;
-  delay_ms: number;
+  recommended_extra_gap_ms: number;
   /** EWMA of the gaps between this account's foreground requests. */
   request_gap_ms: number | null;
   windows: PacingWindowStatus[];
 };
 
 export const PROVIDER_PACING_KV_KEY = "provider_pacing";
-/** Maximum foreground pacing delay (MAX_THROTTLE_DELAY, 60 s). */
+/** Maximum extra-gap recommendation (60 s); it is never applied as a wait. */
 export const MAX_PACING_DELAY_MS = 60_000;
 /** Gaps this long are idle time, not an interval induced by pacing. */
 const REQUEST_GAP_IDLE_MS = 5 * 60_000;
@@ -93,10 +109,10 @@ export const MIN_SAMPLE_INTERVAL_MS = 60_000;
 /** EWMA weight of the newest sample (rates and request gaps). */
 export const PACING_EWMA_ALPHA = 0.3;
 const HOUR_MS = 3_600_000;
-const MAX_SETTINGS = 200;
+const MAX_SETTINGS = MAX_PROVIDER_PACING_SETTINGS;
 const MAX_PACING_TRACKS = 512;
 const PROVIDER_RE = /^[a-z0-9._-]{1,64}$/;
-const ACCOUNT_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const ACCOUNT_RE = /^(?:\*|[A-Za-z0-9._:-]{1,128})$/;
 const PACING_WINDOWS = new Set(["5h", "7d"]);
 
 // ---------------------------------------------------------------------------
@@ -127,72 +143,315 @@ export function parsePacingSetting(input: unknown): PacingSetting | string {
   return parseSetting(input);
 }
 
-/** Stored switches; invalid or duplicate entries are dropped. Never throws. */
-export function getPacingSettings(): PacingSetting[] {
+function samePacingSettings(
+  left: readonly PacingSetting[],
+  right: readonly PacingSetting[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((setting) =>
+      right.some(
+        (candidate) =>
+          candidate.provider === setting.provider &&
+          candidate.account === setting.account &&
+          candidate.enabled === setting.enabled,
+      ),
+    )
+  );
+}
+
+/** Stored switches and generations; invalid state never escapes this boundary. */
+function readPacingState(): PacingState {
   let parsed: unknown;
   try {
     const raw = getKV(PROVIDER_PACING_KV_KEY);
-    if (!raw) return [];
+    if (!raw) return { settings: [], generations: [], valid: true };
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return { settings: [], generations: [], valid: false };
   }
-  if (!Array.isArray(parsed)) return [];
-  const out: PacingSetting[] = [];
+  let rawSettings: unknown[];
+  let rawGenerations: unknown[];
+  if (Array.isArray(parsed)) {
+    // Read pre-v1 arrays during rolling upgrades; the next switch write
+    // upgrades them to the versioned settings/generation envelope.
+    if (parsed.length > MAX_SETTINGS) {
+      return { settings: [], generations: [], valid: false };
+    }
+    rawSettings = parsed;
+    rawGenerations = [];
+  } else if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    !Array.isArray(parsed) &&
+    (parsed as Record<string, unknown>).version === 1 &&
+    Array.isArray((parsed as Record<string, unknown>).settings) &&
+    Array.isArray((parsed as Record<string, unknown>).generations)
+  ) {
+    const envelope = parsed as Record<string, unknown>;
+    if (
+      Object.keys(envelope).some(
+        (key) =>
+          key !== "version" && key !== "settings" && key !== "generations",
+      )
+    ) {
+      return { settings: [], generations: [], valid: false };
+    }
+    const state = parsed as { settings: unknown[]; generations: unknown[] };
+    if (
+      state.settings.length > MAX_SETTINGS ||
+      state.generations.length > MAX_PROVIDER_PACING_GENERATIONS
+    ) {
+      return { settings: [], generations: [], valid: false };
+    }
+    rawSettings = state.settings;
+    rawGenerations = state.generations;
+  } else {
+    return { settings: [], generations: [], valid: false };
+  }
+
+  const settings: PacingSetting[] = [];
   const seen = new Set<string>();
-  for (const entry of parsed) {
+  for (const entry of rawSettings) {
     const setting = parseSetting(entry);
-    if (typeof setting === "string") continue;
+    if (typeof setting === "string") {
+      return { settings: [], generations: [], valid: false };
+    }
     const key = `${setting.provider}\x1f${setting.account}`;
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return { settings: [], generations: [], valid: false };
     seen.add(key);
-    out.push(setting);
-    if (out.length === MAX_SETTINGS) break;
+    settings.push(setting);
   }
-  return out;
+  const generations: PacingGenerationEntry[] = [];
+  const generationSeen = new Set<string>();
+  for (const entry of rawGenerations) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return { settings: [], generations: [], valid: false };
+    }
+    const row = entry as Record<string, unknown>;
+    if (
+      Object.keys(row).some(
+        (key) =>
+          key !== "provider" && key !== "account" && key !== "generation",
+      )
+    ) {
+      return { settings: [], generations: [], valid: false };
+    }
+    if (
+      typeof row.provider !== "string" ||
+      !PROVIDER_RE.test(row.provider) ||
+      typeof row.account !== "string" ||
+      !ACCOUNT_RE.test(row.account) ||
+      !Number.isSafeInteger(row.generation) ||
+      (row.generation as number) < 0
+    ) {
+      return { settings: [], generations: [], valid: false };
+    }
+    const key = `${row.provider}\x1f${row.account}`;
+    if (generationSeen.has(key))
+      return { settings: [], generations: [], valid: false };
+    generationSeen.add(key);
+    generations.push({
+      provider: row.provider,
+      account: row.account,
+      generation: row.generation as number,
+    });
+  }
+  return { settings, generations, valid: true };
+}
+
+/** Stored switches; invalid or duplicate state disables pacing. Never throws. */
+export function getPacingSettings(): PacingSetting[] {
+  return readPacingState().settings;
+}
+
+function pacingGeneration(
+  state: PacingState,
+  provider: string,
+  account: string,
+): string {
+  const generationFor = (target: string): number =>
+    state.generations.find(
+      (entry) => entry.provider === provider && entry.account === target,
+    )?.generation ?? 0;
+  return `${generationFor("*")}:${generationFor(account)}`;
+}
+
+function pacingEnabledInState(
+  state: PacingState,
+  provider: string,
+  account: string,
+): boolean {
+  const exact = state.settings.find(
+    (entry) => entry.provider === provider && entry.account === account,
+  );
+  if (exact) return exact.enabled;
+  const providerDefault = state.settings.find(
+    (entry) => entry.provider === provider && entry.account === "*",
+  );
+  return providerDefault ? providerDefault.enabled : true;
+}
+
+/** Snapshot the switch generation at request start for late-response fencing. */
+export function capturePacingGeneration(
+  match: Pick<BudgetMatch, "provider" | "account" | "auth_kind">,
+): string | null {
+  if (match.auth_kind !== "subscription") return null;
+  const state = readPacingState();
+  if (!state.valid) return null;
+  return pacingGeneration(state, match.provider, match.account);
+}
+
+/** True only while a request's captured pacing generation is still current. */
+export function isPacingGenerationCurrent(
+  match: Pick<BudgetMatch, "provider" | "account" | "auth_kind">,
+  generation: string | null,
+): boolean {
+  if (match.auth_kind !== "subscription") return true;
+  if (generation === null) return false;
+  const state = readPacingState();
+  return (
+    state.valid &&
+    pacingGeneration(state, match.provider, match.account) === generation
+  );
+}
+
+/** Capture a provider epoch when the response may reveal its account identity. */
+export function capturePacingEpoch(
+  match: Pick<BudgetMatch, "provider" | "auth_kind">,
+): number | null {
+  if (match.auth_kind !== "subscription") return null;
+  // This runs before dispatch. Its process-local fence stays synchronous and
+  // does not turn an optional database read into foreground request latency.
+  return providerPacingEpochs.get(match.provider) ?? 0;
+}
+
+/** Reject late quota responses after any switch for their provider changes. */
+export function isPacingEpochCurrent(
+  match: Pick<BudgetMatch, "provider" | "auth_kind">,
+  epoch: number | null,
+): boolean {
+  if (match.auth_kind !== "subscription") return true;
+  if (epoch === null) return false;
+  return (providerPacingEpochs.get(match.provider) ?? 0) === epoch;
 }
 
 /** Store one account's switch (a missing entry means enabled). */
-export function setPacingEnabled(setting: PacingSetting): void {
-  const rest = getPacingSettings().filter(
+export function setPacingEnabled(input: PacingSetting): boolean {
+  const setting = parseSetting(input);
+  if (typeof setting === "string") return false;
+  const state = readPacingState();
+  if (!state.valid) return false;
+  const hasExactSetting = state.settings.some(
+    (entry) =>
+      entry.provider === setting.provider && entry.account === setting.account,
+  );
+  // A per-account switch that already matches its inherited provider default
+  // must not spend a durable generation or a settings slot.
+  if (
+    setting.account !== "*" &&
+    !hasExactSetting &&
+    pacingEnabledInState(state, setting.provider, setting.account) ===
+      setting.enabled
+  ) {
+    return true;
+  }
+  const rest = state.settings.filter(
     (s) => s.provider !== setting.provider || s.account !== setting.account,
   );
-  const next = setting.enabled ? rest : [...rest, setting];
-  setKV(PROVIDER_PACING_KV_KEY, JSON.stringify(next.slice(-MAX_SETTINGS)));
-  if (!setting.enabled) {
-    // Disabling pacing discards every held delay for this account so toggling
-    // it back on can never revive stale controller state.
-    for (const window of PACING_WINDOWS) {
-      rateTracks.delete(trackKey(setting.provider, setting.account, window));
-    }
-    requestGaps.delete(trackKey(setting.provider, setting.account));
-    cancelPacingWaits(setting.provider, setting.account);
+  const inheritedOptOut =
+    setting.account !== "*" &&
+    rest.some(
+      (s) => s.provider === setting.provider && s.account === "*" && !s.enabled,
+    );
+  const next = setting.enabled && !inheritedOptOut ? rest : [...rest, setting];
+  if (next.length > MAX_SETTINGS) return false;
+  // A no-op must not consume a durable identity generation or invalidate
+  // quota observations; caller-controlled accounts could otherwise exhaust
+  // the bounded fence without changing any setting.
+  if (samePacingSettings(next, state.settings)) return true;
+  const generationIndex = state.generations.findIndex(
+    (entry) =>
+      entry.provider === setting.provider && entry.account === setting.account,
+  );
+  const currentGeneration =
+    generationIndex < 0
+      ? 0
+      : (state.generations[generationIndex]?.generation ?? 0);
+  if (!Number.isSafeInteger(currentGeneration + 1)) return false;
+  if (
+    generationIndex < 0 &&
+    state.generations.length >= MAX_PROVIDER_PACING_GENERATIONS
+  ) {
+    return false;
   }
+  const currentEpoch = providerPacingEpochs.get(setting.provider) ?? 0;
+  if (!Number.isSafeInteger(currentEpoch + 1)) return false;
+  const generation: PacingGenerationEntry = {
+    provider: setting.provider,
+    account: setting.account,
+    generation: currentGeneration + 1,
+  };
+  const generations = [...state.generations];
+  if (
+    generationIndex < 0 &&
+    generations.length < MAX_PROVIDER_PACING_GENERATIONS
+  ) {
+    generations.push(generation);
+  } else if (generationIndex >= 0) {
+    generations[generationIndex] = generation;
+  }
+  setKV(
+    PROVIDER_PACING_KV_KEY,
+    JSON.stringify({ version: 1, settings: next, generations }),
+  );
+  providerPacingEpochs.set(setting.provider, currentEpoch + 1);
+  if (!setting.enabled) {
+    // Disabling pacing discards every held recommendation so toggling
+    // it back on can never revive stale controller state.
+    if (setting.account === "*") {
+      const prefix = `${setting.provider}\x1f`;
+      for (const key of rateTracks.keys()) {
+        if (key.startsWith(prefix)) rateTracks.delete(key);
+      }
+      for (const key of requestGaps.keys()) {
+        if (key.startsWith(prefix)) requestGaps.delete(key);
+      }
+    } else {
+      for (const window of PACING_WINDOWS) {
+        rateTracks.delete(trackKey(setting.provider, setting.account, window));
+      }
+      requestGaps.delete(trackKey(setting.provider, setting.account));
+    }
+  }
+  return true;
 }
 
 export function isPacingEnabled(provider: string, account: string): boolean {
-  return !getPacingSettings().some(
-    (s) => s.provider === provider && s.account === account && !s.enabled,
-  );
+  const state = readPacingState();
+  return state.valid && pacingEnabledInState(state, provider, account);
 }
 
 // ---------------------------------------------------------------------------
 // In-memory rate tracker
 
 type RateTrack = {
+  generation: string;
   resetsAt: number | null;
   lastUsed: number;
   lastAt: number;
   samples: number;
   rate: number | null;
-  /** Held integral-controller delay `d_w` (ms). */
+  /** Held integral-controller extra-gap recommendation `d_w` (ms). */
   held: number;
 };
 
 const rateTracks = new Map<string, RateTrack>();
-const requestGaps = new Map<string, { lastAt: number; gap: number | null }>();
-const pacingWaits = new Map<string, Set<AbortController>>();
-export const PACING_DISABLED_REASON = Symbol("provider pacing disabled");
+const requestGaps = new Map<
+  string,
+  { generation: string; lastAt: number; gap: number | null }
+>();
+const providerPacingEpochs = new Map<string, number>();
 
 function trackKey(provider: string, account: string, window?: string): string {
   return window === undefined
@@ -200,39 +459,14 @@ function trackKey(provider: string, account: string, window?: string): string {
     : `${provider}\x1f${account}\x1f${window}`;
 }
 
-/** Register an account-scoped sleep so disabling pacing releases that wait. */
-export function registerPacingWait(
-  match: Pick<BudgetMatch, "provider" | "account">,
-  controller: AbortController,
-): () => void {
-  const key = trackKey(match.provider, match.account, "wait");
-  const waits = pacingWaits.get(key) ?? new Set<AbortController>();
-  waits.add(controller);
-  pacingWaits.set(key, waits);
-  let enabled = true;
-  try {
-    enabled = isPacingEnabled(match.provider, match.account);
-  } catch {
-    // A settings read can fail while storage is closing; never fail the request
-    // because an optional pacing wait could not be registered safely.
-    enabled = false;
-  }
-  if (!enabled) {
-    controller.abort(PACING_DISABLED_REASON);
-  }
-  return () => {
-    waits.delete(controller);
-    if (waits.size === 0 && pacingWaits.get(key) === waits) {
-      pacingWaits.delete(key);
-    }
-  };
-}
-
-function cancelPacingWaits(provider: string, account: string): void {
-  const waits = pacingWaits.get(trackKey(provider, account, "wait"));
-  if (!waits) return;
-  for (const controller of waits) controller.abort(PACING_DISABLED_REASON);
-  pacingWaits.delete(trackKey(provider, account, "wait"));
+function requestGapForGeneration(
+  provider: string,
+  account: string,
+  generation: string | null,
+): number | null {
+  if (generation === null) return null;
+  const entry = requestGaps.get(trackKey(provider, account));
+  return entry?.generation === generation ? entry.gap : null;
 }
 
 function ewma(previous: number | null, sample: number): number {
@@ -274,17 +508,37 @@ function quotaPercentOf(
  * Feed one persisted quota observation into the rate tracker. Called where
  * `provider_quotas` rows are written.
  */
-export function recordQuotaObservation(row: ProviderQuotaRow): void {
+export function recordQuotaObservation(
+  row: ProviderQuotaRow,
+  observedGeneration?: string | null,
+): void {
   if (row.authKind !== "subscription" || !PACING_WINDOWS.has(row.window)) {
     return;
   }
+  if (row.account === "*") return;
+  const match: BudgetMatch = {
+    provider: row.provider,
+    auth_kind: row.authKind,
+    account: row.account,
+  };
+  const generation =
+    observedGeneration === undefined
+      ? capturePacingGeneration(match)
+      : observedGeneration;
+  if (generation === null || !isPacingGenerationCurrent(match, generation)) {
+    return;
+  }
+  if (!isPacingEnabled(row.provider, row.account)) return;
   const used = quotaPercentOf(row);
   if (used === null) return;
   const key = trackKey(row.provider, row.account, row.window);
-  const track = rateTracks.get(key);
+  const previousTrack = rateTracks.get(key);
+  const track =
+    previousTrack?.generation === generation ? previousTrack : undefined;
   if (track && row.observedAt < track.lastAt) return;
   if (!track || track.resetsAt !== row.resetsAt || used < track.lastUsed) {
     rememberTrack(rateTracks, key, {
+      generation,
       resetsAt: row.resetsAt,
       lastUsed: used,
       lastAt: row.observedAt,
@@ -305,14 +559,10 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
   track.lastAt = row.observedAt;
   track.samples++;
   const T = row.resetsAt === null ? 0 : row.resetsAt - row.observedAt;
-  if (!isPacingEnabled(row.provider, row.account)) {
-    // No integral windup while nothing is being delayed.
-    track.held = 0;
-  } else if (used >= 100) {
+  if (used >= 100) {
     track.held = MAX_PACING_DELAY_MS;
   } else if (T > 0) {
-    const gap =
-      requestGaps.get(trackKey(row.provider, row.account))?.gap ?? null;
+    const gap = requestGapForGeneration(row.provider, row.account, generation);
     track.held = integrateHeldDelayMs(
       track.held,
       gap,
@@ -323,10 +573,8 @@ export function recordQuotaObservation(row: ProviderQuotaRow): void {
 }
 
 /**
- * One integral-controller step, applied per accepted rate sample:
- * `d_w ← clamp(d_w + g · (ρ − 1), 0, MAX)`. `g` already includes the delay
- * being applied, so this settles where `r = s` (a stateless `g · (ρ − 1)`
- * would settle only halfway). No gap estimate yet → unchanged; pure.
+ * Update the status-only extra-gap recommendation per accepted rate sample:
+ * `d_w ← clamp(d_w + g · (ρ − 1), 0, MAX)`. No gap estimate yet → unchanged.
  */
 export function integrateHeldDelayMs(
   held: number,
@@ -337,16 +585,30 @@ export function integrateHeldDelayMs(
   return clamp(held + gapMs * (ratio - 1), 0, MAX_PACING_DELAY_MS);
 }
 
-/** Record a foreground request start for the account's gap EWMA. */
+/** Record a foreground request start for the status-only gap EWMA. */
 export function recordForegroundRequest(
   match: BudgetMatch | null,
   now = Date.now(),
+  observedGeneration?: string | null,
 ): void {
   if (!match || match.auth_kind !== "subscription") return;
+  if (match.account === "*") return;
+  const generation =
+    observedGeneration === undefined
+      ? capturePacingGeneration(match)
+      : observedGeneration;
+  if (generation === null || !isPacingGenerationCurrent(match, generation)) {
+    return;
+  }
+  if (!isPacingEnabled(match.provider, match.account)) return;
   const key = trackKey(match.provider, match.account);
   const entry = requestGaps.get(key);
   if (!entry) {
-    rememberTrack(requestGaps, key, { lastAt: now, gap: null });
+    rememberTrack(requestGaps, key, { generation, lastAt: now, gap: null });
+    return;
+  }
+  if (entry.generation !== generation) {
+    rememberTrack(requestGaps, key, { generation, lastAt: now, gap: null });
     return;
   }
   if (now > entry.lastAt) {
@@ -360,12 +622,9 @@ export function recordForegroundRequest(
 }
 
 export function _resetPacingTrackerForTest(): void {
-  for (const waits of pacingWaits.values()) {
-    for (const controller of waits) controller.abort(PACING_DISABLED_REASON);
-  }
-  pacingWaits.clear();
   rateTracks.clear();
   requestGaps.clear();
+  providerPacingEpochs.clear();
 }
 
 export function _pacingTrackerSizesForTest(): {
@@ -420,11 +679,11 @@ export function evaluatePacingWindow(
     rate_source: source,
     ratio,
     throttling,
-    delay_ms: delay,
+    recommended_extra_gap_ms: delay,
   };
 }
 
-/** Largest window delay, capped at {@link MAX_PACING_DELAY_MS}; pure. */
+/** Largest recommended request-gap increase; never delays a request. */
 export function computePacingDelayMs(
   windows: PacingWindowInput[],
   gapMs: number | null,
@@ -433,7 +692,7 @@ export function computePacingDelayMs(
   let delay = 0;
   for (const w of windows) {
     const status = evaluatePacingWindow(w, gapMs, now);
-    if (status) delay = Math.max(delay, status.delay_ms);
+    if (status) delay = Math.max(delay, status.recommended_extra_gap_ms);
   }
   return delay;
 }
@@ -443,6 +702,7 @@ function windowInputs(
   provider: string,
   account: string,
   now: number,
+  generation: string | null,
 ): PacingWindowInput[] {
   const latest = new Map<string, ProviderQuotaRow>();
   for (const row of rows) {
@@ -466,7 +726,10 @@ function windowInputs(
     }
     const track = rateTracks.get(trackKey(provider, account, row.window));
     const current =
-      track && track.resetsAt === row.resetsAt && track.samples >= 2
+      generation !== null &&
+      track?.generation === generation &&
+      track.resetsAt === row.resetsAt &&
+      track.samples >= 2
         ? track
         : null;
     const observedRate = current?.rate ?? null;
@@ -489,37 +752,67 @@ function statusFor(
   enabled: boolean,
   now: number,
 ): ProviderPacingStatus {
-  const gap = requestGaps.get(trackKey(provider, account))?.gap ?? null;
-  const windows = windowInputs(rows, provider, account, now)
+  let generation: string | null = null;
+  try {
+    generation = capturePacingGeneration({
+      provider,
+      account,
+      auth_kind: "subscription",
+    });
+  } catch {
+    // Pacing is optional: a closed database disables its status only.
+  }
+  const gap = requestGapForGeneration(provider, account, generation);
+  const evaluatedWindows = windowInputs(
+    rows,
+    provider,
+    account,
+    now,
+    generation,
+  )
     .map((w) => evaluatePacingWindow(w, gap, now))
     .filter((w): w is PacingWindowStatus => w !== null);
+  // Disabled accounts keep quota rates visible, but never report an active
+  // curation pause or a recommended gap.
+  const windows = enabled
+    ? evaluatedWindows
+    : evaluatedWindows.map((window) => ({
+        ...window,
+        throttling: false,
+        recommended_extra_gap_ms: 0,
+      }));
   return {
     provider,
     account,
     enabled,
-    throttling: enabled && windows.some((w) => w.throttling),
-    delay_ms: enabled
-      ? windows.reduce((max, w) => Math.max(max, w.delay_ms), 0)
-      : 0,
+    throttling: windows.some((w) => w.throttling),
+    recommended_extra_gap_ms: windows.reduce(
+      (max, w) => Math.max(max, w.recommended_extra_gap_ms),
+      0,
+    ),
     request_gap_ms: gap,
     windows,
   };
 }
 
-/** Foreground pacing delay for an attribution; 0 when off or unpaced. */
+/** Estimated request-gap increase for diagnostics; never delays a request. */
 export function pacingDelayMs(
   match: BudgetMatch | null,
   now = Date.now(),
 ): number {
   if (!match || match.auth_kind !== "subscription") return 0;
-  if (!isPacingEnabled(match.provider, match.account)) return 0;
-  return statusFor(
-    listProviderQuotas(),
-    match.provider,
-    match.account,
-    true,
-    now,
-  ).delay_ms;
+  try {
+    if (!isPacingEnabled(match.provider, match.account)) return 0;
+    return statusFor(
+      listProviderQuotas(),
+      match.provider,
+      match.account,
+      true,
+      now,
+    ).recommended_extra_gap_ms;
+  } catch {
+    return 0;
+  }
 }
 
 /** Curation pauses while the account's pacing is throttling (ρ > 1 or u ≥ 100). */
@@ -528,14 +821,18 @@ export function isCurationPacingPaused(
   now = Date.now(),
 ): boolean {
   if (!match || match.auth_kind !== "subscription") return false;
-  if (!isPacingEnabled(match.provider, match.account)) return false;
-  return statusFor(
-    listProviderQuotas(),
-    match.provider,
-    match.account,
-    true,
-    now,
-  ).throttling;
+  try {
+    if (!isPacingEnabled(match.provider, match.account)) return false;
+    return statusFor(
+      listProviderQuotas(),
+      match.provider,
+      match.account,
+      true,
+      now,
+    ).throttling;
+  } catch {
+    return false;
+  }
 }
 
 /** Pacing status for every subscription account with 5h / 7d quota rows. */
@@ -543,11 +840,8 @@ export function evaluateProviderPacing(
   now = Date.now(),
 ): ProviderPacingStatus[] {
   const rows = listProviderQuotas();
-  const disabled = new Set(
-    getPacingSettings()
-      .filter((s) => !s.enabled)
-      .map((s) => trackKey(s.provider, s.account)),
-  );
+  const state = readPacingState();
+  const settings = state.settings;
   const accounts = new Map<string, { provider: string; account: string }>();
   for (const row of rows) {
     if (row.authKind !== "subscription" || !PACING_WINDOWS.has(row.window)) {
@@ -558,10 +852,23 @@ export function evaluateProviderPacing(
       account: row.account,
     });
   }
+  for (const setting of settings) {
+    if (setting.account === "*") continue;
+    accounts.set(trackKey(setting.provider, setting.account), {
+      provider: setting.provider,
+      account: setting.account,
+    });
+  }
   return [...accounts.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, { provider, account }]) =>
-      statusFor(rows, provider, account, !disabled.has(key), now),
+    .map(([_key, { provider, account }]) =>
+      statusFor(
+        rows,
+        provider,
+        account,
+        state.valid && pacingEnabledInState(state, provider, account),
+        now,
+      ),
     );
 }
 

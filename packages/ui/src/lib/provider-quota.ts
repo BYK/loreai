@@ -212,8 +212,8 @@ export function formatRate(perHour: number | null): string {
   return `${perHour < 10 ? perHour.toFixed(1) : perHour.toFixed(0)} pts/h`;
 }
 
-/** Pacing delay per request, e.g. "none", "4.2s", "60s". */
-export function formatDelay(ms: number): string {
+/** Estimated extra request gap, e.g. "none", "4.2s", "60s". */
+export function formatExtraGap(ms: number): string {
   if (!(ms > 0)) return "none";
   const seconds = ms / 1000;
   return `${seconds < 10 ? seconds.toFixed(1) : seconds.toFixed(0)}s`;
@@ -225,10 +225,12 @@ export function pacingStateText(
   enabled: boolean,
 ): string {
   if (!enabled) return "pacing off";
-  if (window.used >= 100) return "limit reached — Lore is slowing requests";
-  if (!window.throttling) return "on pace";
-  if ((window.ratio ?? 0) <= 1) {
-    return "holding pace — Lore is slowing requests";
+  if (window.used >= 100) {
+    return "limit reached — background curation paused";
   }
-  return `${(window.ratio ?? 0).toFixed(1)}× the sustainable rate — Lore is slowing requests`;
+  if (!window.throttling) return "within sustainable rate";
+  if ((window.ratio ?? 0) <= 1) {
+    return "background curation paused — quota pressure remains";
+  }
+  return `${(window.ratio ?? 0).toFixed(1)}× the sustainable rate — background curation paused`;
 }

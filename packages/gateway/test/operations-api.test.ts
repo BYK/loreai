@@ -1119,19 +1119,33 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/pacing", () => {
         enabled: false,
       });
       expect(off.status).toBe(200);
-      expect(
-        ((await off.json()) as { provider_pacing: unknown[] }).provider_pacing,
-      ).toEqual([
+      const offStatus = (await off.json()) as {
+        provider_pacing: Array<Record<string, unknown>>;
+      };
+      expect(offStatus.provider_pacing).toEqual([
         expect.objectContaining({
           account: "acct-put",
           enabled: false,
           throttling: false,
-          delay_ms: 0,
+          recommended_extra_gap_ms: 0,
+          windows: [
+            expect.objectContaining({
+              window: "7d",
+              recommended_extra_gap_ms: 0,
+            }),
+          ],
         }),
       ]);
-      expect(JSON.parse(getKV("provider_pacing") ?? "[]")).toEqual([
-        { provider: "anthropic", account: "acct-put", enabled: false },
-      ]);
+      expect(offStatus.provider_pacing[0]).not.toHaveProperty("delay_ms");
+      expect(offStatus.provider_pacing[0]).not.toHaveProperty(
+        "windows.0.delay_ms",
+      );
+      expect(JSON.parse(getKV("provider_pacing") ?? "[]")).toMatchObject({
+        version: 1,
+        settings: [
+          { provider: "anthropic", account: "acct-put", enabled: false },
+        ],
+      });
 
       // Switching back on removes the entry: missing means enabled.
       const on = await put({
@@ -1140,7 +1154,17 @@ describe("GET /api/v1/costs + PUT /api/v1/costs/pacing", () => {
         enabled: true,
       });
       expect(on.status).toBe(200);
-      expect(JSON.parse(getKV("provider_pacing") ?? "[]")).toEqual([]);
+      expect(JSON.parse(getKV("provider_pacing") ?? "{}")).toMatchObject({
+        version: 1,
+        settings: [],
+        generations: [
+          {
+            provider: "anthropic",
+            account: "acct-put",
+            generation: 2,
+          },
+        ],
+      });
 
       const stored = getKV("provider_pacing");
       for (const bad of [

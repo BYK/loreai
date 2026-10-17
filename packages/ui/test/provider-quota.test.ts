@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   displayProvider,
-  formatDelay,
+  formatExtraGap,
   formatRate,
   pacingForCard,
   pacingStateText,
@@ -172,7 +172,7 @@ describe("pacing helpers", () => {
     rate_source: "observed" as const,
     ratio: 2,
     throttling: true,
-    delay_ms: 10_000,
+    recommended_extra_gap_ms: 10_000,
   };
 
   it("pacingForCard matches subscription cards only", () => {
@@ -181,7 +181,7 @@ describe("pacing helpers", () => {
       account: "a1",
       enabled: true,
       throttling: false,
-      delay_ms: 0,
+      recommended_extra_gap_ms: 0,
       request_gap_ms: null,
       windows: [],
     };
@@ -195,28 +195,28 @@ describe("pacing helpers", () => {
     expect(pacingForCard([row], { ...card, auth_kind: "api_key" })).toBeNull();
   });
 
-  it("formats rates and delays", () => {
+  it("formats rates and estimated extra gaps", () => {
     expect(formatRate(null)).toBe("—");
     expect(formatRate(7.66)).toBe("7.7 pts/h");
     expect(formatRate(38.5)).toBe("39 pts/h");
-    expect(formatDelay(0)).toBe("none");
-    expect(formatDelay(4_200)).toBe("4.2s");
-    expect(formatDelay(60_000)).toBe("60s");
+    expect(formatExtraGap(0)).toBe("none");
+    expect(formatExtraGap(4_200)).toBe("4.2s");
+    expect(formatExtraGap(60_000)).toBe("60s");
   });
 
-  it("pacingStateText covers off / on pace / throttling / limit", () => {
+  it("pacingStateText describes quota-driven background curation", () => {
     expect(pacingStateText(window, false)).toBe("pacing off");
     expect(pacingStateText({ ...window, throttling: false }, true)).toBe(
-      "on pace",
+      "within sustainable rate",
     );
     expect(pacingStateText(window, true)).toBe(
-      "2.0× the sustainable rate — Lore is slowing requests",
+      "2.0× the sustainable rate — background curation paused",
     );
     expect(pacingStateText({ ...window, ratio: 0.95 }, true)).toBe(
-      "holding pace — Lore is slowing requests",
+      "background curation paused — quota pressure remains",
     );
     expect(pacingStateText({ ...window, used: 100 }, true)).toBe(
-      "limit reached — Lore is slowing requests",
+      "limit reached — background curation paused",
     );
   });
 });

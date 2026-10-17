@@ -18,7 +18,9 @@ import {
   ReadPreparationUnavailableError,
   loadSessionTracking,
   listSessionPromptDeltas,
+  listProviderQuotas,
   saveSessionTracking,
+  upsertProviderQuota,
   formatKnowledgeEntry,
   temporal,
 } from "@loreai/core";
@@ -28,10 +30,13 @@ import { createHarness } from "./helpers/harness";
 import type { FixtureEntry } from "../src/recorder";
 import type { GatewayRequest } from "../src/translate/types";
 import {
-  PACING_DISABLED_REASON,
-  registerPacingWait,
+  _resetPacingTrackerForTest,
+  isCurationPacingPaused,
+  recordForegroundRequest,
   setPacingEnabled,
+  type BudgetMatch,
 } from "../src/provider-budgets";
+import * as providerBudgets from "../src/provider-budgets";
 
 vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
@@ -55,7 +60,6 @@ import {
   activePipelineRequestCountForTest,
   buildStreamingResponse,
   abortAwareDelay,
-  completeBudgetThrottleDelay,
   createForegroundAbortScope,
   createMemoryPreparationScope,
   detachedPipelineRequestCountForTest,
@@ -98,6 +102,10 @@ import {
 } from "../src/sse-inactivity";
 import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
+import {
+  _resetCostAttributionForTest,
+  recordSuccessfulChatGPTAuth,
+} from "../src/cost-attribution";
 import { getDegradationWarning } from "../src/worker-health";
 import {
   clearAllCosts,
@@ -2347,92 +2355,208 @@ describe("non-stream recall usage aggregation", () => {
   );
 });
 
-describe("budget throttle cancellation", () => {
+describe("abort-aware foreground delay", () => {
   afterEach(() => vi.useRealTimers());
-
-  it("disabling pacing releases its active delay without affecting another account", () => {
-    const account = { provider: "anthropic", account: "active-wait-test" };
-    const otherAccount = {
-      provider: "anthropic",
-      account: "other-active-wait-test",
-    };
-    const controller = new AbortController();
-    const otherController = new AbortController();
-    const unregister = registerPacingWait(account, controller);
-    const unregisterOther = registerPacingWait(otherAccount, otherController);
-    setPacingEnabled({ ...account, enabled: false });
-
-    expect(controller.signal.aborted).toBe(true);
-    expect(controller.signal.reason).toBe(PACING_DISABLED_REASON);
-    expect(otherController.signal.aborted).toBe(false);
-    unregister();
-    unregisterOther();
-    setPacingEnabled({ ...account, enabled: true });
-  });
-
-  it("caller abort clears a long delay and removes its listener", async () => {
-    vi.useFakeTimers();
-    const caller = new AbortController();
-    const remove = vi.spyOn(caller.signal, "removeEventListener");
-    let recorded = 0;
-    const pending = completeBudgetThrottleDelay(
-      600_000,
-      caller.signal,
-      () => recorded++,
-    );
-    expect(vi.getTimerCount()).toBe(1);
-    caller.abort(new DOMException("client disconnected", "AbortError"));
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(recorded).toBe(0);
-    expect(vi.getTimerCount()).toBe(0);
-    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
-  });
-
-  it("the foreground deadline includes throttle delay and prevents later work", async () => {
-    vi.useFakeTimers();
-    const foreground = createForegroundAbortScope();
-    let recorded = 0;
-    let upstreamStarted = false;
-    // Throttle past the foreground deadline so the deadline must win the race.
-    const throttleDelayMs = FOREGROUND_REQUEST_TIMEOUT_MS + 60_000;
-    const pending = (async () => {
-      await completeBudgetThrottleDelay(
-        throttleDelayMs,
-        foreground.signal,
-        () => recorded++,
-      );
-      upstreamStarted = true;
-    })();
-    const rejected = expect(pending).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
-    await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
-    await rejected;
-    expect(recorded).toBe(0);
-    expect(upstreamStarted).toBe(false);
-    foreground.dispose();
-  });
-
-  it("records throttle completion before allowing upstream work", async () => {
-    vi.useFakeTimers();
-    const order: string[] = [];
-    const pending = (async () => {
-      await completeBudgetThrottleDelay(5_000, undefined, () =>
-        order.push("record"),
-      );
-      order.push("upstream");
-    })();
-    expect(order).toEqual([]);
-    await vi.advanceTimersByTimeAsync(5_000);
-    await pending;
-    expect(order).toEqual(["record", "upstream"]);
-  });
 
   it("zero delay does not leave timers or listeners", async () => {
     vi.useFakeTimers();
     const signal = new AbortController().signal;
     await abortAwareDelay(0, signal);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("foreground subscription pacing", () => {
+  it("dispatches immediately while quota pressure pauses curation", async () => {
+    await resetPipelineState({ fast: true });
+    const previousPacing = core.getKV("provider_pacing");
+    const sessionID = "foreground-pacing-immediate-dispatch";
+    const bearer = "foreground-pacing-oauth-token";
+    const credential = { scheme: "bearer" as const, value: bearer };
+    const credentialAccount = authFingerprint(credential).slice(0, 12);
+    const accounts = ["default", credentialAccount];
+    const previousQuotas = listProviderQuotas().filter(
+      (row) =>
+        row.provider === "openai" &&
+        row.authKind === "subscription" &&
+        accounts.includes(row.account),
+    );
+    const match: BudgetMatch = {
+      provider: "openai",
+      auth_kind: "subscription",
+      account: "default",
+    };
+    const caller = new AbortController();
+    let dispatchStarted = false;
+    let pending: Promise<Response> | undefined;
+    try {
+      core
+        .db()
+        .query("DELETE FROM kv_meta WHERE key = ?")
+        .run("provider_pacing");
+      core
+        .db()
+        .query(
+          "DELETE FROM provider_quotas WHERE provider = ? AND auth_kind = ? AND account IN (?, ?)",
+        )
+        .run("openai", "subscription", ...accounts);
+      _resetPacingTrackerForTest();
+
+      const now = Date.now();
+      for (const account of accounts) {
+        expect(
+          setPacingEnabled({ provider: "openai", account, enabled: true }),
+        ).toBe(true);
+        expect(
+          upsertProviderQuota({
+            provider: "openai",
+            authKind: "subscription",
+            account,
+            window: "5h",
+            label: "5h",
+            windowMinutes: 300,
+            usedPercent: 100,
+            remaining: null,
+            limit: null,
+            resetsAt: now + 5 * 60 * 60_000,
+            source: "test",
+            observedAt: now,
+          }),
+        ).toBe(true);
+        const budgetMatch = { ...match, account };
+        recordForegroundRequest(budgetMatch, now - 20_000);
+        recordForegroundRequest(budgetMatch, now - 10_000);
+        expect(isCurationPacingPaused(budgetMatch, now)).toBe(true);
+      }
+
+      const request = makeResponsesRequest({ sessionHeaders: {} });
+      request.rawHeaders["x-lore-session-id"] = sessionID;
+      request.rawHeaders["x-lore-provider"] = "openai-codex";
+      request.rawHeaders["x-lore-upstream-url"] =
+        "https://chatgpt.com/backend-api";
+      request.rawHeaders.authorization = `Bearer ${bearer}`;
+      request.signal = caller.signal;
+      setUpstreamInterceptor(async () => {
+        dispatchStarted = true;
+        return new Response(validResponsesSSE("resp_pacing_dispatch"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+
+      pending = handleRequest(request, loadLocalConfig());
+      await vi.waitFor(() => expect(dispatchStarted).toBe(true), {
+        timeout: 10_000,
+        interval: 25,
+      });
+      const response = await pending;
+      expect(response.status).toBe(200);
+      await response.text();
+    } finally {
+      caller.abort(new DOMException("test finished", "AbortError"));
+      const response = await pending?.catch(() => undefined);
+      if (response?.body && !response.bodyUsed) {
+        await response.body.cancel().catch(() => {});
+      }
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState({ fast: true });
+      core
+        .db()
+        .query(
+          "DELETE FROM provider_quotas WHERE provider = ? AND auth_kind = ? AND account IN (?, ?)",
+        )
+        .run("openai", "subscription", ...accounts);
+      for (const row of previousQuotas) upsertProviderQuota(row);
+      if (previousPacing === null) {
+        core
+          .db()
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run("provider_pacing");
+      } else {
+        core.setKV("provider_pacing", previousPacing);
+      }
+      _resetPacingTrackerForTest();
+    }
+  });
+
+  it("still dispatches when optional pacing diagnostics throw", async () => {
+    await resetPipelineState({ fast: true });
+    const previousPacing = core.getKV("provider_pacing");
+    const sessionID = "foreground-pacing-throwing-diagnostic";
+    let dispatchStarted = false;
+    let pending: Promise<Response> | undefined;
+    const recordRequest = vi
+      .spyOn(providerBudgets, "recordForegroundRequest")
+      .mockImplementation(() => {
+        throw new Error("synthetic optional pacing failure");
+      });
+    const info = vi.spyOn(core.log, "info").mockImplementation((message) => {
+      if (message === "provider pacing observation failed") {
+        throw new Error("synthetic diagnostic sink failure");
+      }
+    });
+
+    try {
+      core
+        .db()
+        .query("DELETE FROM kv_meta WHERE key = ?")
+        .run("provider_pacing");
+      recordSuccessfulChatGPTAuth({
+        credential: {
+          scheme: "bearer",
+          value: "opaque-pacing-test-token",
+        },
+        upstreamURL: "https://chatgpt.com/backend-api",
+        responseURL: "https://chatgpt.com/backend-api",
+        responseStatus: 200,
+        directUpstreamResponse: true,
+      });
+      const request = makeResponsesRequest({ sessionHeaders: {} });
+      request.rawHeaders["x-lore-session-id"] = sessionID;
+      request.rawHeaders["x-lore-provider"] = "openai-codex";
+      request.rawHeaders["x-lore-upstream-url"] =
+        "https://chatgpt.com/backend-api";
+      request.rawHeaders.authorization = "Bearer opaque-pacing-test-token";
+      setUpstreamInterceptor(async () => {
+        dispatchStarted = true;
+        return new Response(validResponsesSSE("resp_pacing_logger_failure"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+
+      pending = handleRequest(request, loadLocalConfig());
+      await vi.waitFor(() => expect(dispatchStarted).toBe(true), {
+        timeout: 10_000,
+        interval: 25,
+      });
+      const response = await pending;
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(recordRequest).toHaveBeenCalledOnce();
+      expect(
+        info.mock.calls.filter(
+          ([message]) => message === "provider pacing observation failed",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      recordRequest.mockRestore();
+      info.mockRestore();
+      _resetCostAttributionForTest();
+      const response = await pending?.catch(() => undefined);
+      if (response?.body && !response.bodyUsed) {
+        await response.body.cancel().catch(() => {});
+      }
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState({ fast: true });
+      if (previousPacing === null) {
+        core
+          .db()
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run("provider_pacing");
+      } else {
+        core.setKV("provider_pacing", previousPacing);
+      }
+      _resetPacingTrackerForTest();
+    }
   });
 });
 

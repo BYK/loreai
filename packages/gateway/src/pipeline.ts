@@ -16,15 +16,15 @@ import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
 import {
   cacheAnthropicOrganizationFromResponse,
+  isPotentialAnthropicOAuthCredential,
+  isPotentialChatGPTSubscription,
+  recordSuccessfulAnthropicOAuthAuth,
+  recordSuccessfulChatGPTAuth,
   resolveCostAttribution,
 } from "./cost-attribution";
 import {
-  PACING_DISABLED_REASON,
   isSessionCurationPacingPaused,
-  pacingDelayMs,
-  recordForegroundRequest,
-  registerPacingWait,
-  sessionBudgetMatch,
+  capturePacingEpoch,
 } from "./provider-budgets";
 import {
   observeProviderQuotaHeaders,
@@ -465,7 +465,6 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
-  getSessionCosts,
 } from "./cost-tracker";
 import { isQuotaPaused } from "./quota";
 import {
@@ -8542,6 +8541,40 @@ async function forwardToUpstream(
     // Timestamp before invoking interceptors too: recording/replay adapters can
     // return a response without calling dispatchUpstream.
     quotaObservationStartedAt = providerQuotaObservationStartedAt();
+    const quotaPacingEpoch = (() => {
+      try {
+        const quotaAttribution = resolveCostAttribution({
+          sessionID,
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: routingAuth,
+          requestHeaders: req.rawHeaders,
+        });
+        const potentialChatGPTSubscription = isPotentialChatGPTSubscription({
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: routingAuth,
+        });
+        const potentialAnthropicOAuthCredential =
+          isPotentialAnthropicOAuthCredential({
+            providerID,
+            upstreamURL: effectiveUpstreamBase,
+            credential: routingAuth,
+          });
+        return capturePacingEpoch({
+          provider: quotaAttribution.provider,
+          auth_kind:
+            quotaAttribution.authKind === "subscription" ||
+            potentialChatGPTSubscription ||
+            potentialAnthropicOAuthCredential
+              ? "subscription"
+              : quotaAttribution.authKind,
+        });
+      } catch {
+        // This optional snapshot only fences quota capture; dispatch continues.
+        return null;
+      }
+    })();
     const response = await (effectiveInterceptor
       ? responseAgainstAbort(
           () =>
@@ -8558,15 +8591,35 @@ async function forwardToUpstream(
         : undefined) ??
       latestQuotaObservationTiming;
     const responseReceivedAt = responseTiming?.responseReceivedAt ?? Date.now();
+    const directUpstreamResponse =
+      quotaObservationTimes.has(response) ||
+      (response.body !== null && quotaObservationBodyTimes.has(response.body));
     // Capture provider quota headers for the cost ledger (#1926). Header
     // reads only — the response object is returned untouched.
     try {
+      recordSuccessfulAnthropicOAuthAuth({
+        credential: routingAuth,
+        upstreamURL: effectiveUpstreamBase,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
+      });
+      recordSuccessfulChatGPTAuth({
+        credential: routingAuth,
+        upstreamURL: effectiveUpstreamBase,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
+      });
       const attribution = resolveCostAttribution({
         sessionID,
         providerID,
         upstreamURL: effectiveUpstreamBase,
         credential: routingAuth,
         responseHeaders: response.headers,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
         requestHeaders: req.rawHeaders,
       });
       const quotaObservedAt =
@@ -8578,6 +8631,7 @@ async function forwardToUpstream(
         attribution,
         quotaObservedAt,
         responseReceivedAt,
+        quotaPacingEpoch,
       );
       if (accepted) {
         cacheAnthropicOrganizationFromResponse({
@@ -8586,6 +8640,9 @@ async function forwardToUpstream(
           sessionID,
           observedAt: quotaObservedAt,
           responseHeaders: response.headers,
+          upstreamURL: effectiveUpstreamBase,
+          responseURL: response.url,
+          directUpstreamResponse,
         });
       }
     } catch {
@@ -19088,16 +19145,6 @@ export function abortAwareDelay(
   });
 }
 
-export async function completeBudgetThrottleDelay(
-  delayMs: number,
-  signal: AbortSignal | undefined,
-  record: () => void,
-): Promise<void> {
-  await abortAwareDelay(delayMs, signal);
-  signal?.throwIfAborted();
-  record();
-}
-
 export function createForegroundAbortScope(caller?: AbortSignal): {
   signal: AbortSignal;
   abort: (reason?: unknown) => void;
@@ -20208,8 +20255,8 @@ async function handleProvisionalConversationTurn(
         extractProviderHeader(req.rawHeaders) || undefined,
       );
     }
-    captureBillingPrefix(state.sessionID, req.system);
-    captureSessionHeaders(state.sessionID, req.rawHeaders);
+    captureBillingPrefix(state.sessionID, req.system, credential);
+    captureSessionHeaders(state.sessionID, req.rawHeaders, credential);
     return true;
   };
   scheduleStreamingPostResponse(
@@ -21077,12 +21124,12 @@ async function handleConversationTurnPrepared(
   // x-anthropic-billing-header in the system prompt; we extract the prefix
   // so workers can rebuild it. Per-session storage prevents cross-session
   // contamination when multiple Claude Code versions share one process.
-  captureBillingPrefix(sessionID, req.system);
+  captureBillingPrefix(sessionID, req.system, cred);
 
   // Sniff Claude Code headers from conversation turns for replay on worker
   // calls. For OAuth sessions, workers need the same anthropic-beta and
   // user-agent headers as conversation turns to avoid 401 rejections.
-  captureSessionHeaders(sessionID, req.rawHeaders);
+  captureSessionHeaders(sessionID, req.rawHeaders, cred);
 
   // Track fingerprint for future correlation
   if (isNew) {
@@ -22949,86 +22996,14 @@ async function handleConversationTurnPrepared(
   };
 
   // Memory preparation is complete; its short timer cannot cancel generation.
-  // The absolute foreground lifetime started at turn admission and still
-  // covers deliberate throttling and every later upstream/recall phase.
+  // The absolute foreground lifetime started at turn admission and covers
+  // every later upstream and recall phase.
   preparation.assertActive();
   preparation.dispose();
   modifiedReq.signal = foregroundAbort.signal;
 
-  // --- Subscription pacing (#2045) ---
-  // Apply an invisible proxy-level sleep when this account's quota usage runs
-  // faster than its windows can sustain (pacingDelayMs). The sleep is capped
-  // to avoid causing cache busts (which would be self-defeating — costing
-  // more than the throttle saved). A DB failure must never break the request.
-  let pacingDelay = 0;
-  let pacingMatch: ReturnType<typeof sessionBudgetMatch> | undefined;
-  try {
-    pacingMatch = sessionBudgetMatch(
-      sessionID,
-      sessionState.lastUpstream,
-      req.rawHeaders,
-      resolveAuth(sessionID, sessionState.lastUpstream?.providerID),
-    );
-    const now = Date.now();
-    recordForegroundRequest(pacingMatch, now);
-    pacingDelay = pacingDelayMs(pacingMatch, now) / 1000;
-  } catch (err) {
-    log.info(`provider-pacing: evaluation failed: ${String(err)}`);
-  }
-  if (pacingDelay > 0) {
-    // Cap delay to avoid pushing the next request past the cache TTL boundary.
-    // Use prevRequestTime (the request before this one) to compute how much
-    // of the cache TTL window has already been consumed.
-    const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-    const elapsed = sessionState.prevRequestTime
-      ? Date.now() - sessionState.prevRequestTime
-      : 0; // first request — no prior timing, full TTL available
-    const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
-    const actualDelay = Math.min(pacingDelay, maxSafe);
-
-    if (actualDelay > 0.5) {
-      // don't bother sleeping < 500ms
-      log.info(
-        `pacing-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
-          `session=${sessionID.slice(0, 16)}`,
-      );
-      const pacingWaitController = new AbortController();
-      const unregisterPacingWait = pacingMatch
-        ? registerPacingWait(pacingMatch, pacingWaitController)
-        : () => {};
-      const abortPacingWait = (): void =>
-        pacingWaitController.abort(foregroundAbort.signal.reason);
-      foregroundAbort.signal.addEventListener("abort", abortPacingWait, {
-        once: true,
-      });
-      if (foregroundAbort.signal.aborted) abortPacingWait();
-      try {
-        await completeBudgetThrottleDelay(
-          actualDelay * 1000,
-          pacingWaitController.signal,
-          () => {
-            const costs = getSessionCosts(sessionID);
-            if (costs) {
-              costs.throttle.events++;
-              costs.throttle.totalDelayMs += actualDelay * 1000;
-            }
-          },
-        );
-      } catch (error) {
-        if (foregroundAbort.signal.aborted) {
-          foregroundAbort.dispose();
-          throw foregroundAbort.signal.reason;
-        }
-        if (error !== PACING_DISABLED_REASON) {
-          foregroundAbort.dispose();
-          throw error;
-        }
-      } finally {
-        foregroundAbort.signal.removeEventListener("abort", abortPacingWait);
-        unregisterPacingWait();
-      }
-    }
-  }
+  // Foreground requests always dispatch immediately; pacing pauses only
+  // background curation.
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Start gen_ai.chat span before the upstream call so it captures real

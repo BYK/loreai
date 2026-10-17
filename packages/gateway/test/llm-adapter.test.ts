@@ -87,12 +87,26 @@ import {
 import { captureSessionHeaders, captureBillingPrefix } from "../src/cch";
 import { _setTestVertexTokenProvider } from "../src/vertex-auth";
 import * as Sentry from "@sentry/bun";
-import { log } from "@loreai/core";
+import { db, listProviderQuotas, log } from "@loreai/core";
+import {
+  _pacingTrackerSizesForTest,
+  _resetPacingTrackerForTest,
+  setPacingEnabled,
+} from "../src/provider-budgets";
+import {
+  _resetCostAttributionForTest,
+  recordSuccessfulAnthropicOAuthAuth,
+  resolveCostAttribution,
+} from "../src/cost-attribution";
 
 // Claude Code billing-header system prompt — marks a session as an OAuth
 // billing session so worker calls replay its sniffed anthropic-beta header.
 const BILLING_SYSTEM =
   "x-anthropic-billing-header: cc_version=2.1.177.00c; cc_entrypoint=cli; cch=a55d7;";
+const OAUTH_WORKER_CREDENTIAL = {
+  scheme: "bearer" as const,
+  value: "oauth-token",
+};
 
 // ---------------------------------------------------------------------------
 // maxRetriesFor — unified policy (modeled on Claude Code's single budget)
@@ -1653,6 +1667,106 @@ describe("createGatewayLLMClient.prompt", () => {
       getSessionCosts("sess-codex")?.workers.distillation;
     expect(distillationCost?.calls).toBe(1);
     expect(distillationCost?.cost).toBeGreaterThan(0);
+  });
+
+  test("late worker quota headers remain visible without restoring pacing across a switch", async () => {
+    db().exec("DELETE FROM provider_quotas");
+    db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
+    _resetPacingTrackerForTest();
+    _resetCostAttributionForTest();
+
+    const sessionID = "sess-quota-switch-fence";
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-worker-quota-fence",
+    };
+    recordSuccessfulAnthropicOAuthAuth({
+      credential,
+      upstreamURL: "https://api.anthropic.com/v1/messages",
+      responseURL: "https://api.anthropic.com/v1/messages",
+      responseStatus: 200,
+      directUpstreamResponse: true,
+    });
+    const responseHeaders = new Headers({
+      "content-type": "text/event-stream",
+      "anthropic-organization-id": "org-hidden-until-response",
+      "anthropic-ratelimit-unified-5h-utilization": "0.50",
+      "anthropic-ratelimit-unified-5h-reset": String(
+        (Date.now() + 60 * 60_000) / 1000,
+      ),
+      "anthropic-ratelimit-unified-status": "allowed",
+    });
+    const responseAttribution = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      upstreamURL: "https://api.anthropic.com",
+      credential,
+      responseHeaders,
+    });
+    expect(responseAttribution.authKind).toBe("subscription");
+
+    let resolveResponse: (response: Response) => void = () => {
+      throw new Error("upstream response was not awaited");
+    };
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveResponse = resolve;
+        }),
+    );
+    const client = createGatewayLLMClient(UPSTREAMS, () => credential, {
+      providerID: "anthropic",
+      modelID: "claude-test",
+    });
+    const prompt = client.prompt("system", "user", {
+      sessionID,
+      workerID: "lore-distill",
+      protocol: "anthropic",
+      upstreamProviderID: "anthropic",
+    });
+    try {
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: responseAttribution.account,
+          enabled: false,
+        }),
+      ).toBe(true);
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: responseAttribution.account,
+          enabled: true,
+        }),
+      ).toBe(true);
+
+      const stream = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_worker","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+        "",
+        "",
+      ].join("\n\n");
+      resolveResponse(
+        new Response(stream, { status: 200, headers: responseHeaders }),
+      );
+
+      await expect(prompt).resolves.toBe("ok");
+      expect(listProviderQuotas()).toHaveLength(1);
+      expect(_pacingTrackerSizesForTest()).toEqual({
+        rateTracks: 0,
+        requestGaps: 0,
+      });
+    } finally {
+      db().exec("DELETE FROM provider_quotas");
+      db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
+      _resetPacingTrackerForTest();
+      _resetCostAttributionForTest();
+    }
   });
 
   test("github-copilot worker accepts rotating Responses lifecycle IDs", async () => {
@@ -4584,11 +4698,19 @@ describe("worker beta stripping (#1571)", () => {
 
     // Mark the session as a billing/OAuth session and seed a sniffed beta that
     // includes context-1m alongside legitimate betas.
-    captureBillingPrefix("sess-haiku-beta", BILLING_SYSTEM);
-    captureSessionHeaders("sess-haiku-beta", {
-      "anthropic-beta":
-        "oauth-2025-04-20,context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
-    });
+    captureBillingPrefix(
+      "sess-haiku-beta",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-haiku-beta",
+      {
+        "anthropic-beta":
+          "oauth-2025-04-20,context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4628,10 +4750,18 @@ describe("worker beta stripping (#1571)", () => {
     // subscription auth accounts without usage credits and the session's
     // background work stops forever. The OAuth gate is preserved so the bearer
     // token still authenticates.
-    captureBillingPrefix("sess-opus-beta", BILLING_SYSTEM);
-    captureSessionHeaders("sess-opus-beta", {
-      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
-    });
+    captureBillingPrefix(
+      "sess-opus-beta",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-opus-beta",
+      {
+        "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4669,10 +4799,18 @@ describe("worker beta stripping (#1571)", () => {
     // and the upstream is subscription auth without usage credits. Without the
     // fix, the worker call carries context-1m and 429s permanently. With the
     // fix, the beta is stripped upfront and the call succeeds.
-    captureBillingPrefix("sess-sonnet46", BILLING_SYSTEM);
-    captureSessionHeaders("sess-sonnet46", {
-      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
-    });
+    captureBillingPrefix(
+      "sess-sonnet46",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-sonnet46",
+      {
+        "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4706,10 +4844,18 @@ describe("worker beta stripping (#1571)", () => {
     // The date suffix on context-1m-* changes over time; the strip must match
     // any variant of the stem so a future release doesn't suddenly start
     // carrying the beta again.
-    captureBillingPrefix("sess-suffix", BILLING_SYSTEM);
-    captureSessionHeaders("sess-suffix", {
-      "anthropic-beta": "oauth-2025-04-20,context-1m-2099-12-31",
-    });
+    captureBillingPrefix(
+      "sess-suffix",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-suffix",
+      {
+        "anthropic-beta": "oauth-2025-04-20,context-1m-2099-12-31",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4744,7 +4890,11 @@ describe("worker beta stripping (#1571)", () => {
     // persists the snapshot (it returns early otherwise — `buildOAuthWorkerHeaders`
     // would then return `null` and the worker request would never carry
     // `anthropic-beta` at all, making the test a no-op).
-    captureBillingPrefix("sess-only-context", BILLING_SYSTEM);
+    captureBillingPrefix(
+      "sess-only-context",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
     // If the sniffed beta IS the long-context beta, `buildOAuthWorkerHeaders`
     // replays it directly (not the WORKER_BETAS fallback). The upfront strip
     // removes context-1m and leaves no betas — so the header is dropped
@@ -4752,9 +4902,13 @@ describe("worker beta stripping (#1571)", () => {
     // end-to-end integration of the `delete headers[betaKey]` branch
     // (covered directly as a unit test on `stripBetaHeaders` in
     // `long-context-beta.test.ts`).
-    captureSessionHeaders("sess-only-context", {
-      "anthropic-beta": "context-1m-2025-08-07",
-    });
+    captureSessionHeaders(
+      "sess-only-context",
+      {
+        "anthropic-beta": "context-1m-2025-08-07",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4793,10 +4947,18 @@ describe("worker beta stripping (#1571)", () => {
     // header keyed `Anthropic-Beta` is normalized. Lock this down so a future
     // refactor that switches to a case-sensitive match doesn't silently start
     // carrying context-1m again on mis-keyed sessions.
-    captureBillingPrefix("sess-case-key", BILLING_SYSTEM);
-    captureSessionHeaders("sess-case-key", {
-      "Anthropic-Beta": "oauth-2025-04-20,context-1m-2025-08-07",
-    });
+    captureBillingPrefix(
+      "sess-case-key",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-case-key",
+      {
+        "Anthropic-Beta": "oauth-2025-04-20,context-1m-2025-08-07",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4839,10 +5001,18 @@ describe("worker beta stripping (#1571)", () => {
     // weird. The guard `if (!betaValue)` short-circuits, leaving the header
     // exactly as-is. This is a defensive pin against a future refactor that
     // might drop the guard and accidentally create an empty header value.
-    captureBillingPrefix("sess-empty-beta", BILLING_SYSTEM);
-    captureSessionHeaders("sess-empty-beta", {
-      "anthropic-beta": "",
-    });
+    captureBillingPrefix(
+      "sess-empty-beta",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-empty-beta",
+      {
+        "anthropic-beta": "",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -5234,10 +5404,18 @@ describe("worker temperature capability", () => {
     // The user opted into context-1m on a 1M-capable session model. The
     // upfront filter strips the beta for workers regardless of the session
     // model — and the rebuild through buildWorkerRequest keeps the strip.
-    captureBillingPrefix("sess-rebuild", BILLING_SYSTEM);
-    captureSessionHeaders("sess-rebuild", {
-      "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
-    });
+    captureBillingPrefix(
+      "sess-rebuild",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-rebuild",
+      {
+        "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -5366,10 +5544,18 @@ describe("worker thinking suppression for Anthropic Claude models", () => {
     // sniffed anthropic-beta (with the interleaved-thinking flag that would
     // otherwise let sonnet-5 emit an empty thinking block) is replayed onto
     // worker calls.
-    captureBillingPrefix("sess-think-oauth", BILLING_SYSTEM);
-    captureSessionHeaders("sess-think-oauth", {
-      "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14",
-    });
+    captureBillingPrefix(
+      "sess-think-oauth",
+      BILLING_SYSTEM,
+      OAUTH_WORKER_CREDENTIAL,
+    );
+    captureSessionHeaders(
+      "sess-think-oauth",
+      {
+        "anthropic-beta": "oauth-2025-04-20,interleaved-thinking-2025-05-14",
+      },
+      OAUTH_WORKER_CREDENTIAL,
+    );
 
     const client = createGatewayLLMClient(
       UPSTREAMS,

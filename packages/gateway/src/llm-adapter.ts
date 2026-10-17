@@ -46,12 +46,17 @@ import {
 import { recordWorkerCost } from "./cost-tracker";
 import {
   cacheAnthropicOrganizationFromResponse,
+  isPotentialAnthropicOAuthCredential,
+  isPotentialChatGPTSubscription,
+  recordSuccessfulAnthropicOAuthAuth,
+  recordSuccessfulChatGPTAuth,
   resolveCostAttribution,
 } from "./cost-attribution";
 import {
   observeProviderQuotaHeaders,
   providerQuotaObservationStartedAt,
 } from "./provider-quota-headers";
+import { capturePacingEpoch } from "./provider-budgets";
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import {
@@ -1797,7 +1802,7 @@ function buildAnthropicWorkerRequest(
   // as the first system block with a cch=00000 placeholder that gets
   // signed after JSON serialization.
   const billingBlock =
-    cred.scheme === "bearer" ? buildBillingBlock(sessionID, user) : null;
+    cred.scheme === "bearer" ? buildBillingBlock(sessionID, user, cred) : null;
 
   // System prompt caching for workers: send as block array with 1h TTL.
   // Worker calls come in bursts (distillation, curation) separated by
@@ -1879,7 +1884,7 @@ function buildAnthropicWorkerRequest(
   // For OAuth sessions, include Claude Code headers (anthropic-beta,
   // user-agent, etc.) sniffed from conversation turns. Without these,
   // Anthropic may reject worker calls with 401 even when the token is valid.
-  const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
+  const oauthHeaders = buildOAuthWorkerHeaders(sessionID, cred);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -3946,6 +3951,41 @@ export function createGatewayLLMClient(
             for (let attempt = 0; ; attempt++) {
               const quotaObservationStartedAt =
                 providerQuotaObservationStartedAt();
+              const quotaPacingEpoch = (() => {
+                try {
+                  const quotaAttribution = resolveCostAttribution({
+                    sessionID: opts?.sessionID,
+                    providerID: credentialProviderID ?? model.providerID,
+                    upstreamURL: target.url,
+                    credential: cred,
+                    requestHeaders: req.headers,
+                  });
+                  const potentialChatGPTSubscription =
+                    isPotentialChatGPTSubscription({
+                      providerID: credentialProviderID ?? model.providerID,
+                      upstreamURL: target.url,
+                      credential: cred,
+                    });
+                  const potentialAnthropicOAuthCredential =
+                    isPotentialAnthropicOAuthCredential({
+                      providerID: credentialProviderID ?? model.providerID,
+                      upstreamURL: target.url,
+                      credential: cred,
+                    });
+                  return capturePacingEpoch({
+                    provider: quotaAttribution.provider,
+                    auth_kind:
+                      quotaAttribution.authKind === "subscription" ||
+                      potentialChatGPTSubscription ||
+                      potentialAnthropicOAuthCredential
+                        ? "subscription"
+                        : quotaAttribution.authKind,
+                  });
+                } catch {
+                  // The quota fence is optional and never blocks worker dispatch.
+                  return null;
+                }
+              })();
               let response: Response;
               try {
                 recordPromptDispatch(model, target.protocol);
@@ -3990,6 +4030,24 @@ export function createGatewayLLMClient(
 
               quotaObservationReceivedTimes.set(response, Date.now());
               finalStatus = response.status;
+              try {
+                recordSuccessfulAnthropicOAuthAuth({
+                  credential: cred,
+                  upstreamURL: target.url,
+                  responseURL: response.url,
+                  responseStatus: response.status,
+                  directUpstreamResponse: true,
+                });
+                recordSuccessfulChatGPTAuth({
+                  credential: cred,
+                  upstreamURL: target.url,
+                  responseURL: response.url,
+                  responseStatus: response.status,
+                  directUpstreamResponse: true,
+                });
+              } catch {
+                // Credential classification is optional and never blocks work.
+              }
 
               if (response.ok) {
                 // If a prior attempt stripped `temperature` and the request now
@@ -4367,6 +4425,9 @@ export function createGatewayLLMClient(
                     upstreamURL: target.url,
                     credential: cred,
                     responseHeaders: response.headers,
+                    responseURL: response.url,
+                    responseStatus: response.status,
+                    directUpstreamResponse: true,
                     requestHeaders: req.headers,
                   });
                   recordWorkerCost(
@@ -4383,6 +4444,7 @@ export function createGatewayLLMClient(
                     attribution,
                     quotaObservationStartedAt,
                     quotaObservationReceivedTimes.get(response) ?? Date.now(),
+                    quotaPacingEpoch,
                   );
                   if (acceptedQuota) {
                     cacheAnthropicOrganizationFromResponse({
@@ -4391,6 +4453,9 @@ export function createGatewayLLMClient(
                       sessionID: opts?.sessionID,
                       observedAt: quotaObservationStartedAt,
                       responseHeaders: response.headers,
+                      upstreamURL: target.url,
+                      responseURL: response.url,
+                      directUpstreamResponse: true,
                     });
                   }
                 }

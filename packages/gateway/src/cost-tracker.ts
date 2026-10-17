@@ -90,11 +90,11 @@ export type SessionCosts = {
     avoidedCompactionCost: number;
   };
 
-  // --- Budget throttle diagnostics ---
+  // --- Legacy budget-throttle counters; subscription pacing never increments these ---
   throttle: {
-    /** Number of requests that were throttled (delayed). */
+    /** Number of requests delayed by a separate throttling mechanism. */
     events: number;
-    /** Total delay imposed in milliseconds. */
+    /** Total delay imposed by a separate throttling mechanism, in milliseconds. */
     totalDelayMs: number;
   };
 

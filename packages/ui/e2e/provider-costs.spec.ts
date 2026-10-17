@@ -19,7 +19,7 @@ test.describe("provider cost cards", () => {
     await expect(page.getByText("Daily budget")).toHaveCount(0);
     await expect(page.getByTestId("budget-editor")).toHaveCount(0);
     // Seeded 5h: 3h of 5h elapsed at 23% → current ≈7.7 pts/h vs sustainable
-    // ≈38.5 pts/h; 7d: 4d of 7d at 41% → both under, so no delay.
+    // ≈38.5 pts/h; 7d: 4d of 7d at 41% → both remain within sustainable rate.
     await expect(anthropic.getByTestId("pacing-rates")).toHaveCount(2);
     // Both rates drift with the time between seeding and this assertion
     // (slow CI), so match the band rather than one rounded value.
@@ -30,10 +30,16 @@ test.describe("provider cost cards", () => {
       /current 7\.\d pts\/h \(window avg\)/,
     );
     await expect(anthropic.getByTestId("pacing-state")).toHaveText([
-      "on pace",
-      "on pace",
+      "within sustainable rate",
+      "within sustainable rate",
     ]);
-    await expect(anthropic.getByTestId("pacing-delay")).toHaveText("none");
+    await expect(anthropic.getByTestId("pacing-extra-gap")).toHaveText("none");
+    await expect(anthropic.getByTestId("pacing-curation-state")).toHaveText(
+      "inactive",
+    );
+    await expect(anthropic).toContainText(
+      "Provider pacing never delays user requests.",
+    );
     await expect(
       anthropic.getByRole("switch", { name: "Automatic pacing" }),
     ).toHaveAttribute("aria-checked", "true");
@@ -71,7 +77,10 @@ test.describe("provider cost cards", () => {
       enabled: false,
     });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
-    await expect(anthropic.getByTestId("pacing-delay")).toHaveText("off");
+    await expect(anthropic.getByTestId("pacing-extra-gap")).toHaveText("off");
+    await expect(anthropic.getByTestId("pacing-curation-state")).toHaveText(
+      "inactive",
+    );
     await expect(anthropic.getByTestId("pacing-state")).toHaveText([
       "pacing off",
       "pacing off",

@@ -2537,12 +2537,371 @@ const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
 const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
 const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
+/** One slot per current switch plus every legacy provider-budget opt-out. */
+export const MAX_PROVIDER_PACING_SETTINGS = 250;
+/** Bounded durable generations fence late responses after a switch changes. */
+export const MAX_PROVIDER_PACING_GENERATIONS = 512;
 // The v102 daily budget is retired here. The v105 provider-budget migration
 // copies explicit opt-outs and deletes its key atomically in its JS step.
 const RETIRED_KV_KEY_BY_MIGRATION_INDEX = new Map<number, string>([
   [101, "daily_budget"], // 0-based index of version-102
 ]);
 const PROVIDER_BUDGETS_MIGRATION_INDEX = 104; // 0-based index of version-105
+
+type ProviderPacingSettingMigrationRow = {
+  provider: string;
+  account: string;
+  enabled: boolean;
+};
+type ProviderPacingGenerationMigrationRow = {
+  provider: string;
+  account: string;
+  generation: number;
+};
+
+const PROVIDER_PACING_PROVIDER_RE = /^[a-z0-9._-]{1,64}$/;
+const PROVIDER_PACING_ACCOUNT_RE = /^(?:\*|[A-Za-z0-9._:-]{1,128})$/;
+
+function isProviderPacingSettingRow(
+  entry: unknown,
+): entry is ProviderPacingSettingMigrationRow {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return false;
+  }
+  const row = entry as Record<string, unknown>;
+  return (
+    typeof row.provider === "string" &&
+    PROVIDER_PACING_PROVIDER_RE.test(row.provider) &&
+    typeof row.account === "string" &&
+    PROVIDER_PACING_ACCOUNT_RE.test(row.account) &&
+    typeof row.enabled === "boolean"
+  );
+}
+
+function isProviderPacingGenerationRow(
+  entry: unknown,
+): entry is ProviderPacingGenerationMigrationRow {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return false;
+  }
+  const row = entry as Record<string, unknown>;
+  return (
+    typeof row.provider === "string" &&
+    PROVIDER_PACING_PROVIDER_RE.test(row.provider) &&
+    typeof row.account === "string" &&
+    PROVIDER_PACING_ACCOUNT_RE.test(row.account) &&
+    Number.isSafeInteger(row.generation) &&
+    typeof row.generation === "number" &&
+    row.generation >= 0
+  );
+}
+
+function migrateProviderPacingSettings(
+  rows: unknown[],
+): ProviderPacingSettingMigrationRow[] {
+  if (rows.length > MAX_PROVIDER_PACING_SETTINGS) {
+    throw new Error("Cannot migrate provider_pacing: setting limit exceeded");
+  }
+  const settings: ProviderPacingSettingMigrationRow[] = [];
+  const keys = new Set<string>();
+  for (const [index, entry] of rows.entries()) {
+    if (
+      !isProviderPacingSettingRow(entry) ||
+      Object.keys(entry).some(
+        (field) => !["provider", "account", "enabled"].includes(field),
+      )
+    ) {
+      throw new Error(
+        `Cannot migrate malformed provider_pacing setting ${index}`,
+      );
+    }
+    const key = `${entry.provider}\u0000${entry.account}`;
+    if (keys.has(key)) {
+      throw new Error("Cannot migrate duplicate provider_pacing setting");
+    }
+    keys.add(key);
+    settings.push({
+      provider: entry.provider,
+      account: entry.account,
+      enabled: entry.enabled,
+    });
+  }
+  return settings;
+}
+
+function migrateProviderPacingGenerations(
+  rows: unknown[],
+): ProviderPacingGenerationMigrationRow[] {
+  if (rows.length > MAX_PROVIDER_PACING_GENERATIONS) {
+    throw new Error(
+      "Cannot migrate provider_pacing: generation limit exceeded",
+    );
+  }
+  const generations: ProviderPacingGenerationMigrationRow[] = [];
+  const keys = new Set<string>();
+  for (const [index, entry] of rows.entries()) {
+    if (
+      !isProviderPacingGenerationRow(entry) ||
+      Object.keys(entry).some(
+        (field) => !["provider", "account", "generation"].includes(field),
+      )
+    ) {
+      throw new Error(
+        `Cannot migrate malformed provider_pacing generation ${index}`,
+      );
+    }
+    const key = `${entry.provider}\u0000${entry.account}`;
+    if (keys.has(key)) {
+      throw new Error("Cannot migrate duplicate provider_pacing generation");
+    }
+    keys.add(key);
+    generations.push({
+      provider: entry.provider,
+      account: entry.account,
+      generation: entry.generation,
+    });
+  }
+  return generations;
+}
+
+/**
+ * Preserve known subscription opt-outs before retiring provider_budgets.
+ * A null legacy account means the old provider-wide opt-out, represented by
+ * `*`; malformed data fails the migration and leaves the source row intact.
+ */
+function applyProviderBudgetsMigration(database: Database): void {
+  const hasKvMeta =
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+      )
+      .get() !== null;
+  if (!hasKvMeta) return;
+
+  database.exec("SAVEPOINT provider_budgets_migration");
+  try {
+    const legacy = database
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get("provider_budgets") as { value: string } | null;
+    if (!legacy) {
+      database.exec("RELEASE provider_budgets_migration");
+      return;
+    }
+
+    let rawBudgets: unknown;
+    try {
+      rawBudgets = JSON.parse(legacy.value);
+    } catch {
+      throw new Error("Cannot migrate malformed provider_budgets JSON");
+    }
+    if (!Array.isArray(rawBudgets)) {
+      throw new Error("Cannot migrate malformed provider_budgets data");
+    }
+
+    const existing = database
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get("provider_pacing") as { value: string } | null;
+    let existingSettings: ProviderPacingSettingMigrationRow[] = [];
+    let existingGenerations: ProviderPacingGenerationMigrationRow[] = [];
+    let alreadyVersioned = false;
+    if (existing) {
+      let rawSettings: unknown;
+      try {
+        rawSettings = JSON.parse(existing.value);
+      } catch {
+        throw new Error("Cannot migrate malformed provider_pacing JSON");
+      }
+      if (Array.isArray(rawSettings)) {
+        existingSettings = migrateProviderPacingSettings(rawSettings);
+      } else if (
+        typeof rawSettings === "object" &&
+        rawSettings !== null &&
+        !Array.isArray(rawSettings) &&
+        (rawSettings as Record<string, unknown>).version === 1 &&
+        Array.isArray((rawSettings as Record<string, unknown>).settings) &&
+        Array.isArray((rawSettings as Record<string, unknown>).generations) &&
+        Object.keys(rawSettings as Record<string, unknown>).every((field) =>
+          ["version", "settings", "generations"].includes(field),
+        )
+      ) {
+        alreadyVersioned = true;
+        const state = rawSettings as {
+          settings: unknown[];
+          generations: unknown[];
+        };
+        existingSettings = migrateProviderPacingSettings(state.settings);
+        existingGenerations = migrateProviderPacingGenerations(
+          state.generations,
+        );
+      } else {
+        throw new Error("Cannot migrate malformed provider_pacing data");
+      }
+    }
+
+    const merged = [...existingSettings];
+    const keys = new Set(
+      existingSettings.map(
+        (entry) => `${entry.provider}\u0000${entry.account}`,
+      ),
+    );
+    for (const [index, entry] of rawBudgets.entries()) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw new Error(
+          `Cannot migrate malformed provider_budgets entry ${index}`,
+        );
+      }
+      const budget = entry as Record<string, unknown>;
+      // Off entries are subscription opt-outs and must survive the migration;
+      // cap entries do not participate in pacing. Reject unknown shapes rather
+      // than silently discarding data while retiring the legacy source row.
+      if (
+        typeof budget.provider !== "string" ||
+        !PROVIDER_PACING_PROVIDER_RE.test(budget.provider) ||
+        (budget.account !== null &&
+          (typeof budget.account !== "string" ||
+            !PROVIDER_PACING_ACCOUNT_RE.test(budget.account))) ||
+        typeof budget.mode !== "string"
+      ) {
+        throw new Error(
+          `Cannot migrate malformed provider_budgets entry ${index}`,
+        );
+      }
+      const provider = budget.provider;
+      const account = budget.account === null ? "*" : budget.account;
+      const mode = budget.mode;
+      if (mode !== "pace" && mode !== "cap" && mode !== "off") {
+        throw new Error(
+          `Cannot migrate malformed provider_budgets entry ${index}`,
+        );
+      }
+      const allowedFields = [
+        "provider",
+        "auth_kind",
+        "account",
+        "mode",
+        "window",
+        ...(mode === "pace" ? ["headroom"] : []),
+        ...(mode === "cap" ? ["unit", "amount"] : []),
+      ];
+      if (Object.keys(budget).some((field) => !allowedFields.includes(field))) {
+        throw new Error(
+          `Cannot migrate malformed provider_budgets entry ${index}`,
+        );
+      }
+      if (mode === "pace") {
+        const headroom = budget.headroom === undefined ? 10 : budget.headroom;
+        if (
+          budget.auth_kind !== "subscription" ||
+          (budget.window !== "5h" && budget.window !== "7d") ||
+          typeof headroom !== "number" ||
+          !Number.isFinite(headroom) ||
+          headroom < 0 ||
+          headroom > 50
+        ) {
+          throw new Error(
+            `Cannot migrate malformed provider_budgets entry ${index}`,
+          );
+        }
+        // Automatic pacing replaces explicit pace windows. Their headroom
+        // setting has no equivalent; the new controller uses observed rate.
+        continue;
+      }
+      if (mode === "cap") {
+        if (
+          (budget.auth_kind !== "api_key" &&
+            budget.auth_kind !== "subscription") ||
+          typeof budget.amount !== "number" ||
+          !Number.isFinite(budget.amount) ||
+          budget.amount <= 0
+        ) {
+          throw new Error(
+            `Cannot migrate malformed provider_budgets entry ${index}`,
+          );
+        }
+        if (
+          (budget.unit === "usd" || budget.unit === "tokens") &&
+          ((budget.window !== "day" && budget.window !== "week") ||
+            budget.amount > 1e9)
+        ) {
+          throw new Error(
+            `Cannot migrate malformed provider_budgets entry ${index}`,
+          );
+        }
+        if (
+          budget.unit === "percent" &&
+          ((budget.window !== "5h" && budget.window !== "7d") ||
+            budget.amount > 100)
+        ) {
+          throw new Error(
+            `Cannot migrate malformed provider_budgets entry ${index}`,
+          );
+        }
+        if (
+          budget.unit !== "usd" &&
+          budget.unit !== "tokens" &&
+          budget.unit !== "percent"
+        ) {
+          throw new Error(
+            `Cannot migrate malformed provider_budgets entry ${index}`,
+          );
+        }
+        continue;
+      }
+      if (
+        mode !== "off" ||
+        budget.auth_kind !== "subscription" ||
+        (budget.window !== "5h" && budget.window !== "7d")
+      ) {
+        throw new Error(
+          `Cannot migrate malformed provider_budgets entry ${index}`,
+        );
+      }
+      const key = `${provider}\u0000${account}`;
+      if (keys.has(key)) continue;
+      keys.add(key);
+      merged.push({ provider, account, enabled: false });
+    }
+
+    if (merged.length > MAX_PROVIDER_PACING_SETTINGS) {
+      throw new Error(
+        "Cannot migrate provider_budgets: pacing setting limit exceeded",
+      );
+    }
+
+    if (!alreadyVersioned || merged.length !== existingSettings.length) {
+      database
+        .query(
+          `INSERT INTO kv_meta (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .run(
+          "provider_pacing",
+          JSON.stringify({
+            version: 1,
+            settings: merged,
+            generations: existingGenerations,
+          }),
+        );
+    }
+    database.query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
+    database.exec("RELEASE provider_budgets_migration");
+  } catch (error: unknown) {
+    try {
+      database.exec("ROLLBACK TO provider_budgets_migration");
+      database.exec("RELEASE provider_budgets_migration");
+    } catch {
+      // Preserve the original migration failure if rollback itself fails.
+    }
+    throw error;
+  }
+}
+
+/** Test-only seam for exercising v105 against an isolated in-memory database. */
+export function _applyProviderBudgetsMigrationForTest(
+  database: Database,
+): void {
+  applyProviderBudgetsMigration(database);
+}
 
 /**
  * Add durable tenant ownership without re-keying or deleting historical local
@@ -4224,6 +4583,8 @@ function migrate(database: Database) {
       applySyncTenantIsolation(database);
     } else if (i === TEMPORAL_IDENTITY_MIGRATION_INDEX) {
       applyTemporalIdentity(database);
+    } else if (i === PROVIDER_BUDGETS_MIGRATION_INDEX) {
+      applyProviderBudgetsMigration(database);
     } else if (RETIRED_KV_KEY_BY_MIGRATION_INDEX.has(i)) {
       if (
         database

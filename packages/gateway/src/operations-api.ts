@@ -565,6 +565,12 @@ export async function handlePutProviderPacing(
   if (typeof setting === "string") {
     return errorResponse(400, "invalid_request", setting);
   }
-  setPacingEnabled(setting);
+  if (!setPacingEnabled(setting)) {
+    return errorResponse(
+      409,
+      "pacing_settings_full",
+      "The provider pacing setting limit has been reached.",
+    );
+  }
   return jsonResponse({ provider_pacing: evaluateProviderPacing() });
 }

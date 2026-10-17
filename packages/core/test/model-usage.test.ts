@@ -320,21 +320,27 @@ describe("buildDailyModelUsage", () => {
       // Seed MAX_DAILY_CELLS + 1 distinct (day, model) cells in one
       // transaction: ~549 days x 365 models, all valid.
       const base = Date.UTC(2024, 0, 1);
-      const stmt = db().query(
-        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
-         VALUES (?, ?, ?, 'assistant', 'c', 1, 0, ?, ?)`,
-      );
-      db().query("BEGIN").run();
-      for (let i = 0; i < MAX_DAILY_CELLS + 1; i++) {
-        stmt.run(
-          `cap-${i}`,
-          pid,
-          `cap-s${i % 64}`,
-          base + Math.floor(i / 365) * 86_400_000 + (i % 365) * 60_000,
-          JSON.stringify({ providerID: "p", modelID: `m${i % 365}` }),
-        );
-      }
-      db().query("COMMIT").run();
+      db()
+        .query(
+          `WITH RECURSIVE generated(i) AS (
+             SELECT 0
+             UNION ALL
+             SELECT i + 1 FROM generated WHERE i < ?
+           )
+           INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           SELECT
+             'cap-' || i,
+             ?,
+             'cap-s' || (i % 64),
+             'assistant',
+             'c',
+             1,
+             0,
+             ? + (i / 365) * 86400000 + (i % 365) * 60000,
+             '{"providerID":"p","modelID":"m' || (i % 365) || '"}'
+           FROM generated`,
+        )
+        .run(MAX_DAILY_CELLS, pid, base);
       await expect(buildDailyModelUsage()).rejects.toThrow(
         ModelUsageLimitError,
       );

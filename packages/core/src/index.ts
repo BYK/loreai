@@ -263,6 +263,8 @@ export {
   freelistBytes,
   autoVacuumMode,
   incrementalVacuum,
+  MAX_PROVIDER_PACING_SETTINGS,
+  MAX_PROVIDER_PACING_GENERATIONS,
 } from "./db";
 export {
   normalizeRemoteUrl,

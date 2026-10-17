@@ -168,7 +168,7 @@ export const pacingWindowStatus = type({
   rate_source: "'observed' | 'average' | 'unknown'",
   ratio: "number | null",
   throttling: "boolean",
-  delay_ms: "number",
+  recommended_extra_gap_ms: "number",
 });
 
 /** Automatic pacing status of one subscription account (#2045). */
@@ -177,7 +177,7 @@ export const providerPacingStatus = type({
   account: "string",
   enabled: "boolean",
   throttling: "boolean",
-  delay_ms: "number",
+  recommended_extra_gap_ms: "number",
   request_gap_ms: "number | null",
   windows: pacingWindowStatus.array(),
 });

@@ -6,7 +6,14 @@
 
 import { upsertProviderQuota, log } from "@loreai/core";
 import type { CostAttribution } from "./cost-attribution";
-import { recordQuotaObservation } from "./provider-budgets";
+import {
+  capturePacingEpoch,
+  capturePacingGeneration,
+  isPacingGenerationCurrent,
+  isPacingEpochCurrent,
+  recordForegroundRequest,
+  recordQuotaObservation,
+} from "./provider-budgets";
 
 let lastObservationStartedAt = 0;
 
@@ -442,9 +449,48 @@ export function observeProviderQuotaHeaders(
   attribution: CostAttribution,
   observedAt: number = Date.now(),
   responseReceivedAt: number = Date.now(),
+  capturedPacingEpoch?: number | null,
 ): boolean {
   let accepted = false;
   try {
+    const pacingMatch = {
+      provider: attribution.provider,
+      account: attribution.account,
+      auth_kind: attribution.authKind,
+    };
+    let pacingGeneration: string | null = null;
+    let pacingObservationAllowed = false;
+    if (attribution.authKind === "subscription") {
+      try {
+        const pacingEpoch =
+          capturedPacingEpoch === undefined
+            ? capturePacingEpoch(pacingMatch)
+            : capturedPacingEpoch;
+        pacingGeneration = capturePacingGeneration(pacingMatch);
+        pacingObservationAllowed =
+          pacingEpoch !== null &&
+          isPacingEpochCurrent(pacingMatch, pacingEpoch) &&
+          pacingGeneration !== null &&
+          isPacingGenerationCurrent(pacingMatch, pacingGeneration);
+      } catch {
+        try {
+          log.info("provider pacing generation unavailable");
+        } catch {
+          // A failing diagnostic sink must not affect quota capture.
+        }
+      }
+      if (pacingObservationAllowed && pacingGeneration !== null) {
+        try {
+          recordForegroundRequest(pacingMatch, observedAt, pacingGeneration);
+        } catch {
+          try {
+            log.info("provider pacing observation failed");
+          } catch {
+            // A failing diagnostic sink must not affect quota capture.
+          }
+        }
+      }
+    }
     const windows = parseProviderQuotaHeaders(headers, responseReceivedAt);
     for (const w of windows) {
       const row = {
@@ -462,14 +508,26 @@ export function observeProviderQuotaHeaders(
         observedAt,
       };
       if (upsertProviderQuota(row)) {
-        recordQuotaObservation(row);
         accepted = true;
+        if (pacingObservationAllowed && pacingGeneration !== null) {
+          try {
+            recordQuotaObservation(row, pacingGeneration);
+          } catch {
+            try {
+              log.info("provider pacing observation failed");
+            } catch {
+              // A failing diagnostic sink must not affect quota capture.
+            }
+          }
+        }
       }
     }
-  } catch (error) {
-    log.info("provider quota capture failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } catch {
+    try {
+      log.info("provider quota capture failed");
+    } catch {
+      // Quota capture and its diagnostics are best-effort.
+    }
   }
   return accepted;
 }
