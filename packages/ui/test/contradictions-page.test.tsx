@@ -8,7 +8,7 @@ import type {
   ContradictionListResponse,
   ProjectSummary,
 } from "~/contracts";
-import { Nav } from "~/components/shell/Nav";
+import { ProjectListBody } from "~/components/shell/ProjectListBody";
 import { ContradictionsPage } from "~/components/lore/ContradictionsPage";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { useWorkspace, WorkspaceProvider } from "~/routes/workspace";
@@ -44,16 +44,19 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
   } as unknown as ApiClient;
 }
 
-function ReviewWithNav() {
+function ReviewWithProjectList() {
   const ws = useWorkspace();
   return (
     <>
-      <Nav
+      <ProjectListBody
         projects={ws.projects.data()}
+        activeProjectId={null}
+        query=""
         loading={ws.projects.loading()}
         error={ws.projects.error()}
-        activeProjectId={null}
-        totalKnowledge={null}
+        onRetry={ws.projects.reload}
+        connectionUnauthorized={ws.connection.state() === "unauthorized"}
+        connectionDetail={ws.connection.detail()}
       />
       <ContradictionsPage />
     </>
@@ -75,7 +78,7 @@ function project(id: string, name: string, count: number): ProjectSummary {
   };
 }
 
-function mount(client: ApiClient, withNav = false) {
+function mount(client: ApiClient, withProjectList = false) {
   const history = createMemoryHistory();
   history.set({ value: "/ui/contradictions" });
   return render(() => (
@@ -84,7 +87,11 @@ function mount(client: ApiClient, withNav = false) {
         path="*"
         component={() => (
           <WorkspaceProvider client={client} db={Promise.resolve(null)}>
-            {withNav ? <ReviewWithNav /> : <ContradictionsPage />}
+            {withProjectList ? (
+              <ReviewWithProjectList />
+            ) : (
+              <ContradictionsPage />
+            )}
           </WorkspaceProvider>
         )}
       />
@@ -98,7 +105,7 @@ describe("ContradictionsPage", () => {
     { decision: "keep-b", title: "Rule B", loreCount: 1, otherCount: 4 },
     { decision: "keep-both", title: null, loreCount: 2, otherCount: 4 },
   ] as const)(
-    "updates sidebar project counts after $decision across projects",
+    "updates project list counts after $decision across projects",
     async ({ title, loreCount, otherCount }) => {
       let decided: ContradictionDecision | undefined;
       const pair = makePair({
@@ -133,10 +140,12 @@ describe("ContradictionsPage", () => {
       );
       await screen.findByText("Rule A");
       await waitFor(() => {
-        expect(screen.getByRole("link", { name: "lore2" })).toBeInTheDocument();
-        expect(
-          screen.getByRole("link", { name: "other4" }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "lore" })).toHaveTextContent(
+          "2",
+        );
+        expect(screen.getByRole("link", { name: "other" })).toHaveTextContent(
+          "4",
+        );
       });
       fireEvent.click(
         screen.getByRole("button", {
@@ -150,18 +159,18 @@ describe("ContradictionsPage", () => {
 
       await screen.findByText("No open contradictions");
       await waitFor(() => {
-        expect(
-          screen.getByRole("link", { name: `lore${loreCount}` }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByRole("link", { name: `other${otherCount}` }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "lore" })).toHaveTextContent(
+          String(loreCount),
+        );
+        expect(screen.getByRole("link", { name: "other" })).toHaveTextContent(
+          String(otherCount),
+        );
       });
     },
   );
 
   it.each(["Rule A", "Rule B"])(
-    "leaves sidebar counts and the pair intact when keeping %s fails",
+    "leaves project list counts and the pair intact when keeping %s fails",
     async (title) => {
       mount(
         clientWith({
@@ -174,8 +183,8 @@ describe("ContradictionsPage", () => {
       );
       await screen.findByText("Rule A");
       expect(
-        await screen.findByRole("link", { name: "lore2" }),
-      ).toBeInTheDocument();
+        await screen.findByRole("link", { name: "lore" }),
+      ).toHaveTextContent("2");
       fireEvent.click(screen.getByRole("button", { name: `Keep ${title}` }));
       fireEvent.click(
         screen.getByRole("button", { name: "Keep selected entry" }),
@@ -184,7 +193,7 @@ describe("ContradictionsPage", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "Decision refused",
       );
-      expect(screen.getByRole("link", { name: "lore2" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "lore" })).toHaveTextContent("2");
       expect(screen.getByTestId("contradiction-row")).toHaveTextContent(
         "Rule A",
       );
