@@ -1,5 +1,6 @@
 import {
   createReviewDecisionsStore,
+  type DedupApplyRecord,
   type DedupReviewMark,
   type LoreUiDb,
 } from "~/db";
@@ -28,13 +29,29 @@ export function createDedupReviewState(db: () => Promise<LoreUiDb | null>) {
 
   return {
     get(projectId: string, groupId: string) {
-      return withStore(
-        (store) => store.get(reviewMarkKey(projectId, groupId)),
-        undefined,
-      );
+      return withStore(async (store) => {
+        const record = await store.get(reviewMarkKey(projectId, groupId));
+        return record?.kind === "dedup" ? record : undefined;
+      }, undefined);
     },
     list(projectId: string) {
-      return withStore((store) => store.list(projectId), []);
+      return withStore(
+        async (store) =>
+          (await store.list(projectId)).filter(
+            (record): record is DedupReviewMark => record.kind === "dedup",
+          ),
+        [],
+      );
+    },
+    listApplies(projectId: string) {
+      return withStore(
+        async (store) =>
+          (await store.list(projectId)).filter(
+            (record): record is DedupApplyRecord =>
+              record.kind === "dedup-apply",
+          ),
+        [],
+      );
     },
     put(mark: DedupReviewMark) {
       return withStore(async (store) => {
@@ -42,11 +59,42 @@ export function createDedupReviewState(db: () => Promise<LoreUiDb | null>) {
         return true;
       }, false);
     },
+    putApply(record: DedupApplyRecord) {
+      return (async () => {
+        try {
+          const handle = await db();
+          if (!handle) return false;
+          await createReviewDecisionsStore(handle).put(record);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+    },
     delete(projectId: string, groupId: string) {
       return withStore(async (store) => {
         await store.delete(reviewMarkKey(projectId, groupId));
         return true;
       }, false);
+    },
+    deleteApply(record: DedupApplyRecord) {
+      return (async () => {
+        try {
+          const handle = await db();
+          if (!handle) return false;
+          await createReviewDecisionsStore(handle).delete(record.key);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+    },
+    async persistent(): Promise<boolean> {
+      try {
+        return (await db()) !== null;
+      } catch {
+        return false;
+      }
     },
   };
 }

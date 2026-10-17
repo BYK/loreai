@@ -8,10 +8,12 @@ import {
   createMessageBlocksRepo,
   createProjectsRepo,
   createSessionsRepo,
+  createDraftsStore,
   openLoreDb,
   resetCache,
   type CacheStatus,
   type LoreUiDb,
+  type LocalDraft,
   type Repository,
 } from "~/db";
 
@@ -146,6 +148,33 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     knowledgeSearch,
     folk,
     dedupReview,
+    drafts: {
+      async get(key: string): Promise<LocalDraft | undefined> {
+        const handle = await current;
+        if (!handle) return undefined;
+        return createDraftsStore(handle).get(key);
+      },
+      async put(value: LocalDraft): Promise<boolean> {
+        const handle = await current;
+        if (!handle) return false;
+        try {
+          await createDraftsStore(handle).put(value);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      async delete(key: string): Promise<boolean> {
+        const handle = await current;
+        if (!handle) return false;
+        try {
+          await createDraftsStore(handle).delete(key);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    },
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {

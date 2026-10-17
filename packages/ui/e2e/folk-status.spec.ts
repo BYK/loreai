@@ -23,6 +23,8 @@ test.describe("Folk status surfaces", () => {
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "anonymous");
     await expect(badge).toHaveAttribute("aria-label", /Not signed in/);
+    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("account-avatar")).toHaveCount(0);
     if (testInfo.project.name.startsWith("mobile")) {
       await expect(badge.getByText("Not signed in")).toBeHidden();
     } else {
@@ -40,6 +42,59 @@ test.describe("Folk status surfaces", () => {
     await expect(panel).toBeHidden();
     await expect(badge).toBeFocused();
     await expectNoTokenText(page);
+  });
+
+  test("hosted mode explains the local flag and never shows an account avatar", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/account", (route) =>
+      route.fulfill({
+        json: {
+          signed_in: false,
+          user: null,
+          provider: null,
+          expires_at: null,
+          state: "hosted",
+        },
+      }),
+    );
+    await page.goto("/ui/knowledge");
+    const badge = page.getByTestId("folk-status");
+    await expect(badge).toHaveAttribute("data-folk-state", "hosted");
+    await expect(page.getByTestId("account-avatar")).toHaveCount(0);
+    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
+    await badge.click();
+    await expect(page.getByTestId("folk-status-detail")).toContainText(
+      "lore start --local",
+    );
+    await expectNoTokenText(page);
+  });
+
+  test("a signed-in local account displays its own initials", async ({
+    page,
+  }, testInfo) => {
+    await page.route("**/api/v1/account", (route) =>
+      route.fulfill({
+        json: {
+          signed_in: true,
+          user: { id: "test-user", display_name: "Ada Lovelace", email: null },
+          provider: "github",
+          expires_at: null,
+          state: "signed_in",
+        },
+      }),
+    );
+    await page.goto("/ui/knowledge");
+    const avatar = page.getByTestId("account-avatar");
+    await expect(avatar).toHaveText("AL");
+    await expect(avatar).toHaveAttribute(
+      "aria-label",
+      "Signed in as Ada Lovelace",
+    );
+    if (testInfo.project.name.startsWith("mobile"))
+      await expect(avatar).toBeHidden();
+    else await expect(avatar).toBeVisible();
+    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
   });
 
   test("shows not-linked and degraded project sharing details", async ({

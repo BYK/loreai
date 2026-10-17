@@ -5,6 +5,7 @@
  * If no command is given, auto-detects installed agents and either
  * uses the sole one found or prompts the user to pick.
  */
+import { validateCodexHttpLaunch } from "./codex-config";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { startGateway, probeGateway, type StartOptions } from "./start";
@@ -223,10 +224,10 @@ export function injectAdoptionHeaders(
 }
 
 /**
- * Gateway access credential required for remote/hosted data-plane requests.
+ * Optional gateway access credential for remote/hosted data-plane requests.
  * It is sent as `x-lore-gateway-token` and remains separate from provider API
- * keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256
- * visible ASCII characters without commas. OpenCode/Pi consume
+ * keys/bearer tokens. When configured, it must be 32-256 visible ASCII
+ * characters without commas and clients must supply it. OpenCode/Pi consume
  * LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code
  * supports a per-request custom header directly. Never place it in a URL or
  * CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.
@@ -309,6 +310,7 @@ export function resolveLaunchTarget(
   extraArgs: string[],
   adopted: AdoptedUpstream | null,
   remoteGateway = false,
+  codexConfig = "",
 ): LaunchTarget {
   // Resolve workspace root once — walks up from cwd looking for monorepo
   // markers (.lore.json with workspaces, .git, pnpm-workspace.yaml, etc.)
@@ -323,12 +325,12 @@ export function resolveLaunchTarget(
     const prependArgs: string[] = [];
     for (const agent of AGENTS) {
       // Env vars are safe to merge from all agents (unused vars are harmless).
-      Object.assign(env, agent.envVars(gatewayUrl, projectDir));
+      Object.assign(env, agent.envVars(gatewayUrl, projectDir, codexConfig));
       // CLI args are agent-specific (e.g. Codex's `-c` flag) — only inject
       // them for the agent that matches the explicit command to avoid passing
       // unrecognized flags to other agents.
       if (agent.cliArgs && agent.binary === cmdArgs[0]) {
-        prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir));
+        prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir, codexConfig));
       }
     }
     if (selection.def && adopted) {
@@ -356,8 +358,8 @@ export function resolveLaunchTarget(
       env: {},
     };
   }
-  const agentCliArgs = def.cliArgs?.(gatewayUrl, projectDir) ?? [];
-  const env = def.envVars(gatewayUrl, projectDir);
+  const agentCliArgs = def.cliArgs?.(gatewayUrl, projectDir, codexConfig) ?? [];
+  const env = def.envVars(gatewayUrl, projectDir, codexConfig);
   if (adopted) injectAdoptionHeaders(def, env, adopted);
   if (remoteGateway) injectRemoteGatewayAccess(def, env, gatewayUrl);
   return {
@@ -396,6 +398,17 @@ export async function commandRun(
   //    env before loadConfig/startGateway — the config is captured once at
   //    startup and reused per request).
   const selection = await resolveAgentSelection(cmdArgs);
+  let codexConfig = "";
+  if (selection?.def?.name === "codex") {
+    try {
+      codexConfig = validateCodexHttpLaunch();
+    } catch (error) {
+      console.error(
+        `[lore] ${error instanceof Error ? error.message : "Invalid Codex configuration."}`,
+      );
+      return safeExit(1);
+    }
+  }
 
   const config = loadConfig();
   let gatewayUrl: string;
@@ -555,6 +568,7 @@ export async function commandRun(
         extraArgs,
         adopted,
         remoteGateway,
+        codexConfig,
       )
     : null;
 

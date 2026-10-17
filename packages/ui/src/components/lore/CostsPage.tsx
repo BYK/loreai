@@ -1,9 +1,9 @@
-/** Gateway spend, overhead, savings estimates, and daily budget (UI-08). */
+/** Per-provider spend, budgets and quota pacing, plus Lore's overhead and savings estimates (UI-08). */
 import type { Component, JSX } from "solid-js";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { A } from "@solidjs/router";
 
-import type { CostsSnapshot } from "~/contracts";
+import type { CostsSnapshot, ProviderBudgetInput } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatMoney } from "~/lib/money";
 import { useWorkspace } from "~/routes/workspace";
@@ -29,9 +29,6 @@ export const CostsPage: Component = () => {
   const [snapshot, setSnapshot] = createSignal<CostsSnapshot>();
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>();
-  const [actionError, setActionError] = createSignal("");
-  const [budgetValue, setBudgetValue] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
 
   const load = async () => {
     setLoading(true);
@@ -39,11 +36,6 @@ export const CostsPage: Component = () => {
     try {
       const result = await ws.tracked(() => ws.client.getCosts());
       setSnapshot(result);
-      setBudgetValue(
-        result.daily.budget.amount > 0
-          ? String(result.daily.budget.amount)
-          : "",
-      );
     } catch (reason) {
       setError(reason);
     } finally {
@@ -51,25 +43,15 @@ export const CostsPage: Component = () => {
     }
   };
 
-  const setBudget = async (amount: number) => {
-    setBusy(true);
-    setActionError("");
-    try {
-      await ws.tracked(() => ws.client.setDailyBudget(amount));
-      await load();
-    } catch (reason) {
-      setActionError(showError(reason));
-    } finally {
-      setBusy(false);
-    }
+  const saveBudgets = async (budgets: ProviderBudgetInput[]) => {
+    await ws.tracked(() => ws.client.putProviderBudgets(budgets));
+    await load();
   };
 
   onMount(() => void load());
 
   const dailyMax = () =>
     Math.max(0.01, ...(snapshot()?.daily.entries.map((day) => day.cost) ?? []));
-  const liveSavingsTone = () =>
-    (snapshot()?.live.net_savings ?? 0) >= 0 ? "text-accent" : "text-danger";
   const combinedSavingsTone = () =>
     (snapshot()?.totals.net_savings ?? 0) >= 0 ? "text-accent" : "text-danger";
   const spendRows = () =>
@@ -85,15 +67,9 @@ export const CostsPage: Component = () => {
       <div class="eyebrow mb-2">Operations</div>
       <h1 class="mb-1 text-[25px] font-semibold">Cost intelligence</h1>
       <p class="mb-6 max-w-prose text-sm text-muted">
-        Actual gateway spend, Lore’s worker overhead, estimated savings, and a
-        daily spending limit. Historical values are estimates from stored data.
+        Spend, quota and budgets per provider account, Lore’s worker overhead,
+        and estimated savings. Historical values are estimates from stored data.
       </p>
-
-      <Show when={actionError()}>
-        <StateCard kind="error" title="The budget could not be saved">
-          {actionError()}
-        </StateCard>
-      </Show>
 
       <Show when={snapshot() && error()}>
         <StateCard
@@ -122,142 +98,13 @@ export const CostsPage: Component = () => {
       >
         {(data) => (
           <>
-            <div class="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <Stat
-                label="Current spend"
-                value={formatMoney(data().live.spend)}
-              />
-              <Stat
-                label={
-                  data().live.net_savings >= 0
-                    ? "Current net savings"
-                    : "Current net overhead"
-                }
-                value={formatMoney(Math.abs(data().live.net_savings))}
-                valueClass={liveSavingsTone()}
-              />
-              <Stat
-                label="Combined spend"
-                value={formatMoney(data().totals.spend)}
-              />
-              <Stat
-                label={
-                  data().totals.net_savings >= 0
-                    ? "Combined net savings"
-                    : "Combined net overhead"
-                }
-                value={formatMoney(Math.abs(data().totals.net_savings))}
-                valueClass={combinedSavingsTone()}
-              />
-            </div>
-
             <ProviderCards
               providers={data().providers}
               quotas={data().quotas}
               budgets={data().provider_budgets}
               money={formatMoney}
+              onSaveBudgets={data().can_edit_budgets ? saveBudgets : undefined}
             />
-
-            <section class="mb-6 rounded-lg border border-line bg-bg p-4">
-              <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 class="font-semibold">Daily budget</h2>
-                  <p class="mt-1 text-xs text-muted">
-                    {data().daily.budget.date} · today’s spend{" "}
-                    {formatMoney(data().daily.budget.spend)} · rate{" "}
-                    {formatMoney(data().daily.budget.rate)}/hr
-                  </p>
-                </div>
-                <div class="text-right text-xs text-muted">
-                  <div>
-                    {tokens(data().live.throttle.events)} throttled requests
-                  </div>
-                  <div>
-                    {(data().live.throttle.total_delay_ms / 1000).toFixed(1)}s
-                    total delay
-                  </div>
-                </div>
-              </div>
-              <Show
-                when={data().daily.budget.amount > 0}
-                fallback={
-                  <p class="mb-3 text-sm text-muted">
-                    No daily budget is set. Set one to enable automatic spend
-                    throttling.
-                  </p>
-                }
-              >
-                <BudgetBar
-                  amount={data().daily.budget.amount}
-                  spend={data().daily.budget.spend}
-                />
-              </Show>
-              <Show when={data().daily.budget.env_override}>
-                {(override) => (
-                  <p class="mt-3 text-xs text-muted">
-                    Controlled by <code>LORE_DAILY_BUDGET={override()}</code>.
-                  </p>
-                )}
-              </Show>
-              <Show when={data().daily.budget.can_edit}>
-                <form
-                  class="mt-3 flex flex-wrap items-end gap-2"
-                  data-testid="budget-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const rawValue = budgetValue().trim();
-                    if (!rawValue) {
-                      setActionError(
-                        "Enter a daily budget between $0 and $1,000,000.",
-                      );
-                      return;
-                    }
-                    const value = Number(rawValue);
-                    if (
-                      !Number.isFinite(value) ||
-                      value < 0 ||
-                      value > 1_000_000
-                    ) {
-                      setActionError(
-                        "Enter a daily budget between $0 and $1,000,000.",
-                      );
-                      return;
-                    }
-                    void setBudget(value);
-                  }}
-                >
-                  <label class="grid gap-1 text-xs text-muted">
-                    Budget (USD / day)
-                    <input
-                      type="number"
-                      min="0"
-                      max="1000000"
-                      step="any"
-                      value={budgetValue()}
-                      onInput={(event) =>
-                        setBudgetValue(event.currentTarget.value)
-                      }
-                      class="h-9 w-36 rounded-md border border-line bg-surface px-3 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                      aria-label="Daily budget in US dollars"
-                    />
-                  </label>
-                  <Button size="sm" type="submit" disabled={busy()}>
-                    {busy() ? "Saving…" : "Save budget"}
-                  </Button>
-                  <Show when={data().daily.budget.amount > 0}>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      type="button"
-                      disabled={busy()}
-                      onClick={() => void setBudget(0)}
-                    >
-                      Disable budget
-                    </Button>
-                  </Show>
-                </form>
-              </Show>
-            </section>
 
             <Show when={data().daily.entries.some((day) => day.cost > 0)}>
               <section class="mb-6 rounded-lg border border-line bg-bg p-4">
@@ -578,31 +425,3 @@ const WorkerRows: Component<{ workers: WorkerCosts }> = (props) => (
     </For>
   </div>
 );
-
-const BudgetBar: Component<{ amount: number; spend: number }> = (props) => {
-  const percent = () => Math.min(100, (props.spend / props.amount) * 100);
-  const tone = () =>
-    percent() < 60 ? "bg-accent" : percent() < 85 ? "bg-gold" : "bg-danger";
-  return (
-    <div>
-      <div class="flex justify-between text-xs">
-        <span class="font-medium tabular-nums">
-          {formatMoney(props.spend)} spent
-        </span>
-        <span class="text-muted tabular-nums">
-          {formatMoney(props.amount)} daily limit
-        </span>
-      </div>
-      <div
-        class="mt-2 h-2 overflow-hidden rounded-full bg-soft"
-        role="progressbar"
-        aria-label="Daily budget used"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent()}
-      >
-        <div class={`h-full ${tone()}`} style={{ width: `${percent()}%` }} />
-      </div>
-    </div>
-  );
-};

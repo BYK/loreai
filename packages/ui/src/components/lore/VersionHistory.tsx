@@ -1,8 +1,8 @@
-import type { Component } from "solid-js";
-import { For, Show, Switch, Match } from "solid-js";
+import type { Component, JSX } from "solid-js";
+import { createMemo, For, Show, Switch, Match } from "solid-js";
 import { A } from "@solidjs/router";
 
-import type { KnowledgeVersionHistory } from "~/contracts";
+import type { KnowledgeVersion, KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import {
   formatConfidence,
@@ -14,15 +14,21 @@ import { sessionHref } from "~/lib/href";
 
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
+import { VersionDiff } from "./VersionDiff";
 
 export const VersionHistory: Component<{
   loader: Loader<KnowledgeVersionHistory>;
   projectId?: string;
+  renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
-  const versions = () =>
+  const versions = createMemo(() =>
     [...(props.loader.data()?.versions ?? [])].sort(
       (a, b) => b.version - a.version,
-    );
+    ),
+  );
+  const byVersion = createMemo(
+    () => new Map(versions().map((version) => [version.version, version])),
+  );
   return (
     <section class="mt-8" data-testid="version-history">
       <h2 class="mb-3 text-base font-semibold">History</h2>
@@ -68,10 +74,10 @@ export const VersionHistory: Component<{
                     </div>
                   </summary>
                   <div class="mt-3 space-y-2 border-t border-line pt-3 text-xs">
-                    <div class="font-semibold">{version.title}</div>
-                    <p class="m-0 whitespace-pre-wrap leading-relaxed">
-                      {version.content}
-                    </p>
+                    <VersionDiff
+                      version={version}
+                      previous={byVersion().get(version.version - 1)}
+                    />
                     <dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1">
                       <dt class="text-muted">Category</dt>
                       <dd class="m-0">{version.category}</dd>
@@ -100,6 +106,9 @@ export const VersionHistory: Component<{
                           </Show>
                         </div>
                       )}
+                    </Show>
+                    <Show when={!version.is_deleted && !version.is_current}>
+                      {props.renderRestore?.(version)}
                     </Show>
                   </div>
                 </details>

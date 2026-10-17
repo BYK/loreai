@@ -11,6 +11,7 @@
 
 export * as temporal from "./temporal";
 export * as ltm from "./ltm";
+export * as knowledgeEdit from "./knowledge-edit";
 // Client-side encryption primitives (C, #825). Namespaced `crypto` — consumers that
 // also need the WebCrypto/Node global should import that from `node:crypto` to avoid
 // shadowing this named import.
@@ -96,6 +97,7 @@ export * as degradationSignals from "./degradation-signals";
 export * as instructionDetect from "./instruction-detect";
 export * as log from "./log";
 export * as conversationImport from "./import";
+export * as modelUsage from "./model-usage";
 
 export {
   runRecall,
@@ -184,7 +186,7 @@ export {
   projectScope,
   setProjectScope,
   setProjectPromotionPolicy,
-  effectivePromotionPolicy,
+  projectAutoShare,
   resolveWritableScope,
   scopeMemberRole,
   resolveProjectByRemoteOrPath,
@@ -355,6 +357,7 @@ export type {
 } from "./gradient";
 export {
   formatKnowledge,
+  formatKnowledgeEntry,
   formatKnowledgeDelta,
   shortId,
   DELTA_MAX_ENTRIES,

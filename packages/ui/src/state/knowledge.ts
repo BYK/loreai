@@ -5,6 +5,7 @@ import type {
   AllKnowledgeQuery,
   CrossProjectKnowledgeEntry,
   KnowledgeEntry,
+  KnowledgeFiles,
   KnowledgeVersionHistory,
 } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
@@ -232,6 +233,16 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     return { loader, status: statusOf(loader) };
   }
 
+  function files(id: Accessor<string | null>): {
+    loader: Loader<KnowledgeFiles>;
+    status: Accessor<KeyStatus>;
+  } {
+    const loader = createLoader(id, (entryId, signal) =>
+      tracked(() => client.getKnowledgeFiles(entryId, signal)),
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   return {
     list,
     page,
@@ -239,10 +250,20 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     listPaged,
     entry,
     versions,
+    files,
     /** Evict a permanently removed entry from memory and IndexedDB. */
     async remove(id: string): Promise<void> {
       store.remove(id);
       await repo.delete(id);
+    },
+    async reconcile(entry: KnowledgeEntry): Promise<void> {
+      store.reconcileOne(entry);
+      await repo.put(entry, entry.project_id ?? "global", {
+        keepScope: true,
+      });
+    },
+    async invalidateProject(projectId: string): Promise<void> {
+      await repo.deleteCollection(projectId);
     },
     select: (id: string) => store.select(id),
     selectList: (projectId: string) => store.selectList(projectId),

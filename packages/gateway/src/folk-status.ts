@@ -25,17 +25,25 @@ import {
   syncData,
   getKV,
   projectScope,
+  projectAutoShare,
   currentTenantId,
   LOCAL_TENANT_ID,
 } from "@loreai/core";
 import type { GatewayConfig } from "./config";
-import { loadPersistedSession } from "./supabase";
+import { requestIsHosted } from "./folk-access";
+import { loadPersistedSession, sessionRefreshUnavailable } from "./supabase";
 
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
 
-export type AccountState = "signed_in" | "anonymous" | "expired";
+export type AccountState =
+  | "signed_in"
+  | "anonymous"
+  | "expired"
+  | "hosted"
+  | "refreshing"
+  | "unavailable";
 
 export interface AccountStatus {
   signed_in: boolean;
@@ -71,6 +79,8 @@ export interface SharingStatus {
   linked: boolean;
   team: { id: string; name: string | null } | null;
   policy: SharingPolicy;
+  auto_share: boolean;
+  review_required: boolean | null;
   state: SharingState;
   detail: string | null;
 }
@@ -103,9 +113,7 @@ function notFound(message: string): Response {
  * remote-gateway deployments, or any request running under a non-local tenant.
  */
 function folkUnavailable(config: GatewayConfig): boolean {
-  return (
-    config.hostedMode || config.remoteGateway || !syncData.isLocalSyncContext()
-  );
+  return requestIsHosted(config);
 }
 
 type SafeSession = {
@@ -153,7 +161,7 @@ export function accountStatus(
       user: null,
       provider: null,
       expires_at: null,
-      state: "anonymous",
+      state: folkUnavailable(config) ? "hosted" : "anonymous",
     };
   }
   const expired = isExpired(s, nowMs);
@@ -165,13 +173,21 @@ export function accountStatus(
       s.expires_at === null
         ? null
         : new Date(s.expires_at * 1000).toISOString(),
-    state: expired ? "expired" : "signed_in",
+    state: expired
+      ? sessionRefreshUnavailable()
+        ? "unavailable"
+        : "refreshing"
+      : "signed_in",
   };
 }
 
-export function teamsStatus(config: GatewayConfig): { teams: TeamStatus[] } {
-  const s = safeSession(config);
-  if (!s) return { teams: [] };
+export function teamsStatus(config: GatewayConfig): {
+  hosted: boolean;
+  teams: TeamStatus[];
+} {
+  const hosted = requestIsHosted(config);
+  const s = hosted ? null : safeSession(config);
+  if (!s) return { hosted, teams: [] };
   const rows = db()
     .query(
       `SELECT sm.scope_id AS id, sc.name AS name, sm.role AS role,
@@ -188,6 +204,7 @@ export function teamsStatus(config: GatewayConfig): { teams: TeamStatus[] } {
     member_count: number;
   }>;
   return {
+    hosted,
     teams: rows.map((r) => ({
       id: r.id,
       name: r.name ?? null,
@@ -225,8 +242,9 @@ export function sharingStatus(
 
   const projectOverride = asPolicy(link.promotion_policy);
   const teamDefault = asPolicy(scope?.promotion_policy);
+  const autoShare = projectAutoShare(projectId);
   const policy: SharingPolicy = {
-    effective: projectOverride ?? (teamDefault === "auto" ? "auto" : "manual"),
+    effective: autoShare ? "auto" : "manual",
     project_override: projectOverride,
     team_default: teamDefault,
   };
@@ -236,6 +254,8 @@ export function sharingStatus(
       linked: false,
       team: null,
       policy,
+      auto_share: false,
+      review_required: null,
       state: "not_linked",
       detail: folkUnavailable(config)
         ? "Folk Lore is unavailable in hosted/remote gateway mode"
@@ -244,6 +264,7 @@ export function sharingStatus(
   }
 
   const team = { id: scopeId, name: scope?.name ?? null };
+  const reviewRequired = teamDefault !== "auto";
   const s = safeSession(config);
   let detail: string | null = null;
   if (!s) detail = "Not signed in; team content cannot sync";
@@ -252,18 +273,37 @@ export function sharingStatus(
   else if (!scope) detail = "Team is not in the local registry mirror";
   else if (!isMember(scopeId, s.user_id))
     detail = "Current account is not a member of the linked team";
-  if (detail) return { linked: true, team, policy, state: "degraded", detail };
+  if (detail)
+    return {
+      linked: true,
+      team,
+      policy,
+      auto_share: autoShare,
+      review_required: reviewRequired,
+      state: "degraded",
+      detail,
+    };
 
   if (keystore.encryptionState() === "locked") {
     return {
       linked: true,
       team,
       policy,
+      auto_share: autoShare,
+      review_required: reviewRequired,
       state: "locked",
       detail: "Encryption keys are locked on this device",
     };
   }
-  return { linked: true, team, policy, state: "linked", detail: null };
+  return {
+    linked: true,
+    team,
+    policy,
+    auto_share: autoShare,
+    review_required: reviewRequired,
+    state: "linked",
+    detail: null,
+  };
 }
 
 function isMember(scopeId: string, userId: string): boolean {

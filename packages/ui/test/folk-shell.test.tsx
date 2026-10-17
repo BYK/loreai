@@ -1,10 +1,10 @@
 import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import type { AccountStatus, SyncStatus, TeamList } from "~/contracts";
-import { ApiError, type ApiClient } from "~/lib/api";
+import { ApiError, clearGatewayAuthToken, type ApiClient } from "~/lib/api";
 
 const ANONYMOUS: AccountStatus = {
   signed_in: false,
@@ -20,7 +20,7 @@ const IDLE: SyncStatus = {
   pending_changes: 2,
 };
 
-const NO_TEAMS: TeamList = { teams: [] };
+const NO_TEAMS: TeamList = { hosted: false, teams: [] };
 
 type ClientOverrides = Partial<ApiClient>;
 
@@ -56,6 +56,43 @@ function mount(apiClient: ApiClient) {
 }
 
 describe("Folk shell status", () => {
+  it("lets a remote dashboard session enter its gateway token and retry", async () => {
+    sessionStorage.clear();
+    const listProjects = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(
+          "unauthorized",
+          "/api/v1/projects",
+          "Gateway hid this route from the current peer",
+          404,
+        ),
+      )
+      .mockResolvedValue([]);
+    mount(client({ listProjects }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Connect to your gateway" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/LORE_GATEWAY_AUTH_TOKEN/)).toBeInTheDocument();
+    const tokenInput = screen.getByLabelText("Gateway token");
+    expect(tokenInput).toHaveAttribute("type", "password");
+    fireEvent.input(tokenInput, { target: { value: "server-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "Connect to your gateway" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(sessionStorage.length).toBeGreaterThan(0);
+    expect(sessionStorage.getItem("lore.gateway-auth-token")).toBe(
+      "server-token",
+    );
+    clearGatewayAuthToken();
+  });
+
   it("shows anonymous status and lazily loads teams when opened", async () => {
     mount(client());
 
@@ -64,6 +101,7 @@ describe("Folk shell status", () => {
       expect(badge).toHaveAttribute("data-folk-state", "anonymous"),
     );
     expect(badge.getAttribute("aria-label")).toContain("Not signed in");
+    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
     fireEvent.click(badge);
 
     expect(await screen.findByTestId("folk-status-panel")).toBeInTheDocument();
@@ -94,6 +132,7 @@ describe("Folk shell status", () => {
         },
         async getTeams() {
           return {
+            hosted: false,
             teams: [
               {
                 id: "team-acme",
@@ -111,6 +150,7 @@ describe("Folk shell status", () => {
     await waitFor(() =>
       expect(badge).toHaveAttribute("data-folk-state", "sync_on"),
     );
+    expect(screen.getByTestId("account-avatar")).toHaveTextContent("AL");
     fireEvent.click(badge);
 
     expect(await screen.findByTestId("folk-account")).toHaveTextContent(
@@ -124,11 +164,78 @@ describe("Folk shell status", () => {
     );
   });
 
+  it("runs a guarded sync from the status popover and shows its receipt", async () => {
+    const runSync = vi.fn(async () => ({
+      pushed: 2,
+      pulled: 3,
+      conflicts: 0,
+      skipped: 1,
+    }));
+    mount(
+      client({
+        async getAccount() {
+          return {
+            signed_in: true,
+            user: { id: "user-1", email: null, display_name: "Ada" },
+            provider: "github",
+            expires_at: null,
+            state: "signed_in",
+          };
+        },
+        async getSyncStatus() {
+          return IDLE;
+        },
+        runSync,
+      }),
+    );
+
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByTestId("sync-now"));
+    expect(
+      await screen.findByText("Sync complete: pushed 2, pulled 3.", {
+        exact: true,
+      }),
+    ).toBeInTheDocument();
+    expect(runSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Sync now errors visible inside the status popover", async () => {
+    mount(
+      client({
+        async getAccount() {
+          return {
+            signed_in: true,
+            user: null,
+            provider: null,
+            expires_at: null,
+            state: "signed_in",
+          };
+        },
+        async getSyncStatus() {
+          return IDLE;
+        },
+        async runSync() {
+          throw new Error("Sync service is unavailable.");
+        },
+      }),
+    );
+
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByTestId("sync-now"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sync service is unavailable.",
+    );
+  });
+
   it("shows expired accounts", async () => {
     mount(
       client({
         async getAccount() {
-          return { ...ANONYMOUS, state: "expired" };
+          return {
+            ...ANONYMOUS,
+            state: "expired",
+            user: { id: "user-1", email: null, display_name: "Ada Lovelace" },
+          };
         },
       }),
     );
@@ -138,6 +245,27 @@ describe("Folk shell status", () => {
         "data-folk-state",
         "expired",
       ),
+    );
+    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument();
+  });
+
+  it("explains hosted mode without pretending there is no local login", async () => {
+    mount(
+      client({
+        async getAccount() {
+          return { ...ANONYMOUS, state: "hosted" };
+        },
+      }),
+    );
+    const badge = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(badge).toHaveAttribute("data-folk-state", "hosted"),
+    );
+    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
+    fireEvent.click(badge);
+    expect(await screen.findByTestId("folk-status-detail")).toHaveTextContent(
+      "lore start --local",
     );
   });
 
@@ -195,6 +323,266 @@ describe("Folk shell status", () => {
     await waitFor(() => expect(accountCalls).toBe(1));
     fireEvent.click(badge);
     await waitFor(() => expect(accountCalls).toBeGreaterThan(1));
+  });
+
+  it("removes the signed-in avatar after a CLI logout when the tab regains focus", async () => {
+    let account: AccountStatus = {
+      ...ANONYMOUS,
+      signed_in: true,
+      state: "signed_in",
+      user: { id: "user-1", email: null, display_name: "Ada Lovelace" },
+    };
+    mount(
+      client({
+        async getAccount() {
+          return account;
+        },
+      }),
+    );
+    expect(await screen.findByTestId("account-avatar")).toHaveTextContent("AL");
+    account = ANONYMOUS;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-status")).toHaveAttribute(
+        "data-folk-state",
+        "anonymous",
+      ),
+    );
+  });
+
+  it("re-reads teams for a new CLI account while the panel stays open", async () => {
+    let owner = "Ada";
+    mount(
+      client({
+        async getAccount() {
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: owner, email: null, display_name: owner },
+          };
+        },
+        async getTeams() {
+          return {
+            hosted: false,
+            teams: [
+              {
+                id: `team-${owner}`,
+                name: `${owner} team`,
+                role: "editor",
+                member_count: 1,
+              },
+            ],
+          };
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await screen.findByText("Ada team");
+    owner = "Grace";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-account")).toHaveTextContent("Grace"),
+    );
+    expect(await screen.findByText("Grace team")).toBeInTheDocument();
+    expect(screen.queryByText("Ada team")).not.toBeInTheDocument();
+  });
+
+  it.each(["hosted", "expired", "refreshing", "unavailable"] as const)(
+    "does not claim teams are loading for an account in %s state",
+    async (state) => {
+      const getTeams = vi.fn(async () => NO_TEAMS);
+      mount(
+        client({
+          async getAccount() {
+            return { ...ANONYMOUS, state };
+          },
+          getTeams,
+        }),
+      );
+      const badge = await screen.findByTestId("folk-status");
+      await waitFor(() =>
+        expect(badge).toHaveAttribute("data-folk-state", state),
+      );
+      fireEvent.click(badge);
+      expect(await screen.findByText("Teams unavailable.")).toBeInTheDocument();
+      expect(screen.queryByText("Loading teams…")).not.toBeInTheDocument();
+      expect(getTeams).not.toHaveBeenCalled();
+    },
+  );
+
+  it("clears the previous account's teams after CLI logout with the panel open", async () => {
+    let loggedIn = true;
+    mount(
+      client({
+        async getAccount() {
+          return loggedIn
+            ? {
+                ...ANONYMOUS,
+                signed_in: true,
+                state: "signed_in",
+                user: { id: "Ada", email: null, display_name: "Ada" },
+              }
+            : ANONYMOUS;
+        },
+        async getTeams() {
+          return loggedIn
+            ? {
+                hosted: false,
+                teams: [
+                  {
+                    id: "team-ada",
+                    name: "Ada team",
+                    role: "editor",
+                    member_count: 1,
+                  },
+                ],
+              }
+            : NO_TEAMS;
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await screen.findByText("Ada team");
+    loggedIn = false;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-status")).toHaveAttribute(
+        "data-folk-state",
+        "anonymous",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Ada team")).not.toBeInTheDocument(),
+    );
+    expect(
+      await screen.findByText("No team memberships are known on this device."),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels an old account's team request and ignores its late response", async () => {
+    let owner = "Ada";
+    let finishOld!: (teams: TeamList) => void;
+    let oldSignal: AbortSignal | undefined;
+    const getTeams = vi.fn((signal?: AbortSignal) => {
+      if (owner === "Ada") {
+        oldSignal = signal;
+        return new Promise<TeamList>((resolve) => {
+          finishOld = resolve;
+        });
+      }
+      return Promise.resolve({
+        hosted: false,
+        teams: [
+          {
+            id: "team-grace",
+            name: "Grace team",
+            role: "editor",
+            member_count: 1,
+          },
+        ],
+      });
+    });
+    mount(
+      client({
+        async getAccount() {
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: owner, email: null, display_name: owner },
+          };
+        },
+        getTeams,
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    await waitFor(() => expect(finishOld).toBeTypeOf("function"));
+    owner = "Grace";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-account")).toHaveTextContent("Grace"),
+    );
+    finishOld({
+      hosted: false,
+      teams: [
+        { id: "team-ada", name: "Ada team", role: "editor", member_count: 1 },
+      ],
+    });
+    expect(await screen.findByText("Grace team")).toBeInTheDocument();
+    expect(oldSignal?.aborted).toBe(true);
+    expect(screen.queryByText("Ada team")).not.toBeInTheDocument();
+  });
+
+  it("hides a stale avatar when the account service stops answering", async () => {
+    let offline = false;
+    mount(
+      client({
+        async getAccount() {
+          if (offline) throw new Error("account unavailable");
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: "user-1", email: null, display_name: "Ada" },
+          };
+        },
+      }),
+    );
+    await screen.findByTestId("account-avatar");
+    offline = true;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-status")).toHaveAttribute(
+        "data-folk-state",
+        "unavailable",
+      ),
+    );
+  });
+
+  it("keeps a stale avatar hidden while an unavailable account is being retried", async () => {
+    let state: "signed_in" | "offline" | "pending" = "signed_in";
+    let finish!: (account: AccountStatus) => void;
+    mount(
+      client({
+        async getAccount() {
+          if (state === "offline") throw new Error("account unavailable");
+          if (state === "pending")
+            return new Promise<AccountStatus>((resolve) => {
+              finish = resolve;
+            });
+          return {
+            ...ANONYMOUS,
+            signed_in: true,
+            state: "signed_in",
+            user: { id: "user-1", email: null, display_name: "Ada" },
+          };
+        },
+      }),
+    );
+    await screen.findByTestId("account-avatar");
+    state = "offline";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-status")).toHaveAttribute(
+        "data-folk-state",
+        "unavailable",
+      ),
+    );
+    state = "pending";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument();
+    finish(ANONYMOUS);
   });
 
   it("does not change connection status when an account read fails generically", async () => {

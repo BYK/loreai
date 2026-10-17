@@ -20,11 +20,13 @@ import {
   openLoreDb,
   resetCache,
   setMeta,
+  type DedupApplyRecord,
   type LocalDraft,
   type PendingChange,
 } from "~/db";
 import { createRepository } from "~/db/repository";
 import { LOCAL_CAP } from "~/db/local";
+import { createDedupReviewState } from "~/state/dedup-review";
 import type {
   KnowledgeEntry,
   ProjectSummary,
@@ -167,7 +169,36 @@ describe("openLoreDb", () => {
       expectedRevisions: { k1: 1, k2: 2 },
       markedAt: 1,
     });
-    expect(await marks.list("p1")).toHaveLength(1);
+    const applyRecord: DedupApplyRecord = {
+      key: "p1/apply/op-1",
+      kind: "dedup-apply",
+      projectId: "p1",
+      operationId: "op-1",
+      body: {
+        operationId: "op-1",
+        projectId: null,
+        reviewedAt: 2,
+        actor: "lore-ui",
+        decisions: [
+          {
+            keepId: "k1",
+            mergeIds: ["k2"],
+            expectedRevisions: { k1: 1, k2: 2 },
+          },
+        ],
+      },
+      groupIds: ["project:group-1"],
+      candidateTitles: { k1: "Keep", k2: "Merge" },
+      createdAt: 2,
+    };
+    await marks.put(applyRecord);
+    expect(await marks.list("p1")).toHaveLength(2);
+
+    const state = createDedupReviewState(async () => db);
+    expect(await state.list("p1")).toMatchObject([
+      { kind: "dedup", groupId: "group-1" },
+    ]);
+    expect(await state.listApplies("p1")).toEqual([applyRecord]);
   });
 
   it("upgrades a v1 database without touching meta rows", async () => {

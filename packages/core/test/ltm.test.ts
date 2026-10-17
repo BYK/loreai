@@ -9,10 +9,15 @@ import {
 } from "vitest";
 import { EventEmitter } from "node:events";
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, setProjectScope } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
+import { currentTenantId } from "../src/tenant";
 import { config } from "../src/config";
+import {
+  KNOWLEDGE_HEADER_OVERHEAD_TOKENS,
+  knowledgeEntryTokenCost,
+} from "../src/prompt";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import { runReadJob } from "../src/read-job";
 import type {
@@ -88,6 +93,143 @@ describe("ltm", () => {
     expect(ltm.get(id)).toBeNull();
     expect(ltm.getByLogical(id)).toBeNull(); // no current, live version
     expect(ltm.isTombstoned(id)).toBe(true);
+  });
+
+  test("restoreDeletedKnowledge appends a reviewed live version with provenance", () => {
+    const projectPath = `${PROJECT}/restore-team`;
+    const projectId = ensureProject(projectPath);
+    setProjectScope(projectId, "team-scope");
+    const id = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Deleted team entry",
+      content: "Original content",
+      scope: "project",
+      metadata: { gitHead: "a".repeat(40) },
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = 'approved', approved_by = 'reviewer', approved_at = 123 WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(id);
+    ltm.remove(id);
+    const deathCert = db()
+      .query(
+        "SELECT id, version FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(id) as { id: string; version: number };
+    db()
+      .query(
+        "INSERT INTO knowledge_tombstones (id, project_id, deleted_at, tenant_id) VALUES (?, ?, ?, ?)",
+      )
+      .run(id, projectId, Date.now(), currentTenantId());
+
+    const restored = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 17,
+      title: "Recovered team entry",
+      content: "Recovered local content",
+      metadata: { enforce: "soft" },
+    });
+
+    expect(restored).toEqual({ ok: true, versionId: expect.any(String) });
+    const entry = ltm.getByLogical(id);
+    expect(entry).toMatchObject({
+      id: restored.ok ? restored.versionId : "",
+      category: "gotcha",
+      title: "Recovered team entry",
+      content: "Recovered local content",
+      approval_status: "pending",
+      approved_by: null,
+      approved_at: null,
+      metadata: {
+        gitHead: "a".repeat(40),
+        enforce: "soft",
+        recovered_from: {
+          kind: "sync_conflict_keep_local",
+          conflict_id: 17,
+          remote_deleted_version_id: deathCert.id,
+          restored_at: expect.any(String),
+        },
+      },
+    });
+    expect(ltm.versionHistory(id).at(-1)?.version).toBe(deathCert.version + 1);
+    expect(ltm.isTombstoned(id)).toBe(false);
+  });
+
+  test("restoreDeletedKnowledge rejects a stale death-certificate id without mutation", () => {
+    const id = ltm.create({
+      category: "pattern",
+      title: "Stale restore",
+      content: "Original content",
+      scope: "global",
+    });
+    ltm.remove(id);
+    const deathCert = db()
+      .query(
+        "SELECT id, version FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(id) as { id: string; version: number };
+
+    const result = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: "stale-death-cert",
+      conflictId: 18,
+      title: "Local title",
+      content: "Local content",
+      metadata: null,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "stale",
+      currentVersionId: deathCert.id,
+    });
+    expect(
+      db()
+        .query(
+          "SELECT id, version, is_deleted, is_current FROM knowledge WHERE logical_id = ? AND is_current = 1",
+        )
+        .get(id),
+    ).toEqual({
+      id: deathCert.id,
+      version: deathCert.version,
+      is_deleted: 1,
+      is_current: 1,
+    });
+    expect(ltm.isTombstoned(id)).toBe(true);
+  });
+
+  test("restoreDeletedKnowledge keeps non-team entries automatically approved", () => {
+    const id = ltm.create({
+      category: "preference",
+      title: "Deleted personal entry",
+      content: "Original personal content",
+      scope: "global",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = 'approved', approved_by = 'reviewer', approved_at = 123 WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(id);
+    ltm.remove(id);
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(id) as { id: string };
+
+    const result = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 20,
+      title: "Restored personal entry",
+      content: "Restored personal content",
+      metadata: null,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(ltm.getByLogical(id)).toMatchObject({
+      approval_status: "auto",
+      approved_by: null,
+      approved_at: null,
+    });
   });
 
   test("update knowledge entry appends a new current version", () => {
@@ -488,6 +630,8 @@ describe("ltm.forSession", () => {
   const SESSION = "test-session-abc";
 
   beforeEach(() => {
+    // Exercise retrieval and bookkeeping independently of post-pack admission.
+    config().knowledge.taskFilter = false;
     const pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     // Clean up any cross-project entries from this test project
@@ -1649,6 +1793,8 @@ describe("ltm.forProjectOffloaded (#1080)", () => {
 describe("ltm.forSession — vector-path set stability (regression #727)", () => {
   const PROJ = "/test/ltm/vector-churn";
   const SESSION = "vector-churn-session";
+  const VECTOR_ENTRY_CONTENT =
+    "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. Sphinx of black quartz judge my vow.";
   let availableSpy: ReturnType<typeof vi.spyOn>;
   let embedSpy: ReturnType<typeof vi.spyOn>;
   let vectorSpy: ReturnType<typeof vi.spyOn>;
@@ -1667,10 +1813,8 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
     ids.length = 0;
 
-    // 8 equal-confidence project entries, each ~30 tokens. A tight budget fits
-    // only ~4, so which 4 are selected is decided purely by the (shifting)
-    // vector scores. (~30 tok: title ~11 chars + content with ~30 BPE tokens →
-    // ~10 overhead ≈ 40; budget below tuned to fit exactly 4.)
+    // 8 equal-confidence project entries. The shared selector/renderer cost
+    // below fits exactly 4, so shifting vector scores decide the selected set.
     for (let i = 0; i < 8; i++) {
       ids.push(
         ltm.create({
@@ -1680,8 +1824,7 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
           // Varied English text whose BPE token count approximates the legacy
           // 90-char / 30-token budget. Avoids degenerate "C C C" tokenization
           // (single-char runs collapse to ~12 BPE tokens instead of 30).
-          content:
-            "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. Sphinx of black quartz judge my vow.",
+          content: VECTOR_ENTRY_CONTENT,
           scope: "project",
           crossProject: false,
         }),
@@ -1742,7 +1885,14 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
     return m;
   }
 
-  const TIGHT = 200;
+  const TIGHT =
+    KNOWLEDGE_HEADER_OVERHEAD_TOKENS +
+    4 *
+      knowledgeEntryTokenCost({
+        id: "present",
+        title: "Vec entry 0",
+        content: VECTOR_ENTRY_CONTENT,
+      });
 
   test("WITHOUT stickyIds: vector scores shifting across turns churn the set (the bug)", async () => {
     currentScores = scoresForTurn(0);
@@ -1864,6 +2014,8 @@ describe("ltm.forSession — relevance floor", () => {
   ];
 
   beforeEach(() => {
+    // These pattern fixtures isolate the vector floor, before task filtering.
+    config().knowledge.taskFilter = false;
     const pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
@@ -2817,6 +2969,126 @@ describe("ltm — cross-project promotion", () => {
       expect(e.cross_project).toBe(0);
       expect(e.promotion_status).toBeNull();
     }
+  });
+
+  test("skips shared-title collisions and reports them in dry and real runs", () => {
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Promotion collision candidate",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Promotion safe candidate B",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Promotion safe candidate C",
+      confidence: 0.9,
+      embedSeed: 17,
+    });
+    const existing = ltm.create({
+      category: "preference",
+      title: "Promotion collision candidate",
+      content: "Existing shared content",
+      scope: "global",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run("Promotion collision candidate", a);
+    const before = [a, b, c].map((id) => ltm.getByLogical(id)?.content);
+
+    const dryRun = ltm.promoteCrossProject({ dryRun: true });
+    expect(dryRun.promoted).toBe(2);
+    expect(dryRun.conflicts).toEqual([
+      {
+        logicalId: a,
+        title: "Promotion collision candidate",
+        conflictingLogicalId: existing,
+      },
+    ]);
+    expect([a, b, c].map((id) => ltm.getByLogical(id)?.cross_project)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const applied = ltm.promoteCrossProject({ dryRun: false });
+    expect(applied.promoted).toBe(2);
+    expect(applied.conflicts).toEqual(dryRun.conflicts);
+    expect(ltm.getByLogical(a)).toMatchObject({
+      cross_project: 0,
+      content: before[0],
+    });
+    expect(ltm.getByLogical(b)?.cross_project).toBe(1);
+    expect(ltm.getByLogical(c)?.cross_project).toBe(1);
+    expect(ltm.getByLogical(existing)?.content).toBe("Existing shared content");
+  });
+
+  test("dry runs track normalized title collisions between cluster members", () => {
+    const a = seedEntry({
+      projectPath: PA,
+      title: "Promotion batch first",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    const b = seedEntry({
+      projectPath: PB,
+      title: "Promotion batch second",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    const c = seedEntry({
+      projectPath: PC,
+      title: "Promotion batch third",
+      confidence: 0.9,
+      embedSeed: 19,
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run("Batch duplicate", a);
+    db()
+      .query(
+        "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(" batch duplicate ", b);
+
+    const dryRun = ltm.promoteCrossProject({ dryRun: true });
+    expect(dryRun.promoted).toBe(2);
+    expect(dryRun.conflicts).toHaveLength(1);
+    const collision = dryRun.conflicts[0];
+    if (!collision) throw new Error("expected an in-batch title conflict");
+    const titleById = new Map([
+      [a, "Batch duplicate"],
+      [b, " batch duplicate "],
+    ]);
+    expect(titleById.get(collision.logicalId)).toBe(collision.title);
+    expect([a, b]).toContain(collision.logicalId);
+    expect([a, b]).toContain(collision.conflictingLogicalId);
+    expect(collision.conflictingLogicalId).not.toBe(collision.logicalId);
+    expect([a, b, c].map((id) => ltm.getByLogical(id)?.cross_project)).toEqual([
+      0, 0, 0,
+    ]);
+
+    const applied = ltm.promoteCrossProject({ dryRun: false });
+    expect(applied.promoted).toBe(2);
+    expect(applied.conflicts).toEqual(dryRun.conflicts);
+    expect(
+      [a, b, c].filter((id) => ltm.getByLogical(id)?.cross_project === 1),
+    ).toHaveLength(2);
+    const sharedCopies = db()
+      .query(
+        `SELECT COUNT(*) AS count FROM knowledge_current
+          WHERE (project_id IS NULL OR cross_project = 1)
+            AND LOWER(TRIM(title, ' ' || char(9) || char(10) || char(13))) = 'batch duplicate'`,
+      )
+      .get() as { count: number };
+    expect(sharedCopies.count).toBe(1);
   });
 
   test("no-op when embeddings are unavailable", () => {

@@ -31,6 +31,23 @@ mkdirSync(scratch, { recursive: true });
 
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
+const fileLinks = join(root, "file-links-fixture");
+mkdirSync(fileLinks, { recursive: true });
+const fileLinksProjectId = core.ensureProject(fileLinks, "file-links", null);
+core
+  .db()
+  .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+  .run("github.com/BYK/loreai", fileLinksProjectId);
+const sharingProject = join(root, "sharing-e2e");
+mkdirSync(sharingProject, { recursive: true });
+core.ensureProject(sharingProject, "sharing-e2e", null);
+core.ltm.create({
+  projectPath: sharingProject,
+  scope: "project",
+  category: "pattern",
+  title: "Sharing controls use project-local policy",
+  content: "The team review policy controls approval after a project shares.",
+});
 
 const dedupReview = join(root, "dedup-review");
 mkdirSync(dedupReview, { recursive: true });
@@ -47,12 +64,12 @@ for (const [title, content, confidence] of [
     0.82,
   ],
   [
-    "Shared duplicate review evidence sample candidate alpha",
+    "Shared-only evidence review seed alpha",
     "First shared candidate for the no-project duplicate group.",
     0.91,
   ],
   [
-    'Shared duplicate review evidence sample <img src=x onerror="window.__pwned=1">',
+    'Shared-only evidence review seed <img src=x onerror="window.__pwned=1">',
     'Hostile text stays inert in the review screen: <img src=x onerror="window.__pwned=1">',
     0.88,
   ],
@@ -94,6 +111,186 @@ core.ltm.create({
   crossProject: true,
   confidence: 0.9,
 });
+for (const viewport of ["desktop", "mobile"]) {
+  for (const run of [1, 2, 3]) {
+    const name = `dd-apply-${viewport}-${run}`;
+    const refusalTitle =
+      viewport === "desktop"
+        ? [
+            "Cobalt geodesic lantern astronomy beacon silver",
+            "Papaya acoustic kettle geometry artisan violet",
+            "Thimble glacier rainfall magnetism particle amber",
+          ][run - 1]
+        : [
+            "Quasar maple jukebox fossil moonlit engine",
+            "Velvet otter cathedral bacteria canvas monsoon",
+            "Saffron bicycle fjord tessellation trumpet eclipse",
+          ][run - 1];
+    const projectPath = join(root, name);
+    mkdirSync(projectPath, { recursive: true });
+    core.ensureProject(projectPath, name, null);
+    for (const [title, content, scope] of [
+      [
+        `Applyable ${viewport} ${run} atomic amber keeper`,
+        `Keep the primary apply fixture for ${name}.`,
+        "project",
+      ],
+      [
+        `Applyable ${viewport} ${run} atomic amethyst keeper`,
+        `Merge the primary apply fixture for ${name}.`,
+        "project",
+      ],
+      [
+        `${refusalTitle} keeper`,
+        `Keep the refusal fixture for ${name}.`,
+        "global",
+      ],
+      [
+        `${refusalTitle} remove-me`,
+        `Remove this candidate before the shared apply for ${name}.`,
+        "global",
+      ],
+    ]) {
+      core.ltm.create({
+        id: crypto.randomUUID(),
+        ...(scope === "project" ? { projectPath } : {}),
+        scope,
+        category: "decision",
+        title,
+        content,
+        confidence: 0.88,
+      });
+    }
+
+    const replacementPhrase = (
+      viewport === "desktop"
+        ? [
+            "Qorvex zintara plasmonic velmora thalix nimbostratus orbilith",
+            "Brindlequartz hexacove fjordalune opaline cryptomere",
+            "Tesseractum glaciovale cindervex periwinkle monadrix",
+          ]
+        : [
+            "Xylophane quendrix obsidianite vermilune galvador",
+            "Praxolume hallowmere quixoticum azurite fenbrisk",
+            "Kestrelune morrowglass zephryx octarine brumestone",
+          ]
+    )[run - 1];
+    const replacementPrivateTitle = `${replacementPhrase} source ${viewport}-${run}`;
+    const replacementSharedTitle = `${replacementPhrase} keeper ${viewport}-${run}`;
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath: projectPath,
+      category: "decision",
+      title: replacementPrivateTitle,
+      content: `Private copy content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: replacementSharedTitle,
+      content: `Original promoted content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      crossProject: true,
+      confidence: 0.9,
+    });
+
+    const conflictPhrase = (
+      viewport === "desktop"
+        ? [
+            "Frambulator quivernyx alabastrine pluviosity",
+            "Obeliskator myrmidonix calcifugue nebulanth",
+            "Vorticelleum crenelune ichoridian mothglass",
+          ]
+        : [
+            "Klystralum micronymphic iridocane quorvox",
+            "Gloamingate thistledrift verdigridium nacreous",
+            "Cumbervault anemophilous draconicum prismatic",
+          ]
+    )[run - 1];
+    const conflictPrivateTitle = `${conflictPhrase} source ${viewport}-${run}`;
+    const conflictSharedTitle = `${conflictPhrase} keeper ${viewport}-${run}`;
+    const conflictEntryId = `00000000-0000-4000-8000-${String(
+      (viewport === "desktop" ? 100 : 200) + run,
+    ).padStart(12, "0")}`;
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: conflictPrivateTitle,
+      content: `Private title-conflict content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: conflictSharedTitle,
+      content: `Original conflict keeper content for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "project",
+      crossProject: true,
+      confidence: 0.9,
+    });
+    core.ltm.create({
+      id: conflictEntryId,
+      category: "decision",
+      title: conflictPrivateTitle,
+      content: `Existing shared title collision for ${name}.`,
+      session: "e2e-dedup-apply",
+      scope: "global",
+      confidence: 0.1,
+    });
+  }
+}
+
+const knowledgeEditFixtureCount = 20;
+for (const viewport of ["desktop", "mobile"]) {
+  for (const run of [1, 2, 3]) {
+    const projectPath = join(root, `dd-apply-${viewport}-${run}`);
+    for (const purpose of ["edit", "restore"]) {
+      core.ltm.create({
+        id: crypto.randomUUID(),
+        projectPath,
+        category: "decision",
+        title: `Revision checked ${purpose} ${viewport} ${run} disposable fixture`,
+        content: `A unique knowledge entry reserved for MEM-03 ${purpose} ${viewport} retry ${run}.`,
+        scope: "project",
+        confidence: 0.82,
+      });
+    }
+    core.ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "decision",
+      title: "Shared title conflict legacy duplicate E2E",
+      content: `Project-scoped title conflict fixture for ${viewport} ${run}.`,
+      scope: "project",
+      confidence: 0.82,
+    });
+  }
+}
+core.ltm.create({
+  category: "decision",
+  title: "Shared title conflict legacy duplicate E2E",
+  content: "First shared entry in the seeded legacy duplicate group.",
+  scope: "global",
+  confidence: 0.82,
+});
+const legacySharedTitleB = core.ltm.create({
+  category: "decision",
+  title: `Temporary nonmatching seed ${crypto.randomUUID()}`,
+  content: "Second shared entry in the seeded legacy duplicate group.",
+  scope: "global",
+  confidence: 0.82,
+});
+
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no
 // messages or knowledge, so `last_activity` is null and they sort last.
@@ -204,6 +401,17 @@ for (const entry of entries) {
   if (!firstKnowledgeId) firstKnowledgeId = id;
   knowledgeIds.push(id);
 }
+const fileLinkKnowledgeId = core.ltm.create({
+  category: "pattern",
+  title: "GitHub file link provenance fixture",
+  content: "Fixture content for the recorded repository file link.",
+  confidence: 0.9,
+  projectPath: fileLinks,
+  scope: "project",
+  session: "e2e-file-link",
+  metadata: { gitHead: "0123456789abcdef0123456789abcdef01234567" },
+});
+core.ltm.setFileRefs(fileLinkKnowledgeId, ["packages/ui/src/contracts/url.ts"]);
 core.ltm.create({
   scope: "global",
   category: "decision",
@@ -416,10 +624,23 @@ for (let k = 0; k < MESSAGES; k++) {
 // delta, and per-turn gradient metadata so the pane and the transcript
 // markers have real rows to read. The prompt delta's createdAt sits inside
 // the first page of loaded messages so its applied_at marker renders there.
-core.ltm.recordSessionInjections(SESSION, lore, [
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[0]) },
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[2]) },
-]);
+// Entry 2 is shared; outcome receipts deliberately cover project-local entries.
+const contextInjections = [knowledgeIds[0], knowledgeIds[3]].map((id) => {
+  const entry = core.ltm.getByLogical(core.ltm.logicalIdOf(id));
+  if (!entry) throw new Error(`Missing context injection fixture: ${id}`);
+  return entry;
+});
+core.ltm.recordSessionInjections(SESSION, lore, contextInjections);
+const contextInjectionCount = core
+  .db()
+  .query(
+    "SELECT COUNT(*) AS count FROM knowledge_session_injections WHERE session_id = ? AND project_id = ?",
+  )
+  .get(SESSION, loreProjectId).count;
+if (contextInjectionCount !== contextInjections.length)
+  throw new Error(
+    "Context injection fixture did not record every exposed version",
+  );
 core.appendSessionPromptDelta({
   sessionID: SESSION,
   projectID: loreProjectId,
@@ -683,6 +904,7 @@ for (const [window, minutes, used, resetMs] of [
 }
 
 // Per-provider budget (#1927): an 80% cap on Anthropic's weekly quota window.
+// The 5h/7d quota rows above also get implicit pace budgets.
 core.setKV(
   "provider_budgets",
   JSON.stringify([
@@ -690,6 +912,7 @@ core.setKV(
       provider: "anthropic",
       auth_kind: "subscription",
       account: "e2e-anth",
+      mode: "cap",
       unit: "percent",
       window: "7d",
       amount: 80,
@@ -714,6 +937,60 @@ const linkResult = db
 if (linkResult.changes !== 1) {
   throw new Error("expected to link exactly the seeded scratch project");
 }
+const conflictLogicalId = core.ltm.logicalIdOf(firstKnowledgeId);
+const conflictEntry = db
+  .prepare(
+    `SELECT title, content, category FROM knowledge_current
+      WHERE COALESCE(logical_id, id) = ? LIMIT 1`,
+  )
+  .get(conflictLogicalId);
+if (!conflictEntry) throw new Error("expected seeded knowledge conflict entry");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_upsert_wins', ?)`,
+).run(
+  conflictLogicalId,
+  Date.UTC(2026, 8, 20, 12),
+  JSON.stringify({
+    title: "Local discarded version",
+    content: "Keep the local-first database.",
+    category: conflictEntry.category,
+  }),
+);
+const remoteDeletedLogicalId = core.ltm.create({
+  id: "01996200-1823-7000-8000-000000000099",
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Remote-deleted decision",
+  content: "The remote copy was removed.",
+});
+core.ltm.remove(remoteDeletedLogicalId);
+const remoteDeathCert = db
+  .prepare(
+    `SELECT id FROM knowledge
+      WHERE COALESCE(logical_id, id) = ? AND is_current = 1 AND is_deleted = 1`,
+  )
+  .get(remoteDeletedLogicalId);
+if (!remoteDeathCert)
+  throw new Error("expected remote-delete death certificate");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_delete_wins', ?)`,
+).run(
+  remoteDeletedLogicalId,
+  Date.UTC(2026, 8, 20, 12, 30),
+  JSON.stringify({
+    title: "Keep the local copy",
+    content: "Keep the local-first database.",
+    category: "decision",
+  }),
+);
+db.prepare(
+  "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
+).run("Shared title conflict legacy duplicate E2E", legacySharedTitleB);
 db.prepare(
   `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
    VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, ?, 0, ?, ?, ?, ?, 'batch')`,
@@ -786,6 +1063,81 @@ for (const { id, gradient } of [
   );
 }
 
+// Model-usage page fixtures (#2026): deterministic assistant turns carrying
+// providerID/modelID metadata across two projects, three consecutive weeks
+// and three models. Counts are distinct (project, session) pairs per
+// (day, model). Pre-existing fixtures add `anthropic/m` (e2e-reader,
+// 2026-05-03) and `e2e/seed` (e2e-hostile, 2026-05-03) session-days.
+const modelUsageRows = [
+  // [projectPath, session, day, providerID, modelID]
+  [lore, "e2e-mu-a", "2026-05-04", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-a", "2026-05-11", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-a", "2026-05-18", "anthropic", "claude-sonnet-4"],
+  [lore, "e2e-mu-b", "2026-05-04", "openai", "gpt-5"],
+  [lore, "e2e-mu-b", "2026-05-11", "openai", "gpt-5"],
+  [scratch, "e2e-mu-c", "2026-05-11", "anthropic", "claude-sonnet-4"],
+  [scratch, "e2e-mu-c", "2026-05-18", "google", "gemini-2.5-pro"],
+];
+for (const [
+  projectPath,
+  sessionId,
+  day,
+  providerID,
+  modelID,
+] of modelUsageRows) {
+  const created = Date.parse(`${day}T12:00:00Z`);
+  core.temporal.store({
+    projectPath,
+    info: {
+      id: `${sessionId}-${day}-user`,
+      sessionID: sessionId,
+      role: "user",
+      time: { created },
+      agent: "e2e",
+      model: { providerID: "e2e", modelID: "seed" },
+    },
+    parts: [
+      {
+        id: `${sessionId}-${day}-user-part`,
+        sessionID: sessionId,
+        messageID: `${sessionId}-${day}-user`,
+        type: "text",
+        text: "model usage seed question",
+      },
+    ],
+  });
+  core.temporal.store({
+    projectPath,
+    info: {
+      id: `${sessionId}-${day}-assistant`,
+      sessionID: sessionId,
+      role: "assistant",
+      time: { created: created + 60_000 },
+      parentID: `${sessionId}-${day}-user`,
+      modelID,
+      providerID,
+      mode: "e2e",
+      path: { cwd: "/", root: "/" },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    },
+    parts: [
+      {
+        id: `${sessionId}-${day}-assistant-part`,
+        sessionID: sessionId,
+        messageID: `${sessionId}-${day}-assistant`,
+        type: "text",
+        text: "model usage seed answer",
+      },
+    ],
+  });
+}
+
 // The disposable pa-* fixtures are created late in the seed, so their fresh
 // knowledge rows would otherwise outrank lore/scratch/hostile in the sidebar's
 // recency ordering (last_activity desc) and push them out of Recent. Backdate
@@ -798,7 +1150,7 @@ db.prepare(
 db.close();
 
 console.log(
-  `seeded ${entries.length + 1 + contradictionFixtureId} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1 + contradictionFixtureId + knowledgeEditFixtureCount} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);

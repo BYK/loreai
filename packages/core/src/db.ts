@@ -2075,9 +2075,9 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     `,
   // Version 71 (#827 E-5-F3): scope selection & team-promotion policy plumbing (producer side).
   // `projects.scope_id` = the team scope a project is ASSOCIATED with (promotion TARGET; NULL =
-  // personal). `projects.promotion_policy` = per-project override of the auto/manual promotion
-  // policy (NULL = inherit the team default). `scopes.promotion_policy` = the team-level default,
-  // pulled from remote (0034). All behavior-preserving until F3-3 wires push scope resolution.
+  // personal). `projects.promotion_policy` = the local per-project auto-share override (`auto`
+  // opts in; `manual`/NULL disable it). `scopes.promotion_policy` = the team-level review policy
+  // mirrored from remote (0034); it never enables project auto-share.
   `
    ALTER TABLE projects ADD COLUMN scope_id TEXT;
    ALTER TABLE projects ADD COLUMN promotion_policy TEXT;
@@ -2466,6 +2466,41 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- with no time.
   ALTER TABLE session_prompt_deltas ADD COLUMN created_at INTEGER;
   `,
+  `
+  -- Version 101: remove subscription quota snapshots keyed by rotating
+  -- credentials; they will be repopulated with stable account IDs (#2022).
+  DELETE FROM provider_quotas WHERE auth_kind = 'subscription';
+  `,
+  `
+  -- Version 102: the global daily budget is retired in favour of
+  -- per-provider budgets (#1927). No-op marker: the delete of the
+  -- 'daily_budget' kv_meta row runs in migrate() by
+  -- DAILY_BUDGET_RETIRE_MIGRATION_INDEX, because kv_meta can be missing on
+  -- a damaged database (it is recreated later by recovery).
+  SELECT 1;
+  `,
+  `
+  -- Version 103: bound replayed knowledge-handle ownership scans by tenant
+  -- and ID prefix. A tenant/project index cannot bound a prefix scan across
+  -- projects, including historical versions.
+  CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
+  `,
+  `
+  -- Version 104: pin outcome feedback to the knowledge version actually
+  -- exposed (#2054). Legacy provenance is unknown; never guess a backfill.
+  -- Recreate a lost local receipt table before ALTER during upgrade as well
+  -- as on ordinary recovery of an already-current schema.
+  CREATE TABLE IF NOT EXISTS knowledge_session_injections (
+    session_id TEXT NOT NULL,
+    logical_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    credited INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT,
+    PRIMARY KEY (session_id, logical_id)
+  );
+  ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2496,6 +2531,7 @@ const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
 const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
 const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
+const DAILY_BUDGET_RETIRE_MIGRATION_INDEX = 101; // 0-based index of version-102
 
 /**
  * Add durable tenant ownership without re-keying or deleting historical local
@@ -3917,7 +3953,7 @@ export function assertFts5Available(database: Database): void {
     if (!/fts5|no such module/i.test(detail)) throw e;
     throw new Error(
       `Lore requires SQLite with the FTS5 full-text search extension, but this runtime's SQLite was built without it (${detail}). ` +
-        "FTS5 powers Lore's memory search and cannot be disabled. Use the standalone `lore` binary, or a Node.js/Bun build whose bundled SQLite includes FTS5. " +
+        "FTS5 powers Lore's memory search and cannot be disabled. Use Node.js 22.16 or later, except 23.x (earlier Node 22 builds and tested Node 23 releases ship SQLite without FTS5), Bun, or the standalone `lore` binary. " +
         "See https://www.sqlite.org/fts5.html",
       { cause: e },
     );
@@ -4177,6 +4213,16 @@ function migrate(database: Database) {
       applySyncTenantIsolation(database);
     } else if (i === TEMPORAL_IDENTITY_MIGRATION_INDEX) {
       applyTemporalIdentity(database);
+    } else if (i === DAILY_BUDGET_RETIRE_MIGRATION_INDEX) {
+      if (
+        database
+          .query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+          )
+          .get() !== null
+      ) {
+        database.exec("DELETE FROM kv_meta WHERE key = 'daily_budget'");
+      }
     } else {
       // Pre-strip any column-side ALTERs that are already satisfied by the
       // current schema (ADD COLUMN where the column exists, RENAME COLUMN
@@ -4417,6 +4463,7 @@ function recoverMissingObjects(database: Database) {
       created_at  INTEGER NOT NULL,
       credited    INTEGER NOT NULL DEFAULT 0,
       verdict     TEXT,
+      version_id  TEXT,
       PRIMARY KEY (session_id, logical_id)
     );
     CREATE INDEX IF NOT EXISTS idx_ksi_session_uncredited
@@ -4587,6 +4634,9 @@ function recoverMissingObjects(database: Database) {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_knowledge_logical ON knowledge(logical_id, version);
     CREATE INDEX IF NOT EXISTS idx_knowledge_current ON knowledge(is_current);
+    -- Foreground delta replay requires this exact index via INDEXED BY. Recover
+    -- it even when the schema version is already current and the index was lost.
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_id ON knowledge(tenant_id, id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_one_current
       ON knowledge(logical_id) WHERE is_current = 1;
     CREATE INDEX IF NOT EXISTS idx_knowledge_project_current
@@ -4888,6 +4938,12 @@ function recoverMissingObjects(database: Database) {
       if (!icols.some((c) => c.name === "verdict")) {
         database.exec(
           "ALTER TABLE knowledge_session_injections ADD COLUMN verdict TEXT;",
+        );
+      }
+      // Version 104: missing exposure provenance remains NULL on recovery.
+      if (!icols.some((c) => c.name === "version_id")) {
+        database.exec(
+          "ALTER TABLE knowledge_session_injections ADD COLUMN version_id TEXT;",
         );
       }
       database.exec(
@@ -6195,10 +6251,7 @@ export function setProjectScope(id: string, scopeId: string | null): void {
     .run(scopeId, currentTenantId(), id);
 }
 
-/**
- * Set (or clear, with null) a project-level override of the team-promotion policy. Null ⇒ inherit
- * the bound team scope's default (see effectivePromotionPolicy).
- */
+/** Set or clear the project-local auto-share override. Null disables auto-share. */
 export function setProjectPromotionPolicy(
   id: string,
   policy: "manual" | "auto" | null,
@@ -6210,30 +6263,16 @@ export function setProjectPromotionPolicy(
     .run(policy, currentTenantId(), id);
 }
 
-/**
- * Effective team-promotion policy for a project: the project override if set, else the bound team
- * scope's default (from the pulled scopes mirror), else 'manual' — never auto-promote to a team
- * without review unless explicitly opted in.
- */
-export function effectivePromotionPolicy(id: string): "manual" | "auto" {
+/** Whether this project explicitly opted into automatic sharing. */
+export function projectAutoShare(id: string): boolean {
   const p = db()
     .query(
-      "SELECT scope_id, promotion_policy FROM projects WHERE tenant_id = ? AND id = ?",
+      "SELECT promotion_policy FROM projects WHERE tenant_id = ? AND id = ?",
     )
     .get(currentTenantId(), id) as {
-    scope_id: string | null;
     promotion_policy: string | null;
   } | null;
-  if (p?.promotion_policy === "auto" || p?.promotion_policy === "manual") {
-    return p.promotion_policy;
-  }
-  if (p?.scope_id) {
-    const s = db()
-      .query("SELECT promotion_policy FROM scopes WHERE id = ?")
-      .get(p.scope_id) as { promotion_policy: string | null } | null;
-    if (s?.promotion_policy === "auto") return "auto";
-  }
-  return "manual";
+  return p?.promotion_policy === "auto";
 }
 
 /**

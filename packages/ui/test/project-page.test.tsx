@@ -31,6 +31,8 @@ const client = {
       project_override: null,
       team_default: null,
     },
+    auto_share: false,
+    review_required: null,
     state: "not_linked",
     detail: null,
   }),
@@ -56,9 +58,11 @@ const linkedAuto: SharingStatus = {
   team: { id: "team-acme", name: "Acme" },
   policy: {
     effective: "auto",
-    project_override: null,
+    project_override: "auto",
     team_default: "auto",
   },
+  auto_share: true,
+  review_required: false,
   state: "linked",
   detail: null,
 };
@@ -189,6 +193,8 @@ describe("ProjectPage", () => {
         project_override: null,
         team_default: null,
       },
+      auto_share: false,
+      review_required: null,
       state: "not_linked",
       detail: null,
     });

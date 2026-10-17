@@ -2287,15 +2287,14 @@ describe.skipIf(gate())(
     // 0039 revokes the default PUBLIC/anon EXECUTE grant on every SECURITY
     // DEFINER function so PostgREST no longer exposes them to unauthenticated
     // (or, for triggers, any) clients via /rpc. `authenticated` KEEPS EXECUTE on
-    // the five client RPCs (the CLI calls them) and on the RLS helpers (a policy
+    // the four client RPCs (the CLI calls them) and on the RLS helpers (a policy
     // expression runs AS the querying role, so it needs helper EXECUTE), and
     // LOSES it on the trigger/internal functions.
     const CLIENT_RPCS = [
       "create_team",
       "add_scope_member",
-      "remove_scope_member",
+      "remove_scope_member_rotating",
       "set_scope_role",
-      "rotate_scope_key",
     ];
     const RLS_HELPERS = [
       "is_member",
@@ -2347,6 +2346,26 @@ describe.skipIf(gate())(
       }
     });
 
+    it("the legacy three-argument set_scope_role RPC is not executable", async () => {
+      const grantees = await h.asService((c) =>
+        c
+          .query(
+            `select coalesce(r.rolname, 'PUBLIC') as grantee
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+               cross join lateral
+                 aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+               left join pg_roles r on r.oid = a.grantee
+              where n.nspname = 'public'
+                and p.proname = 'set_scope_role'
+                and pg_get_function_identity_arguments(p.oid) = 'p_scope uuid, p_user uuid, p_role text'
+                and a.privilege_type = 'EXECUTE'`,
+          )
+          .then((result) => result.rows as Array<{ grantee: string }>),
+      );
+      expect(grantees).toEqual([]);
+    });
+
     it("authenticated keeps EXECUTE on client RPCs and RLS helpers", async () => {
       for (const fn of [...CLIENT_RPCS, ...RLS_HELPERS]) {
         const g = await execGrantees(fn);
@@ -2355,6 +2374,20 @@ describe.skipIf(gate())(
           `${fn}: authenticated must EXECUTE`,
         ).toBe(true);
       }
+    });
+
+    it("the legacy remove_scope_member RPC is no longer executable", async () => {
+      const grantees = await execGrantees("remove_scope_member");
+      expect(grantees.has("PUBLIC")).toBe(false);
+      expect(grantees.has("anon")).toBe(false);
+      expect(grantees.has("authenticated")).toBe(false);
+    });
+
+    it("the legacy rotate_scope_key RPC is no longer executable", async () => {
+      const grantees = await execGrantees("rotate_scope_key");
+      expect(grantees.has("PUBLIC")).toBe(false);
+      expect(grantees.has("anon")).toBe(false);
+      expect(grantees.has("authenticated")).toBe(false);
     });
 
     it("trigger/internal functions are executable only by postgres/service_role", async () => {

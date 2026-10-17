@@ -50,5 +50,48 @@ export const knowledgeRoutes: RouteModule = {
         wrap((knowledge, url) => knowledge.handleListAllKnowledge(url)),
       ),
     );
+
+    app.patch(
+      "/api/v1/knowledge/:id",
+      ctx.declaredMethodsOnly(["PATCH"], async (c: GatewayContext) => {
+        const edit = await import("../knowledge-edit-api");
+        const request = c.var.request;
+        return withManagementCors(
+          await edit.handlePatchKnowledge(
+            request,
+            c.req.param("id") ?? "",
+            ctx.config.hostedMode,
+          ),
+          c.var.allowedManagementOrigin,
+        );
+      }),
+    );
+    app.post(
+      "/api/v1/knowledge/:id/restore",
+      ctx.declaredMethodsOnly(["POST"], async (c: GatewayContext) => {
+        const edit = await import("../knowledge-edit-api");
+        const request = c.var.request;
+        return withManagementCors(
+          await edit.handleRestoreKnowledge(
+            request,
+            c.req.param("id") ?? "",
+            ctx.config.hostedMode,
+          ),
+          c.var.allowedManagementOrigin,
+        );
+      }),
+    );
+    app.get(
+      "/api/v1/knowledge/:id/effects",
+      ctx.declaredMethodsOnly(["GET"], (c: GatewayContext) => {
+        const edit = import("../knowledge-edit-api");
+        return edit.then((api) =>
+          withManagementCors(
+            api.handleKnowledgeEffects(c.req.param("id") ?? ""),
+            c.var.allowedManagementOrigin,
+          ),
+        );
+      }),
+    );
   },
 };

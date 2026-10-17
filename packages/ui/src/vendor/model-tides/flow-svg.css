@@ -1,0 +1,129 @@
+/*
+ * Vendored from https://github.com/BYK/model-tides
+ * Source path: src/flow-svg/flow-svg.css
+ * Source commit: debf94918013ff8bb579d7a12272521a1d395080
+ * MIT License, Copyright (c) 2026 Burak Yigit Kaya — see LICENSE in this directory.
+ */
+.usage-chart.flow-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    overflow: visible;
+}
+
+.flow-svg .chart-gridline {
+    stroke: var(--chart-grid, rgba(206, 210, 216, 0.08));
+    stroke-width: 1;
+    stroke-dasharray: 2 6;
+}
+
+.flow-svg .date-axis,
+.flow-svg .date-tick {
+    stroke: var(--chart-axis, rgba(206, 210, 216, 0.35));
+    stroke-width: 1;
+}
+
+.flow-svg .date-label {
+    fill: currentColor;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.flow-svg .axis-caption {
+    fill: currentColor;
+    font-family: inherit;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 1.35px;
+    opacity: 0.68;
+}
+
+.flow-svg .flow-ribbon {
+    transition: opacity 120ms;
+}
+
+.flow-svg .flow-ribbon:hover {
+    opacity: 0.8;
+}
+
+.flow-svg [data-flow-action]:hover { cursor: help; }
+.flow-svg .continuity-ribbon:hover { opacity: 0.65; }
+.flow-svg .usage-node:hover { stroke: var(--text, white); stroke-width: 1.6; }
+
+.flow-svg .flow-entry {
+    opacity: var(--flow-entry-opacity, 0.34);
+}
+
+.flow-svg .flow-transition {
+    opacity: var(--flow-transition-opacity, 0.3);
+}
+
+.flow-svg .flow-intra {
+    opacity: var(--flow-intra-opacity, 0.58);
+}
+
+.flow-svg .flow-inferred {
+    opacity: var(--flow-inferred-opacity, 0.5);
+}
+
+.flow-svg .continuity-ribbon {
+    opacity: var(--flow-continuity-opacity, 0.24);
+}
+
+.flow-svg .usage-node {
+    stroke: var(--node-outline, rgba(255, 255, 255, 0.24));
+    stroke-width: 0.7;
+}
+
+.flow-svg-widget {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.flow-svg-legend {
+    display: flex;
+    flex: 0 0 30px;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    overflow-x: auto;
+    padding: 0 10px;
+    scrollbar-width: thin;
+}
+
+.flow-svg-legend-item {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    color: currentColor;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.flow-svg-legend-swatch {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    border-radius: 2px;
+}
+
+.flow-svg-canvas {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+}
+
+.flow-svg-widget [data-flow-action] {
+    cursor: pointer;
+}

@@ -9,6 +9,8 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  DedupApplyBody,
+  DedupApplyReceipt,
   DedupPreviewCandidate,
   DedupPreviewGroup,
   DedupPreviewResponse,
@@ -16,6 +18,7 @@ import type {
 } from "~/contracts";
 import {
   closeLoreDb,
+  createKnowledgeRepo,
   createReviewDecisionsStore,
   openLoreDb,
   type DedupReviewMark,
@@ -23,6 +26,7 @@ import {
 } from "~/db";
 import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { ApiError, type ApiClient } from "~/lib/api";
+import { markFrom } from "~/lib/dedup-review";
 import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { WorkspaceProvider } from "~/routes/workspace";
 import { IDBFactory } from "./idb-globals";
@@ -69,6 +73,20 @@ function group(
   };
 }
 
+function sharedGroup(
+  groupId = "global:group-1",
+  candidates = [
+    candidate("shared-a", { scope: "shared", project_id: null }),
+    candidate("shared-b", { scope: "shared", project_id: null }),
+  ],
+): DedupPreviewGroup {
+  return {
+    ...group(groupId, candidates),
+    scope: "global",
+    project_id: null,
+  };
+}
+
 function response(groups: DedupPreviewGroup[]): DedupPreviewResponse {
   return {
     dry_run: true,
@@ -76,6 +94,55 @@ function response(groups: DedupPreviewGroup[]): DedupPreviewResponse {
     project: { clusters: [], totalRemoved: 0 },
     global: { clusters: [], totalRemoved: 0 },
     project_shared: { clusters: [], totalRemoved: 0 },
+  };
+}
+
+function receiptFor(
+  routeProjectId: string,
+  body: DedupApplyBody,
+  options: {
+    appliedIndices?: number[];
+    refused?: DedupApplyReceipt["refused"];
+    replayed?: boolean;
+  } = {},
+): DedupApplyReceipt {
+  const indices =
+    options.appliedIndices ?? body.decisions.map((_, index) => index);
+  return {
+    operationId: body.operationId,
+    projectId: body.projectId === null ? null : routeProjectId,
+    applied: indices.flatMap((groupIndex) => {
+      const decision = body.decisions[groupIndex];
+      return decision
+        ? [
+            {
+              groupIndex,
+              keepId: decision.keepId,
+              keepRevision: 2,
+              merged: decision.mergeIds.map((id) => ({
+                id,
+                revision: 2,
+                tombstoneVersionId: `${id}-tombstone`,
+              })),
+              appliedAt: 1_700_000_000_001,
+              ...(decision.contentFromId === undefined
+                ? {}
+                : {
+                    contentFrom: {
+                      id: decision.contentFromId,
+                      revision: 1,
+                      replacedKeepRevision: 1,
+                      keepVersionId: `${decision.keepId}-version-2`,
+                    },
+                  }),
+            },
+          ]
+        : [];
+    }),
+    refused: options.refused ?? [],
+    startedAt: 1_700_000_000_000,
+    finishedAt: 1_700_000_000_002,
+    replayed: options.replayed ?? false,
   };
 }
 
@@ -119,6 +186,13 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     listProjects: async () => [],
     previewDedup: async () => response([group()]),
+    getSyncStatus: async () => ({
+      enabled: false,
+      state: "disabled",
+      pending_changes: 0,
+    }),
+    applyDedup: async (id: string, body: DedupApplyBody) =>
+      receiptFor(id, body),
     listKnowledgeVersions: async (id: string) => {
       const item = group().candidates.find((value) => value.logical_id === id);
       if (!item) throw new Error(`Unknown knowledge id: ${id}`);
@@ -313,6 +387,9 @@ describe("DuplicateReview", () => {
     expect(
       await screen.findByText("No duplicate candidates"),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
     emptyMount.unmount();
 
     const previewDedup = vi
@@ -328,6 +405,79 @@ describe("DuplicateReview", () => {
       await screen.findByText("No duplicate candidates"),
     ).toBeInTheDocument();
     expect(previewDedup).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows read-only shared-title conflicts with links and omits empty data", async () => {
+    const conflicts = [
+      {
+        title_key: "shared title",
+        entries: [
+          {
+            id: "project-shared-entry",
+            title: "Project-owned shared entry",
+            project_id: "project-2",
+            scope: "shared" as const,
+          },
+          {
+            id: "global-shared-entry",
+            title: "Global shared entry",
+            project_id: null,
+            scope: "shared" as const,
+          },
+        ],
+      },
+    ];
+    const withConflicts = mount(
+      makeClient({
+        previewDedup: async () => ({
+          ...response([]),
+          shared_title_conflicts: conflicts,
+        }),
+      }),
+    );
+    const section = await screen.findByTestId("shared-title-conflicts");
+    expect(section).toHaveTextContent(
+      "Lore does not merge, rename, or delete them automatically",
+    );
+    expect(section).toHaveTextContent(
+      "Rename, change scope, or delete one to resolve the conflict",
+    );
+    expect(
+      within(section).getByRole("link", { name: "Project-owned shared entry" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${knowledgeHref("project-2", "project-shared-entry")}`,
+    );
+    expect(
+      within(section).getByRole("link", { name: "Global shared entry" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${globalKnowledgeHref("global-shared-entry")}`,
+    );
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
+    withConflicts.unmount();
+
+    const missing = mount(
+      makeClient({ previewDedup: async () => response([]) }),
+    );
+    await screen.findByText("No duplicate candidates");
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
+    missing.unmount();
+
+    mount(
+      makeClient({
+        previewDedup: async () => ({
+          ...response([]),
+          shared_title_conflicts: [],
+        }),
+      }),
+    );
+    await screen.findByText("No duplicate candidates");
+    expect(
+      screen.queryByTestId("shared-title-conflicts"),
+    ).not.toBeInTheDocument();
   });
 
   it("persists decisions and keeper selection, then marks changed revisions stale", async () => {
@@ -357,7 +507,10 @@ describe("DuplicateReview", () => {
       const mark = await createReviewDecisionsStore(db).get(
         `${projectId}/project:stable`,
       );
-      expect(mark?.keepId).toBe("knowledge-b");
+      expect(mark?.kind).toBe("dedup");
+      if (mark?.kind === "dedup") {
+        expect(mark.keepId).toBe("knowledge-b");
+      }
     });
     firstMount.unmount();
 
@@ -375,10 +528,487 @@ describe("DuplicateReview", () => {
     await waitFor(() =>
       expect(screen.getByTestId("review-summary")).toHaveTextContent("1 stale"),
     );
+    expect(screen.getByTestId("apply-accepted")).toBeDisabled();
     expect(screen.getByTestId("duplicate-group")).toHaveAttribute(
       "data-testid",
       "duplicate-group",
     );
+  });
+
+  it("keeps Apply disabled when the only mark is skipped", async () => {
+    mount();
+    await screen.findByText("Full content for knowledge-a");
+
+    fireEvent.click(screen.getByTestId("skip-group"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 skipped",
+      ),
+    );
+    expect(screen.getByTestId("apply-accepted")).toBeDisabled();
+  });
+
+  it("confirms both scopes with honest sync consequences and separate operations", async () => {
+    const projectGroup = group("project:apply", [
+      candidate("project-keep"),
+      candidate("project-merge"),
+    ]);
+    const shared = sharedGroup("global:apply");
+    const allCandidates = [...projectGroup.candidates, ...shared.candidates];
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const getSyncStatus = vi.fn(async () => ({
+      enabled: true,
+      state: "idle" as const,
+      pending_changes: 3,
+    }));
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    const client = makeClient({
+      previewDedup: async () => response([projectGroup, shared]),
+      listKnowledgeVersions: async (id) => {
+        const item = allCandidates.find(
+          (candidateItem) => candidateItem.logical_id === id,
+        );
+        if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+        return history(item);
+      },
+      getSyncStatus,
+      applyDedup,
+    });
+    mount(client, Promise.resolve(db));
+    await screen.findByText("Full content for project-keep");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getAllByTestId("duplicate-group")[1]!);
+    await screen.findByText("Full content for shared-a");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "2 accepted",
+      ),
+    );
+
+    // The workspace's shell status loader also reads sync status; count only
+    // the read the confirmation itself makes.
+    const syncReadsBeforeConfirm = getSyncStatus.mock.calls.length;
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "Regenerates .lore.md for this project (when .lore.md export is enabled)",
+    );
+    expect(dialog).toHaveTextContent(
+      ".lore.md files are not affected (the removed entries belong to no project)",
+    );
+    await within(dialog).findByText(
+      "Deletions are synced (3 changes already pending)",
+    );
+    const savedMarks = (
+      await createReviewDecisionsStore(db).list(projectId)
+    ).filter((record): record is DedupReviewMark => record.kind === "dedup");
+    const expectedProjectReviewedAt = savedMarks.find(
+      (mark) => mark.groupId === projectGroup.group_id,
+    )?.markedAt;
+    const expectedSharedReviewedAt = savedMarks.find(
+      (mark) => mark.groupId === shared.group_id,
+    )?.markedAt;
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 2 accepted" }),
+    );
+
+    await waitFor(() => expect(applyDedup).toHaveBeenCalledTimes(2));
+    const projectBody = applyDedup.mock.calls[0]?.[1];
+    const sharedBody = applyDedup.mock.calls[1]?.[1];
+    expect(applyDedup.mock.calls[0]?.[0]).toBe(projectId);
+    expect(applyDedup.mock.calls[1]?.[0]).toBe(projectId);
+    expect(projectBody).not.toHaveProperty("projectId");
+    expect(sharedBody?.projectId).toBeNull();
+    expect(projectBody?.reviewedAt).toBe(expectedProjectReviewedAt);
+    expect(sharedBody?.reviewedAt).toBe(expectedSharedReviewedAt);
+    expect(projectBody?.actor).toBe("lore-ui");
+    expect(sharedBody?.actor).toBe("lore-ui");
+    expect(projectBody?.decisions[0]).not.toHaveProperty("contentFromId");
+    expect(sharedBody?.decisions[0]).not.toHaveProperty("contentFromId");
+    expect(projectBody?.operationId).not.toBe(sharedBody?.operationId);
+    const operations = await screen.findAllByTestId("dedup-apply-operation");
+    expect(operations).toHaveLength(2);
+    expect(
+      within(operations[0]!).getByText("Project", { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      within(operations[1]!).getByText("Shared (no project)", { exact: true }),
+    ).toBeInTheDocument();
+    await waitFor(async () =>
+      expect(await createReviewDecisionsStore(db).list(projectId)).toEqual([]),
+    );
+    expect(getSyncStatus).toHaveBeenCalledTimes(syncReadsBeforeConfirm + 1);
+  });
+
+  it("applies only fresh accepted marks and retains the stale mark", async () => {
+    const staleSnapshot = group("project:stale", [
+      candidate("stale-keep"),
+      candidate("stale-merge"),
+    ]);
+    const staleFresh = group("project:stale", [
+      candidate("stale-keep", { revision: 2 }),
+      candidate("stale-merge"),
+    ]);
+    const fresh = group("project:fresh", [
+      candidate("fresh-keep"),
+      candidate("fresh-merge"),
+    ]);
+    const currentGroups = [staleFresh, fresh];
+    const allCandidates = currentGroups.flatMap((item) => item.candidates);
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const decisions = createReviewDecisionsStore(db);
+    const staleMark = markFrom(
+      staleSnapshot,
+      "accept",
+      "stale-keep",
+      projectId,
+    );
+    const freshMark = markFrom(fresh, "accept", "fresh-keep", projectId);
+    await decisions.put(staleMark);
+    await decisions.put(freshMark);
+
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    const client = makeClient({
+      previewDedup: async () => response(currentGroups),
+      listKnowledgeVersions: async (id) => {
+        const item = allCandidates.find(
+          (candidateItem) => candidateItem.logical_id === id,
+        );
+        if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+        return history(item);
+      },
+      applyDedup,
+    });
+    mount(client, Promise.resolve(db));
+    await screen.findByText("Full content for stale-keep");
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    expect(screen.getByTestId("apply-accepted")).toHaveTextContent(
+      "Apply 1 accepted…",
+    );
+
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    await screen.findByTestId("dedup-apply-receipt");
+    expect(applyDedup).toHaveBeenCalledTimes(1);
+    expect(applyDedup.mock.calls[0]?.[1].decisions).toEqual([
+      {
+        keepId: "fresh-keep",
+        mergeIds: ["fresh-merge"],
+        expectedRevisions: { "fresh-keep": 1, "fresh-merge": 1 },
+      },
+    ]);
+    await waitFor(async () =>
+      expect(await decisions.list(projectId)).toEqual([staleMark]),
+    );
+  });
+
+  it("shows the project export consequence and device-only sync state", async () => {
+    mount(
+      makeClient({
+        getSyncStatus: async () => ({
+          enabled: false,
+          state: "disabled",
+          pending_changes: null,
+        }),
+      }),
+    );
+    await screen.findByText("Full content for knowledge-a");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "Regenerates .lore.md for this project (when .lore.md export is enabled)",
+    );
+    await within(dialog).findByText("Sync is off — this device only");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  });
+
+  it("clears only applied marks and evicts merged knowledge cache rows", async () => {
+    const firstGroup = group("project:first", [
+      candidate("first-keep"),
+      candidate("first-merge"),
+    ]);
+    const refusedGroup = group("project:refused", [
+      candidate("refused-keep"),
+      candidate("knowledge-b"),
+    ]);
+    const allCandidates = [
+      ...firstGroup.candidates,
+      ...refusedGroup.candidates,
+    ];
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const knowledgeRepo = createKnowledgeRepo(db);
+    await knowledgeRepo.put(
+      {
+        id: "first-merge",
+        project_id: projectId,
+        category: "decision",
+        title: "Cached merged entry",
+        content: "Cached content",
+        confidence: 0.9,
+      },
+      projectId,
+    );
+    await knowledgeRepo.setCollection(projectId, {
+      complete: true,
+      count: 1,
+      nextCursor: null,
+      fetchedAt: Date.now(),
+    });
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) => {
+      const refusedDecision = body.decisions[1];
+      if (!refusedDecision) throw new Error("Expected a second group");
+      return receiptFor(id, body, {
+        appliedIndices: [0],
+        refused: [
+          {
+            groupIndex: 1,
+            keepId: refusedDecision.keepId,
+            mergeIds: refusedDecision.mergeIds,
+            error: {
+              code: "stale_revision",
+              message: "The entry changed after review.",
+              details: [
+                {
+                  id: refusedDecision.mergeIds[0]!,
+                  reason: "stale_revision",
+                  expectedRevision: 1,
+                  actualRevision: 2,
+                },
+              ],
+            },
+          },
+        ],
+      });
+    });
+    const client = makeClient({
+      previewDedup: async () => response([firstGroup, refusedGroup]),
+      listKnowledgeVersions: async (id) => {
+        const item = allCandidates.find(
+          (candidateItem) => candidateItem.logical_id === id,
+        );
+        if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+        return history(item);
+      },
+      applyDedup,
+    });
+    mount(client, Promise.resolve(db));
+    await screen.findByText("Full content for first-keep");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getAllByTestId("duplicate-group")[1]!);
+    await screen.findByText("Full content for refused-keep");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "2 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 2 accepted" }),
+    );
+
+    expect(await screen.findByTestId("applied-group")).toHaveTextContent(
+      "Entry first-merge",
+    );
+    expect(await screen.findByTestId("refused-group")).toHaveTextContent(
+      "This group changed since you reviewed it — rescan and review again",
+    );
+    expect(screen.getAllByTestId("applied-group")).toHaveLength(1);
+    expect(screen.getAllByTestId("refused-group")).toHaveLength(1);
+    await waitFor(async () => {
+      const records = await createReviewDecisionsStore(db).list(projectId);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.kind).toBe("dedup");
+    });
+    const remaining = await createReviewDecisionsStore(db).list(projectId);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.kind).toBe("dedup");
+    if (remaining[0]?.kind === "dedup") {
+      expect(remaining[0].groupId).toBe(refusedGroup.group_id);
+    }
+    expect(await knowledgeRepo.get("first-merge")).toBeUndefined();
+    expect(await knowledgeRepo.collection(projectId)).toBeUndefined();
+  });
+
+  it("retries an unconfirmed apply after remount with the identical body", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const applyDedup = vi
+      .fn<ApiClient["applyDedup"]>()
+      .mockRejectedValueOnce(new Error("The connection closed"))
+      .mockImplementationOnce(async (id, body) =>
+        receiptFor(id, body, { replayed: true }),
+      );
+    const client = makeClient({ applyDedup });
+    const firstMount = mount(client, Promise.resolve(db));
+    await screen.findByText("Full content for knowledge-a");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const firstDialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(firstDialog).findByRole("button", {
+        name: "Apply 1 accepted",
+      }),
+    );
+
+    expect(
+      await screen.findByText("The last apply didn't confirm — Retry"),
+    ).toBeInTheDocument();
+    const storedRecords = await createReviewDecisionsStore(db).list(projectId);
+    const pending = storedRecords.find(
+      (record) => record.kind === "dedup-apply",
+    );
+    expect(pending).toBeDefined();
+    if (!pending || pending.kind !== "dedup-apply") {
+      throw new Error("Pending apply record was not persisted");
+    }
+    const exactBody = pending.body;
+    expect(exactBody.operationId).toBe(pending.operationId);
+    firstMount.unmount();
+
+    mount(client, Promise.resolve(db));
+    expect(
+      await screen.findByTestId("pending-dedup-applies"),
+    ).toHaveTextContent("Retry");
+    fireEvent.click(screen.getByTestId("retry-dedup-apply"));
+
+    await screen.findByTestId("dedup-apply-receipt");
+    expect(applyDedup).toHaveBeenNthCalledWith(1, projectId, exactBody);
+    expect(applyDedup).toHaveBeenNthCalledWith(2, projectId, exactBody);
+    expect(applyDedup.mock.calls[0]?.[1].operationId).toBe(
+      applyDedup.mock.calls[1]?.[1].operationId,
+    );
+    expect(
+      (await createReviewDecisionsStore(db).list(projectId)).some(
+        (record) => record.kind === "dedup-apply",
+      ),
+    ).toBe(false);
+    const operation = screen.getByTestId("dedup-apply-operation");
+    const header = within(operation).getByTestId(
+      "dedup-apply-operation-header",
+    );
+    expect(
+      within(header).getByText("Project", { exact: true }),
+    ).toBeInTheDocument();
+    expect(header).not.toHaveTextContent(/replayed/i);
+    const technicalDetails = within(operation)
+      .getByText("Technical details")
+      .closest("details");
+    if (!technicalDetails) throw new Error("Missing technical details");
+    fireEvent.click(within(operation).getByText("Technical details"));
+    expect(technicalDetails).toHaveTextContent(/Replayed:\s*true/);
+  });
+
+  it("drops pending state after an operation conflict without clearing marks", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const applyDedup = vi
+      .fn<ApiClient["applyDedup"]>()
+      .mockRejectedValue(
+        new ApiError(
+          "http",
+          "/api/v1/projects/p1/dedup/apply",
+          "operation_conflict",
+          409,
+        ),
+      );
+    mount(makeClient({ applyDedup }), Promise.resolve(db));
+    await screen.findByText("Full content for knowledge-a");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Operation ID conflict",
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    const remaining = await createReviewDecisionsStore(db).list(projectId);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.kind).toBe("dedup");
+  });
+
+  it("closes the dialog and removes pending state when hosted apply is forbidden", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const applyDedup = vi
+      .fn<ApiClient["applyDedup"]>()
+      .mockRejectedValue(
+        new ApiError(
+          "forbidden",
+          "/api/v1/projects/p1/dedup/apply",
+          "Hosted mode forbids apply",
+          403,
+        ),
+      );
+    mount(makeClient({ applyDedup }), Promise.resolve(db));
+    await screen.findByText("Full content for knowledge-a");
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Not available in hosted mode",
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(
+      (await createReviewDecisionsStore(db).list(projectId)).some(
+        (record) => record.kind === "dedup-apply",
+      ),
+    ).toBe(false);
   });
 
   it("keeps orphaned marks until explicitly discarded", async () => {
@@ -582,11 +1212,384 @@ describe("DuplicateReview", () => {
     );
   });
 
+  it("restricts shared keepers and applies a selected private copy", async () => {
+    const hostileTitle = '<img src=x onerror="alert(1)">';
+    const privateCopy = candidate("private-copy", { title: hostileTitle });
+    const sharedKeeper = candidate("shared-keeper", {
+      title: "Shared title",
+      scope: "shared",
+      project_id: "project-2",
+    });
+    const projectShared = group(
+      "project_shared:content",
+      [privateCopy, sharedKeeper],
+      { pool: "project_shared", suggested_keep_id: privateCopy.id },
+    );
+    const candidates = projectShared.candidates;
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    mount(
+      makeClient({
+        previewDedup: async () => response([projectShared]),
+        listKnowledgeVersions: async (id) => {
+          const item = candidates.find(
+            (candidateItem) => candidateItem.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+        listProjects: async () =>
+          [{ id: "project-2", name: "Origin Project" }] as Awaited<
+            ReturnType<ApiClient["listProjects"]>
+          >,
+        applyDedup,
+      }),
+      Promise.resolve(db),
+    );
+    await screen.findByText("Full content for private-copy");
+    expect(
+      screen.queryByLabelText("Keep this one (1)"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Keep this one (2)")).toBeChecked();
+    expect(screen.getByTestId("content-to-keep")).toHaveTextContent(
+      "Content to keep",
+    );
+    fireEvent.click(
+      screen.getByLabelText(`the private copy: “${hostileTitle}”`),
+    );
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    const mark = await createReviewDecisionsStore(db).get(
+      `${projectId}/${projectShared.group_id}`,
+    );
+    expect(mark?.kind).toBe("dedup");
+    if (mark?.kind === "dedup") expect(mark.contentFromId).toBe("private-copy");
+
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(
+      "“Shared title” takes the title and content of “",
+    );
+    expect(dialog).toHaveTextContent(
+      "as a new version, remains shared, and the prior version stays in history.",
+    );
+    expect(dialog).toHaveTextContent(
+      "Regenerates .lore.md for this project, Origin Project (when .lore.md export is enabled)",
+    );
+    expect(dialog.querySelector("img")).toBeNull();
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+    await screen.findByTestId("dedup-apply-receipt");
+    expect(applyDedup.mock.calls[0]?.[1].decisions).toEqual([
+      {
+        keepId: "shared-keeper",
+        mergeIds: ["private-copy"],
+        expectedRevisions: {
+          "private-copy": 1,
+          "shared-keeper": 1,
+        },
+        contentFromId: "private-copy",
+      },
+    ]);
+    expect(screen.getByTestId("applied-group")).toHaveTextContent(
+      "prior version remains in history",
+    );
+  });
+
+  it("clears the selected private content when the keeper changes", async () => {
+    const privateCopy = candidate("private-copy");
+    const sharedA = candidate("shared-a", {
+      scope: "shared",
+      project_id: "project-2",
+    });
+    const sharedB = candidate("shared-b", {
+      scope: "shared",
+      project_id: null,
+    });
+    const projectShared = group(
+      "project_shared:multiple-shared",
+      [privateCopy, sharedA, sharedB],
+      { pool: "project_shared", suggested_keep_id: sharedA.id },
+    );
+    const candidates = projectShared.candidates;
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    mount(
+      makeClient({
+        previewDedup: async () => response([projectShared]),
+        listKnowledgeVersions: async (id) => {
+          const item = candidates.find(
+            (candidateItem) => candidateItem.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+      }),
+      Promise.resolve(db),
+    );
+    await screen.findByText("Full content for private-copy");
+    fireEvent.click(
+      screen.getByLabelText("the private copy: “Entry private-copy”"),
+    );
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByLabelText("Keep this one (3)"));
+    await waitFor(async () => {
+      const mark = await createReviewDecisionsStore(db).get(
+        `${projectId}/${projectShared.group_id}`,
+      );
+      expect(mark?.kind).toBe("dedup");
+      if (mark?.kind === "dedup") {
+        expect(mark.keepId).toBe("shared-b");
+        expect(mark.contentFromId).toBeUndefined();
+      }
+    });
+    expect(screen.getByLabelText("the shared entry's content")).toBeChecked();
+  });
+
+  it("explains title conflicts and stale revisions in apply receipts", async () => {
+    const first = group(
+      "project:title-conflict",
+      [
+        candidate("shared-keeper", {
+          scope: "shared",
+          project_id: null,
+        }),
+        candidate("private-source"),
+      ],
+      {
+        pool: "project_shared",
+      },
+    );
+    const candidates = first.candidates;
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body, {
+        appliedIndices: [],
+        refused: [
+          {
+            groupIndex: 0,
+            keepId: "shared-keeper",
+            mergeIds: ["private-source"],
+            error: {
+              code: "title_conflict",
+              message:
+                "The replacement title is already used by another shared entry.",
+              details: [{ id: "third-shared", reason: "title_conflict" }],
+            },
+          },
+        ],
+      }),
+    );
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    mount(
+      makeClient({
+        previewDedup: async () => response([first]),
+        listKnowledgeVersions: async (id) => {
+          const item = candidates.find(
+            (candidateItem) => candidateItem.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+        applyDedup,
+      }),
+      Promise.resolve(db),
+    );
+    await screen.findByText("Full content for shared-keeper");
+    fireEvent.click(
+      screen.getByLabelText("the private copy: “Entry private-source”"),
+    );
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+    const refusal = await screen.findByTestId("refused-group");
+    expect(refusal).toHaveTextContent(
+      "The private copy's title is already used by another shared entry. Rename one of them, then review the group again.",
+    );
+    expect(
+      within(refusal).getByRole("link", { name: "third-shared" }),
+    ).toHaveAttribute("href", "/ui/knowledge/third-shared");
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("closes apply when another group is skipped while the dialog is open", async () => {
+    const remaining = group("project:remaining", [
+      candidate("remaining-keep"),
+      candidate("remaining-merge"),
+    ]);
+    const skipped = group("project:skipped", [
+      candidate("skipped-keep"),
+      candidate("skipped-merge"),
+    ]);
+    const candidates = [...remaining.candidates, ...skipped.candidates];
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const marks = createReviewDecisionsStore(db);
+    await marks.put(markFrom(remaining, "accept", "remaining-keep", projectId));
+    await marks.put(markFrom(skipped, "accept", "skipped-keep", projectId));
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    mount(
+      makeClient({
+        previewDedup: async () => response([remaining, skipped]),
+        listKnowledgeVersions: async (id) => {
+          const item = candidates.find(
+            (candidateItem) => candidateItem.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+        applyDedup,
+      }),
+      Promise.resolve(db),
+    );
+    await screen.findByText("Full content for remaining-keep");
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "2 accepted",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("apply-accepted")).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(screen.getAllByTestId("duplicate-group")[1]!);
+    fireEvent.click(screen.getByTestId("skip-group"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted · 1 skipped · 0 pending",
+      ),
+    );
+    expect(dialog).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Apply 1 accepted" }),
+    );
+    await screen.findByTestId("dedup-apply-receipt");
+    expect(applyDedup).toHaveBeenCalledTimes(1);
+    expect(applyDedup.mock.calls[0]?.[1].decisions).toEqual([
+      {
+        keepId: "remaining-keep",
+        mergeIds: ["remaining-merge"],
+        expectedRevisions: {
+          "remaining-keep": 1,
+          "remaining-merge": 1,
+        },
+      },
+    ]);
+  });
+
+  it("closes apply without a request when its only group is skipped", async () => {
+    const only = group("project:only", [
+      candidate("only-keep"),
+      candidate("only-merge"),
+    ]);
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    await createReviewDecisionsStore(db).put(
+      markFrom(only, "accept", "only-keep", projectId),
+    );
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    mount(
+      makeClient({
+        previewDedup: async () => response([only]),
+        listKnowledgeVersions: async (id) => {
+          const item = only.candidates.find(
+            (candidateItem) => candidateItem.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+        applyDedup,
+      }),
+      Promise.resolve(db),
+    );
+    await screen.findByText("Full content for only-keep");
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("apply-accepted")).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(screen.getByTestId("skip-group"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "0 accepted · 1 skipped · 0 pending",
+      ),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Apply 0 accepted" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    expect(applyDedup).not.toHaveBeenCalled();
+  });
+
   it("explains that decisions are session-only when IndexedDB is unavailable", async () => {
     mount(makeClient(), Promise.resolve(null));
     expect(
       await screen.findByTestId("review-storage-notice"),
     ).toHaveTextContent("not saved on this device");
+  });
+
+  it("does not send an apply when IndexedDB is unavailable", async () => {
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    mount(makeClient({ applyDedup }), Promise.resolve(null));
+    await screen.findByText("Full content for knowledge-a");
+
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    expect(screen.getByTestId("duplicate-group")).toHaveTextContent("Accepted");
+
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not save the apply operation on this device — no changes were sent.",
+    );
+    expect(applyDedup).not.toHaveBeenCalled();
+    expect(screen.getByTestId("review-summary")).toHaveTextContent(
+      "1 accepted",
+    );
+    expect(screen.getByTestId("duplicate-group")).toHaveTextContent("Accepted");
   });
 
   it("reports failed mark writes and deletes", async () => {

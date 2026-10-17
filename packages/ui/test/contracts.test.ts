@@ -15,6 +15,7 @@ import {
   ContractError,
   cursorPage,
   crossProjectKnowledgeEntry,
+  dedupApplyReceipt,
   dedupPreviewResponse,
   distillationDetail,
   distillationList,
@@ -25,9 +26,12 @@ import {
   isApiError,
   isContractError,
   knowledgeEntry,
+  knowledgeFiles,
   knowledgeList,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
+  modelUsageDocument,
+  modelUsageUploadState,
   parseContract,
   projectClearResult,
   projectList,
@@ -43,6 +47,7 @@ import {
   sessionPage,
   sessionSearchPage,
   sharingStatus,
+  syncRunReceipt,
   syncStatus,
   teamList,
 } from "~/contracts";
@@ -97,9 +102,18 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-account.json": { route: "/account", schema: accountStatus },
   "folk-teams.json": { route: "/teams", schema: teamList },
   "folk-sync-status.json": { route: "/sync/status", schema: syncStatus },
+  "folk-sync-run.json": { route: "/sync/run", schema: syncRunReceipt },
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
+  },
+  "model-usage.json": {
+    route: "/model-usage",
+    schema: modelUsageDocument,
+  },
+  "model-usage-upload.json": {
+    route: "/model-usage/upload",
+    schema: modelUsageUploadState,
   },
   "project-imports.json": {
     route: "/projects/p/imports",
@@ -132,6 +146,14 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
     route: "/projects/p/dedup",
     schema: dedupPreviewResponse,
   },
+  "dedup-apply.json": {
+    route: "/projects/p/dedup/apply",
+    schema: dedupApplyReceipt,
+  },
+  "dedup-apply-gateway.json": {
+    route: "/projects/p/dedup/apply",
+    schema: dedupApplyReceipt,
+  },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {
     route: "/projects/p/knowledge",
@@ -144,6 +166,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "cursor/knowledge-versions.json": {
     route: "/knowledge/k/versions",
     schema: knowledgeVersionHistory,
+  },
+  "knowledge-files.json": {
+    route: "/knowledge/k/files",
+    schema: knowledgeFiles,
   },
 };
 
@@ -356,6 +382,38 @@ describe("contract violations", () => {
     const ok = safeParseContract("/sessions/s/context", sessionContext, sample);
     expect(ok.ok).toBe(true);
     if (ok.ok) expect(ok.value).toEqual(sample);
+
+    for (const version_status of [
+      "current",
+      "superseded",
+      "unknown",
+      "unavailable",
+    ]) {
+      const withVersion = structuredClone(sample);
+      Object.assign(withVersion.knowledge.injections[0]!, {
+        version_id: "v1",
+        current_version_id: version_status === "unavailable" ? null : "v2",
+        version_status,
+      });
+      const parsed = safeParseContract(
+        "/sessions/s/context",
+        sessionContext,
+        withVersion,
+      );
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.value).toEqual(withVersion);
+    }
+    for (const invalid of [
+      { version_id: 42 },
+      { current_version_id: 42 },
+      { version_status: "invented" },
+    ]) {
+      const badVersion = structuredClone(sample);
+      Object.assign(badVersion.knowledge.injections[0]!, invalid);
+      expect(
+        safeParseContract("/sessions/s/context", sessionContext, badVersion).ok,
+      ).toBe(false);
+    }
 
     const broken = structuredClone(sample);
     (broken as Record<string, unknown>).layer = "2";

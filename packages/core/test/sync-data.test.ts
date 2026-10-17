@@ -150,6 +150,137 @@ describe("applyRemoteKnowledge — append-only pull apply (A2, #823)", () => {
     ).toBe("sensitive");
   });
 
+  test.each(["title", "category"] as const)(
+    "a %s-only remote edit appends once without re-push",
+    (field) => {
+      enableSync("basic");
+      const row = remoteRow(`immutable-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        ...row,
+        [field]: field === "title" ? "Remote title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        db()
+          .query("SELECT title, category FROM knowledge WHERE id = ?")
+          .get(row.id),
+      ).toEqual({ title: "AK", category: "decision" });
+      const current = currentKnowledgeRow(row.id)!;
+      expect(current[field]).toBe(changed[field]);
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(
+        readOutbox(0).filter(
+          (entry) =>
+            entry.table_name === "knowledge" && entry.row_id === row.id,
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  test.each(["title", "category"] as const)(
+    "partial %s edits retain the other version fields",
+    (field) => {
+      const row = remoteRow(`partial-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      const changed = {
+        id: row.id,
+        content: row.content,
+        [field]: field === "title" ? "Partial title" : "gotcha",
+      };
+      applyRemoteKnowledge(changed);
+      expect(versions(row.id)).toHaveLength(2);
+      expect(currentKnowledgeRow(row.id)).toMatchObject({
+        project_id: row.project_id,
+        content: row.content,
+        title: field === "title" ? "Partial title" : "AK",
+        category: field === "category" ? "gotcha" : "decision",
+      });
+    },
+  );
+
+  test("partial metadata pulls do not invent absent title/category changes", () => {
+    const row = remoteRow("partial-metadata", "same body");
+    applyRemoteKnowledge(row);
+    applyRemoteKnowledge({
+      id: row.id,
+      content: row.content,
+      sensitivity: "sensitive",
+    });
+    expect(versions(row.id)).toHaveLength(1);
+    expect(currentKnowledgeRow(row.id)).toMatchObject({
+      title: "AK",
+      category: "decision",
+      sensitivity: "sensitive",
+    });
+  });
+
+  test.each(["title", "category", "content"] as const)(
+    "a remote %s append preserves the local team approval",
+    (field) => {
+      const row = remoteRow(`approved-${field}`, "same body");
+      applyRemoteKnowledge(row);
+      expect(ltm.approveForTeam(row.id, "local-reviewer")).toBe(true);
+      const approval = () =>
+        db()
+          .query(
+            "SELECT approval_status, approved_by, approved_at FROM knowledge_current WHERE logical_id = ?",
+          )
+          .get(row.id);
+      const before = approval();
+      applyRemoteKnowledge({
+        ...row,
+        [field]: field === "category" ? "gotcha" : "Edited value",
+      });
+      expect(versions(row.id)).toHaveLength(2);
+      expect(approval()).toEqual(before);
+    },
+  );
+
+  test("appends copy local metadata without accepting remote approval or provenance", () => {
+    const row = remoteRow("local-version-metadata", "same body");
+    applyRemoteKnowledge(row);
+    expect(ltm.rejectForTeam(row.id)).toBe(true);
+    // These are local metadata columns, deliberately absent from the sync
+    // payload contract. Seed the existing device's receipt/provenance values.
+    const local = {
+      approval_status: "rejected",
+      approved_by: null,
+      approved_at: null,
+      promoted_at: 123,
+      source_user_id: "local-user",
+      source_entry_id: "local-source",
+      last_accessed_at: 456,
+      worker_provider_id: "local-provider",
+      worker_model_id: "local-model",
+    };
+    const cols = Object.keys(local);
+    db()
+      .query(
+        `UPDATE knowledge SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      )
+      .run(...Object.values(local), row.id);
+    const forged = Object.fromEntries(
+      cols.map((c) => [c, c.endsWith("_at") ? 999 : "remote-forgery"]),
+    );
+    applyRemoteKnowledge({
+      ...row,
+      title: "New revision",
+      ...forged,
+      approval_status: "approved",
+    });
+    expect(
+      db()
+        .query(
+          `SELECT ${cols.join(", ")} FROM knowledge_current WHERE logical_id = ?`,
+        )
+        .get(row.id),
+    ).toEqual(local);
+    expect(versions(row.id)).toHaveLength(2);
+  });
+
   test("delete → death-cert (no live current); re-delete is a no-op", () => {
     applyRemoteKnowledge(remoteRow("d1", "body"));
     applyRemoteKnowledgeDelete("d1");
@@ -264,6 +395,47 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
         .all() as { row_id: string }[]
     ).map((r) => r.row_id);
     expect(rowIds).toEqual([id]); // every knowledge op coalesced to the logical_id
+  });
+
+  test("restoring a deleted knowledge entry is captured as a live sync upsert", () => {
+    const projectPath = "/tmp/lore-restore-capture";
+    ensureProject(projectPath);
+    setTeamConfig("sync.enabled", "1");
+    const id = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Restored entry",
+      content: "Before delete",
+    });
+    ltm.remove(id);
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(id) as { id: string };
+    db().exec("DELETE FROM sync_outbox");
+
+    const restored = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 19,
+      title: "Restored entry",
+      content: "Recovered content",
+      metadata: null,
+    });
+
+    expect(restored.ok).toBe(true);
+    expect(
+      outboxFor("knowledge").filter((entry) => entry.row_id === id),
+    ).toEqual(
+      expect.arrayContaining([expect.objectContaining({ op: "upsert" })]),
+    );
+    expect(knowledgePushPlan(id)).toMatchObject({
+      op: "upsert",
+      row: {
+        id,
+        title: "Restored entry",
+        content: "Recovered content",
+      },
+    });
   });
 
   test("seedOutbox skips an already-synced versioned (v2) entry — no re-enqueue bloat (#823)", () => {
@@ -1353,6 +1525,37 @@ describe("applyRemoteMeta / applyRemoteMetaCrdt — convergent confidence (A2 3b
     expect(conf(id)).toBeCloseTo(0.7, 6);
     expect(crdtCount(id, "B")).toBe(1);
   });
+
+  test.each([
+    { pos: 1, neg: 0 },
+    { pos: 0, neg: 1 },
+  ])(
+    "explicit confidence edits cancel observed peer overshoot: %j",
+    (counter) => {
+      const id = mk(0.5);
+      ltm.reinforce(id, 0.1);
+      const peer = {
+        logical_id: id,
+        replica_id: "B",
+        ...counter,
+        updated_at: 1,
+      };
+      applyRemoteMetaCrdt(peer);
+
+      ltm.update(id, { confidence: 0.4 });
+      expect(conf(id)).toBeCloseTo(0.4, 6);
+      expect(base(id)).toBe(0.5);
+      // Replaying already-observed evidence must not undo the correction.
+      applyRemoteMetaCrdt(peer);
+      expect(conf(id)).toBeCloseTo(0.4, 6);
+      expect(crdtCount(id, "B")).toBe(1);
+
+      // New peer evidence still merges additively; an explicit local set does not
+      // reset peer counters or introduce last-writer-wins semantics.
+      applyRemoteMetaCrdt({ ...peer, pos: counter.pos + 0.1, updated_at: 2 });
+      expect(conf(id)).toBeCloseTo(0.5, 6);
+    },
+  );
 
   test("three replicas' independent deltas all sum into the converged value", () => {
     const id = mk(0.5);

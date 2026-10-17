@@ -279,7 +279,7 @@ describe("db", () => {
       expect(msg).toContain("FTS5");
       expect(msg).toContain("no such module: fts5");
       // Actionable guidance + preserved cause for debugging.
-      expect(msg).toMatch(/lore` binary|Node\.js\/Bun|sqlite\.org\/fts5/);
+      expect(msg).toContain("Node.js 22.16 or later, except 23.x");
       expect((thrown as Error).cause).toBe(cause);
     });
 
@@ -344,6 +344,60 @@ describe("db", () => {
     expect(
       (
         recovered.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
+  test("v101 clears subscription quota snapshots without changing the cost ledger", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT INTO provider_quotas
+        (provider, auth_kind, account, window, source, observed_at)
+      VALUES
+        ('openai', 'subscription', 'rotating-old', '5h', 'codex', 1),
+        ('openai', 'api_key', 'stable-key', 'requests', 'openai-ratelimit', 2);
+      INSERT INTO provider_costs
+        (day, provider, auth_kind, account, bucket, cost, updated_at)
+      VALUES ('2099-01-01', 'openai', 'subscription', 'rotating-old', 'conversation', 1.25, 3);
+      UPDATE schema_version SET version = 100;
+    `);
+    close();
+
+    const migrated = db();
+    expect(
+      migrated.query("SELECT auth_kind, account FROM provider_quotas").all(),
+    ).toEqual([{ auth_kind: "api_key", account: "stable-key" }]);
+    expect(
+      migrated
+        .query("SELECT auth_kind, account, cost FROM provider_costs")
+        .all(),
+    ).toEqual([
+      { auth_kind: "subscription", account: "rotating-old", cost: 1.25 },
+    ]);
+  });
+
+  test("v102 deletes the retired daily_budget KV row and keeps provider budgets", () => {
+    const connection = db();
+    connection.exec(`
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('daily_budget', '25');
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_budgets', '[]');
+      UPDATE schema_version SET version = 101;
+    `);
+    close();
+
+    const migrated = db();
+    expect(
+      migrated
+        .query(
+          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')",
+        )
+        .all(),
+    ).toEqual([{ key: "provider_budgets" }]);
+    expect(
+      (
+        migrated.query("SELECT version FROM schema_version").get() as {
           version: number;
         }
       ).version,
@@ -1282,6 +1336,52 @@ describe("db", () => {
       )
       .all() as Array<{ name: string }>;
     expect(indexes.length).toBe(1);
+  });
+
+  test("v103 bounds tenant-scoped knowledge handle scans through the ID index", () => {
+    const plan = db()
+      .query(
+        "EXPLAIN QUERY PLAN SELECT id FROM knowledge INDEXED BY idx_knowledge_tenant_id WHERE tenant_id = ? AND id >= ? AND id < ? LIMIT 1025",
+      )
+      .all("tenant", "01900000", "01900000\uffff") as Array<{
+      detail: string;
+    }>;
+    expect(
+      plan.some(({ detail }) => detail.includes("idx_knowledge_tenant_id")),
+    ).toBe(true);
+    expect(
+      plan.some(({ detail }) =>
+        detail.includes("tenant_id=? AND id>? AND id<?"),
+      ),
+    ).toBe(true);
+  });
+
+  test("recovers the v103 replay index before an existing database serves requests", () => {
+    const connection = db();
+    expect(
+      connection.query("SELECT version FROM schema_version").get(),
+    ).toEqual({
+      version: MIGRATIONS.length,
+    });
+    connection.exec("DROP INDEX idx_knowledge_tenant_id");
+    close();
+
+    const recovered = db();
+    const plan = recovered
+      .query(
+        "EXPLAIN QUERY PLAN SELECT id FROM knowledge INDEXED BY idx_knowledge_tenant_id WHERE tenant_id = ? AND id >= ? AND id < ? LIMIT 1025",
+      )
+      .all("tenant", "01900000", "01900000\uffff") as Array<{
+      detail: string;
+    }>;
+    expect(
+      plan.some(({ detail }) => detail.includes("idx_knowledge_tenant_id")),
+    ).toBe(true);
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
   });
 
   test("ensureProject stores git_remote as null for non-git paths", () => {

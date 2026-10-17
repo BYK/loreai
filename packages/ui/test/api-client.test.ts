@@ -128,6 +128,52 @@ describe("api client: happy path", () => {
     });
   });
 
+  it("applies dedup decisions with a validated receipt", async () => {
+    let request:
+      | { url: string; method: string | undefined; body: unknown }
+      | undefined;
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        request = {
+          url,
+          method: init?.method,
+          body: init?.body,
+        };
+        return json({
+          operationId: "op-1",
+          projectId: null,
+          applied: [],
+          refused: [],
+          startedAt: 1_700_000_000_000,
+          finishedAt: 1_700_000_000_001,
+          replayed: false,
+        });
+      },
+    });
+    const body = {
+      operationId: "op-1",
+      projectId: null,
+      reviewedAt: 1_700_000_000_000,
+      actor: "lore-ui",
+      decisions: [
+        {
+          keepId: "keep",
+          mergeIds: ["merged"],
+          expectedRevisions: { keep: 1, merged: 2 },
+        },
+      ],
+    };
+
+    const response = await client.applyDedup("p/1", body);
+
+    expect(response.operationId).toBe("op-1");
+    expect(request).toEqual({
+      url: "/api/v1/projects/p%2F1/dedup/apply",
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  });
+
   it("recalls with expansion disabled and project identity", async () => {
     const { client, calls } = clientFor(() =>
       json({
@@ -252,6 +298,61 @@ describe("api client: happy path", () => {
   });
 });
 
+describe("api client: remote gateway authentication", () => {
+  it("sends the configured gateway token as a Bearer credential", async () => {
+    let authorization: string | null = null;
+    const token = "remote-management-test-token";
+    const client = createApiClient({
+      getGatewayAuthToken: () => token,
+      fetch: async (_url, init) => {
+        authorization = new Headers(init?.headers).get("authorization");
+        return json([PROJECT]);
+      },
+    });
+
+    await client.listProjects();
+
+    expect(authorization).toBe(`Bearer ${token}`);
+  });
+
+  it("sends the session token on management API writes", async () => {
+    const authorizations: string[] = [];
+    const client = createApiClient({
+      getGatewayAuthToken: () => "remote-management-test-token",
+      fetch: async (_url, init) => {
+        authorizations.push(
+          new Headers(init?.headers).get("authorization") ?? "",
+        );
+        return json({
+          removed: "user-2",
+          new_epoch: 1,
+          rewrapped: 1,
+          skipped_count: 0,
+          unlinked_projects: 0,
+        });
+      },
+    });
+
+    await client.removeTeamMember("team-1", "user-2", "editor");
+
+    expect(authorizations).toEqual(["Bearer remote-management-test-token"]);
+  });
+
+  it("clears a rejected token when the gateway hides the management route", async () => {
+    let cleared = false;
+    const client = createApiClient({
+      getGatewayAuthToken: () => "rejected-token",
+      clearGatewayAuthToken: () => {
+        cleared = true;
+      },
+      fetch: async () => new Response(null, { status: 404 }),
+    });
+
+    expect((await failure(client.listProjects())).kind).toBe("unauthorized");
+    expect(cleared).toBe(true);
+  });
+});
+
 describe("api client: error classification", () => {
   it("rejects a 2xx body that does not match the contract as `invalid`", async () => {
     const { client } = clientFor(() => json([{ nope: true }]));
@@ -329,6 +430,35 @@ describe("api client: error classification", () => {
     expect(error.kind).toBe("forbidden");
     expect(error.status).toBe(403);
     expect(error.message).toBe("Not available in hosted mode");
+  });
+
+  it("replaces provider budgets with PUT /costs/budgets", async () => {
+    const seen: { url?: string; method?: string; body?: string } = {};
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        seen.url = url;
+        seen.method = init?.method;
+        seen.body = typeof init?.body === "string" ? init.body : undefined;
+        return json({ provider_budgets: [] });
+      },
+    });
+    const budgets = [
+      {
+        provider: "anthropic",
+        auth_kind: "subscription" as const,
+        account: null,
+        mode: "off" as const,
+        window: "7d" as const,
+      },
+    ];
+    await expect(client.putProviderBudgets(budgets)).resolves.toEqual({
+      provider_budgets: [],
+    });
+    expect(seen).toEqual({
+      url: "/api/v1/costs/budgets",
+      method: "PUT",
+      body: JSON.stringify({ provider_budgets: budgets }),
+    });
   });
 
   it("sends PATCH with a JSON body for entity metadata updates", async () => {
@@ -526,7 +656,7 @@ describe("api client: error classification", () => {
           state: "anonymous",
         });
       }
-      if (url.endsWith("/teams")) return json({ teams: [] });
+      if (url.endsWith("/teams")) return json({ hosted: false, teams: [] });
       if (url.endsWith("/sync/status")) {
         return json({
           enabled: false,
@@ -542,12 +672,16 @@ describe("api client: error classification", () => {
           project_override: null,
           team_default: null,
         },
+        auto_share: false,
+        review_required: null,
         state: "not_linked",
         detail: null,
       });
     });
     expect((await client.getAccount()).state).toBe("anonymous");
-    expect((await client.getTeams()).teams).toEqual([]);
+    const teams = await client.getTeams();
+    expect(teams.hosted).toBe(false);
+    expect(teams.teams).toEqual([]);
     expect((await client.getSyncStatus()).enabled).toBe(false);
     expect((await client.getProjectSharing("p1")).state).toBe("not_linked");
     expect(calls).toEqual([
@@ -634,7 +768,7 @@ describe("warming and costs API client", () => {
           disabled: false,
           force_keep_warm: true,
         });
-      return json({ amount: 0, disabled: true });
+      throw new Error(`unexpected ${url}`);
     });
 
     expect(await client.setWarmingEnabled(false)).toEqual({
@@ -650,15 +784,10 @@ describe("warming and costs API client", () => {
       mode: "keep",
       force_keep_warm: true,
     });
-    expect(await client.setDailyBudget(0)).toEqual({
-      amount: 0,
-      disabled: true,
-    });
     expect(calls).toEqual([
       "/api/v1/warming/settings",
       "/api/v1/warming/circuit-breaker/reset",
       "/api/v1/warming/sessions/a%2Fb/mode",
-      "/api/v1/costs/budget",
     ]);
   });
 });
@@ -797,6 +926,263 @@ describe("promotion API client", () => {
   });
 });
 
+describe("FOLK-03 API client", () => {
+  it("uses team, review-policy, and sync-conflict routes with typed receipts", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const responses = [
+      {
+        remote: "ok",
+        team: { id: "team-1", name: "Acme" },
+        my_role: "admin",
+        can_manage: true,
+        members: [
+          {
+            user_id: "user-1",
+            label: "Ada",
+            role: "admin",
+            me: true,
+          },
+        ],
+        actions: {
+          invite: "available",
+          remove: "available",
+          set_role: "available",
+          add_by_id: "available",
+          offline_invite: "available",
+          list_invites: "unsupported",
+          revoke_invite: "unsupported",
+        },
+      },
+      {
+        invite: {
+          team_id: "team-1",
+          role: "viewer",
+          expires_in_days: 14,
+          token: "invite-token",
+          accept_command: "lore team accept invite-token",
+          emailed: false,
+        },
+      },
+      { member: { user_id: "user-2", role: "editor" } },
+      {
+        removed: "user-2",
+        new_epoch: 2,
+        rewrapped: 3,
+        skipped_count: 1,
+        unlinked_projects: 0,
+      },
+      {
+        linked: true,
+        team: { id: "team-1", name: "Acme" },
+        policy: {
+          effective: "manual",
+          project_override: "manual",
+          team_default: "auto",
+        },
+        auto_share: false,
+        review_required: false,
+        state: "linked",
+        detail: null,
+      },
+      {
+        available: true,
+        complete: true,
+        conflicts: [
+          {
+            id: 7,
+            table: "knowledge",
+            row_id: "knowledge-1",
+            detected_at: "2026-09-20T12:00:00.000Z",
+            resolution: "remote_upsert_wins",
+            recoverable: true,
+            unrecoverable_reason: null,
+            local: {
+              title: "Local",
+              content: "Local body",
+              category: "pattern",
+            },
+            current: {
+              version_id: "version-2",
+              version: 2,
+              title: "Current",
+              content: "Current body",
+            },
+          },
+        ],
+      },
+      {
+        kept: "local",
+        current: {
+          version_id: "version-3",
+          version: 3,
+          title: "Local",
+          content: "Local body",
+        },
+      },
+      { discarded: 7 },
+    ];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return json(responses[calls.length - 1]);
+      },
+    });
+
+    await client.getTeamMembers("team-1");
+    await client.inviteTeamMember("team-1", { role: "viewer", offline: true });
+    await client.setTeamMemberRole("team-1", "user-2", "editor", "viewer");
+    await client.removeTeamMember("team-1", "user-2", "editor");
+    await client.setProjectAutoShare("project-1", "manual", null);
+    await client.listSyncConflicts();
+    await client.keepSyncConflictLocal(7, "version-2");
+    await client.discardSyncConflict(7);
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "/api/v1/teams/team-1/members",
+      "/api/v1/teams/team-1/invites",
+      "/api/v1/teams/team-1/members/user-2/role",
+      "/api/v1/teams/team-1/members/user-2/remove",
+      "/api/v1/projects/project-1/sharing/policy",
+      "/api/v1/sync/conflicts",
+      "/api/v1/sync/conflicts/7/keep-local",
+      "/api/v1/sync/conflicts/7/discard",
+    ]);
+    expect(calls.slice(1).map(({ init }) => init?.method)).toEqual([
+      "POST",
+      "POST",
+      "POST",
+      "POST",
+      "GET",
+      "POST",
+      "POST",
+    ]);
+    expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+      role: "viewer",
+      offline: true,
+    });
+    expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
+      role: "editor",
+      expected_role: "viewer",
+    });
+    expect(JSON.parse(calls[3]?.init?.body as string)).toEqual({
+      expected_role: "editor",
+    });
+    expect(JSON.parse(calls[4]?.init?.body as string)).toEqual({
+      policy: "manual",
+      expected_override: null,
+    });
+    expect(JSON.parse(calls[6]?.init?.body as string)).toEqual({
+      expected_version_id: "version-2",
+    });
+    expect(JSON.parse(calls[7]?.init?.body as string)).toEqual({});
+  });
+
+  it("keeps parity actions on their body-based management routes", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        if (url === "/api/v1/teams") {
+          return json({ team: { id: "team-2", name: "Acme" } });
+        }
+        if (url.endsWith("/members")) {
+          return json({
+            member: { user_id: "user-2", role: "editor", wrapped: true },
+          });
+        }
+        if (url === "/api/v1/teams/accept") {
+          return json({ joined: { scope_id: "team-1", role: "editor" } });
+        }
+        if (url === "/api/v1/teams/team-1/discover") {
+          return json({ repos: [] });
+        }
+        if (url === "/api/v1/orgs") {
+          return json({
+            organizations: [{ id: "org-1", name: "Acme", role: "admin" }],
+          });
+        }
+        if (url.endsWith("/domains/requests")) {
+          return json({ requests: [] });
+        }
+        if (url.endsWith("/domains/claim")) {
+          return json({ claimed: "example.test" });
+        }
+        if (url.endsWith("/domains/request")) {
+          return json({ request_id: "request-1" });
+        }
+        if (url.endsWith("/requests/request-1/approve")) {
+          return json({ request_id: "request-1", status: "approved" });
+        }
+        if (url.endsWith("/review-policy")) {
+          return json({ policy: "optional" });
+        }
+        if (url.endsWith("/sharing/link")) {
+          return json({
+            linked: true,
+            team: { id: "team-1", name: "Acme" },
+            policy: {
+              effective: "manual",
+              project_override: null,
+              team_default: "manual",
+            },
+            auto_share: false,
+            review_required: true,
+            state: "linked",
+            detail: null,
+          });
+        }
+        if (url === "/api/v1/sync/run") {
+          return json({ pushed: 1, pulled: 2, conflicts: 0, skipped: 0 });
+        }
+        throw new Error(`unexpected API request: ${url}`);
+      },
+    });
+
+    await client.createTeam("Acme");
+    await client.addTeamMemberById("team-1", "user-2", "editor");
+    await client.acceptTeamInvite("secret-token");
+    await client.discoverTeamContributors("team-1", { repos: ["acme/app"] });
+    await client.getOrganizations();
+    await client.getDomainJoinRequests("org-1");
+    await client.claimOrganizationDomain("org-1", "example.test", "member");
+    await client.requestOrganizationJoin("org-1", "example.test");
+    await client.decideDomainJoinRequest("org-1", "request-1", "approve");
+    await client.getTeamReviewPolicy("team-1");
+    await client.setTeamReviewPolicy("team-1", "required", "optional");
+    await client.linkProjectToTeam("project-1", "team-1", null);
+    await client.runSync();
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "/api/v1/teams",
+      "/api/v1/teams/team-1/members",
+      "/api/v1/teams/accept",
+      "/api/v1/teams/team-1/discover",
+      "/api/v1/orgs",
+      "/api/v1/orgs/org-1/domains/requests",
+      "/api/v1/orgs/org-1/domains/claim",
+      "/api/v1/orgs/org-1/domains/request",
+      "/api/v1/orgs/org-1/domains/requests/request-1/approve",
+      "/api/v1/teams/team-1/review-policy",
+      "/api/v1/teams/team-1/review-policy",
+      "/api/v1/projects/project-1/sharing/link",
+      "/api/v1/sync/run",
+    ]);
+    expect(calls[2]?.url).not.toContain("secret-token");
+    expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
+      token: "secret-token",
+    });
+    expect(JSON.parse(calls[10]?.init?.body as string)).toEqual({
+      policy: "required",
+      expected: "optional",
+    });
+    expect(JSON.parse(calls[11]?.init?.body as string)).toEqual({
+      scope_id: "team-1",
+      expected_scope_id: null,
+    });
+    expect(JSON.parse(calls[12]?.init?.body as string)).toEqual({});
+  });
+});
+
 describe("api client: error envelopes", () => {
   it("preserves the gateway error type in ApiError.code", async () => {
     const { client } = clientFor(() =>
@@ -819,6 +1205,230 @@ describe("api client: error envelopes", () => {
       status: 409,
       code: "stale_version",
     });
+  });
+
+  it.each([
+    {
+      errorType: "stale_member",
+      extra: { current_role: "editor" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.setTeamMemberRole("team-1", "user-1", "editor", "viewer"),
+    },
+    {
+      errorType: "stale_version",
+      extra: { current_version_id: "version-3" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.keepSyncConflictLocal(17, "version-2"),
+    },
+    {
+      errorType: "stale_policy",
+      extra: { current_override: "manual" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.setProjectAutoShare("project-1", "manual", null),
+    },
+  ])(
+    "preserves $errorType and the message when error envelopes include extra fields",
+    async ({ errorType, extra, mutate }) => {
+      const message = "The server state changed; reload and try again.";
+      const { client } = clientFor(() =>
+        json(
+          {
+            type: "error",
+            error: {
+              type: errorType,
+              message,
+              ...extra,
+            },
+          },
+          409,
+        ),
+      );
+      const error = await failure(mutate(client));
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.kind).toBe("http");
+      expect(error.code).toBe(errorType);
+      expect(error.status).toBe(409);
+      expect(error.message).toBe(message);
+    },
+  );
+});
+
+describe("knowledge edit API client", () => {
+  const effects = {
+    scope: "project",
+    project_id: "p1",
+    revision: 2,
+    is_deleted: false,
+    lore_file: {
+      enabled: true,
+      path: "/tmp/project/.lore.md",
+      affected: true,
+      regenerated: true,
+    },
+    agents_file: { enabled: true, mode: "pointer", immediate: false },
+    sync: { enabled: false },
+  };
+  const entry = {
+    id: ENTRY.id,
+    logical_id: ENTRY.id,
+    project_id: "p1",
+    category: "decision",
+    title: "Edited",
+    content: "Updated content",
+    confidence: 0.8,
+    cross_project: 0,
+  };
+  const edited = {
+    id: ENTRY.id,
+    revision: 2,
+    previous_revision: 1,
+    version_id: "version-2",
+    changed: ["title", "content"],
+    effects,
+    entry,
+  };
+
+  it("reads effects and sends checked edit, restore, and delete requests", async () => {
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      body: unknown;
+    }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        requests.push({
+          url,
+          method: init?.method,
+          body: init?.body,
+        });
+        if (url.endsWith("/effects")) return json(effects);
+        if (url.endsWith("/restore"))
+          return json({
+            ...edited,
+            restored_from: { version_id: "version-1", version: 1 },
+          });
+        if (init?.method === "DELETE")
+          return json({ deleted: true, ...edited, entry: null });
+        return json(edited);
+      },
+    });
+
+    await client.getKnowledgeEffects("a/b");
+    await client.editKnowledge("a/b", {
+      expected_revision: 1,
+      title: "Edited",
+      scope: "shared",
+    });
+    await client.restoreKnowledge("a/b", {
+      expected_revision: 2,
+      version_id: "version-1",
+    });
+    await client.deleteKnowledge("a/b", 3);
+
+    expect(requests).toEqual([
+      {
+        url: "/api/v1/knowledge/a%2Fb/effects",
+        method: "GET",
+        body: undefined,
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb",
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_revision: 1,
+          title: "Edited",
+          scope: "shared",
+        }),
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb/restore",
+        method: "POST",
+        body: JSON.stringify({
+          expected_revision: 2,
+          version_id: "version-1",
+        }),
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb?expected_revision=3",
+        method: "DELETE",
+        body: undefined,
+      },
+    ]);
+  });
+
+  it("preserves revision conflict codes for the editor", async () => {
+    const client = createApiClient({
+      fetch: async () =>
+        json(
+          {
+            type: "error",
+            error: {
+              type: "stale_revision",
+              message: "Knowledge entry changed",
+            },
+          },
+          409,
+        ),
+    });
+
+    const error = await failure(
+      client.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(error.status).toBe(409);
+    expect(error.errorType).toBe("stale_revision");
+  });
+
+  it("parses title conflict details separately and tolerates malformed details", async () => {
+    const payload = {
+      type: "error",
+      error: {
+        type: "title_conflict",
+        message: "Title is already used",
+        conflicting_entry: {
+          id: "existing-entry",
+          title: "Existing title",
+          project_id: "project-2",
+          scope: "shared",
+        },
+      },
+    };
+    const validClient = createApiClient({
+      fetch: async () => json(payload, 409),
+    });
+    const validError = await failure(
+      validClient.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(validError.errorType).toBe("title_conflict");
+    expect(validError.conflictingEntry).toEqual({
+      id: "existing-entry",
+      title: "Existing title",
+      project_id: "project-2",
+      scope: "shared",
+    });
+
+    const malformedClient = createApiClient({
+      fetch: async () =>
+        json(
+          {
+            ...payload,
+            error: {
+              ...payload.error,
+              conflicting_entry: {
+                id: "existing-entry",
+                title: "Existing title",
+                project_id: "project-2",
+                scope: "global",
+              },
+            },
+          },
+          409,
+        ),
+    });
+    const malformedError = await failure(
+      malformedClient.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(malformedError.errorType).toBe("title_conflict");
+    expect(malformedError.conflictingEntry).toBeUndefined();
   });
 });
 

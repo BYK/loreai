@@ -12,7 +12,7 @@ See [`quality/REVIEW.md`](quality/REVIEW.md) for the review heuristics and workf
 
 Lore is a **three-tier memory architecture** for AI coding agents. It intercepts LLM API calls (as a transparent proxy or native plugin), distills conversation history into compressed summaries, and extracts long-term knowledge entries that persist across sessions.
 
-**Runtime:** Node.js >= 22.5 (development/tests/production).
+**Runtime:** Node.js >= 22.16, excluding 23.x (development/tests/production).
 **Language:** TypeScript (monorepo with `pnpm workspaces`).
 **Database:** SQLite with WAL mode, FTS5 full-text search. Stored at `~/.local/share/lore/lore.db`.
 

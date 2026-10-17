@@ -86,9 +86,6 @@ const QUOTA_FETCH_TIMEOUT_MS = 10_000;
 /** 5h utilization (%) at/above which background workers are paused. */
 const QUOTA_PAUSE_THRESHOLD = 95;
 
-/** Utilization (%) below which there is no quota throttle pressure. */
-const QUOTA_PRESSURE_FLOOR = 80;
-
 // ---------------------------------------------------------------------------
 // State (module-global)
 // ---------------------------------------------------------------------------
@@ -374,27 +371,6 @@ export function getQuotaForCredential(
 export function isQuotaPaused(cred: AuthCredential | null): boolean {
   if (!cred) return false;
   return quotaPausedFingerprints.has(authFingerprint(cred));
-}
-
-// ---------------------------------------------------------------------------
-// Throttle pressure
-// ---------------------------------------------------------------------------
-
-/**
- * Quota-derived throttle pressure in [0, 1].
- *
- * Uses the higher of the 5-hour and 7-day utilizations, ramping from 0 at the
- * QUOTA_PRESSURE_FLOOR (80%) to 1 at 100%. Below the floor there is no
- * quota-driven throttle.
- */
-export function computeQuotaPressure(snapshot: QuotaSnapshot | null): number {
-  if (!snapshot) return 0;
-  const u5 = snapshot.fiveHour?.utilization ?? 0;
-  const u7 = snapshot.sevenDay?.utilization ?? 0;
-  const util = Math.max(u5, u7);
-  if (util <= QUOTA_PRESSURE_FLOOR) return 0;
-  const pressure = (util - QUOTA_PRESSURE_FLOOR) / (100 - QUOTA_PRESSURE_FLOOR);
-  return Math.min(1, Math.max(0, pressure));
 }
 
 // ---------------------------------------------------------------------------

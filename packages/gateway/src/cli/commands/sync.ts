@@ -4,12 +4,12 @@
  * Wraps the legacy `commandSync` from `../sync-cmd` via the shared
  * `runLegacyAndCollect` bridge. The legacy handler takes:
  *
- *   - positionals[0]: subcommand (enable | disable | status | now;
+ *   - positionals[0]: subcommand (enable | disable | status | now | conflicts;
  *     defaults to "status" if absent)
+ *   - positionals[1]: conflict action
+ *   - positionals[2]: conflict id
  *
- * No flags — `commandSync` ignores the values dict (it reads flags from
- * process.argv itself if needed). The Stricli adapter declares only the
- * positional schema; flags are auto-injected (`--json` only).
+ * `--expected-version` is forwarded for the conflict recovery command.
  *
  * Output shape:
  *   - human: rendered legacy text
@@ -19,26 +19,50 @@
  * subcommand).
  */
 import { buildOutputCommand } from "../lib/command";
+import { UsageError } from "../lib/errors";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandSync } from "../sync-cmd";
 
-type SyncFlags = Record<string, never>;
+type SyncFlags = {
+  "expected-version"?: string;
+};
 
-export const syncCommand = buildOutputCommand<string, SyncFlags, [string?]>({
+export const syncCommand = buildOutputCommand<
+  string,
+  SyncFlags,
+  [string?, string?, string?]
+>({
   brief: "Sync data between the local lore DB and Supabase",
   fullDescription:
     "Bidirectional sync between the local lore DB and Supabase. " +
-    "Subcommands: status (default), enable, disable, now. The " +
-    "first positional selects the subcommand; --json emits a " +
-    "structured envelope.",
+    "Subcommands: status (default), enable, disable, now, conflicts. " +
+    "Use `sync conflicts keep <id> --expected-version <version-id>` to " +
+    "resolve a conflict. --json emits a structured envelope.",
   parameters: {
-    flags: {},
+    flags: {
+      "expected-version": {
+        kind: "parsed",
+        parse: String,
+        brief: "Current knowledge version required to keep a conflict",
+        optional: true,
+      },
+    },
     positional: {
       kind: "tuple",
       parameters: [
         {
           parse: String,
-          brief: "Subcommand (status | enable | disable | now)",
+          brief: "Subcommand (status | enable | disable | now | conflicts)",
+          optional: true,
+        },
+        {
+          parse: String,
+          brief: "Conflict action (list | keep | discard)",
+          optional: true,
+        },
+        {
+          parse: String,
+          brief: "Conflict ID",
           optional: true,
         },
       ],
@@ -48,12 +72,33 @@ export const syncCommand = buildOutputCommand<string, SyncFlags, [string?]>({
     renderHuman: (data) => data,
     toJson: (data) => ({ output: data }),
   },
-  async handler(_flags, sub) {
+  async handler(flags, sub, action, conflictId) {
     // Stricli spreads ARGS = [string?] into individual args, so
     // `sub` is the optional subcommand string itself (or undefined).
     // The legacy commandSync wants a positionals string[].
+    const expectedVersion = flags["expected-version"];
+    if (
+      (sub !== "conflicts" &&
+        (action !== undefined || conflictId !== undefined)) ||
+      (expectedVersion !== undefined &&
+        (sub !== "conflicts" || action !== "keep"))
+    ) {
+      throw new UsageError({
+        message: "Invalid arguments for lore sync.",
+        tryCommand: "lore sync --help",
+      });
+    }
+    const syncOptions =
+      expectedVersion === undefined
+        ? {}
+        : { "expected-version": expectedVersion };
     const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandSync(typeof sub === "string" ? [sub] : [], {}),
+      commandSync(
+        [sub, action, conflictId].filter(
+          (value): value is string => typeof value === "string",
+        ),
+        syncOptions,
+      ),
     );
     // Propagate the legacy handler's exit code. runLegacyAndCollect
     // restores process.exitCode to its prior value (typically

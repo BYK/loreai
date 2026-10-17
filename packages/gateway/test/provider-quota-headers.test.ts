@@ -129,10 +129,46 @@ describe("parseProviderQuotaHeaders", () => {
     if (secondary) expect(secondary.resetsAt).toBe(2_000_500_000_000);
   });
 
+  test("codex zero-minute windows without another signal are skipped", () => {
+    const windows = parseProviderQuotaHeaders(
+      headers({ "x-codex-secondary-window-minutes": "0" }),
+      NOW,
+    );
+    expect(windows).toEqual([]);
+    expect(windows.some((window) => window.window.endsWith("0m"))).toBe(false);
+  });
+
+  test("codex zero-minute windows with zero reset and used percent are skipped", () => {
+    const windows = parseProviderQuotaHeaders(
+      headers({
+        "x-codex-secondary-window-minutes": "0",
+        "x-codex-secondary-reset-at": "0",
+        "x-codex-secondary-used-percent": "0",
+      }),
+      NOW,
+    );
+    expect(windows).toEqual([]);
+  });
+
+  test("codex nonpositive minutes are null when another signal exists", () => {
+    const windows = parseProviderQuotaHeaders(
+      headers({
+        "x-codex-secondary-window-minutes": "0",
+        "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-reset-at": "2000500000",
+      }),
+      NOW,
+    );
+    expect(windows).toMatchObject([
+      { window: "secondary", windowMinutes: null, usedPercent: 12 },
+    ]);
+  });
+
   test("codex named bucket + credits; unlimited credits skipped", () => {
     const windows = parseProviderQuotaHeaders(
       headers({
         "x-codex-bengalfox-primary-used-percent": "80",
+        "x-codex-bengalfox-primary-reset-at": "2000500000",
         "x-codex-bengalfox-limit-name": "model-specific",
         "x-codex-credits-balance": "10.25",
       }),

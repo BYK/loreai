@@ -1832,33 +1832,32 @@ export function reassignKnowledge(
   const oldProjectId = entry.project_id;
   // Move ALL versions of the logical entry so a multi-version entry isn't split
   // across projects (reviewer NIT).
-  // When moving from cross_project to a project, clear the flag.
+  // Global entries become project-private; project-owned entries retain their sharing flag.
   const clearCrossProject = oldProjectId === null || oldProjectId === "";
+  const nextCrossProject = clearCrossProject ? 0 : entry.cross_project;
   database.query("BEGIN IMMEDIATE").run();
   try {
+    if (nextCrossProject === 1) {
+      const conflict = ltm.findSharedTitleConflict(
+        entry.logical_id,
+        entry.title,
+      );
+      if (conflict) throw new ltm.TitleConflictError(entry.title, conflict);
+    }
+
     database
       .query(
         "UPDATE knowledge SET project_id = ?, cross_project = ? WHERE logical_id = ?",
       )
-      .run(toId, clearCrossProject ? 0 : 1, entry.logical_id);
+      .run(toId, nextCrossProject, entry.logical_id);
 
-    // Clean up knowledge_transfers that became self-referential after the move.
-    if (clearCrossProject) {
-      const movedLogicalIds = database
-        .query(
-          "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0",
-        )
-        .all(toId)
-        .map((r) => (r as { logical_id: string }).logical_id);
-      const kPlaceholders = movedLogicalIds.map(() => "?").join(",");
-      database
-        .query(
-          `DELETE FROM knowledge_transfers
-           WHERE recalled_in_project_id = ?
-             AND knowledge_id IN (${kPlaceholders})`,
-        )
-        .run(toId, ...movedLogicalIds);
-    }
+    // The destination is now home, so its past recalls are no longer foreign.
+    // Preserve every other transfer and restrict cleanup to the moved entry.
+    database
+      .query(
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? AND knowledge_id = ?",
+      )
+      .run(toId, entry.logical_id);
 
     database.query("COMMIT").run();
   } catch (e) {

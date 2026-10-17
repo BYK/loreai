@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   db,
-  effectivePromotionPolicy,
   ensureProject,
+  projectAutoShare,
   projectScope,
   resolveWritableScope,
   setProjectScope,
@@ -28,7 +28,7 @@ function approvalOf(logicalId: string): string | undefined {
   )?.approval_status;
 }
 
-// E-5-F3-1: producer-side scope selection & team-promotion policy plumbing (behavior-preserving).
+// E-5-F3-1: producer-side scope selection and project-local auto-share plumbing.
 
 function seedScope(
   id: string,
@@ -89,29 +89,26 @@ describe("E-5-F3 scope selection & promotion policy", () => {
     expect(projectScope(pid)).toBeNull();
   });
 
-  it("effectivePromotionPolicy precedence: project override > scope default > manual", () => {
+  it("project auto-share is independent of the team review default", () => {
     const pid = ensureProject("/test/f3/p2");
-    // Unbound project → always manual (never auto-promote without review).
-    expect(effectivePromotionPolicy(pid)).toBe("manual");
+    expect(projectAutoShare(pid)).toBe(false);
 
-    // Bound to an auto-policy team → inherits the team default.
+    // Intended semantic change: a team may make review optional without enabling auto-share.
     seedScope("s1", "Team One", "auto");
     setProjectScope(pid, "s1");
-    expect(effectivePromotionPolicy(pid)).toBe("auto");
+    expect(projectAutoShare(pid)).toBe(false);
 
-    // Project override wins over the team default.
+    db()
+      .query("UPDATE projects SET promotion_policy='auto' WHERE id=?")
+      .run(pid);
+    expect(projectAutoShare(pid)).toBe(true);
+
     db()
       .query("UPDATE projects SET promotion_policy='manual' WHERE id=?")
       .run(pid);
-    expect(effectivePromotionPolicy(pid)).toBe("manual");
-
-    // A manual-default team with no override → manual.
-    setProjectScope(pid, "s1");
+    expect(projectAutoShare(pid)).toBe(false);
     db().query("UPDATE projects SET promotion_policy=NULL WHERE id=?").run(pid);
-    db()
-      .query("UPDATE scopes SET promotion_policy='manual' WHERE id='s1'")
-      .run();
-    expect(effectivePromotionPolicy(pid)).toBe("manual");
+    expect(projectAutoShare(pid)).toBe(false);
   });
 
   it("resolveWritableScope: by id or name, gated on write membership (admin|editor)", () => {

@@ -20,6 +20,7 @@
     "**/dist-vendor",
     "**/.sea-staging",
     "**/.vendor-build",
+    "**/vendor",
     "**/*.d.ts",
     "**/*.generated.ts",
     "**/eval/data",

@@ -16,9 +16,10 @@ import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
 import { resolveCostAttribution } from "./cost-attribution";
 import {
-  computeProviderBudgetPressure,
-  evaluateProviderBudgets,
-  getProviderBudgets,
+  describeProviderBudget,
+  isBackgroundBudgetPaused,
+  providerBudgetPressure,
+  sessionBudgetMatch,
 } from "./provider-budgets";
 import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
@@ -36,6 +37,7 @@ import {
 export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
+import { knowledgeRecallToken } from "./knowledge-recall-token";
 import { isDeepStrictEqual } from "node:util";
 import type {
   ContextBoundaryProtocol,
@@ -67,6 +69,7 @@ import {
   load,
   config as loreConfig,
   ensureProject,
+  db,
   recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
@@ -107,7 +110,6 @@ import {
   importDedupDecisions,
   calibrate,
   getLastTransformedCount,
-  getLastTransformEstimate,
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
@@ -115,6 +117,7 @@ import {
   consumeCameOutOfIdle,
   needsUrgentDistillation,
   formatKnowledge,
+  formatKnowledgeEntry,
   shouldImportLoreFile,
   importLoreFile,
   loreFileExists,
@@ -460,18 +463,10 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
-  getDailyThrottleDelay,
-  estimateRequestCost,
-  getDailySpend,
-  getDailyBudget,
-  getCostRate,
+  throttleDelayForPressure,
   getSessionCosts,
 } from "./cost-tracker";
-import {
-  getQuotaForCredential,
-  computeQuotaPressure,
-  isQuotaPaused,
-} from "./quota";
+import { isQuotaPaused } from "./quota";
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
@@ -2508,6 +2503,10 @@ const MAX_DELTA_BLOCKS = 8;
  *  ~200-token index; changed entries' IDs are always listed so durable
  *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
+/** Validate only a bounded prefix of ranked suggestions on the gateway thread.
+ *  Extra candidates let revoked or missing entries make room for later valid
+ *  ones without scanning the entire unselected knowledge pool. */
+const OVERFLOW_VALIDATION_MAX = 32;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
  *  the "A" floor). Present from turn 1 (before system[2] / any delta exists) so
@@ -3363,6 +3362,7 @@ export function detectSurfacedMutations(
     string,
     { category: string; title: string; content: string }
   >,
+  projectID?: string,
 ): {
   changed: Array<{
     id: string;
@@ -3399,7 +3399,10 @@ export function detectSurfacedMutations(
     // alongside any version-row compaction.
     const logicalId = ltm.logicalIdOf(id);
     const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
-    if (!current) {
+    if (
+      !current ||
+      (projectID && !eligibleForDeltaProject(current, projectID))
+    ) {
       // Not a resolvable `knowledge` row. Before treating it as a non-knowledge
       // synthetic, check the current selection snapshot: distillation/temporal
       // facts (`d:`/`t:`) and lat.md sections live outside the knowledge
@@ -3432,7 +3435,7 @@ export function detectSurfacedMutations(
       // model would be told to ignore still-valid pinned knowledge, and
       // (append-only) that false removal would be frozen into an immutable block
       // + advance the surfaced set past a non-knowledge id.
-      if (ltm.isTombstoned(logicalId)) removedIds.push(id);
+      if (current || ltm.isTombstoned(logicalId)) removedIds.push(id);
       continue;
     }
     const currentHash = surfaceSignature(current.title, current.content);
@@ -3465,6 +3468,7 @@ export function buildKnowledgeDeltaMessage(
     category: string;
     title: string;
   }>,
+  outRenderedIds?: string[],
 ): GatewayMessage[] {
   // Emit ONLY when there is genuine new/changed knowledge to surface. A
   // removals-only diff (a pinned entry deleted/superseded by background
@@ -3487,6 +3491,7 @@ export function buildKnowledgeDeltaMessage(
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
     renderedIds,
   );
+  outRenderedIds?.push(...renderedIds);
   // If even the first entry exceeds the delta budget, surface its recall ID
   // below rather than injecting an arbitrary prefix of its content. The old
   // 900-code-unit fallback could split an emoji and persist invalid UTF-16 in
@@ -3526,17 +3531,12 @@ export function buildKnowledgeDeltaMessage(
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
         .map((e) => {
-          const recallId =
-            e.category === "lat.md"
-              ? `lat:${e.id}`
-              : e.id.startsWith("d:") || e.id.startsWith("t:")
-                ? e.id
-                : `k:${e.id}`;
-          return `* [${recallId}] ${e.title} (${e.category})`;
+          const recallId = knowledgeRecallToken(e);
+          return `* [${recallId}] ${Array.from(e.title).slice(0, 120).join("")} (${e.category})`;
         })
         .join("\n")}${
         overflowToc.length > shownOverflow.length
-          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
+          ? `\n* At least ${overflowToc.length - shownOverflow.length} more validated matches — search recall for additional guidance.`
           : ""
       }`
     : "";
@@ -3606,10 +3606,19 @@ export function buildKnowledgeDeltaMessage(
  */
 type DeltaMutation = {
   /** ids whose content was surfaced as changed, with the surfaced hash. */
-  changed: Array<{ id: string; h: string }>;
+  changed: Array<{
+    id: string;
+    h: string;
+    /** Non-knowledge sources have no DB row to reconstruct at compaction. */
+    snapshot?: { category: string; title: string; content: string };
+  }>;
   /** ids surfaced as removed/superseded. */
   removed: string[];
 };
+
+// A compaction keeps the latest tasks actionable without turning the single
+// replacement block into an ever-growing catalog of every past task.
+const MAX_CUMULATIVE_DELTA_ENTRIES = 24;
 
 /** Read a block's stashed {@link DeltaMutation} from its selector JSON. */
 function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
@@ -3620,18 +3629,180 @@ function parseDeltaMutation(rawSelector: string): DeltaMutation | null {
     const removed = Array.isArray(mut.removed)
       ? mut.removed.filter((x): x is string => typeof x === "string")
       : [];
-    const changed = Array.isArray(mut.changed)
-      ? mut.changed.filter(
-          (x): x is { id: string; h: string } =>
-            !!x &&
-            typeof (x as { id?: unknown }).id === "string" &&
-            typeof (x as { h?: unknown }).h === "string",
-        )
+    const changed: DeltaMutation["changed"] = Array.isArray(mut.changed)
+      ? mut.changed.flatMap((x: unknown) => {
+          if (!x || typeof x !== "object") return [];
+          const entry = x as Record<string, unknown>;
+          if (typeof entry.id !== "string" || typeof entry.h !== "string")
+            return [];
+          const snapshot = entry.snapshot;
+          if (snapshot && typeof snapshot === "object") {
+            const data = snapshot as Record<string, unknown>;
+            if (
+              typeof data.category === "string" &&
+              typeof data.title === "string" &&
+              typeof data.content === "string"
+            ) {
+              return [
+                {
+                  id: entry.id,
+                  h: entry.h,
+                  snapshot: {
+                    category: data.category,
+                    title: data.title,
+                    content: data.content,
+                  },
+                },
+              ];
+            }
+          }
+          return [{ id: entry.id, h: entry.h }];
+        })
       : [];
     return { changed, removed };
   } catch {
     return null;
   }
+}
+
+/** Delivery accounting uses exact bytes, never the normalized delta-churn key. */
+function exactKnowledgeDigest(
+  category: string,
+  title: string,
+  content: string,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([category, title, content]))
+    .digest("hex");
+}
+
+function deltaPayloadDigest(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/** Count only current selections whose full text is present in a replayed block. */
+export function deliveredContextEntries(
+  sessionID: string,
+  projectID: string,
+  candidates: Map<string, ltm.KnowledgeEntry>,
+): ltm.KnowledgeEntry[] {
+  const byLogical = new Map(
+    [...candidates.values()].map((entry) => [entry.logical_id, entry]),
+  );
+  const textOwners = new Map<string, string>();
+  const ambiguousText = new Set<string>();
+  for (const entry of byLogical.values()) {
+    const text = JSON.stringify([entry.category, entry.title, entry.content]);
+    const owner = textOwners.get(text);
+    // An editable selector cannot assign identical full text to one of two
+    // selected logical entries. Fail closed even if their short IDs differ:
+    // an older surfaced version may have used either short handle.
+    if (owner && owner !== entry.logical_id) ambiguousText.add(text);
+    else textOwners.set(text, entry.logical_id);
+  }
+  const delivered = new Map<string, ltm.KnowledgeEntry>();
+  const resolved = new Map<string, string>();
+  for (const block of listSessionPromptDeltas(sessionID)) {
+    if (block.projectID !== projectID) continue;
+    if (!parseMessageInsertSelector(block.selector)) continue;
+    const messages = parseDeltaMessages(block.content);
+    const payload =
+      messages[0]?.role === "user" ? firstText(messages[0]) : null;
+    if (typeof payload !== "string") continue;
+    const mutation = parseDeltaMutation(block.selector);
+    if (!mutation) continue;
+    const selector = JSON.parse(block.selector) as {
+      full?: unknown;
+      payloadHash?: unknown;
+    };
+    // `mut.changed` also contains recall hints. Older blocks have no full-text
+    // manifest, so they cannot prove delivery and must not earn credit.
+    // Bind that manifest to the *persisted* payload before trusting its IDs.
+    if (
+      !Array.isArray(selector.full) ||
+      selector.full.length > 128 ||
+      selector.payloadHash !== deltaPayloadDigest(block.content)
+    )
+      continue;
+    const hashes = new Map(mutation.changed.map(({ id, h }) => [id, h]));
+    // The first recall heading is generated by renderCurrentDelta. Hint titles
+    // after it are not proof of full delivery, even if they contain newlines
+    // and an exact rendered knowledge bullet.
+    const fullPayload = payload.split(
+      "\n\n## Other relevant knowledge (recall by id for detail)\n\n",
+      1,
+    )[0];
+    const claimedLines = new Map<string, number>();
+    for (const item of selector.full) {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.id !== "string" ||
+        typeof item.h !== "string"
+      )
+        continue;
+      const { id, h } = item;
+      const logicalId = resolved.get(id) ?? ltm.logicalIdOf(id);
+      resolved.set(id, logicalId);
+      const entry = candidates.get(id) ?? byLogical.get(logicalId);
+      if (
+        !entry ||
+        entry.logical_id !== logicalId ||
+        ambiguousText.has(
+          JSON.stringify([entry.category, entry.title, entry.content]),
+        ) ||
+        hashes.get(id) !== surfaceSignature(entry.title, entry.content) ||
+        h !== exactKnowledgeDigest(entry.category, entry.title, entry.content)
+      )
+        continue;
+      // The current selector is not the full set of possible owners: a past
+      // full entry may be unselected or ineligible now. Check every version,
+      // including retired ones, before attributing a short-handle bullet.
+      const short = id.slice(0, 8);
+      const line = `\n${formatKnowledgeEntry({ ...entry, id })}\n`;
+      const possibleOwners = db()
+        .query(
+          "SELECT id, logical_id, project_id, cross_project, category, title, content FROM knowledge INDEXED BY idx_knowledge_tenant_id WHERE tenant_id = ? AND id >= ? AND id < ? LIMIT 1025",
+        )
+        .all(entry.tenant_id, short, `${short}\uffff`) as Array<{
+        id: string;
+        logical_id: string | null;
+        project_id: string | null;
+        cross_project: number;
+        category: string;
+        title: string;
+        content: string;
+      }>;
+      // Cap the raw prefix scan BEFORE project filtering: a limit on eligible
+      // results would still scan arbitrarily many private entries elsewhere.
+      // Only entries visible to this project could own its rendered bullet.
+      // Formatting can collapse distinct raw text into the same visible line.
+      if (
+        possibleOwners.length > 1024 ||
+        possibleOwners.some(
+          (owner) =>
+            owner.category === entry.category &&
+            (owner.project_id === projectID ||
+              owner.project_id === null ||
+              owner.cross_project === 1) &&
+            (owner.logical_id ?? owner.id) !== logicalId &&
+            `\n${formatKnowledgeEntry(owner)}\n` === line,
+        )
+      )
+        continue;
+      // The manifest is only a claim. Prove the *same full rendered item* is in
+      // the persisted user payload; a hint or an added selector ID is not delivery.
+      // Count duplicates so one rendered bullet cannot credit two claimed IDs
+      // with identical short handles and text.
+      // An edited entry retains its surfaced ID in the delta even though its
+      // full text comes from the current version. Match the actual old handle.
+      const nextCount = (claimedLines.get(line) ?? 0) + 1;
+      if (fullPayload.split(line).length - 1 < nextCount) continue;
+      claimedLines.set(line, nextCount);
+      delivered.set(logicalId, entry);
+    }
+  }
+  return [...delivered.values()];
 }
 
 /**
@@ -3685,6 +3856,8 @@ export function appendKnowledgePromptDelta(input: {
    *  (a previous design used `now?: number` and treated undefined as "skip
    *  debounce, always append", which was an easy footgun for future callers). */
   now?: number;
+  /** A new user task may surface previously unseen, unchanged entries. */
+  taskShift?: boolean;
   previousKeys: string[] | undefined;
   nextKeys: string[] | undefined;
   entries: Array<{
@@ -3694,10 +3867,12 @@ export function appendKnowledgePromptDelta(input: {
     content: string;
   }>;
   overflow?: Array<{ id: string; category: string; title: string }>;
+  /** Full-content IDs in the persisted block; recall hints never count. */
+  outRenderedIds?: string[];
 }): boolean {
-  // Source the delta from GENUINE DB mutations to the ADVANCING surfaced set,
-  // NOT from the per-turn relevance selection. `previousKeys` is the frozen
-  // system[2] pin baseline; the surfaced set is that baseline advanced through
+  // Source ordinary deltas from DB mutations to the advancing surfaced set.
+  // A task switch also admits newly selected entries. `previousKeys` is the
+  // frozen context pin baseline; the surfaced set is that baseline advanced through
   // every block already appended this session (each block records the
   // `id:hash` mutations it surfaced in its selector). `detectSurfacedMutations`
   // compares the surfaced set against the CURRENT DB state, so:
@@ -3711,16 +3886,17 @@ export function appendKnowledgePromptDelta(input: {
   // `nextKeys` is retained on the input for the gate sites (hasMaterialLtmDelta).
   // `entries` supplies content for SYNTHETIC context-source ids (see
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
-  let blocks = listSessionPromptDeltas(input.sessionID);
-  // Bound pathological growth: if too many blocks have accumulated without a
-  // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
-  // from the frozen pin baseline below (advanceSurfacedKeys over [] == the pin,
-  // so detectSurfacedMutations re-captures the full pin→DB delta). Costs one
-  // bust, paid only when MAX_DELTA_BLOCKS is reached.
-  if (blocks.length >= MAX_DELTA_BLOCKS) {
-    deleteSessionPromptDelta(input.sessionID);
-    blocks = [];
-  }
+  const projectID = ensureProject(input.projectPath);
+  const blocks = listSessionPromptDeltas(input.sessionID);
+  // Selection snapshots can outlive a versioned edit. Rank ordinary entries
+  // by tenant-scoped logical identity, never by a superseded physical ID.
+  // Synthetic sources retain their own separate identity namespace.
+  const priorityKeys = input.entries.map((entry) =>
+    entry.category === ltm.RECALLED_CONTEXT_CATEGORY ||
+    entry.category === "lat.md"
+      ? `synthetic:${entry.id}`
+      : `knowledge:${ltm.logicalIdOf(entry.id)}`,
+  );
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
   // Synthetic selections (recalled context and lat.md) don't live in knowledge.
   // Supply their current content so an edited section can be surfaced too.
@@ -3740,30 +3916,37 @@ export function appendKnowledgePromptDelta(input: {
       });
     }
   }
-  // A newly indexed synthetic has no key in the frozen pin. Ordinary knowledge
-  // retains the existing frozen-entry policy: a relevance reshuffle must not
-  // append previously unsurfaced, unchanged entries to the conversation.
+  const databaseMutations = detectSurfacedMutations(
+    surfacedKeys,
+    syntheticEntries,
+    projectID,
+  );
+  // Synthetic context may be new at any time. Ordinary knowledge only joins
+  // when a real user task changes: routine re-ranking must not rewrite the
+  // prompt, but a newly relevant entry must actually reach the agent.
   const seen = entryKeyIds(surfacedKeys);
+  // Edits create a new version ID. The old surfaced ID still resolves through
+  // its logical ID; the mutation detector below handles its changed content.
+  // Treating the new version as an unseen task entry would inject it twice.
+  const seenLogical = new Set([...seen].map((id) => ltm.logicalIdOf(id)));
+  const selected = new Set((input.entries ?? []).map((entry) => entry.id));
   for (const key of input.nextKeys ?? []) {
     const separator = key.lastIndexOf(":");
     const id = separator === -1 ? key : key.slice(0, separator);
-    if (syntheticEntries.has(id) && !seen.has(id)) {
+    if (
+      !seenLogical.has(ltm.logicalIdOf(id)) &&
+      (syntheticEntries.has(id) || (input.taskShift && selected.has(id)))
+    ) {
       surfacedKeys.push(`${id}:`);
       seen.add(id);
+      seenLogical.add(ltm.logicalIdOf(id));
     }
   }
   const { changed, removedIds } = detectSurfacedMutations(
     surfacedKeys,
     syntheticEntries,
+    projectID,
   );
-  const messages = buildKnowledgeDeltaMessage(
-    changed,
-    removedIds,
-    loreSessionToken(input.sessionID),
-    input.overflow,
-  );
-  if (!messages.length) return false;
-
   // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
   // rewriting one coalesced row in place. The insertAt is computed tool-pair-
   // safe at the call site against the CURRENT array tail, so the new message
@@ -3788,51 +3971,143 @@ export function appendKnowledgePromptDelta(input: {
     changed: changed.map((c) => ({
       id: c.id,
       h: surfaceSignature(c.title, c.content),
+      ...(syntheticEntries.has(c.id)
+        ? {
+            snapshot: {
+              category: c.category,
+              title: c.title,
+              content: c.content,
+            },
+          }
+        : {}),
     })),
     removed: removedIds,
   };
+  // Revalidate current sources even on first delivery. Keep the entire initial
+  // selection in the mutation so the text budget can list every omitted entry
+  // by full recall ID. Only later rebuilds retire older task additions.
+  const current = renderCurrentDelta(
+    mut,
+    input.sessionID,
+    projectID,
+    input.overflow,
+    entryKeyIds(surfacedKeys),
+    Infinity,
+    priorityKeys,
+  );
+  if (!current.messages.length) return false;
 
   const latest = blocks[blocks.length - 1];
+  const debouncedMut = latest
+    ? mergeMutations(parseDeltaMutation(latest.selector), mut)
+    : null;
   const now = input.now ?? Date.now();
-  if (latest && withinDebounceWindow(latest.selector, now)) {
-    // Merge into the latest block: union muts, union content, update insertAt.
-    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
-    const mergedMessages = mergeDeltaContent(
-      JSON.parse(latest.content) as GatewayMessage[],
-      messages,
+  if (blocks.length >= MAX_DELTA_BLOCKS) {
+    // Only compact on a real change. Keep additions from earlier task switches:
+    // they may never have belonged to the frozen pin baseline. This is the one
+    // bounded cache rewrite after MAX_DELTA_BLOCKS immutable tail additions.
+    const compactedMutations = blocks.reduce<DeltaMutation | null>(
+      (acc, block) =>
+        mergeMutations(
+          acc,
+          parseDeltaMutation(block.selector) ?? { changed: [], removed: [] },
+        ),
+      null,
     );
+    const rendered = renderCurrentDelta(
+      mergeMutations(compactedMutations, mut),
+      input.sessionID,
+      projectID,
+      input.overflow,
+      entryKeyIds(input.previousKeys),
+      MAX_CUMULATIVE_DELTA_ENTRIES,
+      priorityKeys,
+    );
+    if (!rendered.messages.length) return false;
+    // Legacy blocks lack source IDs and signatures. Their text cannot be
+    // revalidated after revocation or deletion, so omit it at compaction.
+    const content = JSON.stringify(rendered.messages);
+    withSavepoint("compact_knowledge_delta", () => {
+      deleteSessionPromptDelta(input.sessionID);
+      appendSessionPromptDelta({
+        sessionID: input.sessionID,
+        projectID,
+        selector: JSON.stringify({
+          target: "messages",
+          insertAt: input.insertAt,
+          mut: rendered.mut,
+          full: rendered.full,
+          payloadHash: deltaPayloadDigest(content),
+          debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+        }),
+        content,
+      });
+    });
+    input.outRenderedIds?.push(...rendered.renderedIds);
+    return true;
+  }
+  if (
+    latest &&
+    debouncedMut &&
+    debouncedMut.changed.length <= MAX_CUMULATIVE_DELTA_ENTRIES &&
+    (!input.taskShift ||
+      databaseMutations.changed.length > 0 ||
+      databaseMutations.removedIds.length > 0) &&
+    withinDebounceWindow(latest.selector, now)
+  ) {
+    // Rebuild from the latest state of each id: rapid repeated edits must not
+    // retain earlier revisions inside the debounced block.
+    const rendered = renderCurrentDelta(
+      debouncedMut,
+      input.sessionID,
+      projectID,
+      input.overflow,
+      new Set([
+        ...entryKeyIds(
+          advanceSurfacedKeys(input.previousKeys, blocks.slice(0, -1)),
+        ),
+        ...entryKeyIds(surfacedKeys),
+      ]),
+      MAX_CUMULATIVE_DELTA_ENTRIES,
+      priorityKeys,
+    );
+    if (!rendered.messages.length) return false;
+    const content = JSON.stringify(rendered.messages);
     updateSessionPromptDeltaSelector(
       input.sessionID,
       latest.seq,
       JSON.stringify({
         target: "messages",
         insertAt: input.insertAt,
-        mut: mergedMut,
+        mut: rendered.mut,
+        full: rendered.full,
+        payloadHash: deltaPayloadDigest(content),
         debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
       }),
     );
-    updateSessionPromptDeltaContent(
-      input.sessionID,
-      latest.seq,
-      JSON.stringify(mergedMessages),
-    );
+    updateSessionPromptDeltaContent(input.sessionID, latest.seq, content);
+    input.outRenderedIds?.push(...rendered.renderedIds);
     log.info(
-      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
+      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${debouncedMut.changed.length} changed, ${debouncedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
     );
     return true;
   }
 
+  const content = JSON.stringify(current.messages);
   appendSessionPromptDelta({
     sessionID: input.sessionID,
-    projectID: ensureProject(input.projectPath),
+    projectID,
     selector: JSON.stringify({
       target: "messages",
       insertAt: input.insertAt,
-      mut,
+      mut: current.mut,
+      full: current.full,
+      payloadHash: deltaPayloadDigest(content),
       debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
     }),
-    content: JSON.stringify(messages),
+    content,
   });
+  input.outRenderedIds?.push(...current.renderedIds);
   log.info(
     `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
   );
@@ -3850,55 +4125,220 @@ function withinDebounceWindow(rawSelector: string, now: number): boolean {
 }
 
 /**
- * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
- * hash wins (curator may have re-surfaced the same id with new content). `removed`
- * entries: union of both sets.
+ * Merge two DeltaMutations in order. `changed` entries: same id → keep the later
+ * hash (curator may have re-surfaced the same id with new content). `removed`
+ * entries: a later addition supersedes a prior removal; a later removal
+ * supersedes the earlier addition.
  */
 function mergeMutations(
   prev: DeltaMutation | null,
   next: DeltaMutation,
 ): DeltaMutation {
   if (!prev) return next;
-  const changedMap = new Map<string, { id: string; h: string }>();
+  const changedMap = new Map<string, DeltaMutation["changed"][number]>();
   for (const c of prev.changed) changedMap.set(c.id, c);
-  for (const c of next.changed) changedMap.set(c.id, c);
-  const removed = new Set([...prev.removed, ...next.removed]);
+  const removed = new Set(prev.removed);
+  for (const c of next.changed) {
+    changedMap.delete(c.id);
+    changedMap.set(c.id, c);
+    removed.delete(c.id);
+  }
+  for (const id of next.removed) removed.add(id);
   return {
     changed: [...changedMap.values()],
     removed: [...removed],
   };
 }
 
-/**
- * Merge the new delta messages into the existing block's content. The existing
- * block has a user-turn payload + assistant-closer pair; we replace the user
- * payload with a union of all changed entries (deduped by id, latest content
- * wins) and remove any removed ids from the rendered list.
- */
-function mergeDeltaContent(
-  prev: GatewayMessage[],
-  next: GatewayMessage[],
-): GatewayMessage[] {
-  // The existing block is [user(payload), assistant(closer)]. The new block is
-  // the same shape. Concatenate the payloads and keep the closer.
-  const userText = firstText(prev[0]) ?? "";
-  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
-  // Reuse the next block's payload text directly — it was just built by
-  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
-  // a superset of the previous block's (the previous block's entries are
-  // already in the surfaced set, so they would NOT appear in `changed` again;
-  // the new payload contains only the genuinely-new mutations).
-  const nextUserText = firstText(next[0]) ?? "";
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
-    },
-    {
-      role: "assistant",
-      content: [{ type: "text", text: closerText }],
-    },
-  ];
+function eligibleForDeltaProject(
+  entry: ltm.KnowledgeEntry,
+  projectID: string,
+): boolean {
+  return (
+    entry.confidence > 0.2 &&
+    (entry.project_id === projectID ||
+      entry.project_id === null ||
+      entry.cross_project === 1)
+  );
+}
+
+/** Snapshots may be reused only while their source remains live in this project. */
+function liveSyntheticSnapshot(
+  id: string,
+  snapshot: NonNullable<DeltaMutation["changed"][number]["snapshot"]>,
+  projectID: string,
+): boolean {
+  if (id.startsWith("d:")) {
+    const row = db()
+      .query(
+        "SELECT observations FROM distillations WHERE id = ? AND project_id = ? AND archived = 0",
+      )
+      .get(id.slice(2), projectID) as { observations: string } | null;
+    return (
+      row?.observations === snapshot.content &&
+      snapshot.title === "Relevant earlier context"
+    );
+  }
+  if (id.startsWith("t:")) {
+    const row = db()
+      .query(
+        "SELECT role, content FROM temporal_messages WHERE id = ? AND project_id = ?",
+      )
+      .get(id.slice(2), projectID) as {
+      role: string;
+      content: string;
+    } | null;
+    return (
+      row?.content === snapshot.content &&
+      snapshot.title === `Relevant earlier message (${row?.role})`
+    );
+  }
+  if (snapshot.category === "lat.md") {
+    const row = db()
+      .query(
+        "SELECT file, heading, content, first_paragraph FROM lat_sections WHERE id = ? AND project_id = ?",
+      )
+      .get(id, projectID) as {
+      file: string;
+      heading: string;
+      content: string;
+      first_paragraph: string | null;
+    } | null;
+    return (
+      row != null &&
+      snapshot.title === `[${row.file}] ${row.heading}` &&
+      snapshot.content === (row.first_paragraph ?? row.content)
+    );
+  }
+  return false;
+}
+
+/** Rebuild a coalesced block from the latest eligible version of every surfaced id. */
+function renderCurrentDelta(
+  merged: DeltaMutation,
+  sessionID: string,
+  projectID: string,
+  overflow?: Array<{ id: string; category: string; title: string }>,
+  retainedRemovedIds?: Set<string>,
+  maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
+  priorityKeys: readonly string[] = [],
+): {
+  messages: GatewayMessage[];
+  mut: DeltaMutation;
+  renderedIds: string[];
+  full: Array<{ id: string; h: string }>;
+} {
+  const removed = new Set(merged.removed);
+  const changed: DeltaMutation["changed"] = [];
+  const priorities = new Map<string, number>();
+  for (const [index, key] of priorityKeys.entries()) {
+    if (!priorities.has(key)) priorities.set(key, index);
+  }
+  const entries: Array<{
+    id: string;
+    category: string;
+    title: string;
+    content: string;
+    priority: number;
+  }> = [];
+  for (const retired of merged.changed.slice(0, -maxEntries)) {
+    if (retainedRemovedIds?.has(retired.id)) removed.add(retired.id);
+  }
+  for (const mutation of merged.changed.slice(-maxEntries)) {
+    if (removed.has(mutation.id)) continue;
+    if (
+      mutation.snapshot &&
+      !liveSyntheticSnapshot(mutation.id, mutation.snapshot, projectID)
+    ) {
+      removed.add(mutation.id);
+      continue;
+    }
+    const currentKnowledge = mutation.snapshot
+      ? null
+      : (ltm.get(mutation.id) ??
+        ltm.getByLogical(ltm.logicalIdOf(mutation.id)));
+    const current = mutation.snapshot
+      ? { id: mutation.id, ...mutation.snapshot }
+      : currentKnowledge;
+    if (
+      !current ||
+      (currentKnowledge &&
+        !eligibleForDeltaProject(currentKnowledge, projectID))
+    ) {
+      removed.add(mutation.id);
+      continue;
+    }
+    entries.push({
+      // Keep the id already surfaced to the model. Recall-by-id resolves a
+      // superseded version through its stable logical id to the current entry.
+      id: mutation.id,
+      category: current.category,
+      title: current.title,
+      content: current.content,
+      priority:
+        priorities.get(
+          currentKnowledge
+            ? `knowledge:${currentKnowledge.logical_id}`
+            : `synthetic:${mutation.id}`,
+        ) ?? Number.MAX_SAFE_INTEGER,
+    });
+    changed.push({
+      ...mutation,
+      h: surfaceSignature(current.title, current.content),
+    });
+  }
+  const persistedRemoved = [...removed].filter(
+    (id) => !retainedRemovedIds || retainedRemovedIds.has(id),
+  );
+  const visibleOverflow: Array<{
+    id: string;
+    category: string;
+    title: string;
+  }> = [];
+  for (const { id } of overflow?.slice(0, OVERFLOW_VALIDATION_MAX) ?? []) {
+    const current = ltm.get(id) ?? ltm.getByLogical(ltm.logicalIdOf(id));
+    if (current && eligibleForDeltaProject(current, projectID)) {
+      visibleOverflow.push({
+        id,
+        category: current.category,
+        title: current.title,
+      });
+      if (visibleOverflow.length === OVERFLOW_TOC_MAX) break;
+    }
+  }
+  const renderedIds: string[] = [];
+  // ID-sorted fingerprints stabilize the cache but never define packing rank.
+  // Pack a new/rebuilt delta in current selector order; replay stays immutable.
+  // Edited entries retain old surfaced handles and their selected logical rank.
+  entries.sort((a, b) => a.priority - b.priority);
+  const messages = buildKnowledgeDeltaMessage(
+    entries,
+    persistedRemoved,
+    loreSessionToken(sessionID),
+    visibleOverflow,
+    renderedIds,
+  );
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  return {
+    messages,
+    mut: { changed, removed: persistedRemoved },
+    renderedIds,
+    full: renderedIds.flatMap((id) => {
+      const entry = byId.get(id);
+      return entry
+        ? [
+            {
+              id,
+              h: exactKnowledgeDigest(
+                entry.category,
+                entry.title,
+                entry.content,
+              ),
+            },
+          ]
+        : [];
+    }),
+  };
 }
 
 /**
@@ -8143,6 +8583,7 @@ async function forwardToUpstream(
           upstreamURL: effectiveUpstreamBase,
           credential: routingAuth,
           responseHeaders: response.headers,
+          requestHeaders: req.rawHeaders,
         }),
       );
     } catch {
@@ -16471,7 +16912,39 @@ export function recordCacheTurnUsage(
   return bustCause;
 }
 
-type CostAttributionUpstream = { providerID?: string; url?: string };
+type CostAttributionUpstream = {
+  providerID?: string;
+  url?: string;
+  /**
+   * Provider identity for temporal attribution (#2026). Unlike `providerID`
+   * (explicit route selection only), this falls back to the wire protocol so
+   * OpenAI/Codex/Gemini/Vertex traffic is not stored as `anthropic/<model>`.
+   */
+  temporalProviderID?: string;
+};
+
+/**
+ * Provider id for temporal model-usage stats: explicit route provider wins,
+ * else the effective wire protocol maps to the models.dev provider id.
+ */
+function temporalProviderIDForRoute(
+  route: ResolvedRequestUpstreamRoute,
+): string | undefined {
+  if (route.providerID) return route.providerID;
+  switch (route.effectiveProtocol) {
+    case "anthropic":
+      return "anthropic";
+    case "openai":
+    case "openai-responses":
+      return "openai";
+    case "vertex":
+      return "google-vertex";
+    case "gemini":
+      return "google";
+    default:
+      return undefined;
+  }
+}
 
 /**
  * Attribution source captured at request time. The resolved route is always
@@ -16481,7 +16954,11 @@ type CostAttributionUpstream = { providerID?: string; url?: string };
 function routeAttributionUpstream(
   route: ResolvedRequestUpstreamRoute,
 ): CostAttributionUpstream {
-  return { providerID: route.providerID, url: route.effectiveUpstreamBase };
+  return {
+    providerID: route.providerID,
+    url: route.effectiveUpstreamBase,
+    temporalProviderID: temporalProviderIDForRoute(route),
+  };
 }
 
 function accountConversationUsage(
@@ -16490,6 +16967,7 @@ function accountConversationUsage(
   sessionID: string,
   resolvedConversationTTL: "5m" | "1h" | undefined,
   upstream?: CostAttributionUpstream,
+  requestHeaders?: Record<string, string>,
 ): AnthropicUsage {
   const usageForSentry: AnthropicUsage = {
     input_tokens: usage.inputTokens,
@@ -16511,6 +16989,7 @@ function accountConversationUsage(
     providerID: source?.providerID,
     upstreamURL: source?.url,
     credential: resolveAuth(sessionID, source?.providerID),
+    requestHeaders,
   });
   recordConversationCost(
     sessionID,
@@ -16564,6 +17043,7 @@ function postResponseForTenant(
       sessionID,
       sessionState.resolvedConversationTTL,
       upstream,
+      req.rawHeaders,
     );
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16628,6 +17108,7 @@ function postResponseForTenant(
       assistantContentBlocks: resp.content,
       usage,
       model: resp.model,
+      providerID: upstream?.temporalProviderID,
       projectPath,
       sessionID,
       noStore,
@@ -16849,6 +17330,7 @@ function accountUnsuccessfulResponse(
   endSpan: () => void,
   markDirty?: () => void,
   upstream?: CostAttributionUpstream,
+  requestHeaders?: Record<string, string>,
 ): void {
   const usage = resp.usage ?? ZERO_USAGE;
   const hasUsage = Object.values(usage).some(
@@ -16863,6 +17345,7 @@ function accountUnsuccessfulResponse(
         sessionID,
         resolvedConversationTTL,
         upstream,
+        requestHeaders,
       );
       if (genAiSpan) {
         setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16989,7 +17472,11 @@ function scheduleBackgroundWorkForTenant(
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
   // Urgent distillation is exempt (it unblocks the next user turn).
-  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
+  // Provider budgets pause the same work when quota usage runs ahead of
+  // pace or a cap is exhausted (isBackgroundBudgetPaused).
+  const quotaPaused =
+    isQuotaPaused(resolveAuth(sessionID)) ||
+    isBackgroundBudgetPaused(sessionID, sessionState.lastUpstream);
 
   // Worker circuit breaker: when background workers have been failing for a
   // sustained period, stop hammering the upstream every turn — allow only a
@@ -19471,6 +19958,7 @@ async function handleProvisionalConversationTurn(
             if (state) state._dirty = true;
           },
           routeAttributionUpstream(requestUpstream.route),
+          req.rawHeaders,
         );
       },
       () => {},
@@ -19641,6 +20129,7 @@ async function handleProvisionalConversationTurn(
         assistantContentBlocks: accumulated.content,
         usage: accumulated.usage ?? ZERO_USAGE,
         model: accumulated.model,
+        providerID: temporalProviderIDForRoute(requestUpstream.route),
         projectPath,
         sessionID: identified.sessionID,
         noStore,
@@ -19739,6 +20228,7 @@ async function handleProvisionalConversationTurn(
           () => {},
           undefined,
           routeAttributionUpstream(requestUpstream.route),
+          req.rawHeaders,
         );
         return;
       }
@@ -19759,6 +20249,7 @@ async function handleProvisionalConversationTurn(
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
         routeAttributionUpstream(requestUpstream.route),
+        req.rawHeaders,
       );
       const state = sessions.get(identified.sessionID);
       if (state) state._dirty = true;
@@ -21032,17 +21523,22 @@ async function handleConversationTurnPrepared(
     | {
         previousKeys: string[] | undefined;
         nextKeys: string[] | undefined;
+        taskShift?: boolean;
         entries: Array<{
           id: string;
           category: string;
           title: string;
           content: string;
         }>;
-        // #917: relevance-scored entries that didn't fit the system[2] budget,
+        // #917: relevance-scored entries that didn't fit the context budget,
         // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
         overflow?: Array<{ id: string; category: string; title: string }>;
       }
     | undefined;
+  // Candidate selection is not delivery: the durable delta has a smaller
+  // full-content budget and may include only recall hints for other entries.
+  const contextEffectCandidates = new Map<string, ltm.KnowledgeEntry>();
+  const contextEffectOwner: { projectID?: string } = {};
   // Step 6 may pin a new context selection before its durable delta is sent.
   // If a later required read fails, restore this committed baseline so a retry
   // reselects and emits the knowledge instead of treating it as already sent.
@@ -21088,6 +21584,8 @@ async function handleConversationTurnPrepared(
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
       const contextHint = lastUserTextTrimmed(req);
+      const taskSelection = selectionTaskHint(req);
+      const selectionHint = taskSelection.hint;
 
       // --- system[1]: Stable LTM (preferences) + known entities ---
       // Computed once per session and pinned for ≥1h. NOT invalidated by
@@ -21156,11 +21654,17 @@ async function handleConversationTurnPrepared(
       // still works: contextHint comes from the incoming request, not temporal
       // storage). (issue #796)
       if (!isFirstTurn || largeColdStart) {
-        const selectionRevision = ltm.selectionRevision(
+        const selectionRevision = taskSelectionRevision(
           projectPath,
           cfg.knowledge.contextSources,
+          taskSelection.identity,
+          cfg.knowledge.taskFilter,
         );
         let cached = ltmSessionCache.get(sessionID);
+        const taskShift =
+          !!selectionHint &&
+          !!ltmPinnedText.get(sessionID) &&
+          taskDigest(cached?.revision) !== taskDigest(selectionRevision);
         // Only content changes invalidate the selected context. This stamp is
         // persisted with the selection, so idle resumes and restarts are cheap
         // when knowledge and this session's context sources have not changed.
@@ -21186,7 +21690,7 @@ async function handleConversationTurnPrepared(
           | undefined;
 
         if (!cached) {
-          // Full context-bound budget — preferences have their own dedicated budget.
+          // Preferences have their own dedicated budget and remain pinned.
           const contextBudget = ltmBudget;
           // Feed the previously-pinned entry set back in as a stability hint so
           // per-turn relevance re-scoring doesn't churn the budget-boundary
@@ -21257,10 +21761,11 @@ async function handleConversationTurnPrepared(
                       currentProjectID,
                       checkpoint.digest,
                       contextBudget,
-                      contextHint,
+                      selectionHint,
                       selectionRevision,
                       [...stickyIds].sort(),
                       cfg.knowledge.contextSources,
+                      cfg.knowledge.taskFilter,
                     ]),
                   )
                   .digest("hex")}`
@@ -21279,7 +21784,7 @@ async function handleConversationTurnPrepared(
                 {
                   signal,
                   excludeCategories: ["preference"],
-                  ...(contextHint ? { contextHint } : {}),
+                  ...(selectionHint ? { contextHint: selectionHint } : {}),
                   ...(stickyIds.size ? { stickyIds } : {}),
                   ...(cfg.knowledge.contextSources?.length
                     ? { includeContextSources: cfg.knowledge.contextSources }
@@ -21324,17 +21829,14 @@ async function handleConversationTurnPrepared(
           } finally {
             if (optionalTimer) clearTimeout(optionalTimer);
           }
-          // Detached selection is read-only. Apply injection bookkeeping only
-          // for a live caller against the same project incarnation.
+          // Detached selection is read-only. Defer injection bookkeeping until
+          // the durable delta is on this live caller's outgoing message array.
           assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (ensureProject(projectPath) !== currentProjectID)
             throw new ReadPreparationUnavailableError("context", "pressure");
-          ltm.recordForSessionEffects(
-            projectPath,
-            sessionID,
-            contextEntries,
-            req.signal,
-          );
+          contextEffectOwner.projectID = currentProjectID;
+          for (const entry of contextEntries)
+            contextEffectCandidates.set(entry.id, entry);
           if (contextKey) contextLtmPreparation.consume(contextKey);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
@@ -21471,6 +21973,7 @@ async function handleConversationTurnPrepared(
             pendingKnowledgeDelta = {
               previousKeys: pinned.entryKeys,
               nextKeys: cachedKeys,
+              taskShift,
               entries: freshContextEntries,
               overflow: freshContextOverflow,
             };
@@ -21770,18 +22273,31 @@ async function handleConversationTurnPrepared(
       const ltmBudget = getLtmBudget(ltmFraction, sessionID, {
         isSubagent: !!sessionState.isSubagent,
       });
-      // Full context-bound budget — preferences have their own dedicated budget.
+      // Preferences have their own dedicated budget and remain pinned.
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const contextHint = lastUserTextTrimmed(req);
+      const taskSelection = selectionTaskHint(req);
+      const contextHint = taskSelection.hint;
       // Stability hint: keep the previously-pinned set sticky so consecutive
       // Layer-4 turns don't churn the selection (see step-6).
       const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
       const overflowSink: ltm.KnowledgeEntry[] = [];
-      const refreshRevision = ltm.selectionRevision(
+      const refreshRevision = taskSelectionRevision(
         projectPath,
         cfg.knowledge.contextSources,
+        taskSelection.identity,
+        cfg.knowledge.taskFilter,
       );
+      // Step 6 may already have saved refreshRevision to the session cache.
+      // Preserve its task-switch decision when Layer 4 replaces that turn's
+      // pending delta; recomputing from the updated cache loses new entries.
+      const taskShift =
+        pendingKnowledgeDelta?.taskShift === true ||
+        (!!contextHint &&
+          !!ltmPinnedText.get(sessionID) &&
+          taskDigest(ltmSessionCache.get(sessionID)?.revision) !==
+            taskDigest(refreshRevision));
+      const refreshProjectID = ensureProject(projectPath);
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -21795,9 +22311,16 @@ async function handleConversationTurnPrepared(
             ? { includeContextSources: cfg.knowledge.contextSources }
             : {}),
           overflowSink,
+          deferEffects: true,
         },
       );
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      if (ensureProject(projectPath) !== refreshProjectID)
+        throw new ReadPreparationUnavailableError("context", "pressure");
+      contextEffectOwner.projectID = refreshProjectID;
+      contextEffectCandidates.clear();
+      for (const entry of contextEntries)
+        contextEffectCandidates.set(entry.id, entry);
       const contextOverflow = overflowSink.map((e) => ({
         id: e.id,
         category: e.category,
@@ -21837,11 +22360,16 @@ async function handleConversationTurnPrepared(
 
           if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
             // Same entry set — nothing to surface. The durable delta already
-            // carries the full set; do NOT emit a system[2] block.
+            // carries the full set; keep cache text byte-identical to the pin.
+            ltmSessionCache.set(sessionID, {
+              formatted: pinned.formatted,
+              tokenCount: pinned.tokenCount,
+              revision: refreshRevision,
+            });
             setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
-              ltmCacheText: formatted,
-              ltmCacheTokens: tokenCount,
+              ltmCacheText: pinned.formatted,
+              ltmCacheTokens: pinned.tokenCount,
               ltmCacheRevision: refreshRevision,
               // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
             });
@@ -21866,6 +22394,7 @@ async function handleConversationTurnPrepared(
             pendingKnowledgeDelta = {
               previousKeys: frozenKeys,
               nextKeys: entryKeys,
+              taskShift,
               entries: contextEntries,
               overflow: contextOverflow,
             };
@@ -22317,6 +22846,26 @@ async function handleConversationTurnPrepared(
     modifiedReq.messages,
     sessionID,
   );
+  if (contextEffectOwner.projectID && contextEffectCandidates.size) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    if (ensureProject(projectPath) !== contextEffectOwner.projectID)
+      throw new ReadPreparationUnavailableError("context", "pressure");
+    // Replayed full-text blocks count on later selections too. Correlate old
+    // surfaced IDs with current versions by tenant-scoped logical identity, and
+    // require matching content hashes. Recall hints never count as injection.
+    const delivered = deliveredContextEntries(
+      sessionID,
+      contextEffectOwner.projectID,
+      contextEffectCandidates,
+    );
+    if (delivered.length)
+      ltm.recordForSessionEffects(
+        projectPath,
+        sessionID,
+        delivered,
+        req.signal,
+      );
+  }
   // Hard guarantee: deltas are spliced into the wire array AFTER the orphan
   // safety net (step 8) and persisted indices are replayed verbatim, so a
   // later turn whose layout differs from the delta's creation turn could place
@@ -22409,54 +22958,28 @@ async function handleConversationTurnPrepared(
   preparation.dispose();
   modifiedReq.signal = foregroundAbort.signal;
 
-  // --- Daily budget + OAuth quota throttle ---
-  // Apply an invisible proxy-level sleep to slow the agent when approaching
-  // the daily budget OR the Anthropic OAuth quota. The sleep is capped to
-  // avoid causing cache busts (which would be self-defeating — costing more
-  // than the throttle saved).
-  const dailyBudget = getDailyBudget();
-  // Quota pressure is an independent signal — applies even with no USD budget.
-  // Gated to Anthropic-OAuth accounts; 0 for everything else.
-  const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
-  const quotaPressure = computeQuotaPressure(quotaSnapshot);
-  // Per-provider budgets (#1927): evaluated only when any are configured,
-  // using whatever attribution is known pre-upstream. A DB failure must
-  // never break the request.
-  let providerPressure = 0;
+  // --- Provider budget throttle (#1927) ---
+  // Apply an invisible proxy-level sleep to slow the agent when a user cap
+  // covering this request's attribution is filling up too fast. Only caps:
+  // pace budgets never delay the user's own requests, they only throttle
+  // Lore's background work. The sleep is capped
+  // to avoid causing cache busts (which would be self-defeating — costing
+  // more than the throttle saved). A DB failure must never break the request.
+  let budgetPressure: ReturnType<typeof providerBudgetPressure> = {
+    pressure: 0,
+    budget: null,
+  };
   try {
-    if (getProviderBudgets().length > 0) {
-      const attribution = resolveCostAttribution({
-        sessionID,
-        providerID: sessionState.lastUpstream?.providerID,
-        upstreamURL: sessionState.lastUpstream?.url,
-        credential: resolveAuth(
-          sessionID,
-          sessionState.lastUpstream?.providerID,
-        ),
-      });
-      providerPressure =
-        attribution.provider === "unknown"
-          ? 0
-          : computeProviderBudgetPressure(evaluateProviderBudgets(), {
-              provider: attribution.provider,
-              auth_kind: attribution.authKind,
-              account: attribution.account,
-            });
-    }
+    budgetPressure = providerBudgetPressure(
+      sessionBudgetMatch(sessionID, sessionState.lastUpstream, req.rawHeaders),
+      "cap",
+    );
   } catch (err) {
     log.info(`provider-budget: evaluation failed: ${String(err)}`);
   }
-  const combinedQuotaPressure = Math.max(quotaPressure, providerPressure);
-  if (dailyBudget > 0 || combinedQuotaPressure > 0) {
-    const inputTokens =
-      getLastTransformEstimate(sessionID) ||
-      coreEstimateTokens(JSON.stringify(modifiedReq.messages));
-    const estimatedCost = estimateRequestCost(req.model, inputTokens);
-    const delay = getDailyThrottleDelay(
-      dailyBudget,
-      estimatedCost,
-      combinedQuotaPressure,
-    );
+  if (budgetPressure.pressure > 0 && budgetPressure.budget) {
+    const trippedBudget = budgetPressure.budget;
+    const delay = throttleDelayForPressure(budgetPressure.pressure);
 
     if (delay > 0) {
       // Cap delay to avoid pushing the next request past the cache TTL boundary.
@@ -22474,11 +22997,8 @@ async function handleConversationTurnPrepared(
         log.info(
           `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
             `session=${sessionID.slice(0, 16)} ` +
-            `spend=$${getDailySpend().spend.toFixed(2)} ` +
-            `rate=$${getCostRate().toFixed(2)}/hr` +
-            (providerPressure >= quotaPressure && providerPressure > 0
-              ? " (provider-budget)"
-              : ""),
+            `pressure=${budgetPressure.pressure.toFixed(2)} ` +
+            `budget=${describeProviderBudget(trippedBudget)}`,
         );
         try {
           await completeBudgetThrottleDelay(
@@ -23304,6 +23824,7 @@ async function handleConversationTurnPrepared(
               sessionState._dirty = true;
             },
             routeAttributionUpstream(requestUpstreamRoute),
+            req.rawHeaders,
           );
           return;
         }
@@ -23376,6 +23897,7 @@ async function handleConversationTurnPrepared(
             sessionState._dirty = true;
           },
           routeAttributionUpstream(requestUpstreamRoute),
+          req.rawHeaders,
         );
       },
       dropStreamingFinalizer,
@@ -24413,6 +24935,71 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
     return text;
   }
   return "";
+}
+
+/** Keep tool-result turns and Lore's own deltas out of the task query. */
+function boundedTaskHint(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars / 4);
+  return `${text.slice(0, headChars)}\n${text.slice(-(maxChars - headChars - 1))}`;
+}
+
+function selectionTaskHint(req: GatewayRequest): {
+  hint: string;
+  identity: string;
+} {
+  const userTurns: string[] = [];
+  for (const message of req.messages.toReversed()) {
+    if (message.role !== "user") continue;
+    const text = message.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (!text || text.startsWith(KNOWLEDGE_DELTA_FRAMING_PREFIX)) continue;
+    userTurns.push(text);
+    if (userTurns.length === 2) break;
+  }
+  const latest = userTurns[0] ?? "";
+  const previous = userTurns[1];
+  // Only an acknowledgement or an explicit continuation needs the preceding
+  // task. Length alone is not evidence: "fix auth" can be a distinct new task.
+  if (
+    !previous ||
+    (!/^(?:(?:please\s+)?(?:go ahead|continue|keep going|same task|same thing|initial plan)|yes|yeah|ok(?:ay)?|sure)[.!?]*$/i.test(
+      latest,
+    ) &&
+      !/^(?:please\s+)?(?:continue (?:the|this|that) (?:work|task|issue)|go ahead with (?:the|this|that) (?:plan|task|work))[.!?]*$/i.test(
+        latest,
+      ))
+  ) {
+    return { hint: boundedTaskHint(latest, 4_096), identity: latest };
+  }
+  return {
+    hint: `${boundedTaskHint(latest, 1_024)}\n${boundedTaskHint(previous, 3_071)}`,
+    identity: `${latest}\n${previous}`,
+  };
+}
+
+function taskSelectionRevision(
+  projectPath: string,
+  contextSources: Parameters<typeof ltm.selectionRevision>[1],
+  taskHint: string,
+  taskFilter: boolean,
+): string {
+  // A policy toggle must refresh a cached selection and admit its newly
+  // eligible facts through a new delta. Existing prefix and replay bytes stay
+  // frozen, just as they do when the user changes the selected task.
+  const revision = `${ltm.selectionRevision(projectPath, contextSources)}:filter:${Number(taskFilter)}`;
+  return taskHint
+    ? `${revision}:task:${createHash("sha256")
+        .update(JSON.stringify([taskHint, taskFilter]))
+        .digest("hex")}`
+    : revision;
+}
+
+function taskDigest(revision: string | undefined): string {
+  return revision?.match(/:task:([a-f0-9]{64})$/)?.[1] ?? "";
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,17 @@ async function openInfo(page: Page) {
   });
 }
 
+async function expectDatabaseVersion(page: Page, version: number) {
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const databases = await indexedDB.databases();
+        return databases.find((db) => db.name === "lore-ui")?.version;
+      }),
+    )
+    .toBe(version);
+}
+
 test.describe("IndexedDB cache migrations and recovery", () => {
   test("upgrades v1 without dropping meta and creates the complete v4 schema", async ({
     page,
@@ -92,6 +103,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await createV1(page);
     await page.reload();
     await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expectDatabaseVersion(page, 4);
     const info = await openInfo(page);
     expect(info.version).toBe(4);
     expect(info.stores.sort()).toEqual([...STORES].sort());
@@ -224,6 +236,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).stores.sort()).toEqual([...STORES].sort());
   });
 
@@ -247,6 +260,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     );
     await page.reload();
     await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).version).toBe(4);
   });
 

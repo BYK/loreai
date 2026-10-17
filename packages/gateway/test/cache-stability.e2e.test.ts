@@ -336,7 +336,10 @@ describe("cache stability (e2e)", () => {
   });
   it("retries a Layer 4 turn when the emergency knowledge refresh loses its read worker", async () => {
     const turns = Array.from({ length: 3 }, (_, i) => ({
-      userMessage: `Emergency refresh turn ${i}: continue.`,
+      // Keep the task query fixed so this test reaches the emergency read,
+      // rather than testing a separate task-switch selection failure.
+      userMessage:
+        "Keep the current gateway request open until the memory refresh finishes.",
       assistantText: `Emergency refresh answer ${i}.`,
     }));
     harness = await createHarness({
@@ -1258,8 +1261,8 @@ describe("cache stability (e2e)", () => {
     // NOTE: with the knowledge-delta debounce (60s window), rapid successive
     // mutations coalesce into the LATEST block. Since both the first injection
     // and the material change happen within the debounce window in this test
-    // (back-to-back turns), they coalesce into ONE block that carries both
-    // mutations in its `mut` and renders both the initial and updated content.
+    // (back-to-back turns), they coalesce into ONE block that carries the
+    // latest mutation in its `mut` and renders only the current content.
     const rows = harness.queryDB<{
       seq: number;
       selector: string;
@@ -1268,28 +1271,389 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, selector, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(
-      rows.length,
-      `expected coalesced first-injection + material change (1 block), got ` +
-        `seqs=${rows.map((r) => r.seq).join(",")}`,
-    ).toBe(1);
+    expect(rows).toHaveLength(1);
     const selector0 = JSON.parse(rows[0].selector) as {
       target: string;
       insertAt: number;
     };
     expect(selector0.target).toBe("messages");
     expect(Number.isInteger(selector0.insertAt)).toBe(true);
-    // The coalesced block carries BOTH the initial and updated content.
-    expect(rows[0].content).toContain("Initial context-bound knowledge");
+    // Replaying the coalesced block must not repeat superseded guidance.
+    expect(rows[0].content).not.toContain("Initial context-bound knowledge");
     expect(rows[0].content).toContain("Updated context-bound knowledge");
     expect(rows[0].content).toContain(`[k:${largeContextID}]`);
-    // The mut signature has both changes recorded.
     const mergedMut = JSON.parse(rows[0].selector).mut as {
       changed: Array<{ id: string; h: string }>;
       removed: string[];
     };
     expect(mergedMut.changed.length).toBeGreaterThan(0);
   });
+
+  it("reselects on a new user task without rewriting the stable prefix", async () => {
+    const turns = [
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Starting.",
+      },
+      {
+        userMessage: "Fix the chart palette colors.",
+        assistantText: "Chart done.",
+      },
+      {
+        userMessage: "Fix tenant-scoped gateway credential routing.",
+        assistantText: "Credentials done.",
+      },
+      {
+        userMessage: "Continue fixing tenant-scoped gateway credentials.",
+        assistantText: "Continuing.",
+      },
+    ];
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-task-shift-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `task-shift-${Date.now()}`,
+    };
+    const { ltm } = await import("@loreai/core");
+    const history: unknown[] = [];
+    const revisions: string[] = [];
+    const deltasByTurn: Array<Array<{ seq: number; content: string }>> = [];
+    for (const [index, turn] of turns.entries()) {
+      if (index === 1) {
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Chart palette colors",
+          content: "Use blue for chart labels and yellow for palette badges.",
+        });
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Tenant credential routing",
+          content:
+            "Scope gateway credentials to the tenant before forwarding requests.",
+        });
+      }
+      const response = await harness.chat(
+        makeBody(turn.userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(response.status).toBe(200);
+      await response.json();
+      const state = harness.queryDB<{ ltm_cache_revision: string | null }>(
+        "SELECT ltm_cache_revision FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      );
+      revisions.push(state[0]?.ltm_cache_revision ?? "");
+      deltasByTurn.push(
+        harness.queryDB<{ seq: number; content: string }>(
+          "SELECT seq, content FROM session_prompt_deltas ORDER BY seq",
+        ),
+      );
+      history.push({ role: "user", content: turn.userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turn.assistantText }],
+      });
+    }
+    const bodies = harness.upstreamBodies();
+    expect(revisions[2]).not.toBe(revisions[1]);
+    expect(serializedMessages(bodies[1])).toContain("Chart palette colors");
+    expect(deltasByTurn[1]).toHaveLength(1);
+    expect(deltasByTurn[2]).toHaveLength(2);
+    expect(deltasByTurn[2][0]).toEqual(deltasByTurn[1][0]);
+    expect(deltasByTurn[2][1].content).toContain("Tenant credential routing");
+    expect(serializedMessages(bodies[2])).toContain(
+      "Tenant credential routing",
+    );
+    expect(systemBlocks(bodies[2])).toEqual(systemBlocks(bodies[1]));
+    expect(deltasByTurn[3]).toEqual(deltasByTurn[2]);
+    expect(systemBlocks(bodies[3])).toEqual(systemBlocks(bodies[1]));
+  });
+
+  it.each([
+    {
+      name: "on an emergency Layer 4 turn",
+      request: "Fix tenant-scoped gateway credential routing.",
+      emergency: true,
+    },
+    {
+      name: "when the new request is short",
+      request: "fix auth",
+      emergency: false,
+    },
+    {
+      name: "when only the tail of a long request changes",
+      initial: `${"Reference material with no task instructions. ".repeat(130)} Fix the chart palette colors.`,
+      request: `${"Reference material with no task instructions. ".repeat(130)} Fix tenant-scoped gateway credential routing.`,
+      emergency: false,
+    },
+  ])(
+    "delivers a newly relevant task $name",
+    async ({ request, emergency, ...caseInput }) => {
+      const turns = [
+        {
+          userMessage: caseInput.initial ?? "Fix the chart palette colors.",
+          assistantText: "Starting.",
+        },
+        {
+          userMessage: caseInput.initial ?? "Fix the chart palette colors.",
+          assistantText: "Chart done.",
+        },
+        { userMessage: request, assistantText: "Credentials done." },
+        { userMessage: request, assistantText: "Continuing." },
+      ];
+      harness = await createHarness({
+        fixtures: makeConversationFixtures(turns),
+      });
+      const projectPath = `/tmp/lore-task-switch-edge-${Date.now()}`;
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": `task-switch-edge-${Date.now()}`,
+      };
+      const { ltm, getLastLayer, setForceMinLayer } =
+        await import("@loreai/core");
+      const original = ltm.forSession;
+      const hints: string[] = [];
+      const selection = vi
+        .spyOn(ltm, "forSession")
+        .mockImplementation((...args) => {
+          if (args[3]?.excludeCategories?.includes("preference")) {
+            hints.push(args[3]?.contextHint ?? "");
+          }
+          return original(...args);
+        });
+      const history: unknown[] = [];
+      let sessionID = "";
+      const deltasByTurn: Array<Array<{ seq: number; content: string }>> = [];
+      for (const [index, turn] of turns.entries()) {
+        if (index === 1) {
+          if (!emergency) {
+            for (const distractor of Array.from({ length: 12 }, (_, i) => i)) {
+              ltm.create({
+                projectPath,
+                scope: "project",
+                category: "gotcha",
+                title: `Unrelated chart palette ${distractor}`,
+                content: `Use contrasting colors for chart label ${distractor}.`,
+                confidence: 0.95,
+              });
+            }
+          }
+          ltm.create({
+            projectPath,
+            scope: "project",
+            category: "gotcha",
+            title: "Chart palette colors",
+            content: "Use blue for chart labels and yellow for palette badges.",
+          });
+          ltm.create({
+            projectPath,
+            scope: "project",
+            category: "gotcha",
+            title: "Auth credential routing",
+            content: "Scope auth credentials to the tenant before forwarding.",
+            confidence: 0.8,
+          });
+        }
+        if (index === 2 && emergency) setForceMinLayer(4, sessionID);
+        const response = await harness.chat(
+          makeBody(turn.userMessage, history),
+          "test-key",
+          headers,
+        );
+        expect(response.status).toBe(200);
+        await response.json();
+        if (index === 2 && emergency) expect(getLastLayer(sessionID)).toBe(4);
+        if (index === 0) {
+          sessionID =
+            harness.queryDB<{ session_id: string }>(
+              "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+            )[0]?.session_id ?? "";
+          expect(sessionID).not.toBe("");
+        }
+        deltasByTurn.push(
+          harness.queryDB<{ seq: number; content: string }>(
+            "SELECT seq, content FROM session_prompt_deltas ORDER BY seq",
+          ),
+        );
+        history.push({ role: "user", content: turn.userMessage });
+        history.push({
+          role: "assistant",
+          content: [{ type: "text", text: turn.assistantText }],
+        });
+      }
+      selection.mockRestore();
+      if (!emergency) {
+        if (caseInput.initial) {
+          expect(hints.map((hint) => hint.slice(-120))).toContainEqual(
+            expect.stringContaining("tenant-scoped"),
+          );
+        } else expect(hints).toContain(request);
+      }
+      const bodies = harness.upstreamBodies();
+      expect(deltasByTurn[1]).toHaveLength(1);
+      expect(deltasByTurn[2]).toHaveLength(2);
+      expect(deltasByTurn[2][1].content).toContain("Auth credential routing");
+      expect(serializedMessages(bodies[2])).toContain(
+        "Auth credential routing",
+      );
+      expect(serializedMessages(bodies[3])).toContain(
+        "Auth credential routing",
+      );
+      expect(systemBlocks(bodies[2])).toEqual(systemBlocks(bodies[1]));
+    },
+  );
+
+  it("does not carry a foreign shared chart entry into a new 'ok fix auth' task", async () => {
+    const turns = [
+      {
+        userMessage: "Fix chart palette colors.",
+        assistantText: "Chart done.",
+      },
+      { userMessage: "ok fix auth", assistantText: "Auth done." },
+    ];
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-ack-task-switch-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `ack-task-switch-${Date.now()}`,
+    };
+    const { ltm } = await import("@loreai/core");
+    const original = ltm.forSession;
+    const hints: string[] = [];
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          hints.push(args[3]?.contextHint ?? "");
+        }
+        return original(...args);
+      });
+    const history: unknown[] = [];
+    try {
+      const first = await harness.chat(
+        makeBody(turns[0].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.json();
+      history.push({ role: "user", content: turns[0].userMessage });
+      history.push({ role: "assistant", content: turns[0].assistantText });
+
+      ltm.create({
+        projectPath: `${projectPath}-other`,
+        scope: "project",
+        crossProject: true,
+        category: "gotcha",
+        title: "Chart palette shared note",
+        content: "FOREIGN_PALETTE_SENTINEL use cerulean for the palette.",
+      });
+      ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Auth credential routing",
+        content: "Scope auth credentials before forwarding.",
+      });
+      const second = await harness.chat(
+        makeBody(turns[1].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(second.status).toBe(200);
+      await second.json();
+      expect(hints).toContain("ok fix auth");
+      const body = harness.upstreamBodies()[1];
+      expect(serializedMessages(body)).toContain("Auth credential routing");
+      expect(serializedMessages(body)).not.toContain(
+        "FOREIGN_PALETTE_SENTINEL",
+      );
+      const deltas = harness.queryDB<{ content: string }>(
+        "SELECT content FROM session_prompt_deltas",
+      );
+      expect(deltas.map((delta) => delta.content).join(" ")).not.toContain(
+        "FOREIGN_PALETTE_SENTINEL",
+      );
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
+  it.each(["continue the work", "go ahead with the plan"])(
+    "keeps the preceding task for the explicit continuation %s",
+    async (continuation) => {
+      const turns = [
+        {
+          userMessage: "Fix chart palette colors.",
+          assistantText: "Chart done.",
+        },
+        { userMessage: continuation, assistantText: "Continuing." },
+      ];
+      harness = await createHarness({
+        fixtures: makeConversationFixtures(turns),
+      });
+      const projectPath = `/tmp/lore-explicit-continuation-${Date.now()}`;
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": `explicit-continuation-${Date.now()}`,
+      };
+      const history: unknown[] = [];
+      const first = await harness.chat(
+        makeBody(turns[0].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.json();
+      history.push({ role: "user", content: turns[0].userMessage });
+      history.push({ role: "assistant", content: turns[0].assistantText });
+
+      const { ltm } = await import("@loreai/core");
+      ltm.create({
+        projectPath: `${projectPath}-other`,
+        scope: "project",
+        crossProject: true,
+        category: "gotcha",
+        title: "Chart palette note",
+        content: "Use soft orange for chart palette colors.",
+      });
+      const original = ltm.forSession;
+      const hints: string[] = [];
+      const selection = vi
+        .spyOn(ltm, "forSession")
+        .mockImplementation((...args) => {
+          if (args[3]?.excludeCategories?.includes("preference")) {
+            hints.push(args[3]?.contextHint ?? "");
+          }
+          return original(...args);
+        });
+      try {
+        const second = await harness.chat(
+          makeBody(turns[1].userMessage, history),
+          "test-key",
+          headers,
+        );
+        expect(second.status).toBe(200);
+        await second.json();
+        expect(hints.some((hint) => hint.includes(turns[0].userMessage))).toBe(
+          true,
+        );
+        expect(serializedMessages(harness.upstreamBodies()[1])).toContain(
+          "Use soft orange",
+        );
+      } finally {
+        selection.mockRestore();
+      }
+    },
+  );
 
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
     // End-to-end proof of the #917 wiring: knowledge that is relevance-scored
@@ -1434,23 +1798,9 @@ describe("cache stability (e2e)", () => {
     );
   });
 
-  it("ranking churn with NO DB change appends NO extra delta beyond the first injection and keeps the prefix byte-stable (the cause=incremental bust)", async () => {
-    // T1 regression for the production bust (session 1LYkXZ7jkiHHnqPl): the delta
-    // fired on per-turn relevance-ranking churn (the forSession selection picks a
-    // different subset each turn) even though NO knowledge changed in the DB,
-    // rewriting a deep-prefix message every turn → ~250k tokens rewritten per
-    // turn. The cached selection should remain stable across near-zero idle
-    // resumes even when the query topic changes and the DB has no mutations.
-    //
-    // New contract (delta-primary): the FIRST injection of context-bound LTM
-    // appends exactly ONE durable block (seq 0). After that, pure ranking churn
-    // (a different top-K subset each turn, but NO DB mutation) must append NO
-    // further blocks — the DB-sourced trigger (detectSurfacedMutations compares
-    // the advancing surfaced set against the live DB, not the per-turn
-    // selection) surfaces nothing to change. And the cached system prefix must
-    // stay byte-identical. Under the old selection-based trigger, the churn
-    // wrote (and rewrote) a "Superseded" delta EVERY turn → many rows → this
-    // test fails (mutation-verified).
+  it("new tasks do not repeat entries already delivered by the large initial budget", async () => {
+    // A changed task query causes re-selection. When the initial budget already
+    // delivered every candidate, no new delta is needed and the prefix stays fixed.
     const topics = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
     const turns = Array.from({ length: 6 }, (_, i) => ({
       // Each turn foregrounds a DIFFERENT topic so forSession re-ranks which
@@ -1502,6 +1852,7 @@ describe("cache stability (e2e)", () => {
     const history: unknown[] = [];
     let sessionID = "";
     let callsAfterInitialSelection = 0;
+    let firstDelta: { seq: number; content: string } | undefined;
     for (let i = 0; i < turns.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 80));
       const resp = await harness.chat(
@@ -1524,31 +1875,32 @@ describe("cache stability (e2e)", () => {
         expect(sessionID).not.toBe("");
       }
       if (i === 1) callsAfterInitialSelection = forSessionSpy.mock.calls.length;
+      if (i === 1) {
+        firstDelta = harness.queryDB<{ seq: number; content: string }>(
+          "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
+          [sessionID],
+        )[0];
+      }
       // NB: intentionally NO ltm.update / ltm.remove anywhere — the DB is frozen.
     }
 
-    // Once the first context selection is saved, idle resumes reuse it instead
-    // of embedding and re-ranking the entire session on every later turn.
     expect(callsAfterInitialSelection).toBeGreaterThan(0);
-    expect(forSessionSpy.mock.calls.length).toBe(callsAfterInitialSelection);
+    expect(forSessionSpy.mock.calls.length).toBeGreaterThan(
+      callsAfterInitialSelection,
+    );
 
-    // The core guarantee: the FIRST injection appends exactly ONE block (seq 0);
-    // pure ranking churn (no genuine knowledge mutation) appends NOTHING further,
-    // regardless of how the relevance selection churned across the later turns.
     const deltaRows = harness.queryDB<{ seq: number; content: string }>(
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(
-      deltaRows.map((r) => r.seq),
-      `expected exactly the first-injection block (seq 0) and NO churn-driven ` +
-        `rows, got seqs=${deltaRows.map((r) => r.seq).join(",")} — a >1 count ` +
-        `means the selection-based trigger rewrote a delta on mere re-ranking, ` +
-        `which is the cause=incremental bust`,
-    ).toEqual([0]);
-    // The single first-injection block carries genuine new knowledge, never a
-    // "Superseded — ignore these ids" churn list.
-    expect(deltaRows[0].content).not.toContain("Superseded");
+    expect(deltaRows).toHaveLength(1);
+    expect(deltaRows[0]).toEqual(firstDelta);
+    for (const topic of topics) {
+      expect(deltaRows[0].content).toContain(`${topic} subsystem note`);
+    }
+    expect(deltaRows.every((row) => !row.content.includes("Superseded"))).toBe(
+      true,
+    );
 
     // And the cached system prefix must be byte-identical once established
     // (turn 2+), proving the churn never emitted a context-bound system[2] block

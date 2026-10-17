@@ -16,6 +16,7 @@ import {
 } from "../config";
 import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
+import { startSessionRefreshScheduler } from "../session-refresh";
 import { writePortFile, removePortFile } from "../portfile";
 import {
   writeGatewayProcessFile,
@@ -959,7 +960,7 @@ async function startGatewayLocked(
   }
 
   // Validate after CLI/env/default mode precedence is fully applied. In
-  // particular, `--local` must be able to opt out before this invariant runs.
+  // particular, optional credentials are validated after mode selection.
   assertGatewayAccessConfigured(config);
 
   // Build the list of ports to try.
@@ -1128,6 +1129,7 @@ async function startGatewayLocked(
       }
 
       const boundServer = server;
+      const stopSessionRefresh = startSessionRefreshScheduler(config);
       let shutdownPromise: Promise<void> | undefined;
       const shutdown = (context?: ProcessShutdownContext): Promise<void> => {
         const startedAt = Date.now();
@@ -1176,6 +1178,7 @@ async function startGatewayLocked(
             }
 
             let pipelineReset = Promise.resolve();
+            const sessionRefreshStop = stopSessionRefresh();
             try {
               shutdownLock.assertOwned();
               pipelineReset = io
@@ -1234,6 +1237,11 @@ async function startGatewayLocked(
             });
             const quiesce = await Promise.allSettled([
               settleBeforeDeadline(pipelineReset, finalizeBy, "pipeline reset"),
+              settleBeforeDeadline(
+                sessionRefreshStop,
+                finalizeBy,
+                "account refresh",
+              ),
               settleBeforeDeadline(listenerClose, finalizeBy, "listener close"),
               temporalQuiescence,
               documentQuiescence,
@@ -1453,7 +1461,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       hasNonLoopbackHost(config.hosts)
     ) {
       console.warn(
-        "[lore] SECURITY WARNING: local mode on a non-loopback bind is filesystem-capable and does not require gateway access authentication. Bind to loopback or use hosted/remote mode for untrusted clients.",
+        "[lore] SECURITY WARNING: local mode on a non-loopback bind is filesystem-capable and does not require gateway access authentication. Bind to loopback or use hosted/remote mode with LORE_GATEWAY_AUTH_TOKEN for untrusted clients.",
       );
     }
     console.log("");
@@ -1494,7 +1502,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       `  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`,
     );
     console.log(
-      `  LORE_GATEWAY_AUTH_TOKEN Access token required by remote/hosted data-plane routes (value is never printed)`,
+      `  LORE_GATEWAY_AUTH_TOKEN Optional access token for remote/hosted routes and remote management (value is never printed)`,
     );
     console.log(
       `  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`,

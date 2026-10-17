@@ -15,18 +15,24 @@
  *   - `invalid`      2xx whose body failed validation (`ContractError`)
  *   - `http`         any other non-2xx
  */
-import { type Type } from "arktype";
+import { type as schema, type Type } from "arktype";
 
 import {
+  modelTidesMutationResult,
+  modelUsageUploadState,
   accountStatus,
   crossProjectKnowledgeEntry,
   ApiError,
   apiErrorBody,
+  conflictingEntry,
   apiPath,
   cursorPage,
   circuitBreakerResetResult,
   costsSnapshot,
-  dailyBudgetResult,
+  providerBudgetsResult,
+  type ProviderBudgetInput,
+  dedupApplyReceipt,
+  modelUsageDocument,
   dedupPreviewResponse,
   contradictionDecisionResult,
   contradictionListResponse,
@@ -40,8 +46,13 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  knowledgeDeleteResult,
+  knowledgeEditResult,
+  knowledgeEffects,
+  knowledgeFiles,
   knowledgeList,
   formatKnowledgeSort,
+  knowledgeRestoreResult,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
   sessionWarmingModeResult,
@@ -54,6 +65,20 @@ import {
   promotionListResponse,
   promotionPreview,
   promotionReceipt,
+  teamMembersResponse,
+  teamInviteReceipt,
+  teamRoleReceipt,
+  teamRemovalReceipt,
+  teamCreateReceipt,
+  teamAddReceipt,
+  teamAcceptReceipt,
+  teamDiscoveryResult,
+  organizationList,
+  domainJoinRequestList,
+  teamReviewPolicy,
+  syncConflictList,
+  syncConflictKeepReceipt,
+  syncConflictDiscardReceipt,
   query,
   sessionsMoveResult,
   recallResponse,
@@ -65,19 +90,26 @@ import {
   sessionPage,
   sessionSearchPage,
   sharingStatus,
+  syncRunReceipt,
   syncStatus,
   teamList,
   warmingSettingsResult,
   warmingSnapshot,
   type AccountStatus,
+  type ConflictingEntry,
   type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
+  type ModelTidesMutationResult,
+  type ModelUsageDocument,
+  type ModelUsageUploadState,
   type ContradictionDecision,
   type ContradictionDecisionResult,
   type ContradictionListResponse,
   type DistillationDetail,
   type DistillationSummary,
+  type DedupApplyBody,
+  type DedupApplyReceipt,
   type DedupPreviewResponse,
   type EntityDetail,
   type EntityListPage,
@@ -85,14 +117,34 @@ import {
   type EntityRebuildStatus,
   type ImportListPage,
   type KnowledgeEntry,
+  type KnowledgeDeleteResult,
+  type KnowledgeEditResult,
+  type KnowledgeEffects,
+  type KnowledgeFiles,
   type KnowledgeSearchResponse,
   type KnowledgeVersionHistory,
+  type KnowledgeRestoreResult,
   type ProjectClearResult,
   type ProjectDeleteResult,
   type ProjectRenameResult,
   type PromotionListResponse,
   type PromotionPreview,
   type PromotionReceipt,
+  type TeamMembersResponse,
+  type TeamInviteReceipt,
+  type TeamRoleReceipt,
+  type TeamRemovalReceipt,
+  type TeamCreateReceipt,
+  type TeamAddReceipt,
+  type TeamAcceptReceipt,
+  type TeamDiscoveryResult,
+  type OrganizationList,
+  type DomainJoinRequestList,
+  type TeamReviewPolicy,
+  type SyncConflictList,
+  type SyncConflictKeepReceipt,
+  type SyncConflictDiscardReceipt,
+  type SyncRunReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -144,22 +196,70 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   /** Path prefix, defaults to `/api/v1` (same-origin; the Vite dev server proxies it). */
   base?: string;
+  /** Injected for tests; production keeps this browser-local in sessionStorage. */
+  getGatewayAuthToken?: () => string | null;
+  /** Injected for tests; production removes a rejected token from sessionStorage. */
+  clearGatewayAuthToken?: () => void;
+}
+
+const GATEWAY_AUTH_STORAGE_KEY = "lore.gateway-auth-token";
+
+function storedGatewayAuthToken(): string | null {
+  try {
+    return globalThis.sessionStorage?.getItem(GATEWAY_AUTH_STORAGE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setGatewayAuthToken(token: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(GATEWAY_AUTH_STORAGE_KEY, token);
+  } catch {
+    // Keep the token in the browser's available storage only; never send it elsewhere.
+  }
+}
+
+export function clearGatewayAuthToken(): void {
+  try {
+    globalThis.sessionStorage?.removeItem(GATEWAY_AUTH_STORAGE_KEY);
+  } catch {
+    // Storage may be unavailable in privacy-restricted browser contexts.
+  }
 }
 
 async function readErrorDetails(res: Response): Promise<{
   message: string | null;
   isErrorEnvelope: boolean;
   code: string | null;
+  conflictingEntry?: ConflictingEntry;
 }> {
   const text = await res.text().catch(() => "");
   if (!text) return { message: null, isErrorEnvelope: false, code: null };
   try {
-    const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
+    const body: unknown = JSON.parse(text);
+    const parsed = safeParseContract("<error>", apiErrorBody, body);
     if (parsed.ok) {
+      const errorBody =
+        body !== null && typeof body === "object" && "error" in body
+          ? body.error
+          : undefined;
+      const conflictValue =
+        errorBody !== null &&
+        typeof errorBody === "object" &&
+        "conflicting_entry" in errorBody
+          ? errorBody.conflicting_entry
+          : undefined;
+      const conflict = safeParseContract(
+        "<conflicting_entry>",
+        conflictingEntry,
+        conflictValue,
+      );
       return {
         message: parsed.value.error.message,
         isErrorEnvelope: true,
         code: parsed.value.error.type,
+        ...(conflict.ok ? { conflictingEntry: conflict.value } : {}),
       };
     }
   } catch {
@@ -176,6 +276,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   const base = options.base ?? API_BASE;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const getGatewayAuthToken =
+    options.getGatewayAuthToken ?? storedGatewayAuthToken;
+  const clearRejectedGatewayAuthToken =
+    options.clearGatewayAuthToken ?? clearGatewayAuthToken;
 
   /**
    * Shared transport + error classifier for GET (getJson) and the write
@@ -189,6 +293,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
   ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
+    const gatewayAuthToken = getGatewayAuthToken();
+    if (gatewayAuthToken) {
+      headers.set("authorization", `Bearer ${gatewayAuthToken}`);
+    }
     let res: Response;
     try {
       res = await doFetch(`${base}${path}`, {
@@ -204,6 +312,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (res.status === 401) {
       const details = await readErrorDetails(res);
+      clearRejectedGatewayAuthToken();
       throw new ApiError(
         "unauthorized",
         path,
@@ -225,9 +334,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
           details.message ?? "Gateway refused this operation",
           res.status,
           details.code,
+          details.conflictingEntry,
         );
       }
       if (details.message === null) {
+        clearRejectedGatewayAuthToken();
         throw new ApiError(
           "unauthorized",
           path,
@@ -258,10 +369,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (!res.ok) {
       const details = await readErrorDetails(res);
+      const message = details.message;
       if (res.status === 404) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
         if (details.message === null) {
+          clearRejectedGatewayAuthToken();
           throw new ApiError(
             "unauthorized",
             path,
@@ -273,9 +386,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
         throw new ApiError(
           "not_found",
           path,
-          details.message,
+          message ?? `Gateway responded ${res.status}`,
           404,
           details.code,
+          details.conflictingEntry,
         );
       }
       throw new ApiError(
@@ -284,6 +398,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         details.message ?? `Gateway responded ${res.status}`,
         res.status,
         details.code,
+        details.conflictingEntry,
       );
     }
 
@@ -317,7 +432,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
    * and a missing record as `not_found`.
    */
   function mutateJson<T>(
-    method: "POST" | "PATCH" | "DELETE",
+    method: "POST" | "PATCH" | "PUT" | "DELETE",
     path: string,
     body: unknown,
     schema: Type<T>,
@@ -360,6 +475,19 @@ export function createApiClient(options: ApiClientOptions = {}) {
         apiPath(["projects", projectId, "dedup"]),
         {},
         dedupPreviewResponse,
+        signal,
+      );
+    },
+    applyDedup(
+      projectId: string,
+      body: DedupApplyBody,
+      signal?: AbortSignal,
+    ): Promise<DedupApplyReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "dedup", "apply"]),
+        body,
+        dedupApplyReceipt,
         signal,
       );
     },
@@ -454,6 +582,74 @@ export function createApiClient(options: ApiClientOptions = {}) {
         }),
         knowledgeVersionHistory,
         opts.signal,
+      );
+    },
+    getKnowledgeEffects(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEffects> {
+      return getJson(
+        apiPath(["knowledge", id, "effects"]),
+        knowledgeEffects,
+        signal,
+      );
+    },
+    editKnowledge(
+      id: string,
+      body: {
+        expected_revision: number;
+        title?: string;
+        content?: string;
+        category?: KnowledgeEntry["category"];
+        confidence?: number;
+        scope?: KnowledgeScope;
+      },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEditResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["knowledge", id]),
+        body,
+        knowledgeEditResult,
+        signal,
+      );
+    },
+    restoreKnowledge(
+      id: string,
+      body: { expected_revision: number; version_id?: string },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeRestoreResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["knowledge", id, "restore"]),
+        body,
+        knowledgeRestoreResult,
+        signal,
+      );
+    },
+    deleteKnowledge(
+      id: string,
+      expectedRevision: number,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeDeleteResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["knowledge", id], {
+          expected_revision: expectedRevision,
+        }),
+        undefined,
+        knowledgeDeleteResult,
+        signal,
+      );
+    },
+    getKnowledgeFiles(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeFiles> {
+      return getJson(
+        apiPath(["knowledge", id, "files"]),
+        knowledgeFiles,
+        signal,
       );
     },
     listProjectSessions(
@@ -615,8 +811,191 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getTeams(signal?: AbortSignal): Promise<TeamList> {
       return getJson("/teams", teamList, signal);
     },
+    getTeamMembers(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamMembersResponse> {
+      return getJson(
+        apiPath(["teams", teamId, "members"]),
+        teamMembersResponse,
+        signal,
+      );
+    },
+    inviteTeamMember(
+      teamId: string,
+      input: {
+        role: "editor" | "viewer";
+        email?: string;
+        offline?: boolean;
+      },
+      signal?: AbortSignal,
+    ): Promise<TeamInviteReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "invites"]),
+        input,
+        teamInviteReceipt,
+        signal,
+      );
+    },
+    createTeam(name: string, signal?: AbortSignal): Promise<TeamCreateReceipt> {
+      return mutateJson("POST", "/teams", { name }, teamCreateReceipt, signal);
+    },
+    addTeamMemberById(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer" = "editor",
+      signal?: AbortSignal,
+    ): Promise<TeamAddReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members"]),
+        { user_id: userId, role },
+        teamAddReceipt,
+        signal,
+      );
+    },
+    acceptTeamInvite(
+      token: string,
+      signal?: AbortSignal,
+    ): Promise<TeamAcceptReceipt> {
+      return mutateJson(
+        "POST",
+        "/teams/accept",
+        { token },
+        teamAcceptReceipt,
+        signal,
+      );
+    },
+    getOrganizations(signal?: AbortSignal): Promise<OrganizationList> {
+      return getJson("/orgs", organizationList, signal);
+    },
+    discoverTeamContributors(
+      teamId: string,
+      input: {
+        repos?: string[];
+        invite_role?: "editor" | "viewer";
+        invite_logins?: string[];
+      },
+      signal?: AbortSignal,
+    ): Promise<TeamDiscoveryResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "discover"]),
+        input,
+        teamDiscoveryResult,
+        signal,
+      );
+    },
+    getDomainJoinRequests(
+      orgId: string,
+      signal?: AbortSignal,
+    ): Promise<DomainJoinRequestList> {
+      return getJson(
+        apiPath(["orgs", orgId, "domains", "requests"]),
+        domainJoinRequestList,
+        signal,
+      );
+    },
+    claimOrganizationDomain(
+      orgId: string,
+      domain: string,
+      role: "manager" | "billing" | "member" = "member",
+      signal?: AbortSignal,
+    ): Promise<{ claimed: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "claim"]),
+        { domain, role },
+        schema({ claimed: "string" }),
+        signal,
+      );
+    },
+    requestOrganizationJoin(
+      orgId: string,
+      domain: string,
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "request"]),
+        { domain },
+        schema({ request_id: "string" }),
+        signal,
+      );
+    },
+    decideDomainJoinRequest(
+      orgId: string,
+      requestId: string,
+      decision: "approve" | "reject",
+      signal?: AbortSignal,
+    ): Promise<{ request_id: string; status: "approved" | "rejected" }> {
+      return mutateJson(
+        "POST",
+        apiPath(["orgs", orgId, "domains", "requests", requestId, decision]),
+        {},
+        schema({ request_id: "string", status: "'approved' | 'rejected'" }),
+        signal,
+      );
+    },
+    getTeamReviewPolicy(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return getJson(
+        apiPath(["teams", teamId, "review-policy"]),
+        teamReviewPolicy,
+        signal,
+      );
+    },
+    setTeamReviewPolicy(
+      teamId: string,
+      policy: "required" | "optional",
+      expected: "required" | "optional",
+      signal?: AbortSignal,
+    ): Promise<TeamReviewPolicy> {
+      return mutateJson(
+        "PUT",
+        apiPath(["teams", teamId, "review-policy"]),
+        { policy, expected },
+        teamReviewPolicy,
+        signal,
+      );
+    },
+    setTeamMemberRole(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer",
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRoleReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "role"]),
+        { role, expected_role: expectedRole },
+        teamRoleReceipt,
+        signal,
+      );
+    },
+    removeTeamMember(
+      teamId: string,
+      userId: string,
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRemovalReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "remove"]),
+        { expected_role: expectedRole },
+        teamRemovalReceipt,
+        signal,
+      );
+    },
     getSyncStatus(signal?: AbortSignal): Promise<SyncStatus> {
       return getJson("/sync/status", syncStatus, signal);
+    },
+    runSync(signal?: AbortSignal): Promise<SyncRunReceipt> {
+      return mutateJson("POST", "/sync/run", {}, syncRunReceipt, signal);
     },
     getProjectSharing(
       projectId: string,
@@ -625,6 +1004,62 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
+        signal,
+      );
+    },
+    setProjectAutoShare(
+      projectId: string,
+      policy: "manual" | "auto",
+      expectedOverride: "manual" | "auto" | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "policy"]),
+        { policy, expected_override: expectedOverride },
+        sharingStatus,
+        signal,
+      );
+    },
+    linkProjectToTeam(
+      projectId: string,
+      scopeId: string | null,
+      expectedScopeId: string | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "link"]),
+        { scope_id: scopeId, expected_scope_id: expectedScopeId },
+        sharingStatus,
+        signal,
+      );
+    },
+    listSyncConflicts(signal?: AbortSignal): Promise<SyncConflictList> {
+      return getJson("/sync/conflicts", syncConflictList, signal);
+    },
+    keepSyncConflictLocal(
+      id: number,
+      expectedVersionId: string,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictKeepReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "keep-local"]),
+        { expected_version_id: expectedVersionId },
+        syncConflictKeepReceipt,
+        signal,
+      );
+    },
+    discardSyncConflict(
+      id: number,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictDiscardReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "discard"]),
+        {},
+        syncConflictDiscardReceipt,
         signal,
       );
     },
@@ -838,16 +1273,83 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getCosts(signal?: AbortSignal): Promise<CostsSnapshot> {
       return getJson("/costs", costsSnapshot, signal);
     },
-    setDailyBudget(
-      amount: number,
+    putProviderBudgets(
+      budgets: ProviderBudgetInput[],
       signal?: AbortSignal,
-    ): Promise<{ amount: number; disabled: boolean }> {
+    ): Promise<{ provider_budgets: CostsSnapshot["provider_budgets"] }> {
       return mutateJson(
-        "PATCH",
-        "/costs/budget",
-        { amount },
-        dailyBudgetResult,
-
+        "PUT",
+        "/costs/budgets",
+        { provider_budgets: budgets },
+        providerBudgetsResult,
+        signal,
+      );
+    },
+    /**
+     * `GET /api/v1/model-usage` — the whole model-tides daily document for a
+     * project (or all projects when `project` is omitted). Date-range
+     * filtering happens client-side (#2026).
+     */
+    getModelUsage(
+      opts: { project?: string } = {},
+      signal?: AbortSignal,
+    ): Promise<ModelUsageDocument> {
+      return getJson(
+        apiPath(["model-usage"], { project: opts.project }),
+        modelUsageDocument,
+        signal,
+      );
+    },
+    /**
+     * Consented Model Tides upload (#2026 PR3). Nothing is uploaded
+     * automatically — every mutation carries `{ confirm: "YES" }` plus the
+     * hash/revision the user just reviewed.
+     */
+    getModelUsageUpload(signal?: AbortSignal): Promise<ModelUsageUploadState> {
+      return getJson(
+        apiPath(["model-usage", "upload"]),
+        modelUsageUploadState,
+        signal,
+      );
+    },
+    postModelUsageUpload(
+      body: {
+        confirm: "YES";
+        snapshot_sha256: string;
+        reviewed_revision?: number;
+      },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    postModelUsageUploadAction(
+      action: "share" | "unshare" | "contribute" | "withdraw" | "rotate",
+      body: { confirm: "YES"; reviewed_revision?: number },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["model-usage", "upload", action]),
+        body,
+        modelTidesMutationResult,
+        signal,
+      );
+    },
+    deleteModelUsageUpload(
+      body: { confirm: "YES" },
+      signal?: AbortSignal,
+    ): Promise<ModelTidesMutationResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["model-usage", "upload"]),
+        body,
+        modelTidesMutationResult,
         signal,
       );
     },

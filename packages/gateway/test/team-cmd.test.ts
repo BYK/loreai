@@ -17,6 +17,16 @@ vi.mock("../src/team", () => ({
   setTeamRole: vi.fn(),
   listTeams: vi.fn(),
   teamMembers: vi.fn(),
+  teamMemberProfiles: vi.fn(),
+  identityLabel: (profile: {
+    display_name: string | null;
+    github_login: string | null;
+    email: string | null;
+  }) =>
+    profile.display_name ??
+    (profile.github_login ? `@${profile.github_login}` : null) ??
+    profile.email ??
+    null,
   createTeamInvite: vi.fn(),
   acceptTeamInvite: vi.fn(),
   claimOrgDomain: vi.fn(),
@@ -57,8 +67,8 @@ vi.mock("../src/cli/login", () => ({
 
 import {
   db,
-  effectivePromotionPolicy,
   ensureProject,
+  projectAutoShare,
   ltm,
   projectScope,
   setProjectScope,
@@ -89,6 +99,10 @@ beforeEach(() => {
     errs.push(a.join(" "));
   });
   vi.mocked(getAuthedClient).mockResolvedValue(FAKE_CLIENT);
+  vi.mocked(team.teamMembers).mockResolvedValue([
+    { userId: "u", role: "viewer" },
+  ]);
+  vi.mocked(team.teamMemberProfiles).mockResolvedValue([]);
   vi.mocked(promotions.listPromotionRequestsService).mockResolvedValue({
     ok: true,
     value: { remote: "ok", requests: [], complete: true },
@@ -192,10 +206,26 @@ describe("members", () => {
       { userId: "u1", role: "admin" },
       { userId: "u2", role: "viewer" },
     ]);
+    vi.mocked(team.teamMemberProfiles).mockResolvedValue([
+      {
+        user_id: "u1",
+        display_name: "Jordan",
+        github_login: null,
+        email: null,
+      },
+      {
+        user_id: "u2",
+        display_name: null,
+        github_login: "pat",
+        email: null,
+      },
+    ]);
     await run("members", "s1");
     expect(vi.mocked(team.teamMembers)).toHaveBeenCalledWith(FAKE_CLIENT, "s1");
-    expect(logs.join("\n")).toContain("u1  admin");
-    expect(logs.join("\n")).toContain("u2  viewer");
+    expect(logs.join("\n")).toContain("Jordan  admin");
+    expect(logs.join("\n")).toContain("@pat  viewer");
+    expect(logs.join("\n")).not.toContain("u1");
+    expect(logs.join("\n")).not.toContain("u2");
   });
 });
 
@@ -263,12 +293,22 @@ describe("remove", () => {
   });
 
   it("reports the rotation", async () => {
+    vi.mocked(team.teamMemberProfiles).mockResolvedValue([
+      {
+        user_id: "u",
+        display_name: "Jordan",
+        github_login: null,
+        email: null,
+      },
+    ]);
     vi.mocked(team.removeTeamMember).mockResolvedValue({
       newEpoch: 3,
       rewrapped: 2,
       skipped: [],
+      unlinkedProjects: 0,
     });
     await run("remove", "s", "u");
+    expect(logs.join("\n")).toContain("Removed Jordan");
     expect(logs.join("\n")).toMatch(
       /rotated the team key to epoch 3 \(2 member/,
     );
@@ -276,16 +316,74 @@ describe("remove", () => {
   });
 
   it("warns about members that lost access (no published key)", async () => {
+    vi.mocked(team.teamMemberProfiles).mockResolvedValue([
+      {
+        user_id: "user-target",
+        display_name: "Jordan",
+        github_login: null,
+        email: null,
+      },
+      {
+        user_id: "user-skipped",
+        display_name: null,
+        github_login: "pat",
+        email: null,
+      },
+    ]);
     vi.mocked(team.removeTeamMember).mockResolvedValue({
       newEpoch: 1,
       rewrapped: 1,
-      skipped: ["x", "y"],
+      skipped: ["user-skipped", "user-unknown"],
+      unlinkedProjects: 0,
     });
-    await run("remove", "s", "u");
+    await run("remove", "s", "user-target");
     expect(logs.join("\n")).toMatch(
       /Warning: 2 member\(s\) had no published key/,
     );
-    expect(logs.join("\n")).toContain("x, y");
+    expect(logs.join("\n")).toContain("@pat, Former member");
+    expect(logs.join("\n")).not.toContain("user-skipped");
+    expect(logs.join("\n")).not.toContain("user-unknown");
+  });
+});
+
+describe("leave", () => {
+  it("requires a team reference", async () => {
+    await run("leave");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("lets an editor leave a team resolved by name and reports unlinked projects", async () => {
+    vi.mocked(getCurrentUser).mockResolvedValue({
+      user_id: "self-user",
+    } as never);
+    vi.mocked(team.listTeams).mockResolvedValue([
+      { scopeId: "scope-1", name: "Acme", role: "editor" },
+    ]);
+    vi.mocked(team.teamMemberProfiles).mockResolvedValue([
+      {
+        user_id: "other-user",
+        display_name: "Casey",
+        github_login: null,
+        email: null,
+      },
+    ]);
+    vi.mocked(team.removeTeamMember).mockResolvedValue({
+      newEpoch: 4,
+      rewrapped: 2,
+      skipped: ["other-user"],
+      unlinkedProjects: 3,
+    });
+    await run("leave", "acme");
+    expect(vi.mocked(team.removeTeamMember)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "scope-1",
+      "self-user",
+    );
+    expect(logs.join("\n")).toContain('Left team "Acme"');
+    expect(logs.join("\n")).toContain("Casey");
+    expect(logs.join("\n")).not.toContain("other-user");
+    expect(logs.join("\n")).toContain("Unlinked 3 local project(s).");
   });
 });
 
@@ -302,15 +400,49 @@ describe("set-role", () => {
     expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
   });
 
+  it("reports a missing team member", async () => {
+    vi.mocked(team.teamMembers).mockResolvedValue([]);
+
+    await run("set-role", "s", "u", "admin");
+
+    expect(errs.join("\n")).toContain("Team member not found: u");
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unrecognized role returned by the server", async () => {
+    vi.mocked(team.teamMembers).mockResolvedValue([
+      { userId: "u", role: "owner" },
+    ] as never);
+
+    await run("set-role", "s", "u", "admin");
+
+    expect(errs.join("\n")).toContain(
+      "Unexpected team-member role from server.",
+    );
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(team.setTeamRole)).not.toHaveBeenCalled();
+  });
+
   it("sets the role", async () => {
+    vi.mocked(team.teamMemberProfiles).mockResolvedValue([
+      {
+        user_id: "u",
+        display_name: "Jordan",
+        github_login: null,
+        email: null,
+      },
+    ]);
     await run("set-role", "s", "u", "admin");
     expect(vi.mocked(team.setTeamRole)).toHaveBeenCalledWith(
       FAKE_CLIENT,
       "s",
       "u",
       "admin",
+      "viewer",
     );
-    expect(logs.join("\n")).toContain("Set u to admin.");
+    expect(logs.join("\n")).toContain("Set Jordan to admin.");
+    expect(logs.join("\n")).not.toContain("Set u to admin.");
   });
 });
 
@@ -628,13 +760,15 @@ describe("domain (E-5-b)", () => {
         id: "req-1",
         domain: "acme.dev",
         userId: "u-2",
+        label: "Ada Lovelace",
         status: "pending",
         requestedAt: "t",
       },
     ]);
     await run("domain", "requests", "org-1");
     expect(logs.join("\n")).toContain("req-1");
-    expect(logs.join("\n")).toContain("u-2");
+    expect(logs.join("\n")).toContain("Ada Lovelace");
+    expect(logs.join("\n")).not.toContain("u-2");
   });
 
   it("requests prints a friendly message when there are none", async () => {
@@ -974,8 +1108,11 @@ describe("server-backed promotion review and project sharing policy", () => {
   it("policy sets the project override", async () => {
     await commandTeam(["policy", "auto"], { project: PROJECT });
     expect(process.exitCode).toBe(0);
-    expect(effectivePromotionPolicy(pid)).toBe("auto");
+    expect(projectAutoShare(pid)).toBe(true);
     expect(logs.join("\n")).toMatch(/auto-share override/);
+    expect(logs.join("\n")).toMatch(
+      /per project.*review policy controls approval/i,
+    );
   });
 
   it("policy with an invalid value → usage + exit 1", async () => {

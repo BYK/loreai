@@ -16,7 +16,7 @@
  * set to match the actual bytes, never blindly forwarded from the client.
  *
  * `node:zlib` provides every codec used here; `zstd*Sync` requires Node
- * >= 22.15, which is the `@loreai/gateway` engines floor.
+ * >= 22.15, while the gateway supports Node >= 22.16 except 23.x.
  */
 import {
   brotliCompressSync,

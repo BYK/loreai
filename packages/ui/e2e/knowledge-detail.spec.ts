@@ -26,7 +26,62 @@ async function projectAndEntry(page: Page) {
   };
 }
 
+async function fileLinkProjectAndEntry(page: Page) {
+  const projects = await (await page.request.get("/api/v1/projects")).json();
+  const project = projects.find(
+    (item: { name: string }) => item.name === "file-links",
+  );
+  expect(project).toBeTruthy();
+  const knowledge = await (
+    await page.request.get(`/api/v1/projects/${project.id}/knowledge`)
+  ).json();
+  const entry = knowledge.find(
+    (item: { title: string }) =>
+      item.title === "GitHub file link provenance fixture",
+  );
+  expect(entry).toBeTruthy();
+  return { project, entry };
+}
+
 test.describe("knowledge detail provenance and history", () => {
+  test("compares consecutive versions and offers a keyboard-accessible full-text view", async ({
+    page,
+  }) => {
+    const { project, live } = await projectAndEntry(page);
+    await page.route(
+      `**/api/v1/knowledge/${live.id}/versions`,
+      async (route) => {
+        const response = await route.fetch();
+        const history = await response.json();
+        for (const version of history.versions) {
+          version.content = version.is_current
+            ? "Use WAL journaling.\nKeep lexical recall."
+            : "Use rollback journaling.\nKeep lexical recall.";
+        }
+        await route.fulfill({ response, json: history });
+      },
+    );
+    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    const current = page.getByTestId("knowledge-version-2");
+    await current.locator("summary").click();
+    const content = current.getByTestId("version-content");
+    await expect(content.locator("del")).toHaveText("rollback");
+    await expect(content.locator("ins")).toHaveText("WAL");
+    const fullText = current.getByRole("button", {
+      name: "Full text",
+      exact: true,
+    });
+    await fullText.focus();
+    await page.keyboard.press("Enter");
+    await expect(fullText).toHaveAttribute("aria-pressed", "true");
+    await expect(content).toHaveText(
+      "Use WAL journaling.\nKeep lexical recall.",
+    );
+    await expect(content.locator("ins, del")).toHaveCount(0);
+    await current.getByRole("button", { name: "Changes", exact: true }).click();
+    await expect(content.locator("del")).toHaveText("rollback");
+  });
+
   test("shows current and superseded versions with old content", async ({
     page,
   }) => {
@@ -53,6 +108,23 @@ test.describe("knowledge detail provenance and history", () => {
     await source.click();
     await expect(page).toHaveURL(
       new RegExp(`/ui/projects/${project.id}/sessions/e2e-session-sqlite$`),
+    );
+  });
+
+  test("links recorded knowledge files to the recorded GitHub commit", async ({
+    page,
+  }) => {
+    const { project, entry } = await fileLinkProjectAndEntry(page);
+    await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
+    await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
+    await expect(
+      page.getByText("packages/ui/src/contracts/url.ts"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /GitHub at 0123456/ }),
+    ).toHaveAttribute(
+      "href",
+      "https://github.com/BYK/loreai/blob/0123456789abcdef0123456789abcdef01234567/packages/ui/src/contracts/url.ts",
     );
   });
 

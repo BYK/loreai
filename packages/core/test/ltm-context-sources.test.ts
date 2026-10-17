@@ -36,6 +36,8 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
   let spies: Array<{ mockRestore: () => void }> = [];
 
   beforeEach(() => {
+    // Isolate source folding and its shared budget from knowledge admission.
+    config().knowledge.taskFilter = false;
     pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
@@ -294,7 +296,7 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     vi.spyOn(embedding, "vectorSearchTemporal").mockResolvedValue([]);
     const kSpy = vi.spyOn(embedding, "vectorSearch");
     const dSpy = vi.spyOn(embedding, "vectorSearchDistillations");
-    const BUDGET = 180; // fits header(15) + exactly one ~118-token entry
+    const BUDGET = 227; // fits the rendered header(50) + exactly one ID-prefixed entry
     const base = {
       excludeCategories: ["preference"] as string[],
       contextHint: HINT,
@@ -418,7 +420,8 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     ]);
 
     const overflowSink: ltm.KnowledgeEntry[] = [];
-    const result = await ltm.forSession(PROJ, undefined, 180, {
+    // Budget includes the rendered header and ID prefix; only the top entry fits.
+    const result = await ltm.forSession(PROJ, undefined, 227, {
       excludeCategories: ["preference"],
       contextHint: HINT,
       includeContextSources: ["distillation"],

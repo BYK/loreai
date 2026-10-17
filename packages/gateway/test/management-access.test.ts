@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { data, ensureProject, ltm } from "@loreai/core";
+import { data, ensureProject, knowledgeEdit, ltm } from "@loreai/core";
 import { connect } from "node:net";
 import { request } from "node:http";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { isLoopbackAddress, startServer } from "../src/server";
 
 type ServerHandle = Awaited<ReturnType<typeof startServer>>;
+const REMOTE_MANAGEMENT_TOKEN = "remote-management-test-token-012345";
 
 function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -37,7 +38,10 @@ describe("management route access control", () => {
       peerAddressForRequest: () => "192.0.2.10",
     });
     remoteManagementPeer = await startServer(
-      makeConfig({ allowRemoteManagement: true }),
+      makeConfig({
+        allowRemoteManagement: true,
+        gatewayAuthToken: REMOTE_MANAGEMENT_TOKEN,
+      }),
       { peerAddressForRequest: () => "192.0.2.10" },
     );
     mappedLoopbackPeer = await startServer(makeConfig(), {
@@ -92,7 +96,7 @@ describe("management route access control", () => {
     );
   });
 
-  test.each(["/api/v1/projects", "/ui", "/"])(
+  test.each(["/ui", "/"])(
     "allows remote management route %s only with the explicit override",
     async (path) => {
       const response = await fetch(urlFor(remoteManagementPeer, path), {
@@ -103,6 +107,153 @@ describe("management route access control", () => {
       expect(response.status).not.toBe(500);
     },
   );
+
+  test("hides remote management API access without a Bearer token", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  test.each(["/ui", "/"])(
+    "keeps the remote dashboard shell public at %s while API routes stay gated",
+    async (path) => {
+      const response = await fetch(urlFor(remoteManagementPeer, path), {
+        redirect: "manual",
+      });
+      expect(response.status).not.toBe(404);
+      expect(response.status).not.toBe(500);
+    },
+  );
+
+  test("hides public remote management when remote management is not enabled", async () => {
+    const response = await fetch(urlFor(remotePeer, "/api/v1/projects"), {
+      headers: { authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}` },
+    });
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  test.each([
+    ["missing scheme", REMOTE_MANAGEMENT_TOKEN],
+    ["wrong scheme", `Basic ${REMOTE_MANAGEMENT_TOKEN}`],
+    ["wrong token", "Bearer wrong-token"],
+    ["extra credentials", `Bearer ${REMOTE_MANAGEMENT_TOKEN},other`],
+  ])(
+    "rejects remote API credentials with %s",
+    async (_label, authorization) => {
+      const response = await fetch(
+        urlFor(remoteManagementPeer, "/api/v1/projects"),
+        { headers: { authorization } },
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    },
+  );
+
+  test("accepts the configured remote-management Bearer token", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+      {
+        headers: {
+          authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expect.any(Array));
+  });
+
+  test.each([
+    ["team creation", "/api/v1/teams"],
+    [
+      "member role changes",
+      "/api/v1/teams/00000000-0000-0000-0000-000000000001/members/00000000-0000-0000-0000-000000000002/role",
+    ],
+    [
+      "organization domain changes",
+      "/api/v1/orgs/00000000-0000-0000-0000-000000000003/domains/claim",
+    ],
+    [
+      "project team links",
+      "/api/v1/projects/00000000-0000-0000-0000-000000000004/sharing/link",
+    ],
+    ["remote sync execution", "/api/v1/sync/run"],
+    [
+      "knowledge promotions",
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000005/promote",
+    ],
+    [
+      "promotion approvals",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000006/approve",
+    ],
+    [
+      "promotion rejections",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000007/reject",
+    ],
+    [
+      "promotion withdrawals",
+      "/api/v1/promotions/00000000-0000-0000-0000-000000000008/withdraw",
+    ],
+  ] as const)(
+    "hides remote %s despite a valid gateway token and spoofed local headers",
+    async (_label, path) => {
+      const response = await fetch(urlFor(remoteManagementPeer, path), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          "content-type": "application/json",
+          forwarded: "for=127.0.0.1",
+          "x-forwarded-for": "127.0.0.1",
+        },
+        body: "not-json",
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    },
+  );
+
+  test("allows a CORS preflight for Authorization without exposing the API", async () => {
+    const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
+    const origin = `https://${host}`;
+    const response = await new Promise<{
+      status: number;
+      headers: import("node:http").IncomingHttpHeaders;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/api/v1/projects",
+          method: "OPTIONS",
+          headers: {
+            host,
+            origin,
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization",
+          },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () =>
+            resolve({ status: res.statusCode ?? 0, headers: res.headers }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers["access-control-allow-headers"]).toContain(
+      "authorization",
+    );
+  });
 
   test("allows the external dashboard's exact browser origin", async () => {
     const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
@@ -116,7 +267,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();
@@ -149,7 +304,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();
@@ -181,7 +340,11 @@ describe("management route access control", () => {
           host: "127.0.0.1",
           port: remoteManagementPeer.port,
           path: "/api/v1/projects",
-          headers: { host, origin },
+          headers: {
+            host,
+            origin,
+            authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          },
         },
         (res) => {
           res.resume();
@@ -380,6 +543,61 @@ describe("management route access control", () => {
         .map((e) => e.id)
         .sort(),
     ).toEqual([keep, merge].sort());
+  });
+
+  test("hides knowledge edit routes and checked delete from remote peers", async () => {
+    const projectPath = `/test/remote-knowledge-edit-${Date.now()}`;
+    ensureProject(projectPath, "remote-knowledge-edit-guard");
+    const id = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Remote knowledge edit guard",
+      content: "keep unchanged",
+      session: "s",
+      scope: "project",
+    });
+    const before = knowledgeEdit.knowledgeEffects(id);
+    expect(before).not.toBeNull();
+
+    const path = `/api/v1/knowledge/${id}`;
+    const requests: Array<{ path: string; init?: RequestInit }> = [
+      { path: `${path}/effects` },
+      {
+        path,
+        init: {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: before?.revision,
+            content: "remote write",
+          }),
+        },
+      },
+      {
+        path: `${path}/restore`,
+        init: {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expected_revision: before?.revision }),
+        },
+      },
+      {
+        path: `${path}?expected_revision=${before?.revision}`,
+        init: { method: "DELETE" },
+      },
+    ];
+
+    for (const item of requests) {
+      const response = await fetch(urlFor(remotePeer, item.path), item.init);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("");
+    }
+
+    expect(knowledgeEdit.knowledgeEffects(id)).toMatchObject({
+      revision: before?.revision,
+      is_deleted: false,
+    });
+    expect(ltm.getByLogical(id)?.content).toBe("keep unchanged");
   });
 
   test("denies before parsing a management request body", async () => {

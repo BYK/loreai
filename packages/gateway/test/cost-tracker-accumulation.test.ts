@@ -13,7 +13,7 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import {
   clearAllCosts,
-  resetDailyBudgetState,
+  resetDailyCostsCache,
   getSessionCosts,
   getAllSessionCosts,
   deleteSessionCosts,
@@ -49,7 +49,7 @@ function costsFor(sessionID: string): SessionCosts {
 
 beforeEach(() => {
   clearAllCosts();
-  resetDailyBudgetState();
+  resetDailyCostsCache();
 });
 
 describe("recordConversationCost", () => {

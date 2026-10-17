@@ -27,6 +27,7 @@ import type { LoreMessage, LorePart, LoreToolState } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 import { estimateTokens } from "./tokenize";
 import { currentTenantId } from "./tenant";
+import { taskHintExcerpt } from "./task-text";
 
 /**
  * Chunk-boundary terminator inserted between chunks by `partsToText`.
@@ -77,6 +78,13 @@ export function partsToText(parts: LorePart[]): string {
 function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
   const meta: Record<string, unknown> = {};
   if (info.role === "user") {
+    meta.taskText = taskHintExcerpt(
+      parts
+        .filter(isTextPart)
+        .map((part) => part.text)
+        .join("\n"),
+      4_096,
+    );
     if (info.agent) meta.agent = info.agent;
     if (info.model) meta.model = info.model;
   } else {

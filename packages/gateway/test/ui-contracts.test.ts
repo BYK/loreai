@@ -28,6 +28,7 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  knowledgeFiles,
   knowledgeList,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
@@ -45,6 +46,9 @@ import {
   syncStatus,
   teamList,
   costsSnapshot,
+  dedupApplyReceipt,
+  modelUsageDocument,
+  modelUsageUploadState,
   dedupPreviewResponse,
   projectClearResult,
   projectRenameResult,
@@ -253,6 +257,34 @@ beforeAll(async () => {
       0,
       1_700_000_500_000,
     );
+
+  // Model-usage fixture rows (#2026): assistant turns that carry provider and
+  // model metadata across two sessions and two days. They sit in their own
+  // project so the session fixtures above stay untouched; projects.json is
+  // regenerated to include it.
+  const usageMeta = JSON.stringify({
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4",
+  });
+  const usageProjectId = ensureProject(
+    "/test/ui-contracts/model-usage",
+    "ui-contracts-model-usage",
+  );
+  for (const [id, sessionId, createdAt] of [
+    ["mu-ui-contracts-1", "ui-contracts-mu-session-1", 1_700_000_000_000],
+    [
+      "mu-ui-contracts-2",
+      "ui-contracts-mu-session-2",
+      1_700_000_000_000 + 86_400_000,
+    ],
+  ] as const) {
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'assistant', 'assistant reply', 10, 0, ?, ?)`,
+      )
+      .run(id, usageProjectId, sessionId, createdAt, usageMeta);
+  }
 
   const config = loadConfig();
   config.remoteGateway = false;
@@ -473,6 +505,53 @@ describe("ui contracts against the real gateway", () => {
     ).toBe(true);
   });
 
+  it("POST /projects/:id/dedup/apply", async () => {
+    const previewResponse = await api(
+      v1(["projects", SEEDED.dedupProjectId, "dedup"]),
+      { method: "POST", ...JSON_BODY({}) },
+    );
+    const previewBody: unknown = await previewResponse.json();
+    const preview = safeParseContract(
+      "dedup preview",
+      dedupPreviewResponse,
+      previewBody,
+    );
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+    const group = preview.value.groups.find(
+      (candidate) => candidate.scope === "project",
+    );
+    expect(group).toBeDefined();
+    if (!group) return;
+
+    const body = {
+      operationId: "ui-contracts-dedup-apply",
+      reviewedAt: 1_700_000_000_000,
+      actor: "lore-ui",
+      decisions: [
+        {
+          keepId: group.candidates[0].logical_id,
+          mergeIds: group.candidates
+            .slice(1)
+            .map((candidate) => candidate.logical_id),
+          expectedRevisions: Object.fromEntries(
+            group.candidates.map((candidate) => [
+              candidate.logical_id,
+              candidate.revision,
+            ]),
+          ),
+        },
+      ],
+    };
+    await contractRoute(
+      "dedup-apply-gateway.json",
+      `/projects/${SEEDED.dedupProjectId}/dedup/apply`,
+      v1(["projects", SEEDED.dedupProjectId, "dedup", "apply"]),
+      dedupApplyReceipt,
+      { method: "POST", ...JSON_BODY(body) },
+    );
+  });
+
   it("GET /knowledge first cross-project page", async () => {
     await contractRoute(
       "knowledge-all-page.json",
@@ -570,6 +649,37 @@ describe("ui contracts against the real gateway", () => {
       v1(["knowledge", SEEDED.knowledgeId, "versions"]),
       knowledgeVersionHistory,
     );
+  });
+
+  it("GET knowledge files", async () => {
+    const { db, ltm } = await import("@loreai/core");
+    const logicalId = ltm.logicalIdOf(SEEDED.knowledgeId);
+    db()
+      .query(
+        "UPDATE knowledge SET metadata = ? WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(
+        JSON.stringify({
+          gitHead: "0123456789abcdef0123456789abcdef01234567",
+        }),
+        logicalId,
+      );
+    ltm.setFileRefs(logicalId, ["src/contracts.ts"]);
+    try {
+      await contractRoute(
+        "knowledge-files.json",
+        `/knowledge/${SEEDED.knowledgeId}/files`,
+        v1(["knowledge", SEEDED.knowledgeId, "files"]),
+        knowledgeFiles,
+      );
+    } finally {
+      db()
+        .query(
+          "UPDATE knowledge SET metadata = NULL WHERE logical_id = ? AND is_current = 1",
+        )
+        .run(logicalId);
+      ltm.setFileRefs(logicalId, []);
+    }
   });
 
   it("GET /projects/:id/sessions", async () => {
@@ -803,6 +913,24 @@ describe("ui contracts against the real gateway", () => {
       historical: { session_count: expect.any(Number) },
       daily: { entries: expect.any(Array) },
     });
+  });
+
+  it("GET /model-usage", async () => {
+    await contractRoute(
+      "model-usage.json",
+      "/model-usage",
+      "/api/v1/model-usage",
+      modelUsageDocument,
+    );
+  });
+
+  it("GET /model-usage/upload", async () => {
+    await contractRoute(
+      "model-usage-upload.json",
+      "/model-usage/upload",
+      "/api/v1/model-usage/upload",
+      modelUsageUploadState,
+    );
   });
 
   it("404 error envelope", async () => {

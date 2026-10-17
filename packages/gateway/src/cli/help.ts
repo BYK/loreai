@@ -157,7 +157,7 @@ Examples:
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated
-  lore setup                    # Auto-detect and configure installed apps
+  lore setup                    # Auto-detect CLIs and Codex desktop, report skipped apps
   lore setup codex              # Configure Codex to use lore
   lore setup codex -r http://remote:3207  # Configure Codex with a remote gateway
   lore setup opencode --no-plugin  # Configure OpenCode without installing the @loreai/opencode plugin
@@ -206,7 +206,7 @@ Environment variables:
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
   LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
-  LORE_GATEWAY_AUTH_TOKEN       Access token required by remote/hosted data-plane routes
+  LORE_GATEWAY_AUTH_TOKEN       Optional access token for remote/hosted routes and remote management
   LORE_HOSTED_MODE              Hosted mode — disables FS ops on client-controlled paths
                                 ON by default for \`lore start\`; set to 0 to disable
   LORE_REMOTE_GATEWAY           Remote-gateway mode — bucket path-less sessions per-session

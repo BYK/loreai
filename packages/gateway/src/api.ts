@@ -36,6 +36,9 @@ import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
 import { handlePromotionRequest } from "./promotions";
+import { handleTeamActionRequest } from "./team-actions";
+import { handleSyncConflictRequest } from "./sync-conflicts";
+import { handleSyncRunRequest } from "./sync-run";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 import {
   BadRequest,
@@ -48,6 +51,8 @@ import {
 } from "./api-lists";
 import { parseBooleanParam } from "./query-bool";
 import { handleSessionContext } from "./session-context-api";
+import { handleCheckedDeleteKnowledge } from "./knowledge-edit-api";
+import { handleKnowledgeFiles } from "./knowledge-files";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -451,15 +456,42 @@ async function handleMoveKnowledge(
   }
 
   const resolvedId = data.resolveId("knowledge", knowledgeId) ?? knowledgeId;
-  const success = data.reassignKnowledge(resolvedId, targetPath);
-  if (!success) {
-    return errorResponse(
-      404,
-      "not_found",
-      `Knowledge entry not found: ${knowledgeId}`,
-    );
+  try {
+    const success = data.reassignKnowledge(resolvedId, targetPath);
+    if (!success) {
+      return errorResponse(
+        404,
+        "not_found",
+        `Knowledge entry not found: ${knowledgeId}`,
+      );
+    }
+    return jsonResponse({ moved: true, id: resolvedId });
+  } catch (error) {
+    if (error instanceof ltm.TitleConflictError) {
+      const conflict = error.conflicting;
+      const scope =
+        conflict.project_id === null || conflict.cross_project === 1
+          ? "shared"
+          : "project";
+      return jsonResponse(
+        {
+          type: "error",
+          error: {
+            type: "title_conflict",
+            message: error.message,
+            conflicting_entry: {
+              id: conflict.logical_id,
+              title: conflict.title,
+              project_id: conflict.project_id,
+              scope,
+            },
+          },
+        },
+        409,
+      );
+    }
+    throw error;
   }
-  return jsonResponse({ moved: true, id: resolvedId });
 }
 
 function handleMergeProjects(): Response {
@@ -910,6 +942,12 @@ export async function handleAPIRequest(
     const promotion = await handlePromotionRequest(req, url, config);
     if (promotion) return promotion;
 
+    const teamAction = await handleTeamActionRequest(req, url, config);
+    if (teamAction) return teamAction;
+
+    const syncConflict = await handleSyncConflictRequest(req, url, config);
+    if (syncConflict) return syncConflict;
+
     // GET /api/v1/account, /teams, /sync/status, /projects/:id/sharing (FOLK-01)
     const folk = handleFolkStatusRequest(pathname, config);
     if (folk) return folk;
@@ -962,6 +1000,15 @@ export async function handleAPIRequest(
     if (params) {
       return handleKnowledgeVersions(
         url,
+        params.id,
+        data.resolveId("knowledge", params.id) ?? params.id,
+      );
+    }
+
+    // GET /api/v1/knowledge/:id/files
+    params = matchRoute(pathname, "/api/v1/knowledge/:id/files");
+    if (params) {
+      return handleKnowledgeFiles(
         params.id,
         data.resolveId("knowledge", params.id) ?? params.id,
       );
@@ -1040,7 +1087,11 @@ export async function handleAPIRequest(
   if (method === "DELETE") {
     // DELETE /api/v1/knowledge/:id
     params = matchRoute(pathname, "/api/v1/knowledge/:id");
-    if (params) return handleDeleteKnowledge(params.id);
+    if (params) {
+      if (url.searchParams.has("expected_revision"))
+        return handleCheckedDeleteKnowledge(url, params.id, config.hostedMode);
+      return handleDeleteKnowledge(params.id);
+    }
 
     // DELETE /api/v1/sessions/:id
     params = matchRoute(pathname, "/api/v1/sessions/:id");
@@ -1058,6 +1109,15 @@ export async function handleAPIRequest(
   if (method === "POST") {
     const promotion = await handlePromotionRequest(req, url, config);
     if (promotion) return promotion;
+
+    const teamAction = await handleTeamActionRequest(req, url, config);
+    if (teamAction) return teamAction;
+
+    const syncConflict = await handleSyncConflictRequest(req, url, config);
+    if (syncConflict) return syncConflict;
+
+    const syncRun = await handleSyncRunRequest(req, pathname, config);
+    if (syncRun) return syncRun;
 
     // Literal routes first (before parameterized :id routes)
 

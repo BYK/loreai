@@ -13,7 +13,14 @@ import {
   FunctionsRelayError,
   type SupabaseClient,
 } from "@supabase/supabase-js";
-import { crypto, keystore } from "@loreai/core";
+import {
+  crypto,
+  currentTenantId,
+  db,
+  keystore,
+  setProjectScope,
+  syncData,
+} from "@loreai/core";
 import { getCurrentUser } from "./supabase";
 import { publishIdentityPub, pullOnce, pushOnce } from "./sync";
 
@@ -31,6 +38,15 @@ export interface TeamMemberProfile {
   display_name: string | null;
   github_login: string | null;
   email: string | null;
+}
+
+export class TeamRpcError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+  ) {
+    super(message);
+  }
 }
 
 /** A repo's contributor roster with a Lore-membership flag per contributor (E-5-d, #630). */
@@ -74,6 +90,7 @@ export async function discoverGitHubContributors(
   providerToken: string | null | undefined,
   repos?: string[],
   invite?: { scopeId: string; role: "editor" | "viewer" },
+  inviteLogins?: string[],
 ): Promise<{ repos: DiscoveredRepo[]; invited?: DiscoverInviteReport } | null> {
   if (!providerToken) return null; // no read:org/repo grant (older session / non-github login)
   const body: Record<string, unknown> = {
@@ -82,6 +99,7 @@ export async function discoverGitHubContributors(
   };
   if (invite) body.invite_to_scope = invite.scopeId;
   if (invite) body.invite_role = invite.role;
+  if (inviteLogins) body.invite_logins = inviteLogins;
   const { data, error } = await client.functions.invoke("github-discover", {
     body,
   });
@@ -203,6 +221,24 @@ async function memberPubKey(
   return Buffer.from(data.public_key as string, "base64");
 }
 
+async function memberPubKeyForRotation(
+  client: SupabaseClient,
+  userId: string,
+): Promise<Uint8Array | null> {
+  const { data, error } = await client
+    .from("identity_pub")
+    .select("public_key")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error)
+    throw new TeamRpcError(
+      `identity_pub: ${error.message}`,
+      error.code ?? null,
+    );
+  if (!data?.public_key) return null;
+  return Buffer.from(data.public_key as string, "base64");
+}
+
 /** List the team members of a scope (RLS: readable by any member). */
 export async function teamMembers(
   client: SupabaseClient,
@@ -275,7 +311,8 @@ export async function createTeam(
   name: string,
 ): Promise<string> {
   const { data, error } = await client.rpc("create_team", { p_name: name });
-  if (error) throw new Error(`create_team: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`create_team: ${error.message}`, error.code);
   const scopeId = data as string;
   // Mint the team DEK (epoch 0), wrapped to the creator's own identity key.
   await keystore.getScopeKey(scopeId, await selfUserId());
@@ -299,7 +336,8 @@ export async function addTeamMember(
     p_user: userId,
     p_role: role,
   });
-  if (error) throw new Error(`add_scope_member: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`add_scope_member: ${error.message}`, error.code);
   const pub = await memberPubKey(client, userId);
   if (!pub) return { wrapped: false };
   await keystore.wrapScopeKeyForMember(
@@ -318,61 +356,138 @@ export async function setTeamRole(
   scopeId: string,
   userId: string,
   role: "admin" | "editor" | "viewer",
+  expectedRole: "admin" | "editor" | "viewer",
 ): Promise<void> {
   const { error } = await client.rpc("set_scope_role", {
     p_scope: scopeId,
     p_user: userId,
     p_role: role,
+    p_expected_role: expectedRole,
   });
-  if (error) throw new Error(`set_scope_role: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`set_scope_role: ${error.message}`, error.code);
 }
 
 /**
- * Remove a member and ROTATE the scope key so they cannot read FUTURE content. Order: drop
- * membership first (which also deletes their remote wraps), then allocate the next epoch
- * server-atomically and re-wrap a FRESH DEK to the remaining members. `self` is always re-wrapped
- * via the LOCAL identity key (never self-lockout, even if self never published to identity_pub);
- * other members via their published key — a member with no published key is skipped (`skipped`)
- * and regains access when re-wrapped later. Returns the new epoch + counts.
+ * Atomically remove a member, advance the scope epoch, and insert wraps for remaining members.
+ * The new DEK stays in memory until the server commits; a failed call leaves local key state
+ * untouched, while a post-commit crash recovers through the normal pulled scope_keys path.
  */
 export async function removeTeamMember(
   client: SupabaseClient,
   scopeId: string,
   userId: string,
-): Promise<{ newEpoch: number; rewrapped: number; skipped: string[] }> {
+  expectedRole?: "admin" | "editor" | "viewer",
+): Promise<{
+  newEpoch: number;
+  rewrapped: number;
+  skipped: string[];
+  unlinkedProjects: number;
+}> {
   const self = await selfUserId();
-  // NOT atomic across the two RPCs: if rotate_scope_key throws after remove_scope_member commits,
-  // the member is gone (RLS already blocks their reads) but the key isn't rotated. Re-running
-  // `remove` on the already-removed member re-throws remove_scope_member — safe (no key exposure),
-  // just not auto-resuming. Forward-secrecy-only impact; acceptable for v1.
-  const { error: rmErr } = await client.rpc("remove_scope_member", {
-    p_scope: scopeId,
-    p_user: userId,
-  });
-  if (rmErr) throw new Error(`remove_scope_member: ${rmErr.message}`);
+  const leaving = userId === self;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { data: scope, error: scopeError } = await client
+      .from("scopes")
+      .select("key_epoch")
+      .eq("id", scopeId)
+      .maybeSingle();
+    if (scopeError)
+      throw new TeamRpcError(
+        `team key epoch: ${scopeError.message}`,
+        scopeError.code ?? null,
+      );
+    if (!scope)
+      throw new TeamRpcError("team key epoch: team not found", "P0002");
+    const expectedEpoch = Number(scope.key_epoch);
+    if (!Number.isInteger(expectedEpoch) || expectedEpoch < 0)
+      throw new Error("team key epoch: invalid remote epoch");
 
-  const { data: ep, error: rotErr } = await client.rpc("rotate_scope_key", {
-    p_scope: scopeId,
-  });
-  if (rotErr) throw new Error(`rotate_scope_key: ${rotErr.message}`);
-  const newEpoch = ep as number;
+    const members = await teamMembers(client, scopeId);
+    const actor = members.find((member) => member.userId === self);
+    if (!actor || actor.role !== "admin") {
+      throw new TeamRpcError(
+        "only a scope admin may remove team members",
+        "42501",
+      );
+    }
+    const target = members.find((member) => member.userId === userId);
+    if (!target) {
+      throw new TeamRpcError("team member not found", "P0002");
+    }
+    if (expectedRole && target.role !== expectedRole) {
+      throw new TeamRpcError(
+        "team member role changed; reload the team",
+        "P0001",
+      );
+    }
+    const targetRole = expectedRole ?? target.role;
+    const remaining = members.filter((member) => member.userId !== userId);
+    const recipients: { userId: string; publicKey: Uint8Array }[] = [];
+    const skipped: string[] = [];
+    for (const member of remaining) {
+      const publicKey =
+        member.userId === self
+          ? keystore.getAccountIdentity().publicKey
+          : await memberPubKeyForRotation(client, member.userId);
+      if (publicKey) recipients.push({ userId: member.userId, publicKey });
+      else skipped.push(member.userId);
+    }
 
-  // Re-wrap the fresh DEK to the REMAINING members (the removed member is already gone from the
-  // roster). self uses the LOCAL key so the rotator can never lock itself out.
-  const members = await teamMembers(client, scopeId);
-  const wraps: { userId: string; publicKey: Uint8Array }[] = [];
-  const skipped: string[] = [];
-  for (const m of members) {
-    const pub =
-      m.userId === self
-        ? keystore.getAccountIdentity().publicKey
-        : await memberPubKey(client, m.userId);
-    if (pub) wraps.push({ userId: m.userId, publicKey: pub });
-    else skipped.push(m.userId);
+    const rotation = await keystore.prepareScopeKeyRotation(recipients);
+    const wraps = rotation.wraps.map((wrap) => ({
+      member_user_id: wrap.userId,
+      wrapped_dek: Buffer.from(wrap.wrappedDek).toString("base64"),
+    }));
+    const { data, error } = await client.rpc("remove_scope_member_rotating", {
+      p_scope: scopeId,
+      p_user: userId,
+      p_expected_epoch: expectedEpoch,
+      p_expected_role: targetRole,
+      p_wraps: wraps,
+    });
+    if (error?.code === "40001") {
+      if (attempt === 0) continue;
+      throw new TeamRpcError(
+        "remove_scope_member_rotating: team key changed concurrently; retry",
+        "40001",
+      );
+    }
+    if (error)
+      throw new TeamRpcError(
+        `remove_scope_member_rotating: ${error.message}`,
+        error.code ?? null,
+      );
+
+    const newEpoch = Number(data);
+    if (newEpoch !== expectedEpoch + 1)
+      throw new Error("remove_scope_member_rotating: invalid new epoch");
+
+    let unlinkedProjects = 0;
+    if (leaving) {
+      const projects = db()
+        .query("SELECT id FROM projects WHERE tenant_id = ? AND scope_id = ?")
+        .all(currentTenantId(), scopeId) as { id: string }[];
+      for (const project of projects) {
+        setProjectScope(project.id, null);
+        syncData.reseedProjectContent(project.id);
+      }
+      unlinkedProjects = projects.length;
+    } else {
+      keystore.persistScopeKeyRotation(scopeId, newEpoch, rotation);
+      await pushOnce(client);
+    }
+    return {
+      newEpoch,
+      rewrapped: wraps.length,
+      skipped,
+      unlinkedProjects,
+    };
   }
-  await keystore.rotateScopeKey(scopeId, newEpoch, wraps);
-  await pushOnce(client);
-  return { newEpoch, rewrapped: wraps.length, skipped };
+  throw new TeamRpcError(
+    "remove_scope_member_rotating: team key changed concurrently; retry",
+    "40001",
+  );
 }
 
 /**
@@ -414,7 +529,8 @@ export async function createTeamInvite(
     p_hint: hint ?? null,
     p_eph_pub: ephPubB64,
   });
-  if (error) throw new Error(`create_scope_invite: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`create_scope_invite: ${error.message}`, error.code);
   // Only AFTER the invite token exists: wrap the DEK to the ephemeral pubkey, store the eph row, and
   // push it. An RPC failure above short-circuits before any eph row is created/pushed — no orphan.
   if (ephKeypair) {
@@ -508,7 +624,8 @@ export async function acceptTeamInvite(
   const { data, error } = await client.rpc("accept_scope_invite", {
     p_token: capability,
   });
-  if (error) throw new Error(`accept_scope_invite: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`accept_scope_invite: ${error.message}`, error.code);
   // The RPC returns a single-row set: [{ out_scope_id, out_role, out_eph_pub }] (OUT columns are
   // prefixed to avoid a name collision with the table columns inside the function body).
   const row = Array.isArray(data) ? data[0] : data;
@@ -563,6 +680,7 @@ export interface DomainJoinRequest {
   id: string;
   domain: string;
   userId: string;
+  label: string | null;
   status: string;
   requestedAt: string;
 }
@@ -579,7 +697,8 @@ export async function claimOrgDomain(
     p_domain: domain,
     p_join_role: joinRole,
   });
-  if (error) throw new Error(`claim_org_domain: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`claim_org_domain: ${error.message}`, error.code);
 }
 
 /** Request to join an org whose claimed domain matches the caller's verified email. Returns the
@@ -593,7 +712,8 @@ export async function requestDomainJoin(
     p_org: orgId,
     p_domain: domain,
   });
-  if (error) throw new Error(`request_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`request_domain_join: ${error.message}`, error.code);
   return data as string;
 }
 
@@ -602,17 +722,46 @@ export async function listDomainJoinRequests(
   client: SupabaseClient,
   orgId: string,
 ): Promise<DomainJoinRequest[]> {
+  const { data: profileData, error: profileError } = await client.rpc(
+    "domain_join_request_profiles",
+    { p_org: orgId },
+  );
+  if (profileError)
+    throw new TeamRpcError(
+      `domain_join_request_profiles: ${profileError.message}`,
+      profileError.code,
+    );
+  const profiles = new Map(
+    (
+      (profileData ?? []) as Array<
+        Pick<TeamMemberProfile, "display_name" | "github_login" | "email"> & {
+          request_id: string;
+        }
+      >
+    ).map((profile) => [profile.request_id, profile]),
+  );
   const { data, error } = await client
     .from("domain_join_requests")
     .select("id, domain, user_id, status, requested_at")
     .eq("org_id", orgId)
     .eq("status", "pending")
     .order("requested_at", { ascending: true });
-  if (error) throw new Error(`domain_join_requests: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(
+      `domain_join_requests: ${error.message}`,
+      error.code,
+    );
   return (data ?? []).map((r) => ({
     id: r.id as string,
     domain: r.domain as string,
     userId: r.user_id as string,
+    label: identityLabel(
+      profiles.get(r.id as string) ?? {
+        display_name: null,
+        github_login: null,
+        email: null,
+      },
+    ),
     status: r.status as string,
     requestedAt: r.requested_at as string,
   }));
@@ -626,7 +775,8 @@ export async function approveDomainJoin(
   const { error } = await client.rpc("approve_domain_join", {
     p_request_id: requestId,
   });
-  if (error) throw new Error(`approve_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`approve_domain_join: ${error.message}`, error.code);
 }
 
 /** Reject a pending join request (admin/manager). */
@@ -637,7 +787,8 @@ export async function rejectDomainJoin(
   const { error } = await client.rpc("reject_domain_join", {
     p_request_id: requestId,
   });
-  if (error) throw new Error(`reject_domain_join: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`reject_domain_join: ${error.message}`, error.code);
 }
 
 /**

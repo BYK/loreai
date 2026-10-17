@@ -100,8 +100,9 @@ export interface GatewayConfig {
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
   /**
-   * Gateway access credential required by every remote/hosted data-plane
-   * request. This is separate from provider credentials. Env:
+   * Optional gateway access credential. When configured, remote/hosted
+   * data-plane requests and remote management API requests require it.
+   * This is separate from provider credentials. Env:
    * LORE_GATEWAY_AUTH_TOKEN.
    */
   gatewayAuthToken?: string;
@@ -336,20 +337,17 @@ export function parseGatewayAuthToken(
   return value;
 }
 
-/** Apply the fail-closed remote/hosted startup invariant after CLI overrides. */
+/** Validate optional gateway credentials and upstream headers after CLI overrides. */
 export function assertGatewayAccessConfigured(
   config: Pick<
     GatewayConfig,
     "remoteGateway" | "hostedMode" | "gatewayAuthToken"
   > &
-    Partial<Pick<GatewayConfig, "upstreamExtraHeaders">>,
+    Partial<
+      Pick<GatewayConfig, "allowRemoteManagement" | "upstreamExtraHeaders">
+    >,
 ): void {
-  const gatewayAuthToken = parseGatewayAuthToken(config.gatewayAuthToken);
-  if ((config.remoteGateway || config.hostedMode) && !gatewayAuthToken) {
-    throw new Error(
-      "Remote/hosted gateway mode requires LORE_GATEWAY_AUTH_TOKEN",
-    );
-  }
+  parseGatewayAuthToken(config.gatewayAuthToken);
   if (hasConflictingAuthHeaders(config.upstreamExtraHeaders)) {
     throw new Error(
       "Configured upstream headers contain conflicting authentication mechanisms",

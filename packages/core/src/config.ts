@@ -455,6 +455,21 @@ export const LoreConfig = z.object({
         .describe(
           "Minimum cosine similarity for a vector-only knowledge match to be surfaced into a session. FTS keyword matches bypass it. 0 disables. Default: 0.35.",
         ),
+      /** Rank architecture with other knowledge by default instead of giving
+       *  it the old first-pass allocation. "reserved" restores that allocation.
+       *  Neither mode changes stored knowledge or on-demand recall. */
+      architectureInjection: z
+        .enum(["ranked", "reserved"])
+        .default("ranked")
+        .describe(
+          'Architecture in passive knowledge injection: "ranked" (default) competes by relevance with other entries; "reserved" restores the 20% first-pass allocation. Explicit category reads and recall remain available.',
+        ),
+      taskFilter: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Filter contextual knowledge with checkpoint-time task anchors after budget packing. Keeps preferences and explicit recall available. Set false to retain implicit semantic-only matches and contextual decisions/patterns. Default: true.",
+        ),
     })
     .default({
       enabled: true,
@@ -464,6 +479,8 @@ export const LoreConfig = z.object({
       referenceValidation: true,
       contextSources: ["distillation"],
       minRelevance: 0.35,
+      architectureInjection: "ranked",
+      taskFilter: true,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

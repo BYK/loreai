@@ -75,6 +75,7 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(seen.has("disable")).toBe(true);
     expect(seen.has("status")).toBe(true);
     expect(seen.has("now")).toBe(true);
+    expect(seen.has("conflicts")).toBe(true);
   });
 
   test("sync forwards positional subcommand to legacy handler", async () => {
@@ -117,6 +118,51 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(syncImpl).toHaveBeenCalledTimes(1);
     expect(calls[0]?.positionals).toEqual(["enable"]);
     expect(Buffer.concat(stdoutChunks).toString("utf8")).toContain("sync ok");
+    vi.resetModules();
+  });
+
+  test("sync forwards conflict action, ID, and expected-version flag", async () => {
+    vi.resetModules();
+    const calls: SyncCall[] = [];
+    const syncImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("conflict kept");
+      },
+    );
+    vi.doMock("../src/cli/sync-cmd", () => ({
+      commandSync: syncImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "sync",
+      "conflicts",
+      "keep",
+      "17",
+      "--expected-version",
+      "version-3",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls).toEqual([
+      {
+        positionals: ["conflicts", "keep", "17"],
+        values: { "expected-version": "version-3" },
+      },
+    ]);
     vi.resetModules();
   });
 
@@ -190,18 +236,9 @@ describe("Phase 3D.3b — typed lore sync", () => {
     vi.resetModules();
   });
 
-  test("sync rejects extra positional with exit code 20 (UsageError), not 252 (F-1)", async () => {
-    // Per-slice F-1 (CRITICAL): Stricli's ExitCode.InvalidArgument = -4
-    // is silently truncated by Node's process exit code (mod 256) to
-    // 252 without an explicit determineExitCode mapping (Stricli's
-    // determineExitCode only fires for thrown values, not scanner
-    // errors). We remap the exit code in runCli() to 20 (UsageError)
-    // after detecting scanner errors via stderr monitoring.
+  test("sync rejects extra positional with exit code 20", async () => {
     const { runCli } = await import("../src/cli/cli");
     process.argv = ["node", "lore", "sync", "enable", "extra-arg"];
-    // Do NOT pre-set process.exitCode — Stricli's `??=` only writes
-    // when exitCode is null/undefined, so a pre-existing 0 would mask
-    // the InvalidArgument exit code entirely.
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
     let capturedExitCode: number | undefined;
@@ -211,7 +248,6 @@ describe("Phase 3D.3b — typed lore sync", () => {
     } finally {
       process.exitCode = priorExitCode;
     }
-    // The remapping sets process.exitCode = 20 (UsageError).
     expect(capturedExitCode).toBe(20);
   });
 

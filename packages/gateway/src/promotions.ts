@@ -1,21 +1,21 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  crypto,
-  effectivePromotionPolicy,
-  isHostedMode,
-  keystore,
-  log,
-  ltm,
-  syncData,
-} from "@loreai/core";
+import { crypto, projectAutoShare, keystore, log, ltm } from "@loreai/core";
 import { loadConfig, type GatewayConfig } from "./config";
-import { sharingStatus, type SharingPolicy } from "./folk-status";
 import {
-  getAuthedClient,
-  getCurrentUser,
-  loadPersistedSession,
-} from "./supabase";
+  accessFor,
+  errorResponse,
+  hostedRefusal,
+  json,
+  localIdentityLabel,
+  readObjectBody,
+  requestIsHosted,
+  routeId,
+  UUID,
+} from "./folk-access";
+import type { Access, RemoteStatus } from "./folk-access";
+import { sharingStatus, type SharingPolicy } from "./folk-status";
+import { getCurrentUser } from "./supabase";
 import {
   identityLabel,
   listTeams,
@@ -23,8 +23,6 @@ import {
   teamMembers,
 } from "./team";
 import { makeEncryptionResolver, openString, sealString } from "./sync";
-
-type RemoteStatus = "ok" | "anonymous" | "unreachable" | "hosted";
 type DecisionStatus = "approved" | "rejected";
 type RequestStatus = "pending" | DecisionStatus | "withdrawn";
 type AppliedStatus = "applied" | "stale";
@@ -86,83 +84,6 @@ type TeamPresentation = {
   role: string | null;
   labels: Map<string, string | null>;
 };
-
-const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function errorResponse(
-  status: number,
-  type: string,
-  message: string,
-  fields: Record<string, unknown> = {},
-): Response {
-  return json({ type: "error", error: { type, message, ...fields } }, status);
-}
-
-function requestIsHosted(config: GatewayConfig): boolean {
-  return (
-    config.hostedMode ||
-    config.remoteGateway ||
-    isHostedMode() ||
-    !syncData.isLocalSyncContext()
-  );
-}
-
-function hostedRefusal(): Response {
-  return errorResponse(
-    403,
-    "forbidden",
-    "Knowledge promotions are not available in hosted mode.",
-  );
-}
-
-type Access = {
-  remote: RemoteStatus;
-  client: SupabaseClient | null;
-  me: string | null;
-};
-
-async function accessFor(config: GatewayConfig): Promise<Access> {
-  if (requestIsHosted(config)) {
-    return { remote: "hosted", client: null, me: null };
-  }
-  const session = loadPersistedSession();
-  if (!session) return { remote: "anonymous", client: null, me: null };
-  try {
-    const client = await getAuthedClient();
-    if (!client) return { remote: "anonymous", client: null, me: null };
-    return { remote: "ok", client, me: session.user_id };
-  } catch {
-    return { remote: "unreachable", client: null, me: session.user_id };
-  }
-}
-
-function parseObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-async function readObjectBody(
-  req: Request,
-): Promise<Record<string, unknown> | Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return errorResponse(400, "invalid_request", "Invalid JSON body");
-  }
-  const object = parseObject(body);
-  return (
-    object ?? errorResponse(400, "invalid_request", "Expected an object body")
-  );
-}
 
 function serviceFailure(
   status: number,
@@ -258,13 +179,6 @@ function sharingPolicy(
       team_default: null,
     },
   };
-}
-
-function localIdentityLabel(userId: string): string | null {
-  const session = loadPersistedSession();
-  if (!session || session.user_id !== userId) return null;
-  if (session.github_login) return `@${session.github_login}`;
-  return session.display_name ?? session.email ?? null;
 }
 
 async function teamPresentations(
@@ -662,7 +576,7 @@ export async function autoProposePending(
           candidate.approvalStatus === "pending" &&
           candidate.projectId !== null &&
           candidate.scopeId !== null &&
-          effectivePromotionPolicy(candidate.projectId) === "auto" &&
+          projectAutoShare(candidate.projectId) &&
           eligibility(candidate, "ok", true).promotable,
       );
     if (candidates.length === 0) return;
@@ -1022,12 +936,57 @@ export async function setTeamReviewPolicyService(
   };
 }
 
+export async function getTeamReviewPolicyService(
+  scopeId: string,
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ policy: "manual" | "auto" }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  if (!UUID.test(scopeId))
+    return serviceFailure(400, "invalid_request", "team must be a UUID");
+  const access = await accessFor(config);
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to view team review policy.",
+    );
+  try {
+    const result = await access.client
+      .from("scopes")
+      .select("promotion_policy")
+      .eq("id", scopeId)
+      .maybeSingle();
+    if (result.error) return postgresError(result.error);
+    if (!result.data) return serviceFailure(404, "not_found", "Team not found");
+    return {
+      ok: true,
+      value: {
+        policy: result.data.promotion_policy === "auto" ? "auto" : "manual",
+      },
+    };
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not read team review policy",
+    );
+  }
+}
+
 async function promote(
   req: Request,
   id: string,
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
   if (typeof body.version_id !== "string") {
@@ -1058,7 +1017,10 @@ async function review(
   decision: "approve" | "reject" | "withdraw",
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
   let result: PromotionServiceResult<{ request: PromotionRequest }>;
@@ -1095,49 +1057,47 @@ async function setTeamReviewPolicy(
   scopeId: string,
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
-  if (
-    Object.keys(body).some(
-      (key) => key !== "policy" && key !== "expected_policy",
-    )
-  ) {
+  if (Object.keys(body).some((key) => key !== "policy" && key !== "expected")) {
     return errorResponse(
       400,
       "invalid_request",
-      "Only policy and expected_policy are accepted",
+      "Only policy and expected are accepted",
     );
   }
   if (
-    (body.policy !== "manual" && body.policy !== "auto") ||
-    (body.expected_policy !== "manual" && body.expected_policy !== "auto")
+    (body.policy !== "required" && body.policy !== "optional") ||
+    (body.expected !== "required" && body.expected !== "optional")
   ) {
     return errorResponse(
       400,
       "invalid_request",
-      "policy and expected_policy must be manual or auto",
+      "policy and expected must be required or optional",
     );
   }
   const result = await setTeamReviewPolicyService(
     scopeId,
-    body.policy,
-    body.expected_policy,
+    body.policy === "optional" ? "auto" : "manual",
+    body.expected === "optional" ? "auto" : "manual",
     config,
   );
-  return result.ok ? json(result.value) : resultResponse(result);
-}
-
-function routeId(segment: string): string | Response {
-  let id: string;
-  try {
-    id = decodeURIComponent(segment);
-  } catch {
-    return errorResponse(400, "invalid_request", "Promotion id must be a UUID");
+  if (result.ok)
+    return json({
+      policy: result.value.policy === "auto" ? "optional" : "required",
+    });
+  if (result.code === "stale_policy") {
+    return errorResponse(result.status, result.code, result.message, {
+      ...result.extra,
+      current_policy:
+        result.extra?.current_policy === "auto" ? "optional" : "required",
+    });
   }
-  return UUID.test(id)
-    ? id
-    : errorResponse(400, "invalid_request", "Promotion id must be a UUID");
+  return resultResponse(result);
 }
 
 export async function handlePromotionRequest(
@@ -1162,6 +1122,17 @@ export async function handlePromotionRequest(
     }
   }
   if (req.method === "GET") {
+    match = /^\/api\/v1\/teams\/([^/]+)\/review-policy$/.exec(path);
+    if (match) {
+      const scopeId = routeId(match[1]);
+      if (isResponse(scopeId)) return scopeId;
+      const result = await getTeamReviewPolicyService(scopeId, config);
+      return result.ok
+        ? json({
+            policy: result.value.policy === "auto" ? "optional" : "required",
+          })
+        : resultResponse(result);
+    }
     match = /^\/api\/v1\/knowledge\/([^/]+)\/promotion$/.exec(path);
     if (match) {
       const id = routeId(match[1]);

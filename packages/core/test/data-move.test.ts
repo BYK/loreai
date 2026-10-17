@@ -14,6 +14,7 @@ import {
   saveSessionTracking,
 } from "../src/db";
 import * as data from "../src/data";
+import * as ltm from "../src/ltm";
 import { SourceWindowStore } from "../src/source-window-store";
 import { withTenant } from "../src/tenant";
 
@@ -733,29 +734,77 @@ describe("reassignKnowledge", () => {
     expect(countInProject("knowledge", pidA)).toBe(1);
   });
 
-  test("preserves cross_project flag", () => {
-    insertKnowledge(pidA, "k-cross-1", { crossProject: true });
+  test.each([
+    { scope: "private project", source: "project", shared: false, expected: 0 },
+    { scope: "shared project", source: "project", shared: true, expected: 1 },
+    { scope: "null global", source: null, shared: true, expected: 0 },
+    { scope: "empty global", source: "", shared: true, expected: 0 },
+  ])(
+    "preserves move scope across all versions of $scope knowledge",
+    ({ scope, source, shared, expected }) => {
+      const id = `k-versioned-move-${scope}`;
+      insertKnowledge(source === "project" ? pidA : source, id, {
+        crossProject: shared,
+      });
+      ltm.update(id, { content: "Revised knowledge content" });
+      expect(ltm.getByLogical(id)?.id).not.toBe(id);
 
-    data.reassignKnowledge("k-cross-1", PROJECT_B);
+      // Address the superseded version, as callers may retain its original ID.
+      expect(data.reassignKnowledge(id, PROJECT_B)).toBe(true);
 
-    const row = db()
-      .query("SELECT cross_project FROM knowledge WHERE id = ?")
-      .get("k-cross-1") as { cross_project: number };
-    expect(row.cross_project).toBe(1);
+      const versions = db()
+        .query(
+          "SELECT project_id, cross_project, is_current FROM knowledge WHERE logical_id = ? ORDER BY version",
+        )
+        .all(id);
+      expect(versions).toEqual([
+        { project_id: pidB, cross_project: expected, is_current: 0 },
+        { project_id: pidB, cross_project: expected, is_current: 1 },
+      ]);
+    },
+  );
+
+  test("moves private knowledge despite an existing shared title", () => {
+    insertKnowledge(pidA, "k-private-title");
+    ltm.update("k-private-title", { content: "Private revised content" });
+    const sharedId = ltm.create({
+      scope: "global",
+      category: "pattern",
+      title: "Test Knowledge",
+      content: "Shared content",
+    });
+
+    expect(data.reassignKnowledge("k-private-title", PROJECT_B)).toBe(true);
+    expect(ltm.getByLogical("k-private-title")).toMatchObject({
+      project_id: pidB,
+      cross_project: 0,
+      content: "Private revised content",
+    });
+    expect(ltm.getByLogical(sharedId)).toMatchObject({
+      project_id: null,
+      cross_project: 1,
+      content: "Shared content",
+    });
   });
 
-  test("clears cross_project when moving from global to project", () => {
-    insertKnowledge("", "k-global-1", { crossProject: true });
+  test("rejects a shared title collision without moving any versions", () => {
+    insertKnowledge(pidA, "k-shared-title", { crossProject: true });
+    ltm.update("k-shared-title", { content: "Shared revised content" });
+    // Legacy or synced entries can already contain a duplicate shared title.
+    insertKnowledge(null, "k-shared-conflict", { crossProject: true });
 
-    data.reassignKnowledge("k-global-1", PROJECT_A);
-
-    const row = db()
-      .query("SELECT cross_project, project_id FROM knowledge WHERE id = ?")
-      .get("k-global-1") as {
-      cross_project: number;
-      project_id: string | null;
-    };
-    expect(row.cross_project).toBe(0);
-    expect(row.project_id).toBe(pidA);
+    expect(() => data.reassignKnowledge("k-shared-title", PROJECT_B)).toThrow(
+      ltm.TitleConflictError,
+    );
+    const versions = db()
+      .query(
+        "SELECT project_id, cross_project FROM knowledge WHERE logical_id = ? ORDER BY version",
+      )
+      .all("k-shared-title");
+    expect(versions).toEqual([
+      { project_id: pidA, cross_project: 1 },
+      { project_id: pidA, cross_project: 1 },
+    ]);
+    expect(countInProject("knowledge", pidB)).toBe(0);
   });
 });

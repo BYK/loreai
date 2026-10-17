@@ -162,6 +162,14 @@ describe("KnowledgeDocument", () => {
   it("renders content before the trust and history sections", () => {
     const view = renderDocument();
     const article = view.getByTestId("knowledge-document");
+    expect(
+      screen.getByText(
+        "Edits and deletions are revision-checked; restores create a new version.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Nothing on this page writes to memory/),
+    ).not.toBeInTheDocument();
     expect(article.textContent?.indexOf("c")).toBeLessThan(
       article.textContent?.indexOf("Why trust this") ?? 0,
     );
@@ -458,6 +466,23 @@ describe("KnowledgeDocument", () => {
     expect(screen.getByText("worker-model")).toBeInTheDocument();
   });
 
+  it("does not render a source user account ID", () => {
+    const userId = "11111111-2222-3333-4444-555555555555";
+    renderDocument({
+      versions: loader({
+        id: "k",
+        current_version_id: "v2",
+        versions: [
+          version(2, {
+            source_refs: { ...version(2).source_refs, user_id: userId },
+          }),
+        ],
+      }),
+    });
+    expect(screen.getByText("Identity unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(userId)).not.toBeInTheDocument();
+  });
+
   it("treats a projectless entry as shared", () => {
     renderDocument({
       entry: {
@@ -492,7 +517,7 @@ describe("KnowledgeDocument", () => {
       "knowledge-version-1",
     ]);
     expect(screen.getByText("Deleted")).toBeInTheDocument();
-    expect(screen.getByText("Current")).toBeInTheDocument();
+    expect(rows[1]!.querySelector("summary")?.textContent).toContain("Current");
     expect(screen.getAllByText(/Superseded/).length).toBe(1);
   });
 
@@ -526,5 +551,65 @@ describe("KnowledgeDocument", () => {
       ),
     });
     expect(screen.getByText("Version history unavailable")).toBeInTheDocument();
+  });
+
+  it("compares each version to its predecessor and can show full text", () => {
+    const view = renderDocument();
+    const row = view.container.querySelector(
+      "[data-testid=knowledge-version-2]",
+    )!;
+    expect(row.querySelector("del")?.textContent).toBe("Old");
+    expect(row.querySelector("ins")?.textContent).toBe("Current");
+    expect(row.textContent).toContain("Changes from v1");
+    fireEvent.click(row.querySelector('button[aria-pressed="false"]')!);
+    expect(row.querySelector("del")).toBeNull();
+    expect(row.querySelector("ins")).toBeNull();
+    expect(row.textContent).toContain("Current content");
+    expect(row.textContent).not.toContain("Old content");
+  });
+
+  it("does not invent a comparison across missing versions", () => {
+    const view = renderDocument({
+      versions: loader({
+        id: "k",
+        current_version_id: "v3",
+        versions: [version(1), version(3)],
+      }),
+    });
+    const row = view.container.querySelector(
+      "[data-testid=knowledge-version-3]",
+    )!;
+    expect(row.textContent).toContain("Previous version unavailable");
+    expect(row.querySelector("del")).toBeNull();
+    expect(row.textContent).toContain("Current content");
+  });
+
+  it("keeps changed markup inert and explains metadata-only revisions", () => {
+    const view = renderDocument({
+      versions: loader({
+        id: "k",
+        current_version_id: "v3",
+        versions: [
+          version(1),
+          version(2, { content: "<img src=x onerror=bad>new" }),
+          version(3, {
+            content: "<img src=x onerror=bad>new",
+            confidence: 0.9,
+          }),
+        ],
+      }),
+    });
+    expect(
+      view.container.querySelector(
+        "[data-testid=knowledge-version-2] [data-testid=version-content]",
+      )?.textContent,
+    ).toContain("<img");
+    expect(
+      view.container.querySelector("[data-testid=knowledge-version-2] img"),
+    ).toBeNull();
+    expect(
+      view.container.querySelector("[data-testid=knowledge-version-3]")
+        ?.textContent,
+    ).toContain("No text changes");
   });
 });

@@ -614,7 +614,10 @@ describe("UI serving through the gateway", () => {
       peerAddressForRequest: () => "192.0.2.10",
     });
     remoteManagementPeer = await startServer(
-      makeConfig({ allowRemoteManagement: true }),
+      makeConfig({
+        allowRemoteManagement: true,
+        gatewayAuthToken: "ui-static-remote-management-token",
+      }),
       { peerAddressForRequest: () => "192.0.2.10" },
     );
   });

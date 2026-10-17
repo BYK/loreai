@@ -96,8 +96,8 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
       overflow,
     );
     const t = text(msg);
-    // 12 shown, 3 more reported.
-    expect(t).toMatch(/3 more/);
+    // The renderer may only have checked a bounded prefix of the candidates.
+    expect(t).toMatch(/At least 3 more validated matches/);
     expect(t).toContain("recall");
   });
 

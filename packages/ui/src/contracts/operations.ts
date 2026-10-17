@@ -158,6 +158,27 @@ export const historicalCosts = type({
   worker_breakdown: workerBreakdown,
 });
 
+/** One provider budget with its live status (#1927). */
+export const providerBudgetStatus = type({
+  provider: "string",
+  auth_kind: "'api_key' | 'subscription'",
+  account: "string | null",
+  mode: "'pace' | 'cap' | 'off'",
+  window: "'5h' | '7d' | 'day' | 'week'",
+  "headroom?": "number",
+  "unit?": "'usd' | 'tokens' | 'percent'",
+  "amount?": "number",
+  used: "number | null",
+  target: "number | null",
+  ahead: "number | null",
+  fraction: "number | null",
+  pressure: "number",
+  resets_at: "number | null",
+  stale: "boolean",
+  implicit: "boolean",
+  status: "'ok' | 'throttling' | 'paused' | 'stale' | 'unknown' | 'off'",
+});
+
 export const costsSnapshot = type({
   live: liveCosts,
   totals: {
@@ -172,14 +193,6 @@ export const costsSnapshot = type({
   historical: historicalCosts,
   daily: {
     entries: type({ date: "string", cost: "number" }).array(),
-    budget: {
-      amount: "number",
-      spend: "number",
-      date: "string",
-      rate: "number",
-      env_override: "string | null",
-      can_edit: "boolean",
-    },
   },
   sessions: operationsSession.array(),
   providers: type({
@@ -210,23 +223,90 @@ export const costsSnapshot = type({
     observed_at: "number",
     stale: "boolean",
   }).array(),
-  provider_budgets: type({
-    provider: "string",
-    auth_kind: "'api_key' | 'subscription' | null",
-    account: "string | null",
-    unit: "'usd' | 'tokens' | 'percent'",
-    window: "'daily' | '5h' | '7d'",
-    amount: "number",
-    used: "number | null",
-    fraction: "number | null",
-    resets_at: "number | null",
-    stale: "boolean",
-  }).array(),
+  provider_budgets: providerBudgetStatus.array(),
+  can_edit_budgets: "boolean",
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;
 
-export const dailyBudgetResult = type({
-  amount: "number",
-  disabled: "boolean",
+/** `PUT /costs/budgets` body entry: one explicit (stored) provider budget. */
+export type ProviderBudgetInput = {
+  provider: string;
+  auth_kind: "api_key" | "subscription";
+  account: string | null;
+} & (
+  | { mode: "pace"; window: "5h" | "7d"; headroom: number }
+  | { mode: "off"; window: "5h" | "7d" }
+  | { mode: "cap"; unit: "percent"; window: "5h" | "7d"; amount: number }
+  | {
+      mode: "cap";
+      unit: "usd" | "tokens";
+      window: "day" | "week";
+      amount: number;
+    }
+);
+
+export const providerBudgetsResult = type({
+  provider_budgets: providerBudgetStatus.array(),
 });
+
+/**
+ * `GET /api/v1/model-usage` — the model-tides daily document (#2026). Each
+ * day's `models` maps `provider/model` to distinct sessions that day.
+ */
+export const modelUsageDocument = type({
+  format: "'model-tides-daily'",
+  version: "2",
+  source: "'lore'",
+  days: type({
+    day: "string.date.iso",
+    models: "Record<string, number.integer >= 1>",
+  }).array(),
+});
+export type ModelUsageDocument = typeof modelUsageDocument.infer;
+
+/**
+ * `GET /api/v1/model-usage/upload` (#2026 PR3): the weekly snapshot the user
+ * reviews before a consented upload, its sha256, the uploading OS tag, and
+ * the stored report (or null / report_error).
+ */
+export const weeklyUsageSnapshot = type({
+  format: "'model-tides-weekly'",
+  version: "1|2",
+  weeks: type({
+    week: "string.date.iso",
+    models: "Record<string, number.integer >= 1>",
+  }).array(),
+});
+export type WeeklyUsageSnapshot = typeof weeklyUsageSnapshot.infer;
+
+export const modelTidesReport = type({
+  id: "string",
+  "url?": "string",
+  published: "boolean",
+  inAggregate: "boolean | null",
+  revision: "number.integer >= 0",
+  metricVersion: "1|2",
+  snapshot: [weeklyUsageSnapshot, "|", "null"],
+});
+export type ModelTidesReport = typeof modelTidesReport.infer;
+
+export const modelUsageUploadState = type({
+  snapshot: weeklyUsageSnapshot,
+  snapshot_sha256: "string.hex",
+  upload_os: "'linux' | 'macos' | 'windows' | 'other'",
+  report: [modelTidesReport, "|", "null"],
+  "report_error?": "string",
+});
+export type ModelUsageUploadState = typeof modelUsageUploadState.infer;
+
+/** Mutations return the stored-report shape (never the token). */
+export const modelTidesMutationResult = type({
+  id: "string",
+  "url?": "string",
+  "published?": "boolean",
+  "inAggregate?": "boolean | null",
+  "revision?": "number.integer >= 0",
+  "metricVersion?": "1|2",
+});
+export type ModelTidesMutationResult = typeof modelTidesMutationResult.infer;

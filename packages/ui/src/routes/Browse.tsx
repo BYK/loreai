@@ -1,9 +1,10 @@
 import type { Component } from "solid-js";
-import { createMemo, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type {
   AllKnowledgeQuery,
+  KnowledgeVersion,
   ProjectSummary,
   RecallScope,
 } from "~/contracts";
@@ -21,9 +22,13 @@ import {
   projectHref,
   workspaceSearchHref,
 } from "~/lib/href";
+import { isApiError } from "~/lib/api";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
+import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
+import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
+import { RestoreKnowledgeAction } from "~/components/lore/RestoreKnowledgeAction";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
@@ -38,6 +43,7 @@ import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
+import { createLoader } from "~/lib/loader";
 import {
   Select,
   SelectContent,
@@ -124,6 +130,10 @@ export const Browse: Component<{
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const ws = useWorkspace();
+  const [deletedSaveError, setDeletedSaveError] = createSignal<{
+    entryId: string;
+    message: string;
+  }>();
   const projectId = () => decodeParam(raw.projectId);
   const knowledgeId = () => decodeParam(raw.knowledgeId);
   const project = createMemo(() => ws.projectById(projectId()));
@@ -134,6 +144,22 @@ export const Browse: Component<{
     parseAllKnowledgeQuery(searchParams as Record<string, string | undefined>),
   );
   const entry = ws.state.knowledge.entry(() => knowledgeId() ?? null);
+  const deletedHistoryId = createMemo(() => {
+    const error = entry.loader.error();
+    return props.view === "entry" &&
+      isApiError(error) &&
+      error.kind === "not_found"
+      ? knowledgeId()
+      : null;
+  });
+  const deletedHistory = createLoader(deletedHistoryId, (id, signal) =>
+    ws.tracked(() =>
+      ws.client.listKnowledgeVersions(id, {
+        includeDeleted: true,
+        signal,
+      }),
+    ),
+  );
   const activeProjectId = createMemo(
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
   );
@@ -144,9 +170,10 @@ export const Browse: Component<{
       : null,
   );
   const knowledgePage = ws.state.knowledge.page(pageSource);
-  const allKnowledgePage = ws.state.knowledge.allPage(() =>
+  const allPageSource = createMemo(() =>
     props.view === "all-knowledge" ? allQuery() : null,
   );
+  const allKnowledgePage = ws.state.knowledge.allPage(allPageSource);
   const cursor = () =>
     typeof searchParams.cursor === "string" ? searchParams.cursor : null;
   const searchQ = () =>
@@ -174,6 +201,20 @@ export const Browse: Component<{
     () => project() ?? ws.projectById(entry.loader.data()?.project_id),
   );
   const versions = ws.state.knowledge.versions(
+    () => knowledgeId() ?? entry.loader.data()?.id ?? null,
+  );
+  const refreshAfterKnowledgeWrite = () => {
+    entry.loader.reload();
+    versions.loader.reload();
+    if (pageSource() !== null) {
+      knowledgePage.loader.reload();
+    }
+    if (allPageSource() !== null) {
+      allKnowledgePage.loader.reload();
+    }
+    ws.projects.reload();
+  };
+  const files = ws.state.knowledge.files(
     () => knowledgeId() ?? entry.loader.data()?.id ?? null,
   );
   const evidence = ws.state.sessions.evidence(() => {
@@ -377,6 +418,38 @@ export const Browse: Component<{
         }
         return (
           <Switch>
+            <Match when={deletedHistoryId()}>
+              <DeletedKnowledgeDocument
+                history={deletedHistory}
+                projectId={projectId()}
+                saveError={
+                  deletedSaveError()?.entryId === knowledgeId()
+                    ? deletedSaveError()?.message
+                    : undefined
+                }
+                restoreAction={
+                  <RestoreKnowledgeAction
+                    id={knowledgeId()!}
+                    history={deletedHistory}
+                    onRestored={() => {
+                      setDeletedSaveError(undefined);
+                      refreshAfterKnowledgeWrite();
+                    }}
+                  />
+                }
+                renderRestore={(version: KnowledgeVersion) => (
+                  <RestoreKnowledgeAction
+                    id={knowledgeId()!}
+                    history={deletedHistory}
+                    versionId={version.version_id}
+                    onRestored={() => {
+                      setDeletedSaveError(undefined);
+                      refreshAfterKnowledgeWrite();
+                    }}
+                  />
+                )}
+              />
+            </Match>
             <Match when={entry.loader.error() && !entry.loader.data()}>
               <div class="p-5">
                 {errorStateFor(
@@ -396,7 +469,33 @@ export const Browse: Component<{
                     entry={value()}
                     project={projectForEntry()}
                     versions={versions.loader}
+                    files={files.loader}
                     evidence={evidence.loader}
+                    actions={
+                      <KnowledgeEditor
+                        entry={value()}
+                        versions={versions.loader}
+                        reloadEntry={entry.loader.reload}
+                        onSaved={() => refreshAfterKnowledgeWrite()}
+                        onSaveError={(message) => {
+                          const entryId = knowledgeId();
+                          setDeletedSaveError(
+                            message && entryId
+                              ? { entryId, message }
+                              : undefined,
+                          );
+                        }}
+                        onDeleted={() => refreshAfterKnowledgeWrite()}
+                      />
+                    }
+                    renderRestore={(version: KnowledgeVersion) => (
+                      <RestoreKnowledgeAction
+                        id={value().logical_id ?? value().id}
+                        history={versions.loader}
+                        versionId={version.version_id}
+                        onRestored={() => refreshAfterKnowledgeWrite()}
+                      />
+                    )}
                     loadDistillation={(id) =>
                       ws.tracked(() => ws.client.getDistillation(id))
                     }

@@ -17,6 +17,7 @@ import {
   readStorageMode,
 } from "./db/vec-store";
 import { config } from "./config";
+import { filterTaskKnowledge } from "./knowledge-task-filter";
 import { recomputeEntityRank } from "./entities";
 import {
   ftsQuery,
@@ -49,7 +50,7 @@ import {
   FUZZY_MIN_QUERY,
   FUZZY_RECALL_CAP,
 } from "./fuzzy";
-import { sessionVerifierVerdict } from "./tool-trace";
+import { sessionVerifierVerdictsAfter } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
   extractReferences,
@@ -58,7 +59,22 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import {
+  KNOWLEDGE_HEADER_OVERHEAD_TOKENS,
+  knowledgeEntryTokenCost,
+} from "./prompt";
+import { taskHintExcerpt } from "./task-text";
 import { currentTenantId } from "./tenant";
+
+export function titleKeySql(column: string): string {
+  return `LOWER(TRIM(${column}, ' ' || char(9) || char(10) || char(13)))`;
+}
+
+export function normalizeTitleKey(title: string): string {
+  return title.trim().toLowerCase();
+}
+
+const TITLE_KEY_SQL = titleKeySql;
 
 /**
  * Cheap durable change stamp for a context-bound selection. Knowledge writes
@@ -177,6 +193,12 @@ export type ApprovalStatus = "auto" | "pending" | "approved" | "rejected";
  *  non-queryable per-version data; queryable fields get dedicated columns (see
  *  worker_provider_id / worker_model_id, v35 — db.ts:1000-1004). (#627 Phase 1.) */
 export type KnowledgeMetadata = {
+  recovered_from?: {
+    kind: "sync_conflict_keep_local";
+    conflict_id: number;
+    remote_deleted_version_id: string;
+    restored_at: string;
+  };
   /** Commit SHA the session was on when this entry was minted
    *  (`synthetic-tools.ts` probe → `applySyntheticResolution` → SessionState).
    *  Format: 7-40 char lowercase hex. Never validated here — the probe guard at
@@ -269,6 +291,29 @@ export type KnowledgeEntry = {
   // unreinforced entries. Nullable for pre-v48 rows (backfilled to updated_at).
   last_reinforced_at: number | null;
 };
+
+export type TitleConflict = {
+  logical_id: string;
+  id: string;
+  title: string;
+  project_id: string | null;
+  cross_project: number;
+};
+
+export class TitleConflictError extends Error {
+  readonly code = "title_conflict";
+  readonly title: string;
+  readonly conflicting: TitleConflict;
+
+  constructor(title: string, conflicting: TitleConflict) {
+    super(
+      `Title "${title}" is already used by shared entry "${conflicting.title}" (${conflicting.logical_id})`,
+    );
+    this.name = "TitleConflictError";
+    this.title = title;
+    this.conflicting = conflicting;
+  }
+}
 
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
@@ -377,12 +422,43 @@ function applyConfidenceDelta(
   rematerializeConfidence(logicalId, now);
 }
 
-/** Current materialized confidence of a logical entry (default 1.0 if no row). */
-function currentConfidence(logicalId: string): number {
+/** Observed confidence components and their cancellation-scale roundoff. */
+function confidenceRegister(logicalId: string): {
+  raw: number;
+  roundoff: number;
+} {
   const row = db()
-    .query("SELECT confidence FROM knowledge_meta WHERE logical_id = ?")
-    .get(logicalId) as { confidence: number } | undefined;
-  return row?.confidence ?? 1.0;
+    .query(
+      `SELECT base_confidence,
+              COALESCE((SELECT SUM(pos) FROM knowledge_meta_crdt WHERE logical_id = ?), 0) AS pos,
+              COALESCE((SELECT SUM(neg) FROM knowledge_meta_crdt WHERE logical_id = ?), 0) AS neg,
+              (SELECT COUNT(*) FROM knowledge_meta_crdt WHERE logical_id = ?) AS replicas
+         FROM knowledge_meta WHERE logical_id = ?`,
+    )
+    .get(logicalId, logicalId, logicalId, logicalId) as
+    | { base_confidence: number; pos: number; neg: number; replicas: number }
+    | undefined;
+  if (!row) return { raw: 1.0, roundoff: 0 };
+  // The sums and final add/subtract can lose precision when large positive and
+  // negative components cancel. Scale the bound by the observed magnitudes and
+  // replica count, rather than treating every residual above a fixed epsilon as
+  // meaningful evidence. Only the boundary no-op check uses this tolerance.
+  const scale = Math.max(1, Math.abs(row.base_confidence) + row.pos + row.neg);
+  return {
+    raw: row.base_confidence + row.pos - row.neg,
+    roundoff: Number.EPSILON * (row.replicas + 2) * scale,
+  };
+}
+
+/** Underlying total for absolute confidence edits, before clamping. */
+function rawConfidence(logicalId: string): number {
+  return confidenceRegister(logicalId).raw;
+}
+
+/** Whether a displayed boundary hides evidence beyond numerical roundoff. */
+export function hasConfidenceOvershoot(logicalId: string): boolean {
+  const { raw, roundoff } = confidenceRegister(logicalId);
+  return raw < -roundoff || raw - 1 > roundoff;
 }
 
 export function create(input: {
@@ -421,13 +497,27 @@ export function create(input: {
   // where forSession() can't find them in either the project or cross-project pool.
   const crossProject = pid === null ? true : (input.crossProject ?? false);
 
+  // Build the update payload — forward confidence when the caller provided one
+  // so the curator's scoring intent isn't silently dropped on dedup.
+  const dedupUpdate = {
+    content: input.content,
+    ...(input.confidence != null ? { confidence: input.confidence } : {}),
+  };
+
+  if (input.id && (pid === null || crossProject)) {
+    const sharedConflict = findSharedTitleConflict(null, input.title);
+    if (sharedConflict) {
+      update(sharedConflict.logical_id, dedupUpdate);
+      return sharedConflict.logical_id;
+    }
+  }
+
   // Dedup guard: if an entry with the same project_id + title already exists,
   // update its content instead of inserting a duplicate. This prevents the
   // curator from creating multiple entries for the same concept across sessions.
   // Also checks cross-project entries to prevent the curator from creating
   // project-scoped duplicates of globally-shared knowledge.
-  // Note: when an explicit id is provided (cross-machine import), skip dedup —
-  // the caller (importFromFile) already handles duplicate detection by UUID.
+  // Explicit-id project-scoped imports still use their UUID-based dedup path.
   if (!input.id) {
     // First check same project_id
     // Return the stable logical_id (not the per-version id): update() below
@@ -436,22 +526,25 @@ export function create(input: {
       pid !== null
         ? db()
             .query(
-              "SELECT logical_id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT logical_id FROM knowledge_current
+               WHERE tenant_id = ? AND project_id = ?
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
-            .get(pid, input.title)
+            .get(tenantId, pid, input.title)
         : db()
             .query(
-              "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT logical_id FROM knowledge_current
+               WHERE tenant_id = ? AND project_id IS NULL
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
             .get(tenantId, input.title)
     ) as { logical_id: string } | null;
-
-    // Build the update payload — forward confidence when the caller provided one
-    // so the curator's scoring intent isn't silently dropped on dedup.
-    const dedupUpdate = {
-      content: input.content,
-      ...(input.confidence != null ? { confidence: input.confidence } : {}),
-    };
 
     if (existing) {
       update(existing.logical_id, dedupUpdate);
@@ -462,7 +555,12 @@ export function create(input: {
     // duplicates of entries that already exist as cross-project knowledge.
     const crossExisting = db()
       .query(
-        "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        `SELECT logical_id FROM knowledge_current
+         WHERE tenant_id = ? AND cross_project = 1
+           AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+           AND confidence > 0
+         ORDER BY logical_id
+         LIMIT 1`,
       )
       .get(tenantId, input.title) as { logical_id: string } | null;
 
@@ -555,6 +653,7 @@ export function appendVersion(
     title?: string;
     content?: string;
     category?: string;
+    crossProject?: boolean;
     isDeleted?: boolean;
     /**
      * Per-version metadata. Omit the property to forward-copy the current
@@ -607,7 +706,7 @@ export function appendVersion(
            logical_id, version, is_deleted, is_current)
          SELECT
             ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
+           source_session, COALESCE(?, cross_project), created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
            updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
@@ -619,6 +718,11 @@ export function appendVersion(
         overrides.category ?? null,
         overrides.title ?? null,
         overrides.content ?? null,
+        overrides.crossProject === undefined
+          ? null
+          : overrides.crossProject
+            ? 1
+            : 0,
         now,
         // A missing property forwards the prior version. An explicit empty/null
         // value clears it, which lets `.lore.md` remove an `enforce:` marker.
@@ -662,17 +766,36 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
       ? ensureProject(input.projectPath)
       : null;
 
+  if (input.id && (pid === null || input.crossProject === true)) {
+    const existing = findSharedTitleConflict(null, input.title);
+    if (existing) {
+      const previousContent = getByLogical(existing.logical_id)?.content;
+      const id = create(input);
+      return { id, created: false, previousContent };
+    }
+  }
+
   if (!input.id) {
     const existing = (
       pid !== null
         ? db()
             .query(
-              "SELECT id, content FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT id, content FROM knowledge_current
+               WHERE tenant_id = ? AND project_id = ?
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
-            .get(pid, input.title)
+            .get(tenantId, pid, input.title)
         : db()
             .query(
-              "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT id, content FROM knowledge_current
+               WHERE tenant_id = ? AND project_id IS NULL
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
             .get(tenantId, input.title)
     ) as { id: string; content: string } | null;
@@ -685,7 +808,12 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
 
     const crossExisting = db()
       .query(
-        "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        `SELECT id, content FROM knowledge_current
+         WHERE tenant_id = ? AND cross_project = 1
+           AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+           AND confidence > 0
+         ORDER BY logical_id
+         LIMIT 1`,
       )
       .get(tenantId, input.title) as { id: string; content: string } | null;
     if (crossExisting) {
@@ -916,46 +1044,106 @@ export function rejectForTeam(logicalId: string): boolean {
   return res.changes > 0;
 }
 
+export function findSharedTitleConflict(
+  excludeLogicalId: string | null,
+  title: string,
+): TitleConflict | null {
+  const exclusion = excludeLogicalId === null ? "" : "AND logical_id != ?";
+  const params: unknown[] = [currentTenantId(), title];
+  if (excludeLogicalId !== null) params.push(excludeLogicalId);
+  const conflict = db()
+    .query(
+      `SELECT logical_id, id, title, project_id, cross_project
+         FROM knowledge_current
+        WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
+          AND confidence > 0
+          AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+          ${exclusion}
+        ORDER BY logical_id
+        LIMIT 1`,
+    )
+    .get(...params) as TitleConflict | null;
+  return conflict ?? null;
+}
+
 /**
- * Whether re-titling the entry identified by `logicalId` to `newTitle` would
- * collide with a DIFFERENT live entry sharing the same case-insensitive title in
- * the same dedup scope. Mirrors (and is a superset of) create()'s dedup guard:
- * - a plain project entry checks its own project AND the cross/global pool;
- * - a PROMOTED entry (project_id set, cross_project=1) checks BOTH its origin
- *   project AND the cross/global pool — a promoted entry is visible in its home
- *   project, so a same-project sibling with that title is still a real duplicate;
- * - a global entry (project_id IS NULL) checks the cross/global pool.
- * The entry's own `logical_id` is excluded so a no-op or case-only re-title never
- * counts as a collision, and `confidence > 0` matches create()'s "live" filter
- * (a dead/zeroed entry never blocks a re-title). Used ONLY by the re-title path
- * — create() has its own inline guard.
+ * Find a live title collision in the shared pool and, when project-owned, the
+ * entry's own project pool.
  */
+export function findTitleConflict(
+  logicalId: string,
+  entry: Pick<KnowledgeEntry, "project_id" | "cross_project">,
+  title: string,
+): TitleConflict | null {
+  const projectClause = entry.project_id === null ? "" : "OR project_id = ?";
+  const params: unknown[] = [currentTenantId(), logicalId, title];
+  if (entry.project_id !== null) params.push(entry.project_id);
+  return (
+    (db()
+      .query(
+        `SELECT logical_id, id, title, project_id, cross_project
+           FROM knowledge_current
+          WHERE tenant_id = ? AND logical_id != ? AND confidence > 0
+            AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+            AND (project_id IS NULL OR cross_project = 1 ${projectClause})
+          ORDER BY logical_id
+          LIMIT 1`,
+      )
+      .get(...params) as TitleConflict | undefined) ?? null
+  );
+}
+
+/** Whether re-titling the entry would collide in its dedup scope. */
 export function titleCollides(
   logicalId: string,
-  entry: KnowledgeEntry,
+  entry: Pick<KnowledgeEntry, "project_id" | "cross_project">,
   newTitle: string,
 ): boolean {
-  const pid = entry.project_id;
-  // Pool = the cross/global pool, PLUS the entry's own project when it has one
-  // (true for both plain project entries and promoted entries — a promoted entry
-  // is still surfaced in its home project, so a same-project collision is real).
-  const scopeClause =
-    pid !== null
-      ? "(project_id IS NULL OR cross_project = 1 OR project_id = ?)"
-      : "(project_id IS NULL OR cross_project = 1)";
-  const params: unknown[] =
-    pid !== null
-      ? [currentTenantId(), logicalId, newTitle, pid]
-      : [currentTenantId(), logicalId, newTitle];
-  const hit = db()
+  return findTitleConflict(logicalId, entry, newTitle) !== null;
+}
+
+export type SharedTitleDuplicateGroup = {
+  title_key: string;
+  entries: Array<{
+    id: string;
+    title: string;
+    project_id: string | null;
+    cross_project: number;
+  }>;
+};
+
+/** Read-only report of pre-existing normalized-title duplicates in shared scope. */
+export function listSharedTitleDuplicates(): SharedTitleDuplicateGroup[] {
+  const rows = db()
     .query(
-      `SELECT 1 FROM knowledge_current
-         WHERE tenant_id = ? AND logical_id != ? AND confidence > 0 AND LOWER(title) = LOWER(?)
-           AND ${scopeClause}
-         LIMIT 1`,
+      `SELECT logical_id, title, project_id, cross_project,
+              ${TITLE_KEY_SQL("title")} AS title_key
+         FROM knowledge_current
+        WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
+          AND confidence > 0
+        ORDER BY title_key, logical_id`,
     )
-    .get(...(params as [string, ...unknown[]]));
-  return hit != null;
+    .all(currentTenantId()) as Array<{
+    logical_id: string;
+    title: string;
+    project_id: string | null;
+    cross_project: number;
+    title_key: string;
+  }>;
+  const groups = new Map<string, SharedTitleDuplicateGroup["entries"]>();
+  for (const row of rows) {
+    const entries = groups.get(row.title_key) ?? [];
+    entries.push({
+      id: row.logical_id,
+      title: row.title,
+      project_id: row.project_id,
+      cross_project: row.cross_project,
+    });
+    groups.set(row.title_key, entries);
+  }
+  return [...groups]
+    .filter(([, entries]) => entries.length > 1)
+    .map(([title_key, entries]) => ({ title_key, entries }));
 }
 
 export function update(
@@ -963,6 +1151,7 @@ export function update(
   input: {
     title?: string;
     content?: string;
+    category?: string;
     confidence?: number;
     updatedBy?: string;
     sensitivity?: Sensitivity;
@@ -1013,11 +1202,13 @@ export function update(
   const contentChanged =
     input.content !== undefined && cur != null && cur.content !== input.content;
   const titleChanged = effectiveTitle !== undefined;
+  const categoryChanged =
+    input.category !== undefined && input.category !== cur.category;
   const metadataChanged =
     input.replaceMetadata === true &&
     Object.hasOwn(input, "metadata") &&
     JSON.stringify(cur.metadata) !== JSON.stringify(input.metadata ?? null);
-  if (contentChanged || titleChanged || metadataChanged) {
+  if (contentChanged || titleChanged || categoryChanged || metadataChanged) {
     // Before `replaceMetadata`, an empty metadata object has always meant
     // "no fresh provenance" and therefore forward-copies the current value.
     // File imports explicitly opt into replacement so removing `enforce:` can
@@ -1032,6 +1223,7 @@ export function update(
     appendVersion(logicalId, {
       ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
       ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(categoryChanged ? { category: input.category } : {}),
       ...metadataOverride,
     });
     appended = true;
@@ -1061,11 +1253,13 @@ export function update(
       "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
     )
     .run(now, logicalId);
-  // A confidence "set" (A2 3b-2) becomes a delta to the target on the local replica
-  // (clamped to [0,1]); applyConfidenceDelta re-materializes + bumps updated_at.
+  // An explicit set cancels the observed RAW total, including banked overshoot,
+  // so it reaches the target in one pass. Only the local grow-only counters
+  // change; peer deltas still merge additively. Ordinary reinforce/decay keeps
+  // its boundary hysteresis. applyConfidenceDelta re-materializes the cache.
   if (input.confidence !== undefined) {
     const target = Math.max(0, Math.min(1, input.confidence));
-    applyConfidenceDelta(logicalId, target - currentConfidence(logicalId), now);
+    applyConfidenceDelta(logicalId, target - rawConfidence(logicalId), now);
   }
 
   // Re-embed the new current version only when a content change was appended.
@@ -1166,6 +1360,78 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
     .run(currentTenantId(), logicalId, logicalId);
 }
 
+export function restoreDeletedKnowledge(
+  logicalId: string,
+  input: {
+    expectedDeletedVersionId: string;
+    conflictId: number;
+    title: string;
+    content: string;
+    category?: string;
+    metadata: KnowledgeMetadata | null;
+  },
+):
+  | { ok: true; versionId: string }
+  | { ok: false; reason: "stale"; currentVersionId: string | null } {
+  return withSavepoint("restore_deleted_knowledge", () => {
+    const current = db()
+      .query(
+        "SELECT id, project_id, metadata, category, is_deleted FROM knowledge WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
+      )
+      .get(currentTenantId(), logicalId) as
+      | {
+          id: string;
+          project_id: string | null;
+          metadata: string | null;
+          category: string;
+          is_deleted: number;
+        }
+      | undefined;
+    if (
+      !current ||
+      current.is_deleted !== 1 ||
+      current.id !== input.expectedDeletedVersionId
+    ) {
+      return {
+        ok: false,
+        reason: "stale",
+        currentVersionId: current?.id ?? null,
+      };
+    }
+
+    const metadata = {
+      ...parseMetadata(current.metadata),
+      ...input.metadata,
+      recovered_from: {
+        kind: "sync_conflict_keep_local" as const,
+        conflict_id: input.conflictId,
+        remote_deleted_version_id: current.id,
+        restored_at: new Date().toISOString(),
+      },
+    };
+    const versionId = appendVersion(logicalId, {
+      title: input.title,
+      content: input.content,
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      metadata,
+      isDeleted: false,
+    });
+    if (!versionId) throw new Error("Deleted knowledge entry disappeared");
+
+    const approvalStatus =
+      current.project_id && projectScope(current.project_id)
+        ? "pending"
+        : "auto";
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = ?, approved_by = NULL, approved_at = NULL WHERE tenant_id = ? AND id = ? AND is_current = 1",
+      )
+      .run(approvalStatus, currentTenantId(), versionId);
+    clearTombstone(logicalId);
+    return { ok: true, versionId };
+  });
+}
+
 /** True when the entry for this logical_id was deleted (tombstoned). */
 export function isTombstoned(id: string): boolean {
   // A2: the current version is an is_deleted death certificate.
@@ -1209,12 +1475,20 @@ export function findTombstonedByTitle(input: {
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0
+               AND (project_id = ? OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0
+               AND (project_id IS NULL OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.title) as { 1: number } | null);
   if (live) return false;
@@ -1223,12 +1497,20 @@ export function findTombstonedByTitle(input: {
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1
+               AND (project_id = ? OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1
+               AND (project_id IS NULL OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.title) as { 1: number } | null);
   return deathCert != null;
@@ -2099,55 +2381,81 @@ export async function peekProjectRefsOffloaded(
 
 /**
  * Record which knowledge entries were injected into a session, for the
- * outcome-reward loop (#497). Keyed by `logical_id` (the A2 stable identity), so
- * crediting survives a version edit between injection and the idle credit pass.
- * Idempotent per (session, entry) via the PK — re-injection across turns does
- * NOT reset the `credited` flag, so an entry is credited at most once per
+ * outcome-reward loop (#497, #2054). The supplied snapshot's `id` pins the
+ * exposed version; never look up a replacement and pretend it was shown.
+ * Same-version re-injection preserves its first exposure. A newly shown current
+ * version can replace an uncredited receipt and start a new window. Credited
+ * receipts never change, so a logical entry is credited at most once per
  * session. cross_project (shared) and synthetic (lat.md) entries are skipped:
  * the loop must never auto-adjust shared knowledge, and synthetics aren't rows.
  */
 export function recordSessionInjections(
   sessionID: string | undefined,
   projectPath: string,
-  entries: { logical_id?: string; cross_project?: number; category?: string }[],
+  entries: {
+    id?: string;
+    logical_id?: string;
+    cross_project?: number;
+    category?: string;
+  }[],
 ): void {
   if (!sessionID) return;
   const pid = ensureProject(projectPath);
+  const tenant = currentTenantId();
   const now = Date.now();
   const stmt = db().query(
     `INSERT INTO knowledge_session_injections
-       (session_id, logical_id, project_id, created_at, credited)
-     VALUES (?, ?, ?, ?, 0)
-     ON CONFLICT(session_id, logical_id) DO NOTHING`,
+       (session_id, logical_id, project_id, created_at, credited, version_id)
+     SELECT ?, k.logical_id, k.project_id, ?, 0, k.id FROM knowledge k
+     WHERE k.id = ? AND k.logical_id = ? AND k.project_id = ?
+       AND k.tenant_id = ? AND k.cross_project = 0 AND k.is_deleted = 0
+     ON CONFLICT(session_id, logical_id) DO UPDATE SET
+       version_id = excluded.version_id,
+       created_at = excluded.created_at,
+       verdict = NULL
+     WHERE knowledge_session_injections.credited = 0
+       AND knowledge_session_injections.project_id = excluded.project_id
+       AND knowledge_session_injections.version_id IS NOT excluded.version_id
+       -- Stale snapshot replays may record an initial historical exposure, but
+       -- must never replace a newer/current exposure or guess legacy provenance.
+       AND EXISTS (
+         SELECT 1 FROM knowledge_current current
+         WHERE current.id = excluded.version_id
+           AND current.logical_id = excluded.logical_id
+           AND current.project_id = excluded.project_id
+           AND current.tenant_id = ? AND current.cross_project = 0
+       )`,
   );
   // One transaction for the whole batch (matches markInjected's single write and
   // avoids a per-entry auto-commit on the request hot path).
   withTransaction(() => {
     for (const e of entries) {
-      if (!e.logical_id) continue;
+      if (!e.id || !e.logical_id) continue;
       if (e.cross_project === 1) continue;
       if (e.category === "lat.md") continue;
-      stmt.run(sessionID, e.logical_id, pid, now);
+      stmt.run(sessionID, now, e.id, e.logical_id, pid, tenant, tenant);
     }
   });
 }
 
 /** Outcome of crediting one session's injected entries. */
 export type OutcomeCreditResult = {
+  /** Aggregate of the credited windows; fail if any received a failure. */
   verdict: "pass" | "fail" | "none";
-  /** Number of injected entries whose confidence was adjusted. */
+  /** Number of injection rows credited, including entries already at the cap. */
   credited: number;
 };
 
 /**
- * Credit a session's injected knowledge entries by its verifier verdict (#497).
- * Runs at idle. Within-session co-occurrence: entries that were in-context when
- * the session's verifiers passed get a small (capped) boost; entries in-context
- * when verifiers failed get a larger penalty. Applied at most once per entry per
- * session (the `credited` flag), so a later idle tick won't re-credit.
+ * Credit a session's injected knowledge entries by verifier co-occurrence
+ * (#497, #2052). Each entry considers only checks seeded at or after its first
+ * exposure of the current version. Unknown/superseded exposures are neutral.
+ * Passing windows get a small (capped) boost; windows with failures
+ * get a larger penalty. Runs at idle, at most once per entry per session (the
+ * `credited` flag), so a later idle tick won't re-credit.
  *
  * Invariants:
- *  - `none` verdict (no verifier ran) is a no-op — never guess.
+ *  - A window without a verifier outcome stays uncredited for a later check.
  *  - cross_project (shared) entries are never touched (the injection log already
  *    excludes them; the UPDATE re-asserts `cross_project = 0` as a backstop).
  *  - the boost is clamped to OUTCOME_BOOST_CEILING; the penalty floors at 0.
@@ -2159,23 +2467,41 @@ export function creditSessionOutcome(
   projectPath: string,
 ): OutcomeCreditResult {
   const pid = ensureProject(projectPath);
-  const uncredited = db()
-    .query(
-      `SELECT logical_id FROM knowledge_session_injections
-       WHERE session_id = ? AND project_id = ? AND credited = 0`,
-    )
-    .all(sessionID, pid) as { logical_id: string }[];
-  if (uncredited.length === 0) return { verdict: "none", credited: 0 };
+  const tenant = currentTenantId();
+  const readUncredited = db().query(
+    `SELECT i.logical_id, i.created_at FROM knowledge_session_injections i
+     JOIN knowledge_current k ON k.logical_id = i.logical_id AND k.id = i.version_id
+     WHERE i.session_id = ? AND i.project_id = ? AND i.credited = 0
+       AND k.project_id = i.project_id AND k.tenant_id = ? AND k.cross_project = 0`,
+  );
+  // Most idle calls have nothing to credit. Avoid a write lock in that case;
+  // re-read eligible versions under the lock before applying any feedback.
+  if (!readUncredited.get(sessionID, pid, tenant)) {
+    return { verdict: "none", credited: 0 };
+  }
+  return withTransaction(() => {
+    const uncredited = readUncredited.all(sessionID, pid, tenant) as {
+      logical_id: string;
+      created_at: number;
+    }[];
+    if (uncredited.length === 0) return { verdict: "none", credited: 0 };
 
-  const verdict = sessionVerifierVerdict(projectPath, sessionID);
-  if (verdict === "none") return { verdict, credited: 0 };
+    const verdicts = sessionVerifierVerdictsAfter(
+      projectPath,
+      sessionID,
+      uncredited.map((entry) => entry.created_at),
+    );
+    const groups: Record<"pass" | "fail", string[]> = { pass: [], fail: [] };
+    for (let i = 0; i < uncredited.length; i++) {
+      const verdict = verdicts[i];
+      if (verdict !== "none") groups[verdict].push(uncredited[i].logical_id);
+    }
+    const credited = groups.pass.length + groups.fail.length;
+    if (credited === 0) return { verdict: "none", credited: 0 };
 
-  const ids = uncredited.map((r) => r.logical_id);
-  const placeholders = ids.map(() => "?").join(",");
-  const now = Date.now();
-  // Apply the confidence adjustment and the credited-flag write atomically, so a
-  // crash between them can't re-credit (double-adjust) on restart.
-  withTransaction(() => {
+    const now = Date.now();
+    // Apply the confidence adjustment and the credited-flag write atomically, so a
+    // crash between them can't re-credit (double-adjust) on restart.
     // Adjust the current, live version of each injected logical entry. The
     // cross_project = 0 guard is a real backstop (a PROMOTED entry keeps its
     // origin project_id but has cross_project = 1 — it must never be adjusted);
@@ -2186,55 +2512,64 @@ export function creditSessionOutcome(
     // gate via knowledge_current (pins is_current=1 AND is_deleted=0, exposes the
     // materialized confidence). cross_project = 0 is a real backstop (a PROMOTED
     // entry keeps its origin project_id but has cross_project = 1 — never adjust it).
-    // PASS additionally only rescues under-confident entries (confidence <
-    // OUTCOME_BOOST_CEILING) and the delta is capped so the boost never lifts an
-    // entry above that ceiling — preserved by computing min(REWARD, CEILING−conf)
-    // per entry. FAIL drives down by OUTCOME_PENALTY (materialize clamps at 0).
-    const eligible = (
-      verdict === "pass"
-        ? db()
+    // Group windows by outcome. Chunk ID lists below SQLite's historical
+    // 999-variable minimum, including the fixed project/session/verdict binds.
+    // Neutral windows are absent from both groups and must not be consumed.
+    for (const verdict of ["pass", "fail"] as const) {
+      const group = groups[verdict];
+      for (let offset = 0; offset < group.length; offset += 900) {
+        const ids = group.slice(offset, offset + 900);
+        const placeholders = ids.map(() => "?").join(",");
+        // PASS rescues under-confident entries without lifting above the boost
+        // ceiling. FAIL drives down by OUTCOME_PENALTY (materialize floors at 0).
+        const eligible = (
+          verdict === "pass"
+            ? db()
+                .query(
+                  `SELECT logical_id, confidence FROM knowledge_current
+                    WHERE cross_project = 0 AND project_id = ? AND confidence < ?
+                      AND logical_id IN (${placeholders})`,
+                )
+                .all(pid, OUTCOME_BOOST_CEILING, ...ids)
+            : db()
+                .query(
+                  `SELECT logical_id, confidence FROM knowledge_current
+                    WHERE cross_project = 0 AND project_id = ?
+                      AND logical_id IN (${placeholders})`,
+                )
+                .all(pid, ...ids)
+        ) as { logical_id: string; confidence: number }[];
+        for (const e of eligible) {
+          const delta =
+            verdict === "pass"
+              ? Math.min(OUTCOME_REWARD, OUTCOME_BOOST_CEILING - e.confidence)
+              : -OUTCOME_PENALTY;
+          applyConfidenceDelta(e.logical_id, delta, now);
+          // Both verdicts reset the decay clock.
+          db()
             .query(
-              `SELECT logical_id, confidence FROM knowledge_current
-                WHERE cross_project = 0 AND project_id = ? AND confidence < ?
-                  AND logical_id IN (${placeholders})`,
+              "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
             )
-            .all(pid, OUTCOME_BOOST_CEILING, ...ids)
-        : db()
-            .query(
-              `SELECT logical_id, confidence FROM knowledge_current
-                WHERE cross_project = 0 AND project_id = ?
-                  AND logical_id IN (${placeholders})`,
-            )
-            .all(pid, ...ids)
-    ) as { logical_id: string; confidence: number }[];
-    for (const e of eligible) {
-      const delta =
-        verdict === "pass"
-          ? Math.min(OUTCOME_REWARD, OUTCOME_BOOST_CEILING - e.confidence)
-          : -OUTCOME_PENALTY;
-      applyConfidenceDelta(e.logical_id, delta, now);
-      // Both verdicts reset the decay clock (the entry was demonstrably in use).
-      db()
-        .query(
-          "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
-        )
-        .run(now, e.logical_id);
+            .run(now, e.logical_id);
+        }
+
+        // Credit only this outcome's windows. Entries without a post-exposure
+        // result remain available for later feedback and impact stats stay per
+        // entry rather than inheriting the session-wide verdict.
+        db()
+          .query(
+            `UPDATE knowledge_session_injections SET credited = 1, verdict = ?
+             WHERE session_id = ? AND project_id = ? AND credited = 0
+               AND logical_id IN (${placeholders})`,
+          )
+          .run(verdict, sessionID, pid, ...ids);
+      }
     }
-
-    // Mark this session's injections credited (so a later idle tick is a no-op)
-    // and record the verdict for per-entry "knowledge impact" stats (#497).
-    db()
-      .query(
-        `UPDATE knowledge_session_injections SET credited = 1, verdict = ?
-         WHERE session_id = ? AND project_id = ? AND credited = 0`,
-      )
-      .run(verdict, sessionID, pid);
+    return { verdict: groups.fail.length > 0 ? "fail" : "pass", credited };
   });
-
-  return { verdict, credited: ids.length };
 }
 
-/** Per-entry outcome co-occurrence stats for the reward loop (#497). */
+/** Current-version outcome co-occurrence stats for the reward loop (#497). */
 export type OutcomeImpact = {
   /** Sessions this entry was injected into that ended with passing verifiers. */
   passes: number;
@@ -2248,6 +2583,8 @@ export type OutcomeImpact = {
  * one query per entry. The idle consolidation path evaluates dozens of entries
  * per pass, so the per-entry form was an N+1 (Sentry LOREAI-GATEWAY-3D).
  *
+ * Counts only receipts for the current version, preventing historical or
+ * unknown exposure from being evidence for replacement content (#2054).
  * Counts credited injection rows by verdict; 'none' verdicts are not recorded
  * (no signal), so only pass/fail are counted (the `verdict IN ('pass','fail')`
  * filter also excludes still-uncredited NULL rows). Backed by the
@@ -2275,7 +2612,7 @@ export function outcomeImpactMany(
       .query(
         `SELECT i.logical_id, i.verdict, COUNT(*) AS n
          FROM knowledge_session_injections i
-         JOIN knowledge_current k ON k.logical_id = i.logical_id
+         JOIN knowledge_current k ON k.logical_id = i.logical_id AND k.id = i.version_id
          WHERE k.tenant_id = ? AND i.logical_id IN (${placeholders})
            AND i.verdict IN ('pass','fail')
          GROUP BY i.logical_id, i.verdict`,
@@ -2411,9 +2748,14 @@ export function setFileRefs(logicalId: string, paths: string[]): string[] {
  */
 export function knowledgeFileRefsBatch(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_FILES_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_FILES_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   const rows = db()
     .query(
@@ -2440,7 +2782,7 @@ export function knowledgeFileRefsBatch(
       (p): p is string => typeof p === "string" && p.length > 0,
     );
     if (paths.length === 0) continue;
-    out.set(r.logical_id, paths.slice(0, MAX_RECALL_FILES_PER_ENTRY));
+    out.set(r.logical_id, paths.slice(0, limit));
   }
   return out;
 }
@@ -2455,9 +2797,14 @@ export function knowledgeFileRefsBatch(
  */
 export function knowledgeRefAnchors(
   logicalIds: string[],
+  opts?: { limit?: number },
 ): Map<string, KnowledgeRefAnchor[]> {
   const out = new Map<string, KnowledgeRefAnchor[]>();
-  if (logicalIds.length === 0) return out;
+  const requestedLimit = opts?.limit ?? MAX_RECALL_ANCHORS_PER_ENTRY;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : MAX_RECALL_ANCHORS_PER_ENTRY;
+  if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
   // 'file' < 'symbol' lexically, so ORDER BY kind puts file anchors first; a
   // stable secondary sort by anchor keeps output deterministic (cache-friendly).
@@ -2481,7 +2828,7 @@ export function knowledgeRefAnchors(
       arr = [];
       out.set(r.logical_id, arr);
     }
-    if (arr.length >= MAX_RECALL_ANCHORS_PER_ENTRY) continue;
+    if (arr.length >= limit) continue;
     arr.push({ kind: r.kind, anchor: r.anchor });
   }
   return out;
@@ -2626,6 +2973,61 @@ function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
   return crossEntryClass(entry, pid) !== "foreign";
 }
 
+const SPECIFIC_REFERENCE_TEXT_LIMIT = 4_096;
+const SPECIFIC_REFERENCE_TOTAL_LIMIT = 65_536;
+const SPECIFIC_REFERENCE_CANDIDATE_LIMIT = 128;
+
+function specificReferenceKeys(text: string): Set<string> {
+  return new Set(
+    extractReferences(text).flatMap((reference) => {
+      switch (reference.kind) {
+        case "file":
+          return [`file:${reference.path}`];
+        case "symbol":
+          return [`symbol:${reference.name}`];
+        case "command":
+          return [];
+        default:
+          throw new Error("Unexpected reference kind");
+      }
+    }),
+  );
+}
+
+function specificReferenceMatches(
+  candidates: readonly Scored[],
+  context: string,
+): Map<string, number> {
+  const matches = new Map<string, number>();
+  // This optional foreground signal must bound both regex input and total
+  // work, even for stored bodies that cannot fit a header-only output budget.
+  if (candidates.length > SPECIFIC_REFERENCE_CANDIDATE_LIMIT) return matches;
+  const task = context.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT);
+  const taskReferences = specificReferenceKeys(task);
+  if (taskReferences.size === 0) return matches;
+  const work = { used: task.length };
+  for (const { entry } of candidates) {
+    // Slice each source before concatenation: never flatten an oversized body
+    // merely to clip the combined string afterward.
+    const title = entry.title.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT);
+    const text =
+      title.length === SPECIFIC_REFERENCE_TEXT_LIMIT
+        ? title
+        : `${title}\n${entry.content.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT - title.length - 1)}`;
+    // Partial evidence would bias candidates by scan order. Exhaustion restores
+    // the existing hybrid ordering for the entire eligible pool, not admission.
+    if (work.used + text.length > SPECIFIC_REFERENCE_TOTAL_LIMIT)
+      return new Map<string, number>();
+    work.used += text.length;
+    matches.set(
+      entry.id,
+      [...specificReferenceKeys(text)].filter((key) => taskReferences.has(key))
+        .length,
+    );
+  }
+  return matches;
+}
+
 /**
  * Score entries by FTS5 BM25 relevance to session context.
  *
@@ -2679,7 +3081,9 @@ async function scoreEntriesFTS(
     for (const r of results) {
       const norm =
         minRank === maxRank ? 1 : (maxRank - r.rank) / (maxRank - minRank);
-      scoreMap.set(r.id, norm);
+      // Zero means "no FTS match" downstream. Keep the weakest real match
+      // eligible, including for the overflow recall pool.
+      scoreMap.set(r.id, Math.max(Number.EPSILON, norm));
     }
     return scoreMap;
   } catch (error) {
@@ -2814,9 +3218,18 @@ export async function forSession(
   // wall-time remainder is the synchronous entry-load / FTS / scoring / packing
   // cost. Emitted at each real-work return.
   const timer = new ReadPathTimer();
+  const architectureInjection = config().knowledge.architectureInjection;
+  const taskFilter = config().knowledge.taskFilter;
+  if (typeof taskFilter !== "boolean")
+    throw new Error("Invalid knowledge task filter");
+  if (
+    architectureInjection !== "ranked" &&
+    architectureInjection !== "reserved"
+  ) {
+    throw new Error("Invalid architecture injection mode");
+  }
   const pid = ensureProject(projectPath);
   const categoryFilter = options?.categories;
-  const excludeFilter = options?.excludeCategories;
 
   // Build optional SQL category clauses (include / exclude are mutually exclusive)
   let categoryClause = "";
@@ -2824,9 +3237,9 @@ export async function forSession(
   if (categoryFilter?.length) {
     categoryClause = ` AND category IN (${categoryFilter.map(() => "?").join(",")})`;
     categoryParams = categoryFilter;
-  } else if (excludeFilter?.length) {
-    categoryClause = ` AND category NOT IN (${excludeFilter.map(() => "?").join(",")})`;
-    categoryParams = excludeFilter;
+  } else if (options?.excludeCategories?.length) {
+    categoryClause = ` AND category NOT IN (${options.excludeCategories.map(() => "?").join(",")})`;
+    categoryParams = options.excludeCategories;
   }
 
   // --- 1 & 2. Load project-specific + cross-project candidates ---
@@ -2939,12 +3352,11 @@ export async function forSession(
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
 
-    const HEADER_OVERHEAD_TOKENS = 15;
-    let used = HEADER_OVERHEAD_TOKENS;
+    let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
     const result: KnowledgeEntry[] = [];
     for (const entry of allPrefs) {
       if (used >= maxTokens) break;
-      const cost = estimateTokens(entry.title + entry.content) + 10;
+      const cost = knowledgeEntryTokenCost(entry);
       if (used + cost > maxTokens) continue;
       result.push(entry);
       used += cost;
@@ -2966,34 +3378,85 @@ export async function forSession(
     return result;
   }
 
-  // --- 3. Build session context for relevance scoring ---
-  let sessionContext = "";
-  if (sessionID) {
-    const distRow = db()
-      .query(
-        `SELECT observations FROM distillations
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(pid, sessionID) as { observations: string } | null;
-    if (distRow?.observations) {
-      sessionContext += `${distRow.observations}\n`;
-    }
+  // --- 3. Build a bounded query from the current task, not recent tool output ---
+  // A gateway request already contains the latest real user turns. Prefer that
+  // hint even when a distillation or tool result was stored for this session:
+  // the old order ignored the hint and let unrelated tool output dominate FTS.
+  // Direct callers without a hint use the latest user prose. Only
+  // fall back to the last distillation if neither source has a task to score.
+  const contextHint = options?.contextHint?.trim();
+  let sessionContext = taskHintExcerpt(contextHint ?? "", 4_096);
+  const admissionTask = { text: contextHint ?? "" };
+  if (!sessionContext && sessionID) {
+    type TaskRow = {
+      id: string;
+      content: string | null;
+      metadata: string | null;
+      created_at: number;
+    };
     const recentMsgs = db()
       .query(
-        `SELECT content FROM temporal_messages
-         WHERE project_id = ? AND session_id = ?
-         ORDER BY created_at DESC LIMIT 10`,
+        `SELECT id,
+                CASE WHEN metadata IS NULL OR metadata NOT LIKE '%"tools":%'
+                  THEN substr(content, 1, 4096) ELSE NULL END AS content,
+                substr(metadata, 1, 32768) AS metadata, created_at
+         FROM temporal_messages
+         WHERE project_id = ? AND session_id = ? AND role = 'user'
+          ORDER BY created_at DESC, id DESC LIMIT 10`,
       )
-      .all(pid, sessionID) as Array<{ content: string }>;
-    if (recentMsgs.length) {
-      sessionContext += recentMsgs.map((m) => m.content).join("\n");
+      .all(pid, sessionID) as TaskRow[];
+    const userProse = (m: TaskRow): string => {
+      try {
+        const metadata = m.metadata
+          ? (JSON.parse(m.metadata) as Record<string, unknown>)
+          : {};
+        if (typeof metadata.taskText === "string")
+          return taskHintExcerpt(metadata.taskText, 2_048);
+        // Legacy mixed rows cannot prove which text came from a tool body:
+        // tool output can forge the structural separator. Skip them.
+        if (Array.isArray(metadata.tools) && metadata.tools.length > 0)
+          return "";
+        return m.content?.trim() ?? "";
+      } catch {
+        return "";
+      }
+    };
+    // Keep the two latest plain rows reachable even after many tool-only
+    // messages. The bounded recent scan also admits mixed user/tool rows.
+    const plainMsgs =
+      recentMsgs.filter((m) => userProse(m)).length < 2
+        ? (db()
+            .query(
+              `SELECT id, substr(content, 1, 4096) AS content,
+                      substr(metadata, 1, 32768) AS metadata, created_at
+               FROM temporal_messages
+               WHERE project_id = ? AND session_id = ? AND role = 'user'
+                 AND (metadata IS NULL OR metadata NOT LIKE '%"tools":%')
+               ORDER BY created_at DESC, id DESC LIMIT 2`,
+            )
+            .all(pid, sessionID) as TaskRow[])
+        : [];
+    sessionContext = [
+      ...new Map([...recentMsgs, ...plainMsgs].map((m) => [m.id, m])).values(),
+    ]
+      .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id))
+      .map(userProse)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((text) => taskHintExcerpt(text, 2_048))
+      .join("\n")
+      .trim();
+    admissionTask.text = sessionContext;
+    if (!sessionContext) {
+      const distRow = db()
+        .query(
+          `SELECT observations FROM distillations
+           WHERE project_id = ? AND session_id = ?
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(pid, sessionID) as { observations: string } | null;
+      sessionContext = distRow?.observations.slice(0, 4_096) ?? "";
     }
-  }
-
-  // Fall back to caller-provided context hint (e.g., user's first message)
-  if (!sessionContext.trim() && options?.contextHint) {
-    sessionContext = options.contextHint;
   }
 
   // --- 4. Score both pools by relevance ---
@@ -3003,6 +3466,16 @@ export async function forSession(
   // embedded context vector — keeping distillation/temporal on the identical
   // cosine scale as knowledge (no separate embed, no scale mismatch).
   let contextVec: Float32Array | undefined;
+  // A bare acknowledgment has no new task terms. Preserve the no-context
+  // blanket-eligible fallback; distinct short requests still use FTS below.
+  const bareAcknowledgment =
+    /^(?:ok(?:ay)?|yes|sure|thanks|thank you|go ahead|continue|same task)[.!?]*$/i.test(
+      sessionContext.trim(),
+    );
+
+  // Scoring treats acknowledgments as no new task. Admission must preserve
+  // that same fallback for both packed entries and overflow hints.
+  const admissionContext = bareAcknowledgment ? "" : admissionTask.text;
 
   if (
     !projectEntries.length &&
@@ -3051,9 +3524,15 @@ export async function forSession(
         clearTimeout(deadlineTimer);
       }
       const hits = await timer.await(
-        embedding.vectorSearch(contextVec, 50, excludeFilter, "knowledge", {
-          signal: options?.signal,
-        }),
+        embedding.vectorSearch(
+          contextVec,
+          50,
+          options?.excludeCategories,
+          "knowledge",
+          {
+            signal: options?.signal,
+          },
+        ),
         "vectorSearch",
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
@@ -3137,8 +3616,9 @@ export async function forSession(
         ftsScores,
       ));
     }
-  } else if (sessionContext.trim().length > 20) {
-    // Embeddings unavailable — use FTS5 BM25 as fallback
+  } else if (sessionContext.trim().length > 0 && !bareAcknowledgment) {
+    // Short tasks and unavailable embeddings still use FTS5 BM25. A short
+    // request must not fall through to unrelated confidence-ranked entries.
     const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
     ({ scoredProject, scoredCross } = scoreFTS(
       projectEntries,
@@ -3160,10 +3640,9 @@ export async function forSession(
   }
 
   // --- 5. Merge and pack into token budget ---
-  // Architecture entries get a guaranteed minimum allocation (first 20% of
-  // budget) before the general score-ranked packing. These entries provide
-  // the structural "map" that makes specific gotchas/decisions interpretable
-  // — without them, a gotcha about a subsystem is harder to contextualize.
+  // In reserved mode, architecture gets the established first-pass allocation.
+  // Ranked mode lets it compete for shared slots. Neither mode changes
+  // on-demand recall or the hard token budget.
   const allScored = [...scoredProject, ...scoredCross];
 
   // --- 5b. Fold in relevance-ranked context sources (distillation/temporal) ---
@@ -3204,35 +3683,40 @@ export async function forSession(
     }
   }
 
-  // Deterministic ordering: sort by score DESC, then by entry id ASC as a
-  // stable tiebreak. Without the id tiebreak, equal/near-equal scores (or float
-  // micro-variations from re-embedding the evolving session context) reorder
-  // turn-to-turn, which churns the rendered system[2] text and busts the cache.
-  allScored.sort((a, b) =>
-    b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
-  );
+  // Deterministic ordering: specific evidence, then score DESC and id ASC.
+  // The stable ID tiebreak prevents equal scores from churning the selected set.
+  const referenceMatches = specificReferenceMatches(allScored, sessionContext);
+  // Exact code references are checkpoint-time task evidence, not admission.
+  // Keep every existing FTS/vector/safety-net candidate eligible, including
+  // implicit conventions with no named file or symbol. Never use later work.
+  const compareEvidence = (a: Scored, b: Scored): number =>
+    (referenceMatches.get(b.entry.id) ?? 0) -
+      (referenceMatches.get(a.entry.id) ?? 0) ||
+    b.score - a.score ||
+    (a.entry.id === b.entry.id ? 0 : a.entry.id < b.entry.id ? -1 : 1);
+  allScored.sort(compareEvidence);
 
-  const HEADER_OVERHEAD_TOKENS = 15;
   const ARCH_BUDGET_FRACTION = 0.2;
-  let used = HEADER_OVERHEAD_TOKENS;
-  const result: KnowledgeEntry[] = [];
+  // The formatter receives the same budget. Shared packing costs ensure no
+  // selected entry disappears before its injection effects are recorded.
+  let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
+  const packed: KnowledgeEntry[] = [];
   const packedIds = new Set<string>();
 
-  // Phase 1: Pack architecture entries first (up to 20% of budget)
+  // Only the legacy reserved mode packs architecture first. Ranked mode lets
+  // every entry compete for the same hard budget by relevance.
   const archBudget = Math.floor(maxTokens * ARCH_BUDGET_FRACTION);
-  const archEntries = allScored.filter(
-    (s) => s.entry.category === "architecture",
-  );
-  // Sort architecture by score descending (already sorted, but filter may
-  // reorder) with the same id tiebreak for deterministic selection.
-  archEntries.sort((a, b) =>
-    b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
-  );
+  const archEntries =
+    architectureInjection === "reserved"
+      ? allScored.filter((s) => s.entry.category === "architecture")
+      : [];
+  // Reserved architecture uses the same evidence ordering as the shared pool.
+  archEntries.sort(compareEvidence);
   for (const { entry } of archEntries) {
-    if (used >= archBudget + HEADER_OVERHEAD_TOKENS) break;
-    const cost = estimateTokens(entry.title + entry.content) + 10;
+    if (used >= archBudget + KNOWLEDGE_HEADER_OVERHEAD_TOKENS) break;
+    const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue; // hard cap: never exceed total budget
-    result.push(entry);
+    packed.push(entry);
     packedIds.add(entry.id);
     used += cost;
   }
@@ -3241,9 +3725,9 @@ export async function forSession(
   for (const { entry } of allScored) {
     if (used >= maxTokens) break;
     if (packedIds.has(entry.id)) continue;
-    const cost = estimateTokens(entry.title + entry.content) + 10;
+    const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue;
-    result.push(entry);
+    packed.push(entry);
     used += cost;
   }
 
@@ -3260,16 +3744,21 @@ export async function forSession(
     for (const section of latSections) {
       if (used >= maxTokens) break;
       const display = section.first_paragraph ?? section.content;
-      const cost = estimateTokens(section.heading + display) + 10;
+      const title = `[${section.file}] ${section.heading}`;
+      const cost = knowledgeEntryTokenCost({
+        id: section.id,
+        title,
+        content: display,
+      });
       if (used + cost > maxTokens) continue;
       // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
-      result.push({
+      packed.push({
         id: section.id,
         logical_id: section.id, // synthetic lat.md entry: its own logical identity
         tenant_id: currentTenantId(),
         project_id: section.project_id,
         category: "lat.md",
-        title: `[${section.file}] ${section.heading}`,
+        title,
         content: display,
         source_session: null,
         cross_project: 0,
@@ -3296,6 +3785,13 @@ export async function forSession(
     }
   }
 
+  // Filter after packing: rejected slots never refill, and the overflow sink
+  // must exclude the original packed set rather than resurface rejected facts.
+  // A distilled fallback is not an authoritative task for this second pass.
+  const result = taskFilter
+    ? filterTaskKnowledge(packed, admissionContext)
+    : packed;
+
   // --- 7. Record cross-project transfer metrics (issue #506) ---
   // An entry counts as a "transfer" when it was injected into a project that is
   // NOT its origin: cross_project=1 AND a non-null project_id != pid. Global
@@ -3315,13 +3811,19 @@ export async function forSession(
   // lat.md row, which has no recall id.
   if (options?.overflowSink) {
     options.signal?.throwIfAborted();
-    const selectedIds = new Set(result.map((e) => e.id));
-    for (const { entry } of allScored) {
-      // Recalled-context synthetics are not knowledge rows — keep the ToC
-      // (rendered as "other relevant knowledge") knowledge-only.
-      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
-      if (!selectedIds.has(entry.id)) options.overflowSink.push(entry);
-    }
+    const selectedIds = new Set(packed.map((e) => e.id));
+    const overflow = allScored
+      .map(({ entry }) => entry)
+      .filter(
+        (entry) =>
+          entry.category !== RECALLED_CONTEXT_CATEGORY &&
+          !selectedIds.has(entry.id),
+      );
+    options.overflowSink.push(
+      ...(taskFilter
+        ? filterTaskKnowledge(overflow, admissionContext)
+        : overflow),
+    );
   }
 
   timer.emit("forSession", projectEntries.length + crossEntries.length);
@@ -3354,7 +3856,7 @@ export function recordForSessionEffects(
     log.warn("forSession: transfer recording failed (non-fatal):", err);
   }
 
-  // Being selected resets the decay clock without changing confidence.
+  // Full-content delivery resets the decay clock without changing confidence.
   signal?.throwIfAborted();
   try {
     const knowledgeResult = result.filter(
@@ -5031,6 +5533,11 @@ export type PromotionResult = {
   promoted: number;
   /** Qualifying clusters (distinctProjects >= MIN_PROMOTION_PROJECTS). */
   clusters: PromotionCluster[];
+  conflicts: Array<{
+    logicalId: string;
+    title: string;
+    conflictingLogicalId: string;
+  }>;
 };
 
 /**
@@ -5050,7 +5557,8 @@ export function promoteCrossProject(opts?: {
   dryRun?: boolean;
 }): PromotionResult {
   const dryRun = opts?.dryRun ?? false;
-  if (!embedding.isAvailable()) return { promoted: 0, clusters: [] };
+  if (!embedding.isAvailable())
+    return { promoted: 0, clusters: [], conflicts: [] };
 
   // 1. Load eligible candidate entries (project-scoped, high-confidence, embedded).
   //    Capped at MAX_PROMOTION_CANDIDATES to keep pairwise comparison bounded.
@@ -5076,7 +5584,7 @@ export function promoteCrossProject(opts?: {
   if (candidates.length < MIN_PROMOTION_PROJECTS) {
     // Fewer entries than the minimum distinct-project requirement — impossible
     // to span enough projects.
-    return { promoted: 0, clusters: [] };
+    return { promoted: 0, clusters: [], conflicts: [] };
   }
 
   // 2. Load embeddings for the candidate set.
@@ -5160,20 +5668,36 @@ export function promoteCrossProject(opts?: {
     toPromote.push(...members);
   }
 
-  // 6. Flip qualifying members to cross_project = 1 in place.
-  if (!dryRun && toPromote.length) {
-    const now = Date.now();
-    const stmt = db().query(
-      `UPDATE knowledge
-       SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
-       WHERE id = ? AND is_current = 1`,
-    );
-    for (const id of toPromote) {
-      stmt.run(now, now, id);
+  // 6. Promote qualifying members only when their shared title key is unused.
+  const conflicts: PromotionResult["conflicts"] = [];
+  const promotedByTitleKey = new Map<string, string>();
+  const promotedIds: string[] = [];
+  const now = Date.now();
+  const stmt = db().query(
+    `UPDATE knowledge
+     SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
+     WHERE id = ? AND is_current = 1`,
+  );
+  for (const id of toPromote) {
+    const member = entryById.get(id);
+    if (!member) continue;
+    const conflict = findSharedTitleConflict(member.logical_id, member.title);
+    const titleKey = normalizeTitleKey(member.title);
+    const inBatchConflict = promotedByTitleKey.get(titleKey);
+    if (conflict || inBatchConflict) {
+      conflicts.push({
+        logicalId: member.logical_id,
+        title: member.title,
+        conflictingLogicalId: conflict?.logical_id ?? inBatchConflict!,
+      });
+      continue;
     }
+    promotedByTitleKey.set(titleKey, member.logical_id);
+    promotedIds.push(id);
+    if (!dryRun) stmt.run(now, now, id);
   }
 
-  return { promoted: toPromote.length, clusters };
+  return { promoted: promotedIds.length, clusters, conflicts };
 }
 
 // ---------------------------------------------------------------------------
