@@ -1256,14 +1256,39 @@ export function inferClaudeCodeReminderProjectPath(
   reminder: string,
   headerPath?: string,
 ): InferredProjectPath | null {
-  const instructionFile =
-    /(?:^|\n)[ \t]*(?:Instructions from:|Contents of)[ \t]*(\/[\w.@+/-]+)\/(?:CLAUDE|AGENTS|\.lore)\.md(?=$|[\s"'<>):,;])/g;
   const paths = new Set<string>();
-  for (const match of reminder.matchAll(instructionFile)) {
+  let fence: { marker: string; length: number } | undefined;
+  for (const line of reminder.split(/\r?\n/)) {
+    // Instruction bodies are Markdown, not additional client provenance. In
+    // particular, record-shaped fenced examples must never select a project.
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (
+        delimiter &&
+        delimiter[1][0] === fence.marker &&
+        delimiter[1].length >= fence.length &&
+        !delimiter[2].trim()
+      ) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (delimiter) {
+      fence = { marker: delimiter[1][0], length: delimiter[1].length };
+      continue;
+    }
+    // Four-space/tab-indented code and block quotes cannot be record headers.
+    const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(line);
+    if (!record) continue;
+    // Parse the entire header before validating the path. Silently skipping a
+    // real record with unsupported characters lets a forged second record win.
+    const match = /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(record[1]);
+    if (!match) throw new ProjectPathConflictError();
     const path = match[1].replace(/\/+$/, "");
     if (
       !path ||
       path.length > MAX_PROJECT_PATH_LENGTH ||
+      /[\u0000-\u001f\u007f]/.test(path) ||
       path.includes("//") ||
       path.split("/").some((part) => part === "." || part === "..") ||
       isUnattributedPath(path)
@@ -1272,11 +1297,9 @@ export function inferClaudeCodeReminderProjectPath(
     }
     // User-level Claude Code instructions are shared across projects. They
     // cannot be used to identify the active workspace.
-    if (
-      path.split("/").includes(".claude") ||
-      path.includes("/.config/claude/") ||
-      path.endsWith("/.config/claude")
-    ) {
+    // Match user-global instruction roots, not every .claude ancestor: actual
+    // workspaces can live in a project's .claude/worktrees directory.
+    if (/^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(path)) {
       continue;
     }
     paths.add(path);

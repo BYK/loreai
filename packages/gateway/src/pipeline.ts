@@ -75,6 +75,7 @@ import {
   countMatchingTemporalIds,
   getGitRemote,
   projectId,
+  canonicalProjectId,
   resolveProjectByRemoteOrPath,
   projectGitRemote,
   mergeProjectInternal,
@@ -108,6 +109,7 @@ import {
   recordCacheUsage,
   exportDedupDecisions,
   importDedupDecisions,
+  evictSession,
   calibrate,
   getLastTransformedCount,
   onIdleResume,
@@ -3144,9 +3146,17 @@ function isReasoningBlock(block: GatewayContentBlock): boolean {
 export function applySessionPromptDeltas(
   messages: GatewayMessage[],
   sessionID: string,
+  expectedProjectID?: string,
 ): GatewayMessage[] {
   const deltas = listSessionPromptDeltas(sessionID);
   if (!deltas.length) return messages;
+
+  const boundPath = expectedProjectID === undefined
+    ? loadSessionTracking(sessionID)?.projectPath
+    : undefined;
+  const ownerID = expectedProjectID ?? (boundPath ? projectId(boundPath) : undefined);
+  const owner = ownerID ? canonicalProjectId(ownerID) : undefined;
+  const projectBound = expectedProjectID !== undefined || !!boundPath;
 
   const out = messages.slice();
   // We carry the raw selector JSON alongside the validated `insertAt` so the
@@ -3163,6 +3173,11 @@ export function applySessionPromptDeltas(
     messages: GatewayMessage[];
   }> = [];
   for (const delta of deltas) {
+    // Durable rows can predate binding cleanup or survive an interrupted older
+    // gateway. Verify ownership independently before parsing or re-anchoring.
+    // Request-bound callers always supply a project ID, including an unresolved
+    // empty ID (which fails closed); unbound positional transforms have no owner.
+    if (projectBound && (!owner || canonicalProjectId(delta.projectID) !== owner)) continue;
     const selector = parseMessageInsertSelector(delta.selector);
     // NB: name this `blockMessages`, NOT `messages` — the function parameter
     // `messages` (the conversation array) must stay in scope below for
@@ -5682,10 +5697,38 @@ export function resolveSessionProjectPath(
       return previous;
     }
 
-    // A confident stale-header correction changes the owner of every
-    // session-keyed prompt cache. Drop the old project's pins before selecting
-    // knowledge for this turn; never reuse its stable LTM under the new path.
-    if (confidentlyWrong) evictPipelineSessionState(sessionState.sessionID);
+    if (previous && previous !== projectPath) {
+      const previousID = projectId(previous);
+      const nextID = projectId(projectPath);
+      const sameProject = previousID && nextID &&
+        canonicalProjectId(previousID) === canonicalProjectId(nextID);
+      if (!sameProject) {
+        // Every distinct-project rebind is a prompt-ownership boundary,
+        // including provisional -> confident. Publish the new binding and
+        // retire durable prompt state in ONE transaction: interrupted knowledge
+        // preparation must never hydrate a new owner with the old owner's LTM.
+        withSavepoint("rebind_session_prompt", () => {
+          saveSessionTracking(sessionState.sessionID, {
+            projectPath,
+            projectPathProvisional: false,
+            ltmCacheText: null,
+            ltmCacheTokens: null,
+            ltmCacheRevision: null,
+            ltmPinText: null,
+            ltmPinTokens: null,
+            ltmPinKeys: null,
+            stableLtmText: null,
+            stableLtmTokens: null,
+            recallStore: null,
+            dedupDecisions: null,
+          });
+          deleteSessionPromptDelta(sessionState.sessionID);
+        });
+        evictPipelineSessionState(sessionState.sessionID);
+        evictSession(sessionState.sessionID);
+        sessionState.recallStore = new Map();
+      }
+    }
     sessionState.projectPath = projectPath;
     sessionState.projectPathProvisional = false;
 
@@ -22845,6 +22888,7 @@ async function handleConversationTurnPrepared(
   modifiedReq.messages = applySessionPromptDeltas(
     modifiedReq.messages,
     sessionID,
+    projectId(projectPath) ?? "",
   );
   if (contextEffectOwner.projectID && contextEffectCandidates.size) {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -25042,6 +25086,9 @@ async function handleLoreSlashCommand(
   if (sessionID) {
     assertBoundSessionProject(sessionID, pathResult);
     await claimSession(sessionID);
+    // A queued command belongs to the project it claimed, even if the same
+    // authenticated session was corrected to another project while it waited.
+    assertBoundSessionProject(sessionID, pathResult);
     if (
       indexedSessionID &&
       !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
@@ -25054,6 +25101,7 @@ async function handleLoreSlashCommand(
     }
     await awaitStreamingPostResponse(sessionID, req.signal);
     req.signal?.throwIfAborted();
+    assertBoundSessionProject(sessionID, pathResult);
     if (
       indexedSessionID &&
       !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
@@ -25314,6 +25362,9 @@ async function handleCurateSlashCommand(
     );
   }
 
+  // Curation has its own asynchronous waits; authorize the current binding
+  // again immediately before it can resolve and persist a project change.
+  assertBoundSessionProject(sessionID, pathResult);
   const projectPath = resolveSessionProjectPath(pathResult, state, config);
   saveSessionTracking(sessionID, {
     projectPath: state.projectPath || null,
