@@ -694,6 +694,55 @@ describe("ProjectActions", () => {
     ).toBeDisabled();
   });
 
+  it.each([
+    { name: "composition events", isComposing: true, keyCode: 0 },
+    { name: "legacy IME key code", isComposing: false, keyCode: 229 },
+  ])("keeps candidate keys with the IME for $name", async (ime) => {
+    mount(
+      clientWith({
+        listProjects: async () => [
+          project(),
+          project({ id: "tokyo-a", name: "東京 alpha", path: "/work/alpha" }),
+          project({ id: "tokyo-b", name: "東京 beta", path: "/work/beta" }),
+        ],
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.compositionStart(picker);
+    fireEvent.input(picker, {
+      target: { value: "東京" },
+      inputType: "insertCompositionText",
+      isComposing: true,
+    });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    for (const key of ["ArrowDown", "Enter", "Escape"]) {
+      fireEvent.keyDown(picker, {
+        key,
+        isComposing: ime.isComposing,
+        keyCode: ime.keyCode,
+      });
+      expect(picker).toHaveValue("東京");
+      expect(picker).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("dialog")).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Move 1 session" }),
+      ).toBeDisabled();
+    }
+    fireEvent.compositionEnd(picker, { data: "東京" });
+    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    expect(picker).toHaveValue("東京 alpha");
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeEnabled();
+  });
+
   it("disables a destination removed by a project-list refresh", async () => {
     let projects = [project(), otherProject];
     mount(clientWith({ listProjects: async () => projects }), true);

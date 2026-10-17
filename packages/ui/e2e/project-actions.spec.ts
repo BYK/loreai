@@ -222,6 +222,84 @@ test.describe("project actions (UI-08)", () => {
     ).toHaveValue("");
   });
 
+  test("IME candidate keys do not choose a target or dismiss the dialog", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/projects", async (route) => {
+      const response = await route.fetch();
+      const projects = (await response.json()) as { name: string }[];
+      await route.fulfill({
+        response,
+        // Pin fixture ordering independently of concurrent session moves.
+        json: projects
+          .map((project) => ({
+            ...project,
+            name:
+              project.name === "scratch"
+                ? "東京 alpha"
+                : project.name === "hostile"
+                  ? "東京 beta"
+                  : project.name,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      });
+    });
+    await gotoProject(page, "lore");
+    await page
+      .getByTestId("project-actions")
+      .getByRole("button", { name: "Move sessions…" })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("checkbox", { name: /e2e-reader/ }).check();
+    const target = dialog.getByRole("combobox", { name: "Target project" });
+    const move = dialog.getByRole("button", { name: "Move 1 session" });
+
+    // Exercise the browser composition event contract; an OS IME is not
+    // available to Playwright. Both modern and legacy key signals are used.
+    for (const ime of [
+      { isComposing: true, keyCode: 0 },
+      { isComposing: false, keyCode: 229 },
+    ]) {
+      await target.focus();
+      await target.dispatchEvent("compositionstart");
+      await target.evaluate((element: HTMLInputElement) => {
+        element.value = "東京";
+        element.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            isComposing: true,
+            inputType: "insertCompositionText",
+            data: "東京",
+          }),
+        );
+      });
+      await expect(dialog.getByRole("option")).toHaveCount(2);
+      for (const key of ["ArrowDown", "Enter", "Escape"]) {
+        const nativeDefaultAllowed = await target.evaluate(
+          (element, event) =>
+            element.dispatchEvent(
+              new KeyboardEvent("keydown", {
+                bubbles: true,
+                cancelable: true,
+                ...event,
+              }),
+            ),
+          { key, ...ime },
+        );
+        expect(nativeDefaultAllowed).toBe(true);
+        await expect(target).toHaveValue("東京");
+        await expect(target).toHaveAttribute("aria-expanded", "true");
+        await expect(dialog).toBeVisible();
+        await expect(move).toBeDisabled();
+      }
+      await target.dispatchEvent("compositionend", { data: "東京" });
+      await target.press("ArrowDown");
+      await target.press("Enter");
+      await expect(target).toHaveValue("東京 alpha");
+      await expect(move).toBeEnabled();
+    }
+  });
+
   test("merge duplicates reports none on the seeded data", async ({ page }) => {
     await page.goto("/ui/");
     await expect(page.getByTestId("merge-projects")).toBeVisible();

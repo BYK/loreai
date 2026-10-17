@@ -97,6 +97,12 @@ export const ProjectPicker: Component<{
           // Native edits revoke the old choice; programmatic label updates do not.
           onInput={() => props.onChange(null)}
           on:keydown={(event) => {
+            // Candidate navigation/confirmation belongs to the native IME,
+            // not the combobox or the surrounding dialog.
+            if (event.isComposing || event.keyCode === 229) {
+              event.stopPropagation();
+              return;
+            }
             // Mark Escape before document listeners run. Kobalte still closes
             // the popup, while the parent dialog respects defaultPrevented.
             if (
