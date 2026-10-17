@@ -1,5 +1,11 @@
 import { MemoryRouter, Route } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { createSignal, Show } from "solid-js";
 
@@ -66,7 +72,12 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
   } as unknown as ApiClient;
 }
 
-function mount(client: ApiClient) {
+function ReloadProjects() {
+  const ws = useWorkspace();
+  return <button onClick={() => ws.projects.reload()}>Reload projects</button>;
+}
+
+function mount(client: ApiClient, reloadProjects = false) {
   return render(() => (
     <MemoryRouter>
       <Route
@@ -75,6 +86,9 @@ function mount(client: ApiClient) {
           <WorkspaceProvider client={client} db={Promise.resolve(null)}>
             <ProjectActions project={project()} />
             <MergeProjectsAction />
+            <Show when={reloadProjects}>
+              <ReloadProjects />
+            </Show>
           </WorkspaceProvider>
         )}
       />
@@ -553,9 +567,8 @@ describe("ProjectActions", () => {
     );
     const box = await screen.findByText("s-1");
     fireEvent.click(box.closest("label")!.querySelector("input")!);
-    // Choose the scratch target from the select.
-    const trigger = screen.getByRole("button", { name: /target project/i });
-    fireEvent.keyDown(trigger, { key: "Enter" });
+    const picker = screen.getByRole("combobox", { name: "Target project" });
+    fireEvent.input(picker, { target: { value: "scratch" } });
     fireEvent.click(await screen.findByRole("option", { name: "scratch" }));
     fireEvent.click(screen.getByRole("button", { name: /Move 1 session/ }));
     await waitFor(() =>
@@ -563,11 +576,244 @@ describe("ProjectActions", () => {
         expect.objectContaining({
           session_ids: ["s-1"],
           from_project_id: "p-1",
+          to_project: { id: "p-2" },
           include_children: true,
         }),
       ),
     );
     expect(await screen.findByText(/Moved 1 session/)).toBeInTheDocument();
+  });
+
+  it("searches target names and paths, with exact matches before approximate ones", async () => {
+    mount(
+      clientWith({
+        listProjects: async () => [
+          project(),
+          project({ id: "fuzzy", name: "scratsh", path: "/src/experiment" }),
+          otherProject,
+          project({ id: "path", name: "tools", path: "/src/scratch-tools" }),
+        ],
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.focus(picker);
+    expect(picker).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    await screen.findByRole("option", { name: "scratch" });
+    expect(
+      screen.queryByRole("option", { name: "lore" }),
+    ).not.toBeInTheDocument();
+    fireEvent.input(picker, { target: { value: "scratch" } });
+    await waitFor(() => {
+      const options = screen.getAllByRole("option");
+      expect(options).toHaveLength(3);
+      expect(options[0]).toHaveTextContent("scratch/src/scratch");
+      expect(options[1]).toHaveTextContent("tools/src/scratch-tools");
+      expect(options[2]).toHaveTextContent("scratsh");
+      expect(within(options[2]!).getByText("Approximate match")).toBeVisible();
+    });
+    fireEvent.input(picker, { target: { value: "sc" } });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(3));
+    expect(screen.queryByText("Approximate match")).not.toBeInTheDocument();
+  });
+
+  it("moves to the selected ID when project names are duplicated", async () => {
+    const moveSessions = vi.fn(async () => ({
+      sessions_moved: 1,
+      messages_moved: 3,
+      distillations_moved: 0,
+      tool_calls_moved: 0,
+      knowledge_moved: 0,
+      movedSessionIds: ["s-1"],
+    }));
+    mount(
+      clientWith({
+        moveSessions,
+        listProjects: async () => [
+          project(),
+          project({ id: "alpha", name: "app", path: "/work/alpha" }),
+          project({ id: "beta", name: "app", path: "/work/beta" }),
+        ],
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.input(picker, { target: { value: "beta" } });
+    const option = await screen.findByRole("option", { name: "app" });
+    expect(option).toHaveTextContent("/work/beta");
+    fireEvent.click(option);
+    fireEvent.click(screen.getByRole("button", { name: "Move 1 session" }));
+    await waitFor(() =>
+      expect(moveSessions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to_project: { id: "beta" },
+          from_project_id: "p-1",
+        }),
+      ),
+    );
+  });
+
+  it("clears a chosen target when the query is edited and resets on reopen", async () => {
+    mount(clientWith({}));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.input(picker, { target: { value: "scratch" } });
+    fireEvent.click(await screen.findByRole("option", { name: "scratch" }));
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeEnabled();
+    fireEvent.input(picker, { target: { value: "zzzzzzzz" } });
+    expect(await screen.findByText("No matching projects.")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move sessions…" }));
+    const reopened = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    expect(reopened).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Move 0 sessions" }),
+    ).toBeDisabled();
+  });
+
+  it.each([
+    { name: "composition events", isComposing: true, keyCode: 0 },
+    { name: "legacy IME key code", isComposing: false, keyCode: 229 },
+  ])("keeps candidate keys with the IME for $name", async (ime) => {
+    mount(
+      clientWith({
+        listProjects: async () => [
+          project(),
+          project({ id: "tokyo-a", name: "東京 alpha", path: "/work/alpha" }),
+          project({ id: "tokyo-b", name: "東京 beta", path: "/work/beta" }),
+        ],
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.compositionStart(picker);
+    fireEvent.input(picker, {
+      target: { value: "東京" },
+      inputType: "insertCompositionText",
+      isComposing: true,
+    });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    for (const key of ["ArrowDown", "Enter", "Escape"]) {
+      fireEvent.keyDown(picker, {
+        key,
+        isComposing: ime.isComposing,
+        keyCode: ime.keyCode,
+      });
+      expect(picker).toHaveValue("東京");
+      expect(picker).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("dialog")).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Move 1 session" }),
+      ).toBeDisabled();
+    }
+    fireEvent.compositionEnd(picker, { data: "東京" });
+    fireEvent.keyDown(picker, { key: "ArrowDown" });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    expect(picker).toHaveValue("東京 alpha");
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeEnabled();
+  });
+
+  it("disables a destination removed by a project-list refresh", async () => {
+    let projects = [project(), otherProject];
+    mount(clientWith({ listProjects: async () => projects }), true);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.input(picker, { target: { value: "scratch" } });
+    fireEvent.click(await screen.findByRole("option", { name: "scratch" }));
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeEnabled();
+    projects = [project()];
+    // The real workspace replaces the loaded project list after the selection.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reload projects", hidden: true }),
+    );
+    await waitFor(() => expect(picker).toBeDisabled());
+    expect(
+      screen.getByRole("button", { name: "Move 1 session" }),
+    ).toBeDisabled();
+  });
+
+  it("disables the picker while a move is pending", async () => {
+    let finish!: () => void;
+    mount(
+      clientWith({
+        moveSessions: () =>
+          new Promise((resolve) => {
+            finish = () =>
+              resolve({
+                sessions_moved: 1,
+                messages_moved: 3,
+                distillations_moved: 0,
+                tool_calls_moved: 0,
+                knowledge_moved: 0,
+                movedSessionIds: ["s-1"],
+              });
+          }),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: /s-1/ }));
+    const picker = await screen.findByRole("combobox", {
+      name: "Target project",
+    });
+    fireEvent.input(picker, { target: { value: "scratch" } });
+    fireEvent.click(await screen.findByRole("option", { name: "scratch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move 1 session" }));
+    await waitFor(() => expect(picker).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Moving…" })).toBeDisabled();
+    finish();
+    expect(await screen.findByText(/Moved 1 session/)).toBeInTheDocument();
+  });
+
+  it("shows an honest disabled state when no destination exists", async () => {
+    mount(clientWith({ listProjects: async () => [project()] }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Move sessions…" }),
+    );
+    expect(
+      await screen.findByRole("combobox", { name: "Target project" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("No other project exists to move sessions into."),
+    ).toBeVisible();
   });
 
   it("clears after a destructive confirm naming the project", async () => {
