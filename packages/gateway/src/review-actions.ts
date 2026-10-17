@@ -7,7 +7,7 @@
  * These used to live inline in the legacy server-rendered dashboard. They stay
  * here so the CLI and management routes share the same guarded behaviour.
  */
-import { entities, ltm, withTransaction } from "@loreai/core";
+import { data, entities, ltm, withTransaction } from "@loreai/core";
 
 const REVIEW_SOURCE = "dashboard" as const;
 
@@ -36,7 +36,7 @@ export function resolveContradiction(
   const keep = ltm.logicalIdOf(keepId);
   const remove = ltm.logicalIdOf(removeId);
   if (keep === remove) return false;
-  return withTransaction(() => {
+  const removed = withTransaction(() => {
     const [pairA, pairB] = ltm.contradictionPairKey(keep, remove);
     const stillOpen = ltm
       .listOpenContradictions()
@@ -45,6 +45,11 @@ export function resolveContradiction(
     ltm.remove(remove);
     return true;
   });
+  if (removed) {
+    data.invalidateProjectsCache();
+    data.invalidateGlobalStatsCache();
+  }
+  return removed;
 }
 
 /**

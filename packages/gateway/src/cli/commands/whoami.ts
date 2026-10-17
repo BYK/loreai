@@ -6,8 +6,12 @@
  * path doesn't depend on stdout capture.
  */
 import { buildOutputCommand } from "../lib/command";
-import { AuthError } from "../lib/errors";
-import { clearSession, getCurrentUser, isLoggedIn } from "../../supabase";
+import { AuthError, NetworkError } from "../lib/errors";
+import {
+  getCurrentUser,
+  isLoggedIn,
+  SessionUnavailableError,
+} from "../../supabase";
 
 type WhoamiFlags = {
   verify: boolean;
@@ -65,17 +69,25 @@ export const whoamiCommand = buildOutputCommand<WhoamiResult, WhoamiFlags, []>({
   },
   config: { renderHuman, toJson },
   async handler(flags) {
-    // When verifying, a locally-persisted session that the server rejects is
-    // dead — clear it so the user isn't stuck seeing "Already logged in".
+    // The session helper owns guarded cleanup on an explicit rejection.
+    // Network failures retain the login and report a retryable network error.
     const hadSession = isLoggedIn();
-    const user = await getCurrentUser({ verify: flags.verify });
+    let user;
+    try {
+      user = await getCurrentUser({ verify: flags.verify });
+    } catch (error) {
+      if (error instanceof SessionUnavailableError)
+        throw new NetworkError({
+          message: error.message,
+          tryCommand: "lore whoami --verify",
+        });
+      throw error;
+    }
     if (!user) {
-      if (flags.verify && hadSession) clearSession();
       throw new AuthError({
-        message:
-          flags.verify && hadSession
-            ? "Session expired. Run `lore login` to sign in again."
-            : "Not logged in. Run `lore login` to sign in.",
+        message: hadSession
+          ? "Session expired. Run `lore login` to sign in again."
+          : "Not logged in. Run `lore login` to sign in.",
         tryCommand: "lore login",
       });
     }

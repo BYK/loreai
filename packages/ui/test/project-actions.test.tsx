@@ -1,9 +1,11 @@
 import { MemoryRouter, Route } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
+import { createSignal, Show } from "solid-js";
 
 import { ProjectActions } from "~/components/lore/ProjectActions";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
+import { SharingPanel } from "~/components/lore/SharingPanel";
 import {
   closeLoreDb,
   createKnowledgeRepo,
@@ -12,10 +14,10 @@ import {
   createSessionsRepo,
   openLoreDb,
 } from "~/db";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { WorkspaceProvider, useWorkspace } from "~/routes/workspace";
 import type { ApiClient } from "~/lib/api";
 import { ApiError } from "~/lib/api";
-import type { ProjectSummary } from "~/contracts";
+import type { AccountStatus, ProjectSummary, SharingStatus } from "~/contracts";
 import { createProjectActionsState } from "~/state/project-actions";
 import { IDBFactory } from "./idb-globals";
 
@@ -79,6 +81,376 @@ function mount(client: ApiClient) {
     </MemoryRouter>
   ));
 }
+
+const sharingAccount: AccountStatus = {
+  signed_in: true,
+  state: "signed_in",
+  user: { id: "account-a", email: null, display_name: "Ada" },
+  provider: null,
+  expires_at: null,
+};
+const unlinkedSharing: SharingStatus = {
+  linked: false,
+  team: null,
+  policy: { effective: "manual", project_override: null, team_default: null },
+  auto_share: false,
+  review_required: null,
+  state: "not_linked",
+  detail: null,
+};
+const sharingTeams = {
+  hosted: false,
+  teams: [{ id: "team-a", name: "Acme", role: "admin", member_count: 1 }],
+};
+
+function SharingHarness() {
+  const ws = useWorkspace();
+  const [visible, setVisible] = createSignal(true);
+  return (
+    <>
+      <Show when={visible()}>
+        <SharingPanel projectId="p-1" />
+      </Show>
+      <button onClick={() => setVisible(false)}>Hide sharing controls</button>
+      <output
+        data-testid="sharing-account-owner"
+        data-loading={ws.state.folk.account.loading()}
+      >
+        {ws.state.folk.account.data()?.user?.id ?? "anonymous"}
+      </output>
+      <button onClick={() => ws.state.folk.refresh()}>
+        Refresh account and teams
+      </button>
+    </>
+  );
+}
+
+function mountSharing(partial: Partial<ApiClient>) {
+  return render(() => (
+    <MemoryRouter>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider
+            client={clientWith({
+              getAccount: async () => sharingAccount,
+              getTeams: async () => ({
+                ...sharingTeams,
+                teams: sharingTeams.teams.map((team) => ({ ...team })),
+              }),
+              getSyncStatus: async () => ({
+                enabled: true,
+                state: "idle",
+                pending_changes: 0,
+              }),
+              getProjectSharing: async () => unlinkedSharing,
+              ...partial,
+            })}
+            db={Promise.resolve(null)}
+          >
+            <SharingHarness />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
+  ));
+}
+
+async function chooseSharingTeam() {
+  await screen.findByRole("option", { name: "Acme" });
+  const picker = screen.getByTestId<HTMLSelectElement>("sharing-team-picker");
+  fireEvent.change(picker, { target: { value: "team-a" } });
+  expect(screen.getByTestId("sharing-link-team")).toBeEnabled();
+  return picker;
+}
+
+describe("SharingPanel account polling", () => {
+  it("does not refresh the surviving workspace after a detached link finishes", async () => {
+    const getAccount = vi.fn(async () => sharingAccount);
+    let finish!: (value: SharingStatus) => void;
+    mountSharing({
+      getAccount,
+      linkProjectToTeam: () =>
+        new Promise<SharingStatus>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    await chooseSharingTeam();
+    fireEvent.click(screen.getByTestId("sharing-link-team"));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    fireEvent.click(screen.getByText("Hide sharing controls"));
+    const reads = getAccount.mock.calls.length;
+    finish(unlinkedSharing);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(getAccount).toHaveBeenCalledTimes(reads);
+  });
+  it("ignores a late policy receipt after a different account becomes active", async () => {
+    let account = sharingAccount;
+    const linked: SharingStatus = {
+      ...unlinkedSharing,
+      linked: true,
+      team: { id: "team-a", name: "Acme" },
+      policy: {
+        effective: "manual",
+        project_override: "manual",
+        team_default: "manual",
+      },
+      state: "linked",
+    };
+    let finish!: (value: SharingStatus) => void;
+    const setProjectAutoShare = vi.fn(
+      () =>
+        new Promise<SharingStatus>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mountSharing({
+      getAccount: async () => account,
+      getProjectSharing: async () => linked,
+      setProjectAutoShare,
+    });
+    const toggle = await screen.findByTestId("sharing-auto-share");
+    await waitFor(() => expect(toggle).toBeEnabled());
+    fireEvent.click(toggle);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Share automatically" }),
+    );
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    account = {
+      ...sharingAccount,
+      user: { ...sharingAccount.user!, id: "account-b" },
+    };
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-account-owner")).toHaveTextContent(
+        "account-b",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-account-owner")).toHaveAttribute(
+        "data-loading",
+        "false",
+      ),
+    );
+    finish({
+      ...linked,
+      auto_share: true,
+      policy: { ...linked.policy, effective: "auto", project_override: "auto" },
+    });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).not.toBeChecked();
+  });
+
+  it("keeps anonymous local unlink and policy actions available", async () => {
+    const linked: SharingStatus = {
+      ...unlinkedSharing,
+      linked: true,
+      team: { id: "team-a", name: "Acme" },
+      state: "linked",
+    };
+    const linkProjectToTeam = vi.fn(async () => unlinkedSharing);
+    const setProjectAutoShare = vi.fn(async () => linked);
+    mountSharing({
+      getAccount: async () => ({
+        ...sharingAccount,
+        signed_in: false,
+        state: "anonymous",
+        user: null,
+      }),
+      getProjectSharing: async () => linked,
+      linkProjectToTeam,
+      setProjectAutoShare,
+    });
+    const toggle = await screen.findByTestId("sharing-auto-share");
+    await waitFor(() => expect(toggle).toBeEnabled());
+    fireEvent.click(toggle);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Share automatically" }),
+    );
+    await waitFor(() => expect(setProjectAutoShare).toHaveBeenCalledTimes(1));
+    const unlink = await screen.findByTestId("sharing-unlink-team");
+    await waitFor(() => expect(unlink).toBeEnabled());
+    fireEvent.click(unlink);
+    await waitFor(() =>
+      expect(linkProjectToTeam).toHaveBeenCalledWith("p-1", null, "team-a"),
+    );
+  });
+
+  it("does not let an old A receipt or finalizer affect a new A action after A/B/A", async () => {
+    let account = sharingAccount;
+    const releases: Array<(value: SharingStatus) => void> = [];
+    const linkProjectToTeam = vi.fn(
+      () =>
+        new Promise<SharingStatus>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    mountSharing({ getAccount: async () => account, linkProjectToTeam });
+    await chooseSharingTeam();
+    fireEvent.click(screen.getByTestId("sharing-link-team"));
+    await waitFor(() => expect(releases).toHaveLength(1));
+    for (const id of ["account-b", "account-a"]) {
+      account = { ...sharingAccount, user: { ...sharingAccount.user!, id } };
+      fireEvent(window, new Event("focus"));
+      await waitFor(() =>
+        expect(screen.getByTestId("sharing-account-owner")).toHaveTextContent(
+          id,
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("sharing-account-owner")).toHaveAttribute(
+          "data-loading",
+          "false",
+        ),
+      );
+    }
+    const picker = await screen.findByTestId("sharing-team-picker");
+    await screen.findByRole("option", { name: "Acme" });
+    fireEvent.change(picker, { target: { value: "team-a" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-link-team")).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByTestId("sharing-link-team"));
+    await waitFor(() => expect(releases).toHaveLength(2));
+    releases[0]!({
+      ...unlinkedSharing,
+      linked: true,
+      team: { id: "team-a", name: "Acme" },
+      state: "linked",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId("sharing-link-team")).toBeDisabled();
+    expect(screen.getByTestId("sharing-link-team")).toHaveTextContent(
+      "Linking…",
+    );
+    expect(
+      screen.queryByText("Project linked to team."),
+    ).not.toBeInTheDocument();
+    releases[1]!(unlinkedSharing);
+    await waitFor(() =>
+      expect(screen.queryByText("Linking…")).not.toBeInTheDocument(),
+    );
+  });
+  it("preserves the visible selection during a same-account pending poll", async () => {
+    let polling = false;
+    let finish!: (value: AccountStatus) => void;
+    const getTeams = vi.fn(async () => sharingTeams);
+    mountSharing({
+      getTeams,
+      getAccount: () =>
+        polling
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : Promise.resolve(sharingAccount),
+    });
+    const picker = await chooseSharingTeam();
+    polling = true;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(picker).toHaveValue("team-a");
+    expect(screen.getByTestId("sharing-link-team")).toBeDisabled();
+    finish({ ...sharingAccount });
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-link-team")).toBeEnabled(),
+    );
+    expect(picker).toHaveValue("team-a");
+    expect(getTeams).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the native select synchronized when a manual reload replaces option objects", async () => {
+    const getTeams = vi.fn(async () => ({
+      ...sharingTeams,
+      teams: sharingTeams.teams.map((team) => ({ ...team })),
+    }));
+    mountSharing({ getTeams });
+    const picker = await chooseSharingTeam();
+    fireEvent.click(screen.getByText("Refresh account and teams"));
+    await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-link-team")).toBeEnabled(),
+    );
+    expect(picker).toHaveValue("team-a");
+  });
+
+  it.each(["switch", "logout", "false error", "membership removal"])(
+    "clears stale selection and prevents a link after %s",
+    async (action) => {
+      let changed = false;
+      const linkProjectToTeam = vi.fn(async () => unlinkedSharing);
+      mountSharing({
+        linkProjectToTeam,
+        getAccount: () =>
+          changed && action === "false error"
+            ? Promise.reject(false)
+            : Promise.resolve(
+                changed && action === "logout"
+                  ? {
+                      ...sharingAccount,
+                      signed_in: false,
+                      state: "anonymous",
+                      user: null,
+                    }
+                  : changed && action === "switch"
+                    ? {
+                        ...sharingAccount,
+                        user: { ...sharingAccount.user!, id: "account-b" },
+                      }
+                    : sharingAccount,
+              ),
+        getTeams: async () =>
+          changed && (action === "logout" || action === "membership removal")
+            ? { hosted: false, teams: [] }
+            : sharingTeams,
+      });
+      const picker = await chooseSharingTeam();
+      changed = true;
+      fireEvent.click(screen.getByText("Refresh account and teams"));
+      await waitFor(() => expect(picker).toHaveValue(""));
+      expect(screen.getByTestId("sharing-link-team")).toBeDisabled();
+      fireEvent.click(screen.getByTestId("sharing-link-team"));
+      expect(linkProjectToTeam).not.toHaveBeenCalled();
+    },
+  );
+
+  it("ignores a late link receipt after a different account becomes active", async () => {
+    let account = sharingAccount;
+    let finish!: (value: SharingStatus) => void;
+    const linkProjectToTeam = vi.fn(
+      () =>
+        new Promise<SharingStatus>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mountSharing({ getAccount: async () => account, linkProjectToTeam });
+    await chooseSharingTeam();
+    fireEvent.click(screen.getByTestId("sharing-link-team"));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    account = {
+      ...sharingAccount,
+      user: { ...sharingAccount.user!, id: "account-b" },
+    };
+    fireEvent(window, new Event("focus"));
+    finish({
+      ...unlinkedSharing,
+      linked: true,
+      team: { id: "team-a", name: "Acme" },
+      state: "linked",
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Linking…")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("sharing-link-team")).toBeDisabled(),
+    );
+    expect(
+      screen.queryByText("Project linked to team."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
+      "Not linked",
+    );
+  });
+});
 
 describe("ProjectActions", () => {
   it("renames via the dialog and reports the stored name", async () => {

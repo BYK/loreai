@@ -182,6 +182,7 @@ export const ContradictionsPage: Component = () => {
           // like a failed review action. The in-memory store is already clear.
           console.warn("knowledge cache removal failed", reason);
         }
+        ws.projects.reload();
       }
       setData((previous) =>
         previous

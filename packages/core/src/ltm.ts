@@ -17,6 +17,7 @@ import {
   readStorageMode,
 } from "./db/vec-store";
 import { config } from "./config";
+import { filterTaskKnowledge } from "./knowledge-task-filter";
 import { recomputeEntityRank } from "./entities";
 import {
   ftsQuery,
@@ -2972,6 +2973,61 @@ function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
   return crossEntryClass(entry, pid) !== "foreign";
 }
 
+const SPECIFIC_REFERENCE_TEXT_LIMIT = 4_096;
+const SPECIFIC_REFERENCE_TOTAL_LIMIT = 65_536;
+const SPECIFIC_REFERENCE_CANDIDATE_LIMIT = 128;
+
+function specificReferenceKeys(text: string): Set<string> {
+  return new Set(
+    extractReferences(text).flatMap((reference) => {
+      switch (reference.kind) {
+        case "file":
+          return [`file:${reference.path}`];
+        case "symbol":
+          return [`symbol:${reference.name}`];
+        case "command":
+          return [];
+        default:
+          throw new Error("Unexpected reference kind");
+      }
+    }),
+  );
+}
+
+function specificReferenceMatches(
+  candidates: readonly Scored[],
+  context: string,
+): Map<string, number> {
+  const matches = new Map<string, number>();
+  // This optional foreground signal must bound both regex input and total
+  // work, even for stored bodies that cannot fit a header-only output budget.
+  if (candidates.length > SPECIFIC_REFERENCE_CANDIDATE_LIMIT) return matches;
+  const task = context.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT);
+  const taskReferences = specificReferenceKeys(task);
+  if (taskReferences.size === 0) return matches;
+  const work = { used: task.length };
+  for (const { entry } of candidates) {
+    // Slice each source before concatenation: never flatten an oversized body
+    // merely to clip the combined string afterward.
+    const title = entry.title.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT);
+    const text =
+      title.length === SPECIFIC_REFERENCE_TEXT_LIMIT
+        ? title
+        : `${title}\n${entry.content.slice(0, SPECIFIC_REFERENCE_TEXT_LIMIT - title.length - 1)}`;
+    // Partial evidence would bias candidates by scan order. Exhaustion restores
+    // the existing hybrid ordering for the entire eligible pool, not admission.
+    if (work.used + text.length > SPECIFIC_REFERENCE_TOTAL_LIMIT)
+      return new Map<string, number>();
+    work.used += text.length;
+    matches.set(
+      entry.id,
+      [...specificReferenceKeys(text)].filter((key) => taskReferences.has(key))
+        .length,
+    );
+  }
+  return matches;
+}
+
 /**
  * Score entries by FTS5 BM25 relevance to session context.
  *
@@ -3163,6 +3219,9 @@ export async function forSession(
   // cost. Emitted at each real-work return.
   const timer = new ReadPathTimer();
   const architectureInjection = config().knowledge.architectureInjection;
+  const taskFilter = config().knowledge.taskFilter;
+  if (typeof taskFilter !== "boolean")
+    throw new Error("Invalid knowledge task filter");
   if (
     architectureInjection !== "ranked" &&
     architectureInjection !== "reserved"
@@ -3327,6 +3386,7 @@ export async function forSession(
   // fall back to the last distillation if neither source has a task to score.
   const contextHint = options?.contextHint?.trim();
   let sessionContext = taskHintExcerpt(contextHint ?? "", 4_096);
+  const admissionTask = { text: contextHint ?? "" };
   if (!sessionContext && sessionID) {
     type TaskRow = {
       id: string;
@@ -3386,6 +3446,7 @@ export async function forSession(
       .map((text) => taskHintExcerpt(text, 2_048))
       .join("\n")
       .trim();
+    admissionTask.text = sessionContext;
     if (!sessionContext) {
       const distRow = db()
         .query(
@@ -3411,6 +3472,10 @@ export async function forSession(
     /^(?:ok(?:ay)?|yes|sure|thanks|thank you|go ahead|continue|same task)[.!?]*$/i.test(
       sessionContext.trim(),
     );
+
+  // Scoring treats acknowledgments as no new task. Admission must preserve
+  // that same fallback for both packed entries and overflow hints.
+  const admissionContext = bareAcknowledgment ? "" : admissionTask.text;
 
   if (
     !projectEntries.length &&
@@ -3618,19 +3683,24 @@ export async function forSession(
     }
   }
 
-  // Deterministic ordering: sort by score DESC, then by entry id ASC as a
-  // stable tiebreak. Without the id tiebreak, equal/near-equal scores (or float
-  // micro-variations from re-embedding the evolving session context) reorder
-  // turn-to-turn, which churns the rendered system[2] text and busts the cache.
-  allScored.sort((a, b) =>
-    b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
-  );
+  // Deterministic ordering: specific evidence, then score DESC and id ASC.
+  // The stable ID tiebreak prevents equal scores from churning the selected set.
+  const referenceMatches = specificReferenceMatches(allScored, sessionContext);
+  // Exact code references are checkpoint-time task evidence, not admission.
+  // Keep every existing FTS/vector/safety-net candidate eligible, including
+  // implicit conventions with no named file or symbol. Never use later work.
+  const compareEvidence = (a: Scored, b: Scored): number =>
+    (referenceMatches.get(b.entry.id) ?? 0) -
+      (referenceMatches.get(a.entry.id) ?? 0) ||
+    b.score - a.score ||
+    (a.entry.id === b.entry.id ? 0 : a.entry.id < b.entry.id ? -1 : 1);
+  allScored.sort(compareEvidence);
 
   const ARCH_BUDGET_FRACTION = 0.2;
   // The formatter receives the same budget. Shared packing costs ensure no
   // selected entry disappears before its injection effects are recorded.
   let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
-  const result: KnowledgeEntry[] = [];
+  const packed: KnowledgeEntry[] = [];
   const packedIds = new Set<string>();
 
   // Only the legacy reserved mode packs architecture first. Ranked mode lets
@@ -3640,16 +3710,13 @@ export async function forSession(
     architectureInjection === "reserved"
       ? allScored.filter((s) => s.entry.category === "architecture")
       : [];
-  // Sort architecture by score descending (already sorted, but filter may
-  // reorder) with the same id tiebreak for deterministic selection.
-  archEntries.sort((a, b) =>
-    b.score !== a.score ? b.score - a.score : a.entry.id < b.entry.id ? -1 : 1,
-  );
+  // Reserved architecture uses the same evidence ordering as the shared pool.
+  archEntries.sort(compareEvidence);
   for (const { entry } of archEntries) {
     if (used >= archBudget + KNOWLEDGE_HEADER_OVERHEAD_TOKENS) break;
     const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue; // hard cap: never exceed total budget
-    result.push(entry);
+    packed.push(entry);
     packedIds.add(entry.id);
     used += cost;
   }
@@ -3660,7 +3727,7 @@ export async function forSession(
     if (packedIds.has(entry.id)) continue;
     const cost = knowledgeEntryTokenCost(entry);
     if (used + cost > maxTokens) continue;
-    result.push(entry);
+    packed.push(entry);
     used += cost;
   }
 
@@ -3685,7 +3752,7 @@ export async function forSession(
       });
       if (used + cost > maxTokens) continue;
       // Convert lat section to a synthetic KnowledgeEntry for formatKnowledge()
-      result.push({
+      packed.push({
         id: section.id,
         logical_id: section.id, // synthetic lat.md entry: its own logical identity
         tenant_id: currentTenantId(),
@@ -3718,6 +3785,13 @@ export async function forSession(
     }
   }
 
+  // Filter after packing: rejected slots never refill, and the overflow sink
+  // must exclude the original packed set rather than resurface rejected facts.
+  // A distilled fallback is not an authoritative task for this second pass.
+  const result = taskFilter
+    ? filterTaskKnowledge(packed, admissionContext)
+    : packed;
+
   // --- 7. Record cross-project transfer metrics (issue #506) ---
   // An entry counts as a "transfer" when it was injected into a project that is
   // NOT its origin: cross_project=1 AND a non-null project_id != pid. Global
@@ -3737,13 +3811,19 @@ export async function forSession(
   // lat.md row, which has no recall id.
   if (options?.overflowSink) {
     options.signal?.throwIfAborted();
-    const selectedIds = new Set(result.map((e) => e.id));
-    for (const { entry } of allScored) {
-      // Recalled-context synthetics are not knowledge rows — keep the ToC
-      // (rendered as "other relevant knowledge") knowledge-only.
-      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
-      if (!selectedIds.has(entry.id)) options.overflowSink.push(entry);
-    }
+    const selectedIds = new Set(packed.map((e) => e.id));
+    const overflow = allScored
+      .map(({ entry }) => entry)
+      .filter(
+        (entry) =>
+          entry.category !== RECALLED_CONTEXT_CATEGORY &&
+          !selectedIds.has(entry.id),
+      );
+    options.overflowSink.push(
+      ...(taskFilter
+        ? filterTaskKnowledge(overflow, admissionContext)
+        : overflow),
+    );
   }
 
   timer.emit("forSession", projectEntries.length + crossEntries.length);

@@ -16,6 +16,7 @@ import {
 } from "../config";
 import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
+import { startSessionRefreshScheduler } from "../session-refresh";
 import { writePortFile, removePortFile } from "../portfile";
 import {
   writeGatewayProcessFile,
@@ -1128,6 +1129,7 @@ async function startGatewayLocked(
       }
 
       const boundServer = server;
+      const stopSessionRefresh = startSessionRefreshScheduler(config);
       let shutdownPromise: Promise<void> | undefined;
       const shutdown = (context?: ProcessShutdownContext): Promise<void> => {
         const startedAt = Date.now();
@@ -1176,6 +1178,7 @@ async function startGatewayLocked(
             }
 
             let pipelineReset = Promise.resolve();
+            const sessionRefreshStop = stopSessionRefresh();
             try {
               shutdownLock.assertOwned();
               pipelineReset = io
@@ -1234,6 +1237,11 @@ async function startGatewayLocked(
             });
             const quiesce = await Promise.allSettled([
               settleBeforeDeadline(pipelineReset, finalizeBy, "pipeline reset"),
+              settleBeforeDeadline(
+                sessionRefreshStop,
+                finalizeBy,
+                "account refresh",
+              ),
               settleBeforeDeadline(listenerClose, finalizeBy, "listener close"),
               temporalQuiescence,
               documentQuiescence,

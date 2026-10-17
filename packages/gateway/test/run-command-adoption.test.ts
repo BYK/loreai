@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -71,6 +74,31 @@ describe("lore run adoption with a reused gateway", () => {
     if (priorAnthropicToken === undefined)
       delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = priorAnthropicToken;
+  });
+
+  test("rejects reserved Codex provider authentication before starting a gateway", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "lore-codex-auth-"));
+    const previous = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = configDir;
+    delete process.env.OPENAI_BASE_URL;
+    writeFileSync(
+      join(configDir, "config.toml"),
+      '[model_providers.lore_http]\nname="Private"\n[model_providers.lore_http.auth]\ncommand="false"\n',
+    );
+    mocks.spawn.mockImplementationOnce(() => {
+      throw new Error("__unexpected_codex_spawn__");
+    });
+    try {
+      await expect(commandRun({}, ["codex"])).resolves.toBeUndefined();
+      expect(mocks.safeExit).toHaveBeenCalledWith(1);
+      expect(mocks.startGateway).not.toHaveBeenCalled();
+      expect(mocks.spawn).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous;
+      rmSync(configDir, { recursive: true, force: true });
+      mocks.spawn.mockReset();
+    }
   });
 
   test("does not launch an env-routed agent against an incompatible reused gateway", async () => {

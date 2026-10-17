@@ -155,17 +155,43 @@ describe("Codex agent envVars", () => {
 });
 
 describe("Codex agent cliArgs", () => {
+  test("selects HTTP Responses transport for the gateway", () => {
+    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const args = codex.cliArgs!("http://127.0.0.1:3207", "/tmp/test");
+    expect(args).toContain('model_provider="lore_http"');
+    expect(args).toContain(
+      "model_providers.lore_http.supports_websockets=false",
+    );
+    expect(args).toContain(
+      "model_providers.lore_http.requires_openai_auth=true",
+    );
+    expect(args).toContain(
+      'model_providers.lore_http.base_url="http://127.0.0.1:3207/v1"',
+    );
+  });
+
   test("returns -c openai_base_url override with /v1 suffix", () => {
     const codex = AGENTS.find((a) => a.name === "codex");
     if (!codex) throw new Error("codex agent not registered");
     expect(codex.cliArgs).toBeDefined();
     const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test");
-    expect(args).toEqual([
+    expect(args?.slice(0, 4)).toEqual([
       "-c",
       'openai_base_url="http://127.0.0.1:3207/v1"',
       "-c",
       "model_auto_compact_token_limit=999999999",
     ]);
+  });
+
+  test("forwards persisted OpenAI headers without putting credentials in CLI arguments", () => {
+    const codex = AGENTS.find((a) => a.name === "codex")!;
+    const config =
+      'openai_provider_headers = { "X-Corp" = "workspace-private-token" }\n';
+    const args = codex.cliArgs!("http://127.0.0.1:3207", "/tmp/test", config);
+    const env = codex.envVars("http://127.0.0.1:3207", "/tmp/test", config);
+    expect(args.join(" ")).toContain('"X-Corp" = "LORE_CODEX_HEADER_0"');
+    expect(args.join(" ")).not.toContain("workspace-private-token");
+    expect(env.LORE_CODEX_HEADER_0).toBe("workspace-private-token");
   });
 
   test("includes gateway URL in the override", () => {
@@ -215,6 +241,17 @@ describe("Codex agent cliArgs", () => {
       expect(tomlLine).toContain("abc");
       expect(tomlLine).toContain("X-Tenant");
       expect(tomlLine).toContain("acme");
+    });
+
+    test("explicit upstream headers override persisted headers case-insensitively", () => {
+      const codex = AGENTS.find((a) => a.name === "codex")!;
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS = "x-corp: new";
+      const config = 'openai_provider_headers = { "X-Corp" = "old" }\n';
+      const args = codex.cliArgs!("http://127.0.0.1:3207", "/tmp/test", config);
+      const env = codex.envVars("http://127.0.0.1:3207", "/tmp/test", config);
+      expect(args.join(" ")).not.toContain('"X-Corp" = "LORE_CODEX_HEADER_0"');
+      expect(Object.values(env)).not.toContain("old");
+      expect(args.join(" ")).toContain('x-corp = "new"');
     });
 
     test("escapes quotes in header values", () => {

@@ -1,11 +1,13 @@
 import type { Component } from "solid-js";
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   Match,
   on,
   onMount,
+  onCleanup,
   Show,
   Switch,
 } from "solid-js";
@@ -56,9 +58,40 @@ function explanation(status: SharingStatus): string {
   }
 }
 
-/** Read-only project sharing status (`GET /api/v1/projects/:id/sharing`). */
+/** Project sharing status, policy and team link controls. */
 export const SharingPanel: Component<{ projectId: string }> = (props) => {
   const ws = useWorkspace();
+  const folk = ws.state.folk;
+  const accountId = createMemo(() => {
+    const current = folk.account.data();
+    return folk.account.error() === undefined
+      ? (current?.user?.id ?? null)
+      : null;
+  });
+  const settledAccountId = createMemo<string | null | undefined>(
+    (previous) =>
+      folk.account.loading() ||
+      (folk.account.data() === undefined && folk.account.error() === undefined)
+        ? previous
+        : accountId(),
+    undefined,
+  );
+  const contextAvailable = createMemo(
+    () =>
+      folk.account.error() === undefined &&
+      folk.account.data() !== undefined &&
+      folk.account.data()?.state !== "hosted",
+  );
+  const statusReady = () =>
+    !folk.account.loading() &&
+    contextAvailable() &&
+    !sharing.loading() &&
+    sharing.error() === undefined;
+  const signedAccountReady = () =>
+    statusReady() &&
+    folk.account.data()?.signed_in === true &&
+    folk.account.data()?.state === "signed_in" &&
+    accountId() !== null;
   const sharing = createLoader(
     () => props.projectId,
     (projectId) => ws.tracked(() => ws.client.getProjectSharing(projectId)),
@@ -75,21 +108,41 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     null,
   );
   const [linkSuccess, setLinkSuccess] = createSignal("");
-  const teams = () => ws.state.folk.teams.data()?.teams ?? [];
+  const teams = () => folk.teams.data()?.teams ?? [];
+  const selectedTeamValid = () =>
+    signedAccountReady() &&
+    selectedTeam() !== "" &&
+    !folk.teams.loading() &&
+    folk.teams.error() === undefined &&
+    teams().some((team) => team.id === selectedTeam());
   const shownStatus = () => receipt() ?? sharing.data();
+  let actionEpoch = 0;
+  onCleanup(() => {
+    actionEpoch++;
+  });
   onMount(() => ws.state.folk.loadTeams());
   createEffect(
-    on(
-      () => props.projectId,
-      () => {
-        setReceipt(undefined);
-        setPolicyError(null);
-        setLinkError(null);
-        setConfirmAutoShare(false);
-        setSelectedTeam("");
-      },
-    ),
+    on([() => props.projectId, accountId, contextAvailable], () => {
+      actionEpoch++;
+      setSavingPolicy(false);
+      setSavingLink(false);
+      setReceipt(undefined);
+      setPolicyError(null);
+      setLinkError(null);
+      setConfirmAutoShare(false);
+      setSelectedTeam("");
+      setLinkSuccess("");
+    }),
   );
+  createEffect(
+    on(settledAccountId, (_current, previous) => {
+      if (previous !== undefined) sharing.reload();
+    }),
+  );
+  createEffect(() => {
+    if (selectedTeam() && !teams().some((team) => team.id === selectedTeam()))
+      setSelectedTeam("");
+  });
   const reload = () => {
     setReceipt(undefined);
     setPolicyError(null);
@@ -106,22 +159,36 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   };
   const updateAutoShare = async () => {
     const current = shownStatus();
-    if (!current || !current.linked || savingPolicy()) {
+    if (!current || !current.linked || savingPolicy() || !statusReady()) {
       return;
     }
+    const owner = accountId();
+    const projectId = props.projectId;
+    const operationEpoch = actionEpoch;
     setSavingPolicy(true);
     setPolicyError(null);
     try {
       const updated = await ws.tracked(() =>
         ws.client.setProjectAutoShare(
-          props.projectId,
+          projectId,
           nextAutoShare() ? "auto" : "manual",
           current.policy.project_override,
         ),
       );
+      if (operationEpoch !== actionEpoch) return;
+      if (
+        accountId() !== owner ||
+        props.projectId !== projectId ||
+        !statusReady()
+      ) {
+        sharing.reload();
+        return;
+      }
       setReceipt(updated);
       setConfirmAutoShare(false);
     } catch (error) {
+      if (operationEpoch !== actionEpoch) return;
+      if (accountId() !== owner || props.projectId !== projectId) return;
       setPolicyError({
         cause: error,
         message:
@@ -130,28 +197,49 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
             : "The sharing policy could not be updated.",
       });
     } finally {
-      setSavingPolicy(false);
+      if (operationEpoch === actionEpoch) setSavingPolicy(false);
     }
   };
   const updateProjectLink = async (scopeId: string | null) => {
     const current = shownStatus();
-    if (!current || savingLink()) return;
+    if (
+      !current ||
+      savingLink() ||
+      !statusReady() ||
+      (scopeId !== null && !selectedTeamValid())
+    )
+      return;
+    const owner = accountId();
+    const projectId = props.projectId;
+    const operationEpoch = actionEpoch;
     setSavingLink(true);
     setLinkError(null);
     setLinkSuccess("");
     try {
       const updated = await ws.tracked(() =>
         ws.client.linkProjectToTeam(
-          props.projectId,
+          projectId,
           scopeId,
           current.linked ? (current.team?.id ?? null) : null,
         ),
       );
+      if (operationEpoch !== actionEpoch) return;
+      if (
+        accountId() !== owner ||
+        props.projectId !== projectId ||
+        !statusReady() ||
+        (scopeId !== null && !signedAccountReady())
+      ) {
+        sharing.reload();
+        return;
+      }
       setReceipt(updated);
       setSelectedTeam("");
       setLinkSuccess(scopeId ? "Project linked to team." : "Project unlinked.");
       ws.state.folk.refresh();
     } catch (error) {
+      if (operationEpoch !== actionEpoch) return;
+      if (accountId() !== owner || props.projectId !== projectId) return;
       setLinkError({
         cause: error,
         message:
@@ -160,7 +248,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
             : "The team link could not be updated.",
       });
     } finally {
-      setSavingLink(false);
+      if (operationEpoch === actionEpoch) setSavingLink(false);
     }
   };
   const errorText = () => {
@@ -216,7 +304,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     aria-label="Share automatically"
                     data-testid="sharing-auto-share"
                     checked={status().auto_share}
-                    disabled={savingPolicy()}
+                    disabled={savingPolicy() || !statusReady()}
                     onChange={(event) => {
                       const next = event.currentTarget.checked;
                       event.currentTarget.checked = status().auto_share;
@@ -268,7 +356,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                   size="sm"
                   variant="outline"
                   data-testid="sharing-unlink-team"
-                  disabled={savingLink()}
+                  disabled={savingLink() || !statusReady()}
                   onClick={() => void updateProjectLink(null)}
                 >
                   {savingLink() ? "Unlinking…" : "Unlink"}
@@ -287,10 +375,15 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                         setSelectedTeam(event.currentTarget.value)
                       }
                     >
-                      <option value="">Choose a team</option>
+                      <option value="" selected={!selectedTeam()}>
+                        Choose a team
+                      </option>
                       <For each={teams()}>
                         {(team) => (
-                          <option value={team.id}>
+                          <option
+                            value={team.id}
+                            selected={selectedTeam() === team.id}
+                          >
                             {team.name ?? team.id}
                           </option>
                         )}
@@ -301,7 +394,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     size="sm"
                     variant="outline"
                     data-testid="sharing-link-team"
-                    disabled={savingLink() || !selectedTeam()}
+                    disabled={savingLink() || !selectedTeamValid()}
                     onClick={() => void updateProjectLink(selectedTeam())}
                   >
                     {savingLink() ? "Linking…" : "Link to team"}
@@ -406,6 +499,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               size="sm"
               disabled={
                 savingPolicy() ||
+                !statusReady() ||
                 (policyError() !== null &&
                   requiresMutationReload(policyError()?.cause))
               }

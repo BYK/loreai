@@ -21,7 +21,7 @@ import { SharingPanel } from "~/components/lore/SharingPanel";
 import { TeamParityActions } from "~/components/lore/TeamParityActions";
 import { TeamPage } from "~/components/lore/TeamPage";
 import { ApiError, type ApiClient } from "~/lib/api";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { WorkspaceProvider, useWorkspace } from "~/routes/workspace";
 
 const account: AccountStatus = {
   signed_in: true,
@@ -281,27 +281,29 @@ describe("TeamPage", () => {
       .fn<ApiClient["getTeams"]>()
       .mockResolvedValueOnce(teams)
       .mockImplementationOnce(() => refreshedTeams.promise);
-    const getTeamMembers = vi
-      .fn<ApiClient["getTeamMembers"]>()
-      .mockResolvedValueOnce(memberResponse)
-      .mockImplementationOnce(() => lateMembers.promise);
-    mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
-
-    await screen.findByTestId("team-members");
-    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
-    const dialog = await screen.findByTestId("team-join-dialog");
-    fireEvent.input(screen.getByTestId("team-invite-token"), {
-      target: { value: "invite-token" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Join team" }));
-    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
-
+    const getTeamMembers = vi.fn<ApiClient["getTeamMembers"]>(
+      () => lateMembers.promise,
+    );
+    const Page = () => {
+      const ws = useWorkspace();
+      return (
+        <>
+          <TeamPage />
+          <button onClick={() => ws.state.folk.refresh()}>
+            Refresh team test
+          </button>
+        </>
+      );
+    };
+    mount(() => <Page />, clientWith({ getTeams, getTeamMembers }));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh team test" }));
+    await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(2));
     refreshedTeams.resolve(emptyTeams);
     expect(await screen.findByText("No team memberships")).toBeVisible();
     lateMembers.resolve(memberResponse);
     await lateMembers.promise;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
     expect(screen.getByText("No team memberships")).toBeVisible();
     expect(screen.queryByTestId("team-members")).toBeNull();
   });
@@ -309,7 +311,6 @@ describe("TeamPage", () => {
   it("reloads the same team after joining from the no-team state", async () => {
     const emptyTeams: TeamList = { hosted: false, teams: [] };
     const refreshedTeams = deferred<TeamList>();
-    const pendingReload = deferred<TeamMembersResponse>();
     const getTeams = vi
       .fn<ApiClient["getTeams"]>()
       .mockResolvedValueOnce(teams)
@@ -318,7 +319,6 @@ describe("TeamPage", () => {
     const getTeamMembers = vi
       .fn<ApiClient["getTeamMembers"]>()
       .mockResolvedValueOnce(memberResponse)
-      .mockImplementationOnce(() => pendingReload.promise)
       .mockResolvedValueOnce(memberResponse);
     mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
 
@@ -331,11 +331,9 @@ describe("TeamPage", () => {
     fireEvent.click(
       within(firstDialog).getByRole("button", { name: "Join team" }),
     );
-    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
-    pendingReload.resolve(memberResponse);
-    await waitFor(() =>
-      expect(screen.getByTestId("team-members")).toBeVisible(),
-    );
+    await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(2));
+    // A joined account's roster must wait for its updated memberships.
+    expect(getTeamMembers).toHaveBeenCalledTimes(1);
 
     refreshedTeams.resolve(emptyTeams);
     expect(await screen.findByText("No team memberships")).toBeVisible();
@@ -349,7 +347,7 @@ describe("TeamPage", () => {
     );
 
     await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(3));
-    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
     expect(await screen.findByTestId("team-members")).toBeVisible();
   });
 
@@ -651,8 +649,10 @@ describe("TeamPage", () => {
     });
     fireEvent.change(role, { target: { value: "editor" } });
     const notice = await screen.findByTestId("team-stale-member-notice");
-    expect(notice).toHaveTextContent(
-      "Jordan's role changed to Editor since you loaded the team.",
+    await waitFor(() =>
+      expect(notice).toHaveTextContent(
+        "Jordan's role changed to Editor since you loaded the team.",
+      ),
     );
     expect(notice).toHaveTextContent("The list has been reloaded.");
     expect(
@@ -832,7 +832,9 @@ describe("TeamPage", () => {
     );
 
     fireEvent.click(screen.getByTestId("team-offline-invite"));
-    fireEvent.click(screen.getByRole("button", { name: "Create invite" }));
+    const createInvite = screen.getByRole("button", { name: "Create invite" });
+    await waitFor(() => expect(createInvite).toBeEnabled());
+    fireEvent.click(createInvite);
     const inviteDialog = await screen.findByTestId("team-invite-receipt");
     expect(inviteDialog).toHaveTextContent("invite-secret-token");
     expect(inviteDialog).toHaveTextContent(
@@ -925,9 +927,11 @@ describe("TeamPage", () => {
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Reload team" }),
     );
-    expect(
-      await screen.findByTestId("team-stale-member-notice"),
-    ).toHaveTextContent("Jordan's role changed to Editor");
+    await waitFor(() =>
+      expect(screen.getByTestId("team-stale-member-notice")).toHaveTextContent(
+        "Jordan's role changed to Editor",
+      ),
+    );
     expect(screen.queryByTestId("team-remove-confirmation")).toBeNull();
     expect(getTeamMembers).toHaveBeenCalledTimes(2);
   });
@@ -1737,7 +1741,9 @@ describe("SharingPanel team link control", () => {
       ),
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Unlink" }));
+    const unlink = await screen.findByRole("button", { name: "Unlink" });
+    await waitFor(() => expect(unlink).toBeEnabled());
+    fireEvent.click(unlink);
     await waitFor(() =>
       expect(linkProjectToTeam).toHaveBeenNthCalledWith(
         2,

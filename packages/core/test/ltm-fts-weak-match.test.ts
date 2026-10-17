@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
+import { config } from "../src/config";
 
 test("FTS retains its weakest matching project entry for injection or recall", async () => {
   const projectPath = "/test/ltm/weak-fts-match";
@@ -31,7 +32,10 @@ test("FTS retains its weakest matching project entry for injection or recall", a
   });
 
   const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
+  const taskFilter = config().knowledge.taskFilter;
   try {
+    // This tests retrieval eligibility before the separate admission policy.
+    config().knowledge.taskFilter = false;
     const overflow: ltm.KnowledgeEntry[] = [];
     const selected = await ltm.forSession(projectPath, undefined, 70, {
       contextHint,
@@ -45,6 +49,7 @@ test("FTS retains its weakest matching project entry for injection or recall", a
       foreign,
     );
   } finally {
+    config().knowledge.taskFilter = taskFilter;
     available.mockRestore();
   }
 });

@@ -1,4 +1,5 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { config } from "../src/config";
 import { db } from "../src/db";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
@@ -6,6 +7,11 @@ import { formatKnowledge } from "../src/prompt";
 import { estimateTokens } from "../src/tokenize";
 
 afterEach(() => vi.restoreAllMocks());
+
+beforeEach(() => {
+  // Verify selection/render budget parity without post-pack admission.
+  config().knowledge.taskFilter = false;
+});
 
 test("a tight selection budget still sends its chosen knowledge to the prompt", async () => {
   const projectPath = "/test/ltm/knowledge-render-budget";

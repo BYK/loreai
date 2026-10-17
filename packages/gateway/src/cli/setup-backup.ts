@@ -23,6 +23,13 @@
  */
 
 import { createHash } from "node:crypto";
+import {
+  CODEX_PROVIDER_BACKUP_KEY,
+  getCodexProviderValue,
+  setCodexProviderValue,
+  isTomlTopLevelLine,
+  tomlHeaders,
+} from "./codex-config";
 
 export const LORE_BACKUP_KEY = "_loreBackup";
 
@@ -1164,7 +1171,9 @@ const TOML_UNSET = "(was unset)";
 const TOML_LORE_SET = " # lore-set ";
 const TOML_BACKUP_KEYS = new Set([
   "openai_base_url",
+  "model_provider",
   "model_auto_compact_token_limit",
+  CODEX_PROVIDER_BACKUP_KEY,
 ]);
 
 interface TextBackupEntry {
@@ -1176,6 +1185,30 @@ interface TextBackupEntry {
 function stripBackupBlock(content: string, start: number, end: number): string {
   const lines = content.split("\n");
   return [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n");
+}
+
+/** Provider backups are JSON strings; their content may contain the framing
+ * marker. Only a marker outside those strings separates prior and Lore values. */
+function providerBackupSeparator(body: string): number {
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < body.length; index++) {
+    const char = body[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && body.startsWith(TOML_LORE_SET, index)) return index;
+  }
+  return -1;
 }
 
 function readTomlBackupBlock(content: string): {
@@ -1210,7 +1243,9 @@ function readTomlBackupBlock(content: string): {
   const seen = new Set<string>();
   for (const raw of lines.slice(start + 1, end)) {
     const body = raw.replace(/^#\s*/, "");
-    const sepIdx = body.lastIndexOf(TOML_LORE_SET);
+    const sepIdx = body.startsWith(`${CODEX_PROVIDER_BACKUP_KEY} `)
+      ? providerBackupSeparator(body)
+      : body.lastIndexOf(TOML_LORE_SET);
     if (!/^#\s+/.test(raw) || sepIdx === -1) {
       throw new Error("Invalid Codex Lore backup entry.");
     }
@@ -1261,6 +1296,7 @@ export function getTomlTopLevelValue(
   content: string,
   key: string,
 ): string | null {
+  if (key === CODEX_PROVIDER_BACKUP_KEY) return getCodexProviderValue(content);
   const lines = content.split("\n");
   const keyPattern = new RegExp(
     `^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*(.*?)\\s*$`,
@@ -1274,12 +1310,7 @@ export function getTomlTopLevelValue(
 
 /** Whether the line at `index` is outside any `[section]`. */
 function isTopLevelLine(lines: string[], index: number): boolean {
-  for (let i = index - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line === "" || line.startsWith("#")) continue;
-    if (line.startsWith("[")) return false;
-  }
-  return true;
+  return isTomlTopLevelLine(lines, index);
 }
 
 /** Delete a top-level TOML key line. */
@@ -1394,9 +1425,11 @@ export function restoreTomlBackup(content: string): {
       continue;
     }
     result =
-      priorValue === null
-        ? deleteTomlTopLevelKey(result, key)
-        : setTomlTopLevelKeyRaw(result, key, priorValue);
+      key === CODEX_PROVIDER_BACKUP_KEY
+        ? setCodexProviderValue(result, priorValue)
+        : priorValue === null
+          ? deleteTomlTopLevelKey(result, key)
+          : setTomlTopLevelKeyRaw(result, key, priorValue);
     restored.push(key);
   }
 
@@ -1435,7 +1468,7 @@ function setTomlTopLevelKeyRaw(
       return lines.join("\n");
     }
   }
-  const firstSectionIdx = lines.findIndex((line) => /^\s*\[/.test(line));
+  const firstSectionIdx = tomlHeaders(lines)[0]?.index ?? -1;
   if (firstSectionIdx === -1) {
     const trimmed = content.trimEnd();
     return trimmed ? `${trimmed}\n${newLine}\n` : `${newLine}\n`;

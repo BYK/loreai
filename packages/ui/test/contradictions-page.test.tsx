@@ -3,12 +3,15 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  ContradictionDecision,
   ContradictionListItem,
   ContradictionListResponse,
+  ProjectSummary,
 } from "~/contracts";
+import { Nav } from "~/components/shell/Nav";
 import { ContradictionsPage } from "~/components/lore/ContradictionsPage";
 import { ApiError, type ApiClient } from "~/lib/api";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { useWorkspace, WorkspaceProvider } from "~/routes/workspace";
 
 const makePair = (
   overrides: Partial<ContradictionListItem> = {},
@@ -41,7 +44,38 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
   } as unknown as ApiClient;
 }
 
-function mount(client: ApiClient) {
+function ReviewWithNav() {
+  const ws = useWorkspace();
+  return (
+    <>
+      <Nav
+        projects={ws.projects.data()}
+        loading={ws.projects.loading()}
+        error={ws.projects.error()}
+        activeProjectId={null}
+        totalKnowledge={null}
+      />
+      <ContradictionsPage />
+    </>
+  );
+}
+
+function project(id: string, name: string, count: number): ProjectSummary {
+  return {
+    id,
+    name,
+    path: `/tmp/${name}`,
+    git_remote: null,
+    created_at: 0,
+    knowledge_count: count,
+    session_count: 0,
+    message_count: 0,
+    distillation_count: 0,
+    last_activity: Date.UTC(2026, 8, 1, 10),
+  };
+}
+
+function mount(client: ApiClient, withNav = false) {
   const history = createMemoryHistory();
   history.set({ value: "/ui/contradictions" });
   return render(() => (
@@ -50,7 +84,7 @@ function mount(client: ApiClient) {
         path="*"
         component={() => (
           <WorkspaceProvider client={client} db={Promise.resolve(null)}>
-            <ContradictionsPage />
+            {withNav ? <ReviewWithNav /> : <ContradictionsPage />}
           </WorkspaceProvider>
         )}
       />
@@ -59,6 +93,107 @@ function mount(client: ApiClient) {
 }
 
 describe("ContradictionsPage", () => {
+  it.each([
+    { decision: "keep-a", title: "Rule A", loreCount: 2, otherCount: 3 },
+    { decision: "keep-b", title: "Rule B", loreCount: 1, otherCount: 4 },
+    { decision: "keep-both", title: null, loreCount: 2, otherCount: 4 },
+  ] as const)(
+    "updates sidebar project counts after $decision across projects",
+    async ({ title, loreCount, otherCount }) => {
+      let decided: ContradictionDecision | undefined;
+      const pair = makePair({
+        project_id_b: "p-other",
+        project_name_b: "other",
+      });
+      mount(
+        clientWith({
+          listProjects: async () => [
+            project("p-lore", "lore", decided === "keep-b" ? 1 : 2),
+            project("p-other", "other", decided === "keep-a" ? 3 : 4),
+          ],
+          listContradictions: async () => ({
+            contradictions: decided ? [] : [pair],
+            total: decided ? 0 : 1,
+          }),
+          decideContradiction: async (_idA, _idB, appliedDecision) => {
+            decided = appliedDecision;
+            return {
+              status:
+                appliedDecision === "keep-both" ? "dismissed" : "resolved",
+              kept_id:
+                appliedDecision === "keep-both"
+                  ? null
+                  : appliedDecision === "keep-a"
+                    ? pair.id_a
+                    : pair.id_b,
+            };
+          },
+        }),
+        true,
+      );
+      await screen.findByText("Rule A");
+      await waitFor(() => {
+        expect(screen.getByRole("link", { name: "lore2" })).toBeInTheDocument();
+        expect(
+          screen.getByRole("link", { name: "other4" }),
+        ).toBeInTheDocument();
+      });
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: title ? `Keep ${title}` : "Keep both",
+        }),
+      );
+      if (title)
+        fireEvent.click(
+          screen.getByRole("button", { name: "Keep selected entry" }),
+        );
+
+      await screen.findByText("No open contradictions");
+      await waitFor(() => {
+        expect(
+          screen.getByRole("link", { name: `lore${loreCount}` }),
+        ).toBeInTheDocument();
+        expect(
+          screen.getByRole("link", { name: `other${otherCount}` }),
+        ).toBeInTheDocument();
+      });
+    },
+  );
+
+  it.each(["Rule A", "Rule B"])(
+    "leaves sidebar counts and the pair intact when keeping %s fails",
+    async (title) => {
+      mount(
+        clientWith({
+          listProjects: async () => [project("p-lore", "lore", 2)],
+          decideContradiction: async () => {
+            throw new Error("Decision refused");
+          },
+        }),
+        true,
+      );
+      await screen.findByText("Rule A");
+      expect(
+        await screen.findByRole("link", { name: "lore2" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: `Keep ${title}` }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "Keep selected entry" }),
+      );
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Decision refused",
+      );
+      expect(screen.getByRole("link", { name: "lore2" })).toBeInTheDocument();
+      expect(screen.getByTestId("contradiction-row")).toHaveTextContent(
+        "Rule A",
+      );
+      expect(screen.getByTestId("contradiction-row")).toHaveTextContent(
+        "Rule B",
+      );
+    },
+  );
+
   it("shows a loading state, then the recorded pair and safe knowledge links", async () => {
     let resolve: ((value: ContradictionListResponse) => void) | undefined;
     mount(

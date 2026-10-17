@@ -2,8 +2,8 @@
  * `lore setup [app]` — configure an AI app to route through the Lore gateway.
  *
  * Currently supports:
- *   - codex: writes `openai_base_url` and `model_auto_compact_token_limit`
- *     to `~/.codex/config.toml`
+ *   - codex: selects an authenticated HTTP Responses provider and disables
+ *     auto-compaction in `~/.codex/config.toml`
  *   - opencode: writes `provider.openai.options.baseURL` to
  *     `~/.config/opencode/opencode.json` and installs the
  *     `@loreai/opencode` plugin (unless `--no-plugin`)
@@ -13,6 +13,14 @@
  * The command auto-detects installed apps when no argument is given,
  * or accepts an explicit app name (e.g. `lore setup codex`).
  */
+import {
+  CODEX_PROVIDER_BACKUP_KEY,
+  parseCodexToml,
+  codexProviderValue,
+  setCodexProviderValue,
+  tomlHeaders,
+  isTomlTopLevelLine,
+} from "./codex-config";
 import { execFileSync, spawnSync } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -46,6 +54,7 @@ import {
 } from "../lifecycle-lock";
 import { readGatewayProcessFile } from "../pidfile";
 import { detectAgents } from "./agents";
+import { findCodexSetupEvidence } from "./setup-discovery";
 import {
   refreshJsonBackup,
   parseStableJsonBackup,
@@ -1364,7 +1373,8 @@ const CODEX_COMPACT_DISABLE_LIMIT = 999999999;
 
 /**
  * Update (or create) the Codex user-level `config.toml` to set
- * `openai_base_url` to the Lore gateway and disable auto-compaction.
+ * a named HTTP-only Responses provider and disable auto-compaction.
+ * `openai_base_url` is retained for compatibility with earlier Lore setup.
  *
  * Strategy (per key):
  * - If the key already exists as a top-level key, replace it.
@@ -1373,13 +1383,15 @@ const CODEX_COMPACT_DISABLE_LIMIT = 999999999;
  * - Idempotent: running twice produces the same result.
  */
 export function updateCodexConfig(content: string, baseUrl: string): string {
+  parseCodexToml(content);
   let result = setTopLevelKey(content, "openai_base_url", `"${baseUrl}"`);
+  result = setTopLevelKey(result, "model_provider", '"lore_http"');
   result = setTopLevelKey(
     result,
     "model_auto_compact_token_limit",
     String(CODEX_COMPACT_DISABLE_LIMIT),
   );
-  return result;
+  return setCodexProviderValue(result, codexProviderValue(content, baseUrl));
 }
 
 /**
@@ -1421,7 +1433,7 @@ export function setTopLevelKey(
 
   // Insert at the top, before the first [section] or at the very start.
   // Find the first non-comment, non-blank line that starts a section.
-  const firstSectionIdx = lines.findIndex((line) => /^\s*\[/.test(line));
+  const firstSectionIdx = tomlHeaders(lines)[0]?.index ?? -1;
 
   if (firstSectionIdx === -1) {
     // No sections — append at end (with blank line separator if needed)
@@ -1448,20 +1460,27 @@ export function setTopLevelKey(
  * reaching the start of the file, the key belongs to that section.
  */
 function isTopLevel(lines: string[], index: number): boolean {
-  for (let i = index - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line === "" || line.startsWith("#")) continue;
-    // If we hit a section header, this key is inside that section
-    if (line.startsWith("[")) return false;
-    // Other bare keys don't tell us anything — keep walking back
-  }
-  // Reached the start of the file without hitting a section header → top level
-  return true;
+  return isTomlTopLevelLine(lines, index);
 }
 
 // ---------------------------------------------------------------------------
 // Codex setup
 // ---------------------------------------------------------------------------
+
+/** Pure preparation shared by discovery preflight and the guarded writer. */
+function prepareCodexSetupConfig(content: string, baseUrl: string): string {
+  // Capture a commented backup block from the ORIGINAL content (before lore's
+  // writes), recording the values lore is about to set so undo can revert only
+  // if the file still holds them. Then apply lore's changes and prepend it.
+  const prepared = refreshTomlBackupBlock(content, {
+    openai_base_url: `"${baseUrl}"`,
+    model_provider: '"lore_http"',
+    model_auto_compact_token_limit: String(CODEX_COMPACT_DISABLE_LIMIT),
+    [CODEX_PROVIDER_BACKUP_KEY]: codexProviderValue(content, baseUrl),
+  });
+  const updated = updateCodexConfig(prepared.content, baseUrl);
+  return prependTomlBackupBlock(updated, prepared.block);
+}
 
 function setupCodex(baseUrl: string, guard: SetupGuard): void {
   guard.assertOwned();
@@ -1472,23 +1491,18 @@ function setupCodex(baseUrl: string, guard: SetupGuard): void {
   ensureTrustedDirectory(configDir);
 
   const existingFile = readTrustedTextFile(configPath, { allowMissing: true });
-  const content = existingFile?.text ?? "";
-
-  // Capture a commented backup block from the ORIGINAL content (before lore's
-  // writes), recording the values lore is about to set so undo can revert only
-  // if the file still holds them. Then apply lore's changes and prepend it.
-  const prepared = refreshTomlBackupBlock(content, {
-    openai_base_url: `"${baseUrl}"`,
-    model_auto_compact_token_limit: String(CODEX_COMPACT_DISABLE_LIMIT),
-  });
-  const updated = updateCodexConfig(prepared.content, baseUrl);
-  const final = prependTomlBackupBlock(updated, prepared.block);
+  const final = prepareCodexSetupConfig(existingFile?.text ?? "", baseUrl);
   guard.assertOwned();
   atomicWriteTrustedFile(configPath, final, {
     expectedIdentity: existingFile?.identity ?? null,
   });
 
-  console.log(`[lore] Codex configured to use Lore gateway.`);
+  console.log(
+    `[lore] Codex configured to use Lore gateway over HTTP (WebSockets disabled).`,
+  );
+  console.log(
+    `[lore]   model_provider = "lore_http" (previous providers' sessions may require codex resume --all)`,
+  );
   console.log(`[lore]   openai_base_url = "${baseUrl}"`);
   console.log(
     `[lore]   model_auto_compact_token_limit = ${CODEX_COMPACT_DISABLE_LIMIT} (auto-compaction disabled)`,
@@ -3390,11 +3404,54 @@ async function commandSetupLocked(
     return { baseUrl, remoteUrl, authenticatedPort };
   }
 
-  // No app name — auto-detect
+  // Setup supports desktop clients; launching through `lore run` still needs a CLI.
   const detected = detectAgents();
-  const setupTargets = SUPPORTED_APPS.filter((app) =>
-    detected.some((d) => d.def.name === app.agentName),
-  );
+  const setupTargets = SUPPORTED_APPS.filter((app) => {
+    if (detected.some((d) => d.def.name === app.agentName)) return true;
+    if (app.agentName === "codex") {
+      const configPath = codexConfigPath();
+      let evidence: ReturnType<typeof findCodexSetupEvidence>;
+      let failureReason = "unsafe config path";
+      try {
+        evidence = findCodexSetupEvidence(configPath, (path, error) => {
+          const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+          console.error(
+            `[lore] Could not inspect Codex desktop app at ${path} (${code}); continuing discovery.`,
+          );
+        });
+        if (evidence) {
+          failureReason = "unreadable config";
+          const existingFile = readTrustedTextFile(configPath, {
+            allowMissing: true,
+          });
+          failureReason = "invalid or conflicting config or Lore backup";
+          prepareCodexSetupConfig(existingFile?.text ?? "", baseUrl);
+        }
+      } catch (error) {
+        // A rejected optional target must not block healthy agents. Do not
+        // fall back to desktop evidence or bypass the trusted config writer.
+        const code = (error as NodeJS.ErrnoException)?.code;
+        const detail =
+          typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code)
+            ? `${failureReason}; ${code}`
+            : failureReason;
+        console.error(
+          `[lore] Skipped Codex: could not safely inspect config at ${configPath} (${detail}). Fix the reported config issue, then run \`lore setup codex\`.`,
+        );
+        return false;
+      }
+      if (evidence) {
+        console.log(
+          `[lore] Detected Codex ${evidence.kind} at ${evidence.path}; configuring without a CLI on PATH.`,
+        );
+        return true;
+      }
+    }
+    console.log(
+      `[lore] Skipped ${app.displayName}: ${app.agentName === "codex" ? "CLI not found on PATH and no desktop app or config detected" : "CLI not found on PATH"}. Run \`lore setup ${app.agentName}\` to configure explicitly.`,
+    );
+    return false;
+  });
 
   if (setupTargets.length === 0) {
     const supported = SUPPORTED_APPS.map(

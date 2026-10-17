@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import { parse } from "smol-toml";
 import {
   updateCodexConfig,
   normalizeBaseUrl,
@@ -134,7 +135,8 @@ describe("updateCodexConfig — idempotency", () => {
   test("idempotent with existing config", () => {
     const input = `model = "gpt-5.5"\nopenai_base_url = "http://127.0.0.1:3207/v1"\nmodel_auto_compact_token_limit = 999999999\napproval_policy = "on-request"\n`;
     const result = updateCodexConfig(input, "http://127.0.0.1:3207/v1");
-    expect(result).toBe(input);
+    expect(updateCodexConfig(result, "http://127.0.0.1:3207/v1")).toBe(result);
+    expect(parse(result).model_provider).toBe("lore_http");
   });
 });
 
@@ -835,4 +837,90 @@ describe("geminiEnvPath", () => {
   test("defaults to ~/.gemini/.env", () => {
     expect(geminiEnvPath()).toBe(join(homedir(), ".gemini", ".env"));
   });
+});
+
+describe("Codex HTTP transport", () => {
+  test("selects an authenticated HTTP Responses provider and preserves custom providers", () => {
+    const original =
+      '# Keep this comment\nmodel_provider = "proxy"\n[model_providers.proxy]\nname = "Proxy"\nbase_url = "https://proxy.example/v1"\n';
+    const result = parse(
+      updateCodexConfig(original, "https://gateway.example/lore/v1"),
+    );
+    expect(result.model_provider).toBe("lore_http");
+    expect(result.model_providers).toEqual({
+      proxy: { name: "Proxy", base_url: "https://proxy.example/v1" },
+      lore_http: {
+        name: "Lore",
+        base_url: "https://gateway.example/lore/v1",
+        wire_api: "responses",
+        requires_openai_auth: true,
+        supports_websockets: false,
+        env_http_headers: {
+          "OpenAI-Organization": "OPENAI_ORGANIZATION",
+          "OpenAI-Project": "OPENAI_PROJECT",
+        },
+      },
+    });
+    expect(
+      updateCodexConfig(original, "https://gateway.example/lore/v1"),
+    ).toContain("# Keep this comment");
+  });
+
+  test("updates an existing HTTP provider without duplicating its table", () => {
+    const first = updateCodexConfig("", "http://127.0.0.1:3207/v1");
+    const next = updateCodexConfig(first, "https://remote.example/v1");
+    expect(parse(next).model_providers).toMatchObject({
+      lore_http: {
+        base_url: "https://remote.example/v1",
+        supports_websockets: false,
+      },
+    });
+    expect(updateCodexConfig(next, "https://remote.example/v1")).toBe(next);
+  });
+
+  test.each([
+    "auth",
+    "aws",
+    "env_key",
+    "experimental_bearer_token",
+    "gateway_oauth",
+  ])(
+    "rejects an existing provider with incompatible %s authentication",
+    (key) => {
+      const original = `[model_providers.lore_http]\nname = "Private proxy"\n${key} = "private"\n`;
+      expect(() =>
+        updateCodexConfig(original, "http://127.0.0.1:3207/v1"),
+      ).toThrow(/lore_http/);
+    },
+  );
+
+  test("does not mistake table-looking text in a multiline string for a provider table", () => {
+    const original =
+      'instructions = """\n[model_providers.lore_http]\nsupports_websockets = true\n"""\n';
+    const result = parse(
+      updateCodexConfig(original, "http://127.0.0.1:3207/v1"),
+    );
+    expect(result.instructions).toBe(parse(original).instructions);
+    expect(result.model_providers).toMatchObject({
+      lore_http: { supports_websockets: false },
+    });
+  });
+});
+
+test("Codex setup preserves scalar-looking text inside multiline instructions", () => {
+  const original =
+    'instructions = """\nmodel_provider = "openai"\nopenai_base_url = "fake"\nmodel_auto_compact_token_limit = 1\n"""\n';
+  const result = parse(updateCodexConfig(original, "http://127.0.0.1:3207/v1"));
+  expect(result.instructions).toBe(parse(original).instructions);
+  expect(result.model_provider).toBe("lore_http");
+  expect(result.openai_base_url).toBe("http://127.0.0.1:3207/v1");
+  expect(result.model_auto_compact_token_limit).toBe(999999999);
+});
+
+test("Codex setup refuses a default profile that overrides HTTP provider selection", () => {
+  const config =
+    'profile = "work"\n[profiles.work]\nmodel_provider = "openai"\n';
+  expect(() => updateCodexConfig(config, "http://127.0.0.1:3207/v1")).toThrow(
+    /profile.*model_provider/i,
+  );
 });

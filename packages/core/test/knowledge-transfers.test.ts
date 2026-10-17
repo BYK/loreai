@@ -3,6 +3,7 @@ import { uuidv7 } from "uuidv7";
 import { db, ensureProject, withSavepoint } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as data from "../src/data";
+import { editKnowledge } from "../src/knowledge-edit";
 import { runRecall } from "../src/recall";
 
 // Origin project of the promoted entry, and a DIFFERENT project where it is
@@ -269,6 +270,60 @@ describe("runRecall transfer gating", () => {
     });
     expect(ltm.transferCount(id)).toBe(0);
   });
+});
+
+describe("transfer cleanup on knowledge moves", () => {
+  beforeEach(cleanup);
+
+  test.each([false, true])(
+    "moving knowledge removes only its now-home transfer (private=%s)",
+    (makePrivate) => {
+      const id = createPromoted("Moved entry", "original content");
+      const destination = ensureProject(FOREIGN);
+      const otherProject = ensureProject("/test/transfers/other");
+      ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: destination });
+      ltm.recordTransfer({ knowledgeId: id, recalledInProjectId: destination });
+      ltm.recordTransfer({
+        knowledgeId: id,
+        recalledInProjectId: otherProject,
+      });
+      const foreignTransfer = ltm
+        .transfersFor(id)
+        .filter((row) => row.recalled_in_project_id === otherProject);
+      expect(ltm.transferCount(id)).toBe(2);
+
+      // Transfers predate the edit and move. Address the superseded version ID.
+      if (makePrivate) {
+        editKnowledge(id, {
+          expectedRevision: 1,
+          actor: "test",
+          scope: "project",
+        });
+      } else {
+        ltm.update(id, { content: "revised content" });
+      }
+      expect(ltm.getByLogical(id)?.id).not.toBe(id);
+      const unrelated = createPromoted("Unmoved entry", "unmoved content");
+      ltm.recordTransfer({
+        knowledgeId: unrelated,
+        recalledInProjectId: destination,
+      });
+      const unrelatedTransfers = ltm.transfersFor(unrelated);
+
+      expect(data.reassignKnowledge(id, FOREIGN)).toBe(true);
+
+      expect(ltm.transferCount(id)).toBe(1);
+      expect(ltm.transferCounts().get(id)).toBe(1);
+      expect(ltm.transfersFor(id)).toEqual(foreignTransfer);
+      expect(ltm.transfersFor(unrelated)).toEqual(unrelatedTransfers);
+      expect(ltm.getByLogical(id)).toMatchObject({
+        project_id: destination,
+        cross_project: makePrivate ? 0 : 1,
+      });
+      expect(data.reassignKnowledge(id, FOREIGN)).toBe(true);
+      expect(ltm.transfersFor(id)).toEqual(foreignTransfer);
+    },
+  );
 });
 
 describe("transfer cleanup on project deletion", () => {

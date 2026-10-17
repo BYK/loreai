@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
+import { parse } from "smol-toml";
 import { commandSetup, loadJsonSetupBackup } from "../src/cli/setup";
 import { writePortFile } from "../src/portfile";
 import {
@@ -738,5 +739,38 @@ describe("commandSetup — Gemini CLI", () => {
     expect(restored).not.toContain("GOOGLE_GEMINI_BASE_URL");
     expect(restored).toContain("GEMINI_API_KEY=sk-abc");
     expect(restored).not.toContain("lore setup backup");
+  });
+});
+
+describe("Codex HTTP provider setup lifecycle", () => {
+  const configPath = () => join(home, ".codex", "config.toml");
+
+  it("upgrades legacy setup, changes gateways, and restores original settings", async () => {
+    mkdirSync(join(home, ".codex"), { recursive: true });
+    const original =
+      '# Personal config\nmodel_provider = "proxy"\nopenai_base_url = "https://api.openai.com/v1"\n[model_providers.proxy]\nname = "Proxy"\n';
+    writeFileSync(configPath(), original);
+    await commandSetup(["codex"], { port: 3299 });
+    const first = readFileSync(configPath(), "utf8");
+    expect(parse(first).model_provider).toBe("lore_http");
+    expect(parse(first).model_providers).toMatchObject({
+      lore_http: { supports_websockets: false },
+    });
+    await commandSetup(["codex"], { port: 3300 });
+    await commandSetup(["undo", "codex"], {});
+    expect(parse(readFileSync(configPath(), "utf8"))).toEqual(parse(original));
+  });
+
+  it("preserves provider settings edited after setup during undo", async () => {
+    await commandSetup(["codex"], { port: 3299 });
+    const updated = readFileSync(configPath(), "utf8").replace(
+      "\nsupports_websockets = false\n",
+      "\nsupports_websockets = true\n",
+    );
+    writeFileSync(configPath(), updated);
+    await commandSetup(["undo", "codex"], {});
+    expect(
+      parse(readFileSync(configPath(), "utf8")).model_providers,
+    ).toMatchObject({ lore_http: { supports_websockets: true } });
   });
 });
