@@ -259,9 +259,10 @@ describe("KnowledgeEditor", () => {
     expect(confidence.validity.rangeOverflow).toBe(true);
     fireEvent.input(confidence, { target: { value: "0.375" } });
     expect(confidence.validity.valid).toBe(true);
-    expect(
-      new FormData(screen.getByTestId("knowledge-editor")).get("confidence"),
-    ).toBe("0.375");
+    const form = screen.getByTestId("knowledge-editor");
+    if (!(form instanceof HTMLFormElement))
+      throw new Error("Expected an editor form");
+    expect(new FormData(form).get("confidence")).toBe("0.375");
   });
 
   it("waits for the current revision and keeps projectless entries shared", async () => {
