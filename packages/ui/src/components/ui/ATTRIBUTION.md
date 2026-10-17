@@ -14,7 +14,7 @@ Copyright (c) 2023 Stefan E-K
 ```
 
 Copied files: `button.tsx`, `dialog.tsx`, `select.tsx`, `text-field.tsx`,
-`badge.tsx`, `separator.tsx`, `toggle-group.tsx`. The toggle group combines
+`badge.tsx`, `separator.tsx`, `tabs.tsx`, `toggle-group.tsx`. The toggle group combines
 upstream `toggle-group.tsx` with the `toggleVariants` styles from `toggle.tsx`;
 the standalone toggle button recipe is not included.
 Kobalte (`@kobalte/core`) supplies the headless

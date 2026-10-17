@@ -120,6 +120,37 @@ describe("EntityPage", () => {
     expect(save).toBeDisabled();
   });
 
+  it("clears existing notes and adopts the saved server value", async () => {
+    const updateEntityMetadata = vi.fn(async () =>
+      detail({ metadata: { role: "engineer", notes: "" } }),
+    );
+    mount(
+      clientWith({
+        getEntity: async () =>
+          detail({ metadata: { role: "engineer", notes: "Old note" } }),
+        updateEntityMetadata,
+      }),
+    );
+    const notes = (await screen.findByLabelText(
+      "Notes",
+    )) as HTMLTextAreaElement;
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(notes).toHaveValue("Old note");
+    expect(save).toBeDisabled();
+    notes.value = "";
+    notes.dispatchEvent(new Event("input"));
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await screen.findByText("Saved.");
+    expect(updateEntityMetadata).toHaveBeenCalledWith("e-1", {
+      role: "engineer",
+      description: "",
+      notes: "",
+    });
+    expect(notes).toHaveValue("");
+    expect(save).toBeDisabled();
+  });
+
   it("surfaces a hosted-mode refusal as locked, not a broken form", async () => {
     mount(
       clientWith({

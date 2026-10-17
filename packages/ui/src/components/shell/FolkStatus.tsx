@@ -1,3 +1,4 @@
+import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import * as PopoverPrimitive from "@kobalte/core/popover";
@@ -121,15 +122,17 @@ export const FolkStatus: Component = () => {
             <div class="flex items-center justify-between gap-3">
               <div class="eyebrow">Sync</div>
               <Show when={folk.sync.data()?.enabled}>
-                <button
+                <Button
                   type="button"
+                  variant="outline"
+                  size="sm"
                   data-testid="sync-now"
                   disabled={syncing()}
                   onClick={() => void runSync()}
-                  class="rounded-md border border-line px-2 py-1 text-xs font-medium text-heading hover:bg-chrome focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                  class="h-auto px-2 py-1"
                 >
                   {syncing() ? "Syncing…" : "Sync now"}
-                </button>
+                </Button>
               </Show>
             </div>
             <Show when={syncReceipt()}>
