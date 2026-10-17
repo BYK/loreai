@@ -72,6 +72,67 @@ describe("SessionWorkspace", () => {
     expect(screen.getByTestId("transcript-content")).toBeInTheDocument();
   });
 
+  it("tracks the rem breakpoint with a larger browser default font", () => {
+    let width = 1152;
+    const media: {
+      matches: () => boolean;
+      listeners: Set<(event: MediaQueryListEvent) => void>;
+    }[] = [];
+    vi.stubGlobal("matchMedia", (query: string) => {
+      const match = query.match(/min-width:\s*([\d.]+)(px|rem)/);
+      if (!match) throw new Error(`Unsupported media query: ${query}`);
+      const [, amount, unit] = match;
+      // Media-query rem units use the browser's initial font, not author CSS.
+      const threshold = Number(amount) * (unit === "rem" ? 20 : 1);
+      const entry = {
+        matches: () => width >= threshold,
+        listeners: new Set<(event: MediaQueryListEvent) => void>(),
+      };
+      media.push(entry);
+      return {
+        get matches() {
+          return entry.matches();
+        },
+        addEventListener: (
+          _: string,
+          listener: (event: MediaQueryListEvent) => void,
+        ) => entry.listeners.add(listener),
+        removeEventListener: (
+          _: string,
+          listener: (event: MediaQueryListEvent) => void,
+        ) => entry.listeners.delete(listener),
+      };
+    });
+    const resize = (next: number) => {
+      const before = media.map((entry) => entry.matches());
+      width = next;
+      media.forEach((entry, index) => {
+        if (before[index] !== entry.matches())
+          entry.listeners.forEach((listener) =>
+            listener({ matches: entry.matches() } as MediaQueryListEvent),
+          );
+      });
+    };
+    mount();
+    expect(screen.getByRole("tablist")).toBeVisible();
+    expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+    const transcript = screen.getByTestId("transcript-content");
+    fireEvent.click(screen.getByTestId("session-tab-context"));
+    resize(1280);
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByTestId("context-content")).toBeVisible();
+    expect(transcript).toBeVisible();
+    resize(1152);
+    expect(screen.getByRole("tablist")).toBeVisible();
+    expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+    expect(screen.getByTestId("session-tab-context")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(transcript).not.toBeVisible();
+    expect(screen.getByTestId("transcript-content")).toBe(transcript);
+  });
+
   it("keeps the same transcript DOM node across a breakpoint flip", () => {
     let matches = false;
     const listeners = new Set<(e: MediaQueryListEvent) => void>();

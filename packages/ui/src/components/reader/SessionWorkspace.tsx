@@ -9,8 +9,11 @@ import { createSignal, onCleanup } from "solid-js";
 import { PaneHead } from "~/components/lore/Panes";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 
+// Match Tailwind lg in rem so browser font preferences affect both layouts.
+const DESKTOP_QUERY = "(min-width: 64rem)";
+
 function desktopQuery(): boolean {
-  return globalThis.matchMedia?.("(min-width: 1024px)")?.matches ?? false;
+  return globalThis.matchMedia?.(DESKTOP_QUERY)?.matches ?? false;
 }
 
 export const SessionWorkspace: Component<{
@@ -19,7 +22,7 @@ export const SessionWorkspace: Component<{
 }> = (props) => {
   const [desktop, setDesktop] = createSignal(desktopQuery());
   const [tab, setTab] = createSignal("transcript");
-  const media = globalThis.matchMedia?.("(min-width: 1024px)");
+  const media = globalThis.matchMedia?.(DESKTOP_QUERY);
   const onChange = (event: MediaQueryListEvent) => setDesktop(event.matches);
   media?.addEventListener?.("change", onChange);
   onCleanup(() => media?.removeEventListener?.("change", onChange));
