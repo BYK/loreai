@@ -761,78 +761,112 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     vi.resetModules();
   });
 
-  test("local knowledge move refuses a normalized shared-title conflict", async () => {
-    vi.resetModules();
-    vi.doUnmock("../src/cli/data");
-    vi.doUnmock("../src/cli/commands/data");
-    const root = mkdtempSync(join(tmpdir(), "lore-cli-title-conflict-"));
-    const titleSuffix = randomUUID();
-    const title = `CLI move title conflict ${titleSuffix}`;
-    const source = join(root, "source");
-    const shared = join(root, "shared");
-    const target = join(root, "target");
-    mkdirSync(source);
-    mkdirSync(shared);
-    mkdirSync(target);
-    const { ensureProject, ltm } = await import("@loreai/core");
-    ensureProject(source, "move-source");
-    ensureProject(shared, "move-shared");
-    const id = ltm.create({
-      projectPath: source,
-      category: "decision",
-      title,
-      content: "Project-only source",
-      scope: "project",
-    });
-    const sharedId = ltm.create({
-      id: randomUUID(),
-      projectPath: shared,
-      category: "decision",
-      title: ` ${title.toLowerCase()} `,
-      content: "Existing shared entry",
-      scope: "project",
-      crossProject: true,
-    });
-    expect(ltm.getByLogical(id)?.project_id).toBe(ensureProject(source));
-    expect(ltm.getByLogical(sharedId)?.cross_project).toBe(1);
-    expect(ltm.findSharedTitleConflict(id, title)?.logical_id).toBe(sharedId);
+  test.each([
+    { scope: "private", crossProject: 0 },
+    { scope: "shared", crossProject: 1 },
+  ])(
+    "local $scope knowledge move enforces scope with a normalized shared-title conflict",
+    async ({ crossProject }) => {
+      vi.resetModules();
+      vi.doUnmock("../src/cli/data");
+      vi.doUnmock("../src/cli/commands/data");
+      const root = mkdtempSync(join(tmpdir(), "lore-cli-title-conflict-"));
+      const titleSuffix = randomUUID();
+      const title = `CLI move title conflict ${titleSuffix}`;
+      const source = join(root, "source");
+      const shared = join(root, "shared");
+      const target = join(root, "target");
+      mkdirSync(source);
+      mkdirSync(shared);
+      mkdirSync(target);
+      const { db, ensureProject, ltm } = await import("@loreai/core");
+      ensureProject(source, "move-source");
+      ensureProject(shared, "move-shared");
+      const id = ltm.create({
+        projectPath: source,
+        category: "decision",
+        title,
+        content: "Project-only source",
+        scope: "project",
+      });
+      const sharedId = ltm.create({
+        id: randomUUID(),
+        projectPath: shared,
+        category: "decision",
+        title: ` ${title.toLowerCase()} `,
+        content: "Existing shared entry",
+        scope: "project",
+        crossProject: true,
+      });
+      // Model an existing legacy/synced duplicate when the source is shared;
+      // create() correctly prevents creating two shared entries with this title.
+      db()
+        .query("UPDATE knowledge SET cross_project = ? WHERE logical_id = ?")
+        .run(crossProject, id);
+      expect(ltm.getByLogical(id)).toMatchObject({
+        project_id: ensureProject(source),
+        cross_project: crossProject,
+      });
+      expect(ltm.getByLogical(sharedId)?.cross_project).toBe(1);
+      expect(ltm.findSharedTitleConflict(id, title)?.logical_id).toBe(sharedId);
 
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
-    const exit = vi.spyOn(process, "exit").mockImplementation(() => {
-      throw new Error("process.exit called");
-    });
-    const priorRemoteUrl = process.env.LORE_REMOTE_URL;
-    const priorRemote = process.env.LORE_REMOTE;
-    const priorHostedMode = process.env.LORE_HOSTED_MODE;
-    delete process.env.LORE_REMOTE_URL;
-    delete process.env.LORE_REMOTE;
-    delete process.env.LORE_HOSTED_MODE;
-    try {
-      const { commandData } = await import("../src/cli/data");
-      await expect(
-        commandData(["move", "knowledge", id], {
+      const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+        throw new Error("process.exit called");
+      });
+      const priorRemoteUrl = process.env.LORE_REMOTE_URL;
+      const priorRemote = process.env.LORE_REMOTE;
+      const priorHostedMode = process.env.LORE_HOSTED_MODE;
+      delete process.env.LORE_REMOTE_URL;
+      delete process.env.LORE_REMOTE;
+      delete process.env.LORE_HOSTED_MODE;
+      try {
+        const { commandData } = await import("../src/cli/data");
+        const move = commandData(["move", "knowledge", id], {
           project: source,
           to: target,
           yes: true,
-        }),
-      ).rejects.toThrow("process.exit called");
-      expect(stderr).toHaveBeenCalledWith(
-        `Refusing to move: title "${title}" is already used by shared entry " ${title.toLowerCase()} " (${sharedId}). Rename one entry or review duplicates in the Lore UI.`,
-      );
-      expect(exit).toHaveBeenCalledWith(1);
-    } finally {
-      stderr.mockRestore();
-      exit.mockRestore();
-      if (priorRemoteUrl === undefined) delete process.env.LORE_REMOTE_URL;
-      else process.env.LORE_REMOTE_URL = priorRemoteUrl;
-      if (priorRemote === undefined) delete process.env.LORE_REMOTE;
-      else process.env.LORE_REMOTE = priorRemote;
-      if (priorHostedMode === undefined) delete process.env.LORE_HOSTED_MODE;
-      else process.env.LORE_HOSTED_MODE = priorHostedMode;
-      rmSync(root, { recursive: true, force: true });
-    }
-    vi.resetModules();
-  });
+        });
+        if (crossProject === 1) {
+          await expect(move).rejects.toThrow("process.exit called");
+          expect(stderr).toHaveBeenCalledWith(
+            `Refusing to move: title "${title}" is already used by shared entry " ${title.toLowerCase()} " (${sharedId}). Rename one entry or review duplicates in the Lore UI.`,
+          );
+          expect(exit).toHaveBeenCalledWith(1);
+        } else {
+          await expect(move).resolves.toBeUndefined();
+          expect(stdout).toHaveBeenCalledWith(
+            `Moved knowledge entry ${id} to ${target}`,
+          );
+          expect(stderr).not.toHaveBeenCalled();
+          expect(exit).not.toHaveBeenCalled();
+        }
+        expect(ltm.getByLogical(id)).toMatchObject({
+          project_id: ensureProject(crossProject === 1 ? source : target),
+          cross_project: crossProject,
+          title,
+        });
+        expect(ltm.getByLogical(sharedId)).toMatchObject({
+          project_id: ensureProject(shared),
+          cross_project: 1,
+          title: ` ${title.toLowerCase()} `,
+        });
+      } finally {
+        stdout.mockRestore();
+        stderr.mockRestore();
+        exit.mockRestore();
+        if (priorRemoteUrl === undefined) delete process.env.LORE_REMOTE_URL;
+        else process.env.LORE_REMOTE_URL = priorRemoteUrl;
+        if (priorRemote === undefined) delete process.env.LORE_REMOTE;
+        else process.env.LORE_REMOTE = priorRemote;
+        if (priorHostedMode === undefined) delete process.env.LORE_HOSTED_MODE;
+        else process.env.LORE_HOSTED_MODE = priorHostedMode;
+        rmSync(root, { recursive: true, force: true });
+      }
+      vi.resetModules();
+    },
+  );
 
   // F-4 (MEDIUM): 0-positionals reach the legacy handler with []. The
   // variadic positional schema should accept zero inputs.

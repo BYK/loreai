@@ -508,49 +508,73 @@ describe("revision-checked knowledge mutations", () => {
     });
   });
 
-  it("returns 409 with conflict details when moving into shared visibility", async () => {
-    const title = `Move title conflict ${randomUUID()}`;
-    const { id, projectId, projectPath } = await seedKnowledgeEntry(title);
-    const { ensureProject, ltm } = await import("@loreai/core");
-    const targetPath = `/test/api/move-target/${randomUUID()}`;
-    ensureProject(targetPath, "move-target");
-    const conflictPath = `/test/api/move-conflict/${randomUUID()}`;
-    const conflictProjectId = ensureProject(conflictPath, "move-conflict");
-    const conflictId = ltm.create({
-      projectPath: conflictPath,
-      category: "decision",
-      title,
-      content: "Existing shared move title",
-      scope: "project",
-      crossProject: true,
-    });
+  it.each([
+    { scope: "private", crossProject: 0, status: 200 },
+    { scope: "shared", crossProject: 1, status: 409 },
+  ])(
+    "moves $scope knowledge with a shared title collision with status $status",
+    async ({ crossProject, status }) => {
+      const title = `Move title conflict ${randomUUID()}`;
+      const { id, projectId, projectPath } = await seedKnowledgeEntry(title);
+      const { db, ensureProject, ltm } = await import("@loreai/core");
+      const targetPath = `/test/api/move-target/${randomUUID()}`;
+      const targetProjectId = ensureProject(targetPath, "move-target");
+      const conflictPath = `/test/api/move-conflict/${randomUUID()}`;
+      const conflictProjectId = ensureProject(conflictPath, "move-conflict");
+      const conflictId = ltm.create({
+        projectPath: conflictPath,
+        category: "decision",
+        title,
+        content: "Existing shared move title",
+        scope: "project",
+        crossProject: true,
+      });
 
-    const response = await api(`/api/v1/knowledge/${id}/move`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ to_project: { path: targetPath } }),
-    });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      type: "error",
-      error: {
-        type: "title_conflict",
-        conflicting_entry: {
-          id: conflictId,
-          title,
-          project_id: conflictProjectId,
-          scope: "shared",
-        },
-      },
-    });
-    const { ltm: coreLtm } = await import("@loreai/core");
-    expect(coreLtm.getByLogical(id)).toMatchObject({
-      project_id: projectId,
-      cross_project: 0,
-      title,
-    });
-    expect(projectPath).not.toBe(targetPath);
-  });
+      // Model an existing legacy/synced duplicate when the source is shared;
+      // create() correctly prevents creating two shared entries with this title.
+      db()
+        .query("UPDATE knowledge SET cross_project = ? WHERE logical_id = ?")
+        .run(crossProject, id);
+      expect(ltm.getByLogical(id)).toMatchObject({
+        project_id: projectId,
+        cross_project: crossProject,
+      });
+
+      const response = await api(`/api/v1/knowledge/${id}/move`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ to_project: { path: targetPath } }),
+      });
+      expect(response.status).toBe(status);
+      if (crossProject === 1) {
+        expect(await response.json()).toMatchObject({
+          type: "error",
+          error: {
+            type: "title_conflict",
+            conflicting_entry: {
+              id: conflictId,
+              title,
+              project_id: conflictProjectId,
+              scope: "shared",
+            },
+          },
+        });
+      } else {
+        expect(await response.json()).toMatchObject({ moved: true, id });
+      }
+      expect(ltm.getByLogical(id)).toMatchObject({
+        project_id: crossProject === 1 ? projectId : targetProjectId,
+        cross_project: crossProject,
+        title,
+      });
+      expect(ltm.getByLogical(conflictId)).toMatchObject({
+        project_id: conflictProjectId,
+        cross_project: 1,
+        title,
+      });
+      expect(projectPath).not.toBe(targetPath);
+    },
+  );
 
   it("returns 404 for missing records and preserves the live head on confidence-only PATCH", async () => {
     const { id } = await seedKnowledgeEntry();
