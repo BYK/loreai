@@ -1832,9 +1832,9 @@ export function reassignKnowledge(
   const oldProjectId = entry.project_id;
   // Move ALL versions of the logical entry so a multi-version entry isn't split
   // across projects (reviewer NIT).
-  // When moving from cross_project to a project, clear the flag.
+  // Global entries become project-private; project-owned entries retain their sharing flag.
   const clearCrossProject = oldProjectId === null || oldProjectId === "";
-  const nextCrossProject = clearCrossProject ? 0 : 1;
+  const nextCrossProject = clearCrossProject ? 0 : entry.cross_project;
   database.query("BEGIN IMMEDIATE").run();
   try {
     if (nextCrossProject === 1) {
