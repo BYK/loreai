@@ -9,6 +9,8 @@ export type ShellFolkState =
   | "hidden"
   | "unavailable"
   | "anonymous"
+  | "hosted"
+  | "refreshing"
   | "expired"
   | "sync_disabled"
   | "sync_on";
@@ -82,6 +84,33 @@ export function summarizeFolkStatus(input: FolkStatusInput): ShellFolkSummary {
       tone: "muted",
       detail:
         "No account is signed in on this gateway, so nothing syncs. Run `lore login` to sign in.",
+    };
+  }
+  if (account.state === "hosted") {
+    return {
+      state: "hosted",
+      label: "Hosted gateway",
+      tone: "muted",
+      detail:
+        "Account and cloud sync are unavailable in hosted mode. For a gateway on your own machine, restart with `lore start --local`.",
+    };
+  }
+  if (account.state === "refreshing") {
+    return {
+      state: "refreshing",
+      label: "Refreshing session…",
+      tone: "muted",
+      detail:
+        "The gateway is restoring your saved login automatically. You can also run `lore whoami --verify`.",
+    };
+  }
+  if (account.state === "unavailable") {
+    return {
+      state: "unavailable",
+      label: "Account unavailable",
+      tone: "gold",
+      detail:
+        "The account service could not be reached. Your saved login is kept and the gateway will retry automatically.",
     };
   }
   if (account.state === "expired") {

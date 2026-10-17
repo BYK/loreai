@@ -120,14 +120,23 @@ function insertInjection(
   createdAt: number,
   credited = 0,
   verdict: string | null = null,
+  versionID: string | null = null,
 ) {
   db()
     .query(
       `INSERT INTO knowledge_session_injections
-         (session_id, logical_id, project_id, created_at, credited, verdict)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (session_id, logical_id, project_id, created_at, credited, verdict, version_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(sessionID, logicalID, projectID, createdAt, credited, verdict);
+    .run(
+      sessionID,
+      logicalID,
+      projectID,
+      createdAt,
+      credited,
+      verdict,
+      versionID,
+    );
 }
 
 function forceMetadata(sessionID: string, sourceID: string, metadata: string) {
@@ -199,7 +208,7 @@ describe("sessionContext", () => {
       content: "content",
     });
     const keptLogical = ltm.logicalIdOf(kept);
-    insertInjection(sid, keptLogical, pid, 111, 1, "pass");
+    insertInjection(sid, keptLogical, pid, 111, 1, "pass", kept);
     insertInjection(sid, "deleted-logical", pid, 222);
 
     appendSessionPromptDelta({
@@ -245,6 +254,9 @@ describe("sessionContext", () => {
     expect(ctx!.knowledge.injections).toEqual([
       {
         logical_id: keptLogical,
+        version_id: kept,
+        version_status: "current",
+        current_version_id: kept,
         title: "Kept entry",
         category: "decision",
         confidence: 1,
@@ -254,6 +266,9 @@ describe("sessionContext", () => {
       },
       {
         logical_id: "deleted-logical",
+        version_id: null,
+        version_status: "unknown",
+        current_version_id: null,
         title: null,
         category: null,
         confidence: null,

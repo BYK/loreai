@@ -630,6 +630,8 @@ describe("ltm.forSession", () => {
   const SESSION = "test-session-abc";
 
   beforeEach(() => {
+    // Exercise retrieval and bookkeeping independently of post-pack admission.
+    config().knowledge.taskFilter = false;
     const pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     // Clean up any cross-project entries from this test project
@@ -2012,6 +2014,8 @@ describe("ltm.forSession — relevance floor", () => {
   ];
 
   beforeEach(() => {
+    // These pattern fixtures isolate the vector floor, before task filtering.
+    config().knowledge.taskFilter = false;
     const pid = ensureProject(PROJ);
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
     db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);

@@ -624,10 +624,23 @@ for (let k = 0; k < MESSAGES; k++) {
 // delta, and per-turn gradient metadata so the pane and the transcript
 // markers have real rows to read. The prompt delta's createdAt sits inside
 // the first page of loaded messages so its applied_at marker renders there.
-core.ltm.recordSessionInjections(SESSION, lore, [
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[0]) },
-  { logical_id: core.ltm.logicalIdOf(knowledgeIds[2]) },
-]);
+// Entry 2 is shared; outcome receipts deliberately cover project-local entries.
+const contextInjections = [knowledgeIds[0], knowledgeIds[3]].map((id) => {
+  const entry = core.ltm.getByLogical(core.ltm.logicalIdOf(id));
+  if (!entry) throw new Error(`Missing context injection fixture: ${id}`);
+  return entry;
+});
+core.ltm.recordSessionInjections(SESSION, lore, contextInjections);
+const contextInjectionCount = core
+  .db()
+  .query(
+    "SELECT COUNT(*) AS count FROM knowledge_session_injections WHERE session_id = ? AND project_id = ?",
+  )
+  .get(SESSION, loreProjectId).count;
+if (contextInjectionCount !== contextInjections.length)
+  throw new Error(
+    "Context injection fixture did not record every exposed version",
+  );
 core.appendSessionPromptDelta({
   sessionID: SESSION,
   projectID: loreProjectId,
