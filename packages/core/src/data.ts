@@ -1851,23 +1851,13 @@ export function reassignKnowledge(
       )
       .run(toId, nextCrossProject, entry.logical_id);
 
-    // Clean up knowledge_transfers that became self-referential after the move.
-    if (clearCrossProject) {
-      const movedLogicalIds = database
-        .query(
-          "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0",
-        )
-        .all(toId)
-        .map((r) => (r as { logical_id: string }).logical_id);
-      const kPlaceholders = movedLogicalIds.map(() => "?").join(",");
-      database
-        .query(
-          `DELETE FROM knowledge_transfers
-           WHERE recalled_in_project_id = ?
-             AND knowledge_id IN (${kPlaceholders})`,
-        )
-        .run(toId, ...movedLogicalIds);
-    }
+    // The destination is now home, so its past recalls are no longer foreign.
+    // Preserve every other transfer and restrict cleanup to the moved entry.
+    database
+      .query(
+        "DELETE FROM knowledge_transfers WHERE recalled_in_project_id = ? AND knowledge_id = ?",
+      )
+      .run(toId, entry.logical_id);
 
     database.query("COMMIT").run();
   } catch (e) {
