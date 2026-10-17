@@ -4,6 +4,7 @@
  * activate tabs, and the transcript stays mounted while hidden.
  */
 import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { createSignal, onCleanup, onMount } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionWorkspace } from "~/components/reader/SessionWorkspace";
@@ -41,6 +42,15 @@ describe("SessionWorkspace", () => {
     expect(screen.getByTestId("transcript-content")).toBeInTheDocument();
     expect(screen.getByLabelText("Context window")).toBeInTheDocument();
     expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tabpanel")).toBeNull();
+    expect(document.getElementById("session-panel-transcript")).toHaveAttribute(
+      "tabindex",
+      "-1",
+    );
+    expect(document.getElementById("session-panel-context")).toHaveAttribute(
+      "tabindex",
+      "-1",
+    );
   });
 
   it("shows tabs below lg and switches panels, keeping the transcript mounted", () => {
@@ -90,24 +100,123 @@ describe("SessionWorkspace", () => {
     expect(screen.getByTestId("transcript-content")).toBe(before);
   });
 
-  it("roves tabs with arrow keys and activates on Enter/Space", () => {
+  it.each([false, true])(
+    "preserves both panes and their scroll containers across tab and breakpoint changes (desktop=%s)",
+    (initialDesktop) => {
+      let matches = initialDesktop;
+      const listeners = new Set<(e: MediaQueryListEvent) => void>();
+      vi.stubGlobal("matchMedia", () => ({
+        get matches() {
+          return matches;
+        },
+        addEventListener: (
+          _: string,
+          listener: (e: MediaQueryListEvent) => void,
+        ) => listeners.add(listener),
+        removeEventListener: (
+          _: string,
+          listener: (e: MediaQueryListEvent) => void,
+        ) => listeners.delete(listener),
+      }));
+      const mounts = vi.fn();
+      const cleanups = vi.fn();
+      function StatefulPane(props: { name: string }) {
+        const [count, setCount] = createSignal(0);
+        onMount(mounts);
+        onCleanup(cleanups);
+        return (
+          <button
+            data-testid={props.name}
+            onClick={() => setCount(count() + 1)}
+          >
+            {count()}
+          </button>
+        );
+      }
+      const { unmount } = render(() => (
+        <SessionWorkspace
+          transcript={<StatefulPane name="stateful-transcript" />}
+          context={<StatefulPane name="stateful-context" />}
+        />
+      ));
+      const transcript = screen.getByTestId("stateful-transcript");
+      const context = screen.getByTestId("stateful-context");
+      const transcriptContainer = transcript.parentElement!;
+      const contextContainer = context.closest("aside")!.parentElement!;
+      transcriptContainer.scrollTop = 125;
+      contextContainer.scrollTop = 85;
+      fireEvent.click(transcript);
+      fireEvent.click(context);
+      function resize(desktop: boolean) {
+        matches = desktop;
+        for (const listener of listeners)
+          listener({ matches } as MediaQueryListEvent);
+      }
+      resize(false);
+      fireEvent.click(screen.getByTestId("session-tab-context"));
+      resize(true);
+      expect(screen.queryByRole("tablist")).toBeNull();
+      resize(false);
+      expect(screen.getByTestId("session-tab-context")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      fireEvent.click(screen.getByTestId("session-tab-transcript"));
+      expect(transcript.parentElement).toBe(transcriptContainer);
+      expect(context.closest("aside")!.parentElement).toBe(contextContainer);
+      expect(transcriptContainer.scrollTop).toBe(125);
+      expect(contextContainer.scrollTop).toBe(85);
+      expect(transcript).toHaveTextContent("1");
+      expect(context).toHaveTextContent("1");
+      expect(mounts).toHaveBeenCalledTimes(2);
+      expect(cleanups).not.toHaveBeenCalled();
+      unmount();
+      expect(cleanups).toHaveBeenCalledTimes(2);
+      expect(listeners.size).toBe(0);
+    },
+  );
+
+  it("keeps one selected tab with linked panels through keyboard navigation", () => {
     mockDesktop(false);
     mount();
     const transcriptTab = screen.getByTestId("session-tab-transcript");
     const contextTab = screen.getByTestId("session-tab-context");
+    function expectSelected(selected: HTMLElement, other: HTMLElement) {
+      expect(screen.getAllByRole("tab", { selected: true })).toEqual([
+        selected,
+      ]);
+      expect(selected).toHaveAttribute("tabindex", "0");
+      expect(other).toHaveAttribute("tabindex", "-1");
+      const panel = screen.getByRole("tabpanel");
+      expect(selected).toHaveAttribute("aria-controls", panel.id);
+      expect(panel).toHaveAttribute("aria-labelledby", selected.id);
+      expect(panel.hidden).toBe(false);
+      expect(panel).toHaveAttribute("tabindex", "0");
+      expect(
+        document.querySelector<HTMLElement>(
+          `[role="tabpanel"]:not(#${panel.id})`,
+        )!.hidden,
+      ).toBe(true);
+    }
     transcriptTab.focus();
-    fireEvent.keyDown(transcriptTab, { key: "ArrowRight" });
-    expect(contextTab).toHaveAttribute("aria-selected", "true");
-    expect(contextTab).toHaveFocus();
-    expect(
-      screen.getByRole("tabpanel", { name: "Context window" }).hidden,
-    ).toBe(false);
-    fireEvent.keyDown(contextTab, { key: "ArrowLeft" });
-    expect(transcriptTab).toHaveAttribute("aria-selected", "true");
-    expect(document.getElementById("session-panel-context")!.hidden).toBe(true);
-    fireEvent.keyDown(transcriptTab, { key: "End" });
-    expect(contextTab).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(contextTab, { key: "Home" });
-    expect(transcriptTab).toHaveAttribute("aria-selected", "true");
+    expectSelected(transcriptTab, contextTab);
+    for (const [key, expected] of [
+      ["ArrowRight", contextTab],
+      ["ArrowRight", transcriptTab],
+      ["ArrowLeft", contextTab],
+      ["Home", transcriptTab],
+      ["End", contextTab],
+      ["Enter", contextTab],
+      [" ", contextTab],
+    ] as const) {
+      fireEvent.keyDown(document.activeElement!, { key });
+      expect(expected).toHaveFocus();
+      expectSelected(
+        expected,
+        expected === transcriptTab ? contextTab : transcriptTab,
+      );
+    }
+    fireEvent.click(transcriptTab);
+    expectSelected(transcriptTab, contextTab);
   });
 });
