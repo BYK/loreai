@@ -3,6 +3,8 @@ import {
   chmodSync,
   constants,
   existsSync,
+  fchmodSync,
+  linkSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
@@ -367,12 +369,7 @@ test.skipIf(process.platform === "win32")(
     try {
       expect(existsSync(owned.path)).toBe(true);
       const reused = createUpgradeDownloadDirectory(executable, receipt);
-      if (process.platform === "darwin") {
-        expect(reused.path).not.toBe(owned.path);
-        expect(readFileSync(join(owned.path, "lore.download"))).toHaveLength(0);
-      } else {
-        expect(reused.path).toBe(owned.path);
-      }
+      expect(reused.path).toBe(owned.path);
       closeUpgradeDownloadDirectory(reused);
       expect(readFileSync(join(forged, "lore.download"), "utf8")).toBe(
         "keep this",
@@ -384,24 +381,120 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test.skipIf(process.platform !== "darwin")(
-  "Darwin retains a truncated output and starts the next download in a new directory",
-  () => {
-    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-darwin-retain-"));
+test.skipIf(process.platform !== "darwin").each([false, true])(
+  "reuses one Darwin staging directory after a download (published: %s)",
+  (published) => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-darwin-reuse-"));
     vi.stubEnv("TMPDIR", root);
     try {
       const executable = join(root, "lore");
       const receipt = join(root, "install-path");
-      const first = createUpgradeDownloadDirectory(executable, receipt);
-      const output = openUpgradeDownloadFile(first, "lore.download");
-      writeFileSync(output, "partial binary");
-      closeUpgradeDownloadDirectory(first);
-      expect(readFileSync(join(first.path, "lore.download"))).toHaveLength(0);
+      let previous: string | undefined;
+      for (const attempt of [1, 2, 3]) {
+        const directory = createUpgradeDownloadDirectory(executable, receipt);
+        try {
+          if (previous) expect(directory.path).toBe(previous);
+          previous = directory.path;
+          const output = openUpgradeDownloadFile(directory, "lore.download");
+          writeFileSync(output, `attempt ${attempt}`);
+          if (published) {
+            fchmodSync(directory.fileFd!, 0o755);
+            expect(removeUpgradeDownloadDirectory(directory)).toBe(true);
+          }
+        } finally {
+          closeUpgradeDownloadDirectory(directory);
+        }
+        expect(
+          readFileSync(join(directory.path, "lore.download")),
+        ).toHaveLength(0);
+        expect(
+          lstatSync(join(directory.path, "lore.download")).mode & 0o777,
+        ).toBe(0o700);
+      }
+      expect(readdirSync(root)).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
-      const second = createUpgradeDownloadDirectory(executable, receipt);
+test
+  .skipIf(process.platform !== "darwin")
+  .each([
+    "nonempty",
+    "symlink",
+    "hardlink",
+    "permissions",
+    "special-permissions",
+  ])("preserves an ineligible Darwin staging output: %s", (kind) => {
+  const root = mkdtempSync(join(tmpdir(), "lore-upgrade-ineligible-"));
+  vi.stubEnv("TMPDIR", root);
+  const executable = join(root, "lore");
+  const receipt = join(root, "install-path");
+  try {
+    const first = createUpgradeDownloadDirectory(executable, receipt);
+    const output = openUpgradeDownloadFile(first, "lore.download");
+    writeFileSync(output, "old download");
+    closeUpgradeDownloadDirectory(first);
+    const path = join(first.path, "lore.download");
+    const sentinel = join(root, "sentinel");
+    writeFileSync(sentinel, "keep this");
+    if (kind === "nonempty") writeFileSync(path, "keep this");
+    if (kind === "symlink") {
+      unlinkSync(path);
+      symlinkSync(sentinel, path);
+    }
+    if (kind === "hardlink") linkSync(path, join(root, "linked-output"));
+    if (kind === "permissions") chmodSync(path, 0o777);
+    if (kind === "special-permissions") chmodSync(path, 0o4700);
+    const before = lstatSync(path);
+    const second = createUpgradeDownloadDirectory(executable, receipt);
+    try {
       expect(second.path).not.toBe(first.path);
+    } finally {
       closeUpgradeDownloadDirectory(second);
-      expect(readFileSync(join(first.path, "lore.download"))).toHaveLength(0);
+    }
+    expect(lstatSync(path).ino).toBe(before.ino);
+    expect(lstatSync(path).mode).toBe(before.mode);
+    expect(readFileSync(sentinel, "utf8")).toBe("keep this");
+    expect(readFileSync(path, "utf8")).toBe(
+      kind === "nonempty" || kind === "symlink" ? "keep this" : "",
+    );
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform !== "darwin").each(["contents", "identity"])(
+  "rechecks retained Darwin output %s before writing",
+  (changed) => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-retained-race-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = join(root, "lore");
+    const receipt = join(root, "install-path");
+    try {
+      const first = createUpgradeDownloadDirectory(executable, receipt);
+      openUpgradeDownloadFile(first, "lore.download");
+      closeUpgradeDownloadDirectory(first);
+      const second = createUpgradeDownloadDirectory(executable, receipt);
+      try {
+        expect(second.path).toBe(first.path);
+        const path = join(second.path, "lore.download");
+        if (changed === "identity") {
+          renameSync(path, `${path}.original`);
+          writeFileSync(path, "", { mode: 0o700 });
+        } else writeFileSync(path, "keep this");
+        expect(() =>
+          openUpgradeDownloadFile(second, "lore.download"),
+        ).toThrow();
+        expect(readFileSync(path, "utf8")).toBe(
+          changed === "identity" ? "" : "keep this",
+        );
+      } finally {
+        closeUpgradeDownloadDirectory(second);
+      }
     } finally {
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });

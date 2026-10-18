@@ -5,6 +5,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  fchmodSync,
   ftruncateSync,
   fsyncSync,
   lstatSync,
@@ -42,6 +43,7 @@ export interface UpgradeDownloadDirectory {
   outputName?: string;
   expectedScope?: string;
   fileFd?: number;
+  retainedOutput?: { device: bigint; inode: bigint };
 }
 
 function trustedTempRoot(): string {
@@ -131,6 +133,37 @@ function openDirectoryFile(
   }
 }
 
+/** Reuse only empty, private output inodes; never truncate an existing pathname. */
+function openRetainedDownloadFile(
+  directory: UpgradeDownloadDirectory,
+  name: string,
+): number {
+  const fd = openDirectoryFile(
+    directory,
+    name,
+    constants.O_RDWR | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const stat = fstatSync(fd, { bigint: true });
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1n ||
+      stat.size !== 0n ||
+      (stat.mode & 0o7777n) !== 0o700n ||
+      (process.getuid !== undefined && stat.uid !== BigInt(process.getuid()))
+    ) {
+      throw new UpgradeError(
+        "execution_failed",
+        "Retained upgrade download is not empty and private",
+      );
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
 function scope(executable: string, receiptPath: string): string {
   return createHash("sha256")
     .update(`${executable}\n${receiptPath}`)
@@ -148,11 +181,28 @@ function reusableDownloadDirectory(
       const directory = openUpgradeDownloadDirectory(join(root, name));
       const selected = { value: false };
       try {
+        const outputName = `${basename(executable)}.download`;
+        const names = readdirSync(anchoredPath(directory, "."));
+        const markerOnly = names.length === 1 && names[0] === MARKER;
+        const retainedOutput =
+          process.platform === "darwin" &&
+          names.length === 2 &&
+          names.includes(MARKER) &&
+          names.includes(outputName);
         if (
-          readdirSync(anchoredPath(directory, ".")).join("\n") === MARKER &&
+          (markerOnly || retainedOutput) &&
           hasMarker(directory, scope(executable, receiptPath))
         ) {
-          directory.outputName = `${basename(executable)}.download`;
+          if (retainedOutput) {
+            const fd = openRetainedDownloadFile(directory, outputName);
+            try {
+              const stat = fstatSync(fd, { bigint: true });
+              directory.retainedOutput = { device: stat.dev, inode: stat.ino };
+            } finally {
+              closeSync(fd);
+            }
+          }
+          directory.outputName = outputName;
           directory.expectedScope = scope(executable, receiptPath);
           selected.value = true;
           return directory;
@@ -203,6 +253,13 @@ export function closeUpgradeDownloadDirectory(
   try {
     if (directory.fileFd !== undefined) {
       try {
+        // Verified binaries become executable before installation. Restore the
+        // private staging mode through the held fd so normal closes are reusable.
+        fchmodSync(directory.fileFd, 0o700);
+      } catch {
+        // Still release the downloaded bytes when permission restoration fails.
+      }
+      try {
         ftruncateSync(directory.fileFd, 0);
       } catch {
         // Closing an unnamed inode always releases its bytes even if truncation fails.
@@ -240,18 +297,40 @@ export function openUpgradeDownloadFile(
             );
           }
         })()
-      : openDirectoryFile(
-          directory,
-          name,
-          constants.O_CREAT |
-            constants.O_EXCL |
-            constants.O_RDWR |
-            (constants.O_NOFOLLOW ?? 0),
-          0o700,
-        );
+      : directory.retainedOutput
+        ? (() => {
+            if (name !== directory.outputName)
+              throw new Error("Retained upgrade download filename changed");
+            const fd = openRetainedDownloadFile(directory, name);
+            try {
+              const stat = fstatSync(fd, { bigint: true });
+              if (
+                stat.dev !== directory.retainedOutput.device ||
+                stat.ino !== directory.retainedOutput.inode
+              ) {
+                throw new UpgradeError(
+                  "execution_failed",
+                  "Retained upgrade download changed before opening",
+                );
+              }
+              return fd;
+            } catch (error) {
+              closeSync(fd);
+              throw error;
+            }
+          })()
+        : openDirectoryFile(
+            directory,
+            name,
+            constants.O_CREAT |
+              constants.O_EXCL |
+              constants.O_RDWR |
+              (constants.O_NOFOLLOW ?? 0),
+            0o700,
+          );
   directory.fileFd = fd;
-  // Linux opens an unnamed inode. Darwin retains its exclusive filename and
-  // never unlinks a potentially replaced directory entry.
+  // Linux opens an unnamed inode. Darwin retains its private filename for
+  // empty-inode reuse and never unlinks a potentially replaced directory entry.
   return process.platform === "linux"
     ? `/proc/self/fd/${fd}`
     : process.platform === "darwin"
