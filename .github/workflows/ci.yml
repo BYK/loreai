@@ -316,7 +316,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes lcov
-          lcov --branch-coverage --add-tracefile coverage/lcov.info --add-tracefile coverage-macos/lcov.info --output-file coverage/combined.info
+          # V8 can emit negative branch counters; LCOV clamps these to zero
+          # while preserving line hits and reporting a warning.
+          lcov --branch-coverage --ignore-errors negative --add-tracefile coverage/lcov.info --add-tracefile coverage-macos/lcov.info --output-file coverage/combined.info
 
       # codecov.yml keeps project status informational and PR comments enabled.
       # The 80% patch target is enforced on pull requests, and informational on
