@@ -54,6 +54,10 @@ type PacingState = {
   valid: boolean;
 };
 
+// Prime before the gateway accepts requests. Request/response pacing fences
+// only consult this in-memory snapshot and never synchronously read SQLite.
+let pacingStateSnapshot: PacingState | null = null;
+
 export type BudgetMatch = {
   provider: string;
   auth_kind: ProviderAuthKind;
@@ -260,9 +264,22 @@ function readPacingState(): PacingState {
   return { settings, generations, valid: true };
 }
 
+function refreshPacingStateSnapshot(): PacingState {
+  const state = readPacingState();
+  pacingStateSnapshot = state;
+  return state;
+}
+
+/** Load durable switches and generations before the gateway accepts requests. */
+export function initializeProviderPacingState(): void {
+  refreshPacingStateSnapshot();
+}
+
 /** Stored switches; invalid or duplicate state disables pacing. Never throws. */
 export function getPacingSettings(): PacingSetting[] {
-  return readPacingState().settings;
+  return refreshPacingStateSnapshot().settings.map((setting) => ({
+    ...setting,
+  }));
 }
 
 function pacingGeneration(
@@ -297,8 +314,8 @@ export function capturePacingGeneration(
   match: Pick<BudgetMatch, "provider" | "account" | "auth_kind">,
 ): string | null {
   if (match.auth_kind !== "subscription") return null;
-  const state = readPacingState();
-  if (!state.valid) return null;
+  const state = pacingStateSnapshot;
+  if (!state?.valid) return null;
   return pacingGeneration(state, match.provider, match.account);
 }
 
@@ -309,9 +326,9 @@ export function isPacingGenerationCurrent(
 ): boolean {
   if (match.auth_kind !== "subscription") return true;
   if (generation === null) return false;
-  const state = readPacingState();
+  const state = pacingStateSnapshot;
   return (
-    state.valid &&
+    state?.valid === true &&
     pacingGeneration(state, match.provider, match.account) === generation
   );
 }
@@ -340,7 +357,7 @@ export function isPacingEpochCurrent(
 export function setPacingEnabled(input: PacingSetting): boolean {
   const setting = parseSetting(input);
   if (typeof setting === "string") return false;
-  const state = readPacingState();
+  const state = refreshPacingStateSnapshot();
   if (!state.valid) return false;
   const hasExactSetting = state.settings.some(
     (entry) =>
@@ -405,6 +422,7 @@ export function setPacingEnabled(input: PacingSetting): boolean {
     PROVIDER_PACING_KV_KEY,
     JSON.stringify({ version: 1, settings: next, generations }),
   );
+  pacingStateSnapshot = { settings: next, generations, valid: true };
   providerPacingEpochs.set(setting.provider, currentEpoch + 1);
   if (!setting.enabled) {
     // Disabling pacing discards every held recommendation so toggling
@@ -428,8 +446,10 @@ export function setPacingEnabled(input: PacingSetting): boolean {
 }
 
 export function isPacingEnabled(provider: string, account: string): boolean {
-  const state = readPacingState();
-  return state.valid && pacingEnabledInState(state, provider, account);
+  const state = pacingStateSnapshot;
+  return (
+    state?.valid === true && pacingEnabledInState(state, provider, account)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +645,7 @@ export function _resetPacingTrackerForTest(): void {
   rateTracks.clear();
   requestGaps.clear();
   providerPacingEpochs.clear();
+  refreshPacingStateSnapshot();
 }
 
 export function _pacingTrackerSizesForTest(): {

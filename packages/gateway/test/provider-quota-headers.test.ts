@@ -23,7 +23,10 @@ function clearQuotas(): void {
   db().exec("DELETE FROM provider_quotas");
 }
 
-beforeEach(clearQuotas);
+beforeEach(() => {
+  clearQuotas();
+  _resetPacingTrackerForTest();
+});
 
 describe("parseProviderQuotaHeaders", () => {
   test("anthropic unified 5h/7d windows", () => {

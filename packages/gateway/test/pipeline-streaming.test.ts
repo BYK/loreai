@@ -2407,7 +2407,9 @@ describe("foreground subscription pacing", () => {
 
       const now = Date.now();
       for (const account of accounts) {
-        setPacingEnabled({ provider: "openai", account, enabled: true });
+        expect(
+          setPacingEnabled({ provider: "openai", account, enabled: true }),
+        ).toBe(true);
         expect(
           upsertProviderQuota({
             provider: "openai",
@@ -2431,15 +2433,13 @@ describe("foreground subscription pacing", () => {
       }
 
       const request = makeResponsesRequest({ sessionHeaders: {} });
-      if (typeof recordSuccessfulChatGPTAuth === "function") {
-        recordSuccessfulChatGPTAuth({
-          credential,
-          upstreamURL: "https://chatgpt.com/backend-api",
-          responseURL: "https://chatgpt.com/backend-api",
-          responseStatus: 200,
-          directUpstreamResponse: true,
-        });
-      }
+      recordSuccessfulChatGPTAuth({
+        credential,
+        upstreamURL: "https://chatgpt.com/backend-api",
+        responseURL: "https://chatgpt.com/backend-api",
+        responseStatus: 200,
+        directUpstreamResponse: true,
+      });
       request.rawHeaders["x-lore-session-id"] = sessionID;
       request.rawHeaders["x-lore-provider"] = "openai-codex";
       request.rawHeaders["x-lore-upstream-url"] =
@@ -2514,18 +2514,16 @@ describe("foreground subscription pacing", () => {
         .db()
         .query("DELETE FROM kv_meta WHERE key = ?")
         .run("provider_pacing");
-      if (typeof recordSuccessfulChatGPTAuth === "function") {
-        recordSuccessfulChatGPTAuth({
-          credential: {
-            scheme: "bearer",
-            value: "opaque-pacing-test-token",
-          },
-          upstreamURL: "https://chatgpt.com/backend-api",
-          responseURL: "https://chatgpt.com/backend-api",
-          responseStatus: 200,
-          directUpstreamResponse: true,
-        });
-      }
+      recordSuccessfulChatGPTAuth({
+        credential: {
+          scheme: "bearer",
+          value: "opaque-pacing-test-token",
+        },
+        upstreamURL: "https://chatgpt.com/backend-api",
+        responseURL: "https://chatgpt.com/backend-api",
+        responseStatus: 200,
+        directUpstreamResponse: true,
+      });
       const request = makeResponsesRequest({ sessionHeaders: {} });
       request.rawHeaders["x-lore-session-id"] = sessionID;
       request.rawHeaders["x-lore-provider"] = "openai-codex";
@@ -2549,10 +2547,10 @@ describe("foreground subscription pacing", () => {
       await response.text();
       expect(recordRequest).toHaveBeenCalledOnce();
       expect(
-        info.mock.calls.some(
+        info.mock.calls.filter(
           ([message]) => message === "provider pacing observation failed",
         ),
-      ).toBe(true);
+      ).toHaveLength(1);
     } finally {
       recordRequest.mockRestore();
       info.mockRestore();

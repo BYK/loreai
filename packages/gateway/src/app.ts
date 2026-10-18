@@ -27,6 +27,7 @@ import type { GatewayConfig } from "./config";
 import { hasConflictingAuthHeaders } from "./auth";
 import { responseAgainstAbort } from "./abort-race";
 import { createForegroundAbortScope, wrapBodyWithCleanup } from "./pipeline";
+import { initializeProviderPacingState } from "./provider-budgets";
 import {
   browserOriginDeniedResponse,
   conflictingProviderAuthResponse,
@@ -338,6 +339,7 @@ export function createGatewayApp(
   config: GatewayConfig,
   options: GatewayAppOptions = {},
 ): Hono<GatewayEnv> {
+  initializeProviderPacingState();
   const app = new Hono<GatewayEnv>({ getPath: rawPathname });
 
   // Access policy first — ahead of every route, including static UI, health
