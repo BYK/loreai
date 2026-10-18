@@ -254,6 +254,25 @@ describe("Codex native tool security boundaries", () => {
     },
   );
 
+  test("rejects unsupported persisted server-owned call status on replay", () => {
+    const call = serverOwnedSearchItems[0];
+    const request = parseOpenAIResponsesRequest({ input: [{ ...call }] }, {});
+    const provenance = request.messages
+      .flatMap((message) => message.provenanceContent ?? [])
+      .find(
+        (block) =>
+          block.type === "opaque" && block.raw.type === "tool_search_call",
+      );
+    if (!provenance || provenance.type !== "opaque") {
+      throw new Error("expected server-owned Responses provenance");
+    }
+    provenance.raw.status = "unsupported";
+
+    expect(() =>
+      buildOpenAIResponsesUpstreamRequest(request, "https://provider.example"),
+    ).toThrow("Unsupported cross-provider request");
+  });
+
   test.each([
     [
       "function_call",
@@ -321,6 +340,34 @@ describe("Codex native tool security boundaries", () => {
     }
   });
 
+  test.each([
+    { label: "custom_tool_call", item: { ...customCall } },
+    { label: "client tool_search_call", item: { ...searchCall } },
+  ])("rejects unsupported status on $label ingress", ({ item }) => {
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        { input: [{ ...item, status: "unsupported" }] },
+        {},
+      ),
+    ).toThrow("Unsupported cross-provider request");
+  });
+
+  test.each([
+    {
+      label: "custom_tool_call in progress",
+      item: { ...customCall, status: "in_progress" },
+    },
+    {
+      label: "client tool_search_call in progress",
+      item: { ...searchCall, status: "in_progress" },
+    },
+  ])("accepts supported status on $label", ({ item }) => {
+    const request = parseOpenAIResponsesRequest({ input: [item] }, {});
+    expect(() =>
+      buildOpenAIResponsesUpstreamRequest(request, "https://provider.example"),
+    ).not.toThrow();
+  });
+
   const serverOwnedSearchItems = [
     {
       type: "tool_search_call",
@@ -379,6 +426,25 @@ describe("Codex native tool security boundaries", () => {
       ).toThrow("Unsupported cross-provider request");
     },
   );
+
+  test("preserves incomplete server-owned call status on replay", () => {
+    const call = serverOwnedSearchItems[0];
+    const request = parseOpenAIResponsesRequest({ input: [{ ...call }] }, {});
+    const provenance = request.messages
+      .flatMap((message) => message.provenanceContent ?? [])
+      .find(
+        (block) =>
+          block.type === "opaque" && block.raw.type === "tool_search_call",
+      );
+    if (!provenance || provenance.type !== "opaque") {
+      throw new Error("expected server-owned Responses provenance");
+    }
+    provenance.raw.status = "incomplete";
+
+    expect(() =>
+      buildOpenAIResponsesUpstreamRequest(request, "https://provider.example"),
+    ).not.toThrow();
+  });
 
   test.each(["missing", "non-array"] as const)(
     "rejects persisted server-owned tool_search_output with %s tools on replay",

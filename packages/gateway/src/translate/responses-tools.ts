@@ -85,9 +85,18 @@ export function assertNativeResponsesCall(raw: Record<string, unknown>): void {
           : [];
   if (allowed.length === 0) throw new InvalidCrossProviderRequestError();
   assertKnownNativeFields(raw, allowed);
+  // Calls can be in progress in input history and incomplete/failed in
+  // terminal Responses output; reject unknown strings without narrowing those
+  // valid protocol states to "completed".
+  const supportedStatuses =
+    raw.type === "function_call"
+      ? ["in_progress", "completed", "incomplete", "failed"]
+      : ["in_progress", "completed", "incomplete"];
   if (
     (raw.id !== undefined && typeof raw.id !== "string") ||
-    (raw.status !== undefined && typeof raw.status !== "string")
+    (raw.status !== undefined &&
+      (typeof raw.status !== "string" ||
+        !supportedStatuses.includes(raw.status)))
   ) {
     throw new InvalidCrossProviderRequestError();
   }
