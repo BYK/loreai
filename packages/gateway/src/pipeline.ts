@@ -1852,6 +1852,18 @@ function isConfidentlyBoundToProject(
   );
 }
 
+function isConfidentlyBoundToLogicalProject(
+  state: SessionState,
+  projectPath: string,
+): boolean {
+  // Claims and finalizers can change binding flags across an await. Read them
+  // here afresh rather than relying on the caller's pre-wait narrowing.
+  return (
+    state.projectPathProvisional !== true &&
+    sameLogicalProjectPath(state.projectPath, projectPath)
+  );
+}
+
 function hydrateHeaderSessionIndex(config: GatewayConfig): void {
   if (headerSessionIndexHydrated) return;
   restoreHeaderSessionMappings(config);
@@ -17938,8 +17950,7 @@ async function handleCompactionInner(
   // Waiting may publish an established alias of the authorized workspace.
   // Recheck its logical owner, never a prefix or an unresolved project name.
   if (
-    sessionState.projectPathProvisional === true ||
-    !sameLogicalProjectPath(sessionState.projectPath, authorizedProjectPath)
+    !isConfidentlyBoundToLogicalProject(sessionState, authorizedProjectPath)
   ) {
     return errorResponse(
       403,

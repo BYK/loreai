@@ -1269,6 +1269,11 @@ function hasProjectPathControlCharacter(value: string): boolean {
   return false;
 }
 
+function reminderHeaderEnd(value: string, end = value.length): number {
+  while (end > 0 && (value[end - 1] === " " || value[end - 1] === "\t")) end--;
+  return end;
+}
+
 /**
  * Only an instruction-file header at the start of the reminder can provide
  * provenance. Everything after that first header is file content: additional
@@ -1282,18 +1287,35 @@ export function inferClaudeCodeReminderProjectPath(
   if (!line) return null;
   // The client-generated first header bounds the file body. Never scan that
   // body for more provenance, even for unfenced examples or ordinary prose.
-  const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(
-    line,
-  );
+  const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+/.exec(line);
   if (!record) return null;
-  // Parse the entire header before validating the path. Silently skipping a
-  // real record with unsupported characters lets a forged second record win.
-  const match =
-    /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(
-      record[1],
-    );
-  if (!match) throw new ProjectPathConflictError();
-  const path = match[1].replace(/\/+$/, "");
+  // Bound the complete metadata header, including padding and annotations,
+  // before parsing it. Overlapping whitespace regexes can block the event loop
+  // before a path-only length check ever runs.
+  if (line.length > MAX_PROJECT_PATH_LENGTH + 4096) {
+    throw new ProjectPathConflictError();
+  }
+  const value = line.slice(record[0].length);
+  if (!value.startsWith("/") || /[\r\n\u2028\u2029]/.test(value)) {
+    throw new ProjectPathConflictError();
+  }
+  let end = reminderHeaderEnd(value);
+  if (value[end - 1] === ":") end = reminderHeaderEnd(value, end - 1);
+  const files = /\/(?:CLAUDE|AGENTS|\.lore)\.md/g;
+  let pathEnd: number | undefined;
+  for (const file of value.matchAll(files)) {
+    let suffix = file.index + file[0].length;
+    while (suffix < end && (value[suffix] === " " || value[suffix] === "\t"))
+      suffix++;
+    if (suffix !== end && !(value[suffix] === "(" && value[end - 1] === ")"))
+      continue;
+    // A filename inside an annotation must not create a competing path claim.
+    // Reject ambiguous headers instead of choosing a different workspace.
+    if (pathEnd !== undefined) throw new ProjectPathConflictError();
+    pathEnd = file.index;
+  }
+  if (pathEnd === undefined) throw new ProjectPathConflictError();
+  const path = value.slice(0, pathEnd).replace(/\/+$/, "");
   if (
     !path ||
     path.length > MAX_PROJECT_PATH_LENGTH ||

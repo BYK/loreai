@@ -15,6 +15,7 @@
  */
 import { afterEach, describe, expect, it, test, vi } from "vitest";
 import { dirname } from "node:path";
+import { spawn } from "node:child_process";
 import fc from "fast-check";
 import {
   ltm,
@@ -504,6 +505,72 @@ describe("isClaudeCodeSideChannel", () => {
     ).toBe(true);
   });
 
+  test(
+    "rejects adversarial reminder header padding within an isolated deadline",
+    { timeout: 45_000 },
+    async () => {
+      // Start the deadline only after imports complete. A parser stall must not
+      // block Vitest's own event loop or be confused with child setup failure.
+      const moduleURL = new URL("../src/config.ts", import.meta.url).href;
+      const child = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          `
+      try {
+        const { inferClaudeCodeReminderProjectPath, ProjectPathConflictError } = await import(${JSON.stringify(moduleURL)});
+        process.once("message", () => {
+          for (const padding of [30_000, 4_000]) {
+            try {
+              inferClaudeCodeReminderProjectPath("Instructions from: /client/projects/one/CLAUDE.md" + " ".repeat(padding) + "X");
+              process.send("accepted");
+              return;
+            } catch (error) {
+              if (!(error instanceof ProjectPathConflictError)) {
+                process.send("unexpected-error");
+                return;
+              }
+            }
+          }
+          process.send("rejected");
+        });
+        process.send("ready");
+      } catch { process.send("setup-failed"); }
+    `,
+        ],
+        { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const outcome = await new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("setup-deadline"), 30_000);
+          child.once("error", () => resolve("setup-failed"));
+          child.once("exit", () => resolve("exited-before-result"));
+          child.on("message", (message) => {
+            if (message === "ready") {
+              clearTimeout(timer);
+              timer = setTimeout(() => resolve("parser-deadline"), 5_000);
+              child.send("run");
+            } else if (typeof message === "string") resolve(message);
+          });
+        });
+        expect(outcome).toBe("rejected");
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) {
+          const exited = new Promise<void>((resolve) =>
+            child.once("exit", () => resolve()),
+          );
+          child.kill("SIGKILL");
+          await exited;
+        }
+      }
+    },
+  );
+
   test("reminder project paths preserve spaces, Unicode, and worktree ancestors", () => {
     fc.assert(
       fc.property(
@@ -514,7 +581,13 @@ describe("isClaudeCodeSideChannel", () => {
           "/client/projects/app/.claude/worktrees/feature",
         ),
         fc.constantFrom("CLAUDE", "AGENTS", ".lore"),
-        (marker, path, file) => {
+        fc.constantFrom(
+          "",
+          ":\t",
+          " (project instructions):",
+          "\t (see /reference/AGENTS.md and (nested)) \t: \t",
+        ),
+        (marker, path, file, suffix) => {
           expect(
             getRequestProjectPath(
               makeRequest({
@@ -525,7 +598,7 @@ describe("isClaudeCodeSideChannel", () => {
                     content: [
                       {
                         type: "text",
-                        text: `<system-reminder>\n${marker} ${path}/${file}.md\n</system-reminder>`,
+                        text: `<system-reminder>\n${marker} ${path}/${file}.md${suffix}\n</system-reminder>`,
                       },
                     ],
                   },
