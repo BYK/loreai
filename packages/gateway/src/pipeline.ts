@@ -518,6 +518,13 @@ import {
   type ResolveProjectResult,
 } from "./synthetic-tools";
 
+function isUnnamespacedResponsesItem(
+  item: { namespace?: unknown } | null | undefined,
+): boolean {
+  // Some upstreams serialize the absent namespace explicitly as null.
+  return item?.namespace === undefined || item.namespace === null;
+}
+
 function requestSourceMessageCount(req: GatewayRequest): number {
   return (
     (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + req.messages.length
@@ -10716,7 +10723,7 @@ export function streamResponsesRecallAware(
       if (
         item.type === "function_call" &&
         item.name === RECALL_TOOL_NAME &&
-        item.namespace === undefined &&
+        isUnnamespacedResponsesItem(item) &&
         item.status !== undefined &&
         item.status !== "in_progress" &&
         item.status !== "completed"
@@ -11204,7 +11211,7 @@ export function streamResponsesRecallAware(
           }
           if (
             item.name === RECALL_TOOL_NAME &&
-            item.namespace === undefined &&
+            isUnnamespacedResponsesItem(item) &&
             item?.status !== undefined &&
             item.status !== "completed"
           ) {
@@ -13443,7 +13450,9 @@ export function streamResponsesRecallAware(
                 "function_call" &&
               (parsed.item as Record<string, unknown>).name ===
                 RECALL_TOOL_NAME &&
-              (parsed.item as Record<string, unknown>).namespace === undefined
+              isUnnamespacedResponsesItem(
+                parsed.item as Record<string, unknown> | undefined,
+              )
             ) {
               recallDetected = true;
             }
@@ -13477,7 +13486,7 @@ export function streamResponsesRecallAware(
                 if (
                   item.type !== "function_call" ||
                   item.name !== RECALL_TOOL_NAME ||
-                  item.namespace !== undefined
+                  !isUnnamespacedResponsesItem(item)
                 ) {
                   return;
                 }
@@ -13516,7 +13525,7 @@ export function streamResponsesRecallAware(
               const isRecallCall =
                 item?.type === "function_call" &&
                 item?.name === "recall" &&
-                item?.namespace === undefined;
+                isUnnamespacedResponsesItem(item);
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
@@ -13679,7 +13688,9 @@ export function streamResponsesRecallAware(
                       "function_call" &&
                     (item as Record<string, unknown>).name ===
                       RECALL_TOOL_NAME &&
-                    (item as Record<string, unknown>).namespace === undefined,
+                    isUnnamespacedResponsesItem(
+                      item as Record<string, unknown>,
+                    ),
                 )
               ) {
                 recallDetected = true;
@@ -13692,7 +13703,7 @@ export function streamResponsesRecallAware(
                     if (
                       item.type !== "function_call" ||
                       item.name !== RECALL_TOOL_NAME ||
-                      item.namespace !== undefined ||
+                      !isUnnamespacedResponsesItem(item) ||
                       (!recallIndices.has(outputIndex) &&
                         !unresolvedToolIndices.has(outputIndex))
                     ) {
@@ -13708,7 +13719,7 @@ export function streamResponsesRecallAware(
                     if (item.type !== "function_call") return;
                     if (
                       item.name === RECALL_TOOL_NAME &&
-                      item.namespace === undefined
+                      isUnnamespacedResponsesItem(item)
                     ) {
                       collectCompletedRecall(
                         state,
@@ -14266,7 +14277,7 @@ export function streamResponsesRecallAware(
                             if (
                               item?.type === "function_call" &&
                               item.name === RECALL_TOOL_NAME &&
-                              item.namespace === undefined
+                              isUnnamespacedResponsesItem(item)
                             ) {
                               contRecallIndices.add(ci);
                               resolvingRecallTool = true;
@@ -14412,7 +14423,7 @@ export function streamResponsesRecallAware(
                                   if (
                                     item.type !== "function_call" ||
                                     item.name !== RECALL_TOOL_NAME ||
-                                    item.namespace !== undefined
+                                    !isUnnamespacedResponsesItem(item)
                                   ) {
                                     return;
                                   }
@@ -14425,7 +14436,7 @@ export function streamResponsesRecallAware(
                                   if (item.type !== "function_call") return;
                                   if (
                                     item.name === RECALL_TOOL_NAME &&
-                                    item.namespace === undefined
+                                    isUnnamespacedResponsesItem(item)
                                   ) {
                                     collectCompletedRecall(
                                       contState,
@@ -15561,7 +15572,7 @@ export function streamResponsesRecallAware(
             (item) =>
               item.type !== "function_call" ||
               ((item.name !== RECALL_TOOL_NAME ||
-                item.namespace !== undefined) &&
+                !isUnnamespacedResponsesItem(item)) &&
                 ![item.id, item.call_id].some(
                   (identity) =>
                     typeof identity === "string" &&
