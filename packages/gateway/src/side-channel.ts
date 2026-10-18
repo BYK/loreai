@@ -32,6 +32,7 @@ import {
   getProjectPath,
   inferClaudeCodeReminderProjectPath,
   inferProjectPathDetailed,
+  sameLogicalProjectPath,
   type ProjectPathResult,
 } from "./config";
 import { isClaudeCodeClient } from "./session";
@@ -119,7 +120,7 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
         const later = reminder
           ? inferClaudeCodeReminderProjectPath(reminder)
           : null;
-        if (later && later.path !== result.path) {
+        if (later && !sameLogicalProjectPath(later.path, result.path)) {
           throw new ProjectPathConflictError();
         }
       }

@@ -193,6 +193,7 @@ import {
   normalizeUpstreamBase,
   unattributedBucketPath,
   ProjectPathConflictError,
+  sameLogicalProjectPath,
   type ProjectPathResult,
 } from "./config";
 import {
@@ -1823,16 +1824,6 @@ function conflictsWithConfidentSessionProject(
     persisted.projectPathProvisional === false &&
     !sameLogicalProjectPath(persisted.projectPath, pathResult.path)
   );
-}
-
-function sameLogicalProjectPath(previous: string, next: string): boolean {
-  if (previous === next) return true;
-  const previousID = projectId(previous);
-  const nextID = projectId(next);
-  // Only tenant-scoped, already-established identity proves an alias. Neither
-  // path prefixes nor missing project rows authorize a project switch.
-  const owner = previousID ? canonicalProjectId(previousID) : undefined;
-  return !!owner && !!nextID && owner === canonicalProjectId(nextID);
 }
 
 /** Reject a project switch before any session-scoped prompt data or controls run. */

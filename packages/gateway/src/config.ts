@@ -1,11 +1,12 @@
 /**
  * Gateway configuration — loaded from environment variables with sensible
- * defaults. No Zod, no file-based config — minimal @loreai/core dependency
- * (only `normalizeRemoteUrl` for git URL canonicalization).
+ * defaults, workspace attribution, and tenant-scoped project identity checks.
  */
 
 import {
   normalizeRemoteUrl,
+  projectId,
+  canonicalProjectId,
   discoverWorkspaceRoot,
   GATEWAY_AUTH_HEADER,
   UNATTRIBUTED_PROJECT_PREFIX,
@@ -1246,6 +1247,28 @@ export class ProjectPathConflictError extends Error {
   }
 }
 
+/** Compare only already-established project identities in the current tenant. */
+export function sameLogicalProjectPath(
+  previous: string,
+  next: string,
+): boolean {
+  if (previous === next) return true;
+  const previousID = projectId(previous);
+  const nextID = projectId(next);
+  // A path prefix or two missing identities must never authorize a switch.
+  // Request provenance and post-wait session guards must use the same proof.
+  const owner = previousID ? canonicalProjectId(previousID) : undefined;
+  return !!owner && !!nextID && owner === canonicalProjectId(nextID);
+}
+
+function hasProjectPathControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
 /**
  * Only an instruction-file header at the start of the reminder can provide
  * provenance. Everything after that first header is file content: additional
@@ -1274,10 +1297,7 @@ export function inferClaudeCodeReminderProjectPath(
   if (
     !path ||
     path.length > MAX_PROJECT_PATH_LENGTH ||
-    [...path].some(
-      (character) =>
-        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
-    ) ||
+    hasProjectPathControlCharacter(path) ||
     path.includes("//") ||
     path.split("/").some((part) => part === "." || part === "..") ||
     isUnattributedPath(path)
@@ -1286,13 +1306,10 @@ export function inferClaudeCodeReminderProjectPath(
   }
   // User-level Claude Code instructions are shared across projects. They
   // cannot be used to identify the active workspace.
-  // Match user-global instruction roots, not every .claude ancestor: actual
-  // workspaces can live in a project's .claude/worktrees directory.
-  if (
-    /^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(
-      path,
-    )
-  ) {
+  // Home layouts are arbitrary on remote clients. Terminal instruction roots
+  // need independent attribution, regardless of their parent directory. Do not
+  // exclude all .claude ancestors: real workspaces can live in .claude/worktrees.
+  if (path.endsWith("/.claude") || path.endsWith("/.config/claude")) {
     return null;
   }
   return { path, authoritative: true };
@@ -1388,8 +1405,9 @@ export function getProjectPath(
   if (
     reminderPath &&
     (inferred?.authoritative
-      ? inferred.path !== reminderPath.path
-      : headerPath !== undefined && headerPath !== reminderPath.path)
+      ? !sameLogicalProjectPath(inferred.path, reminderPath.path)
+      : headerPath !== undefined &&
+        !sameLogicalProjectPath(headerPath, reminderPath.path))
   ) {
     throw new ProjectPathConflictError();
   }

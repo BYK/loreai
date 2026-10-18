@@ -582,6 +582,43 @@ describe("isClaudeCodeSideChannel", () => {
     ).toThrow("Conflicting project paths");
   });
 
+  test("reminder project paths preserve global-root isolation outside standard homes", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom("a", "team", "日本語", "my home"), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        fc.constantFrom(".claude", ".config/claude"),
+        (segments, terminal) => {
+          const root = `/nonstandard/${segments.join("/")}/${terminal}`;
+          const reminder = `<system-reminder>Instructions from: ${root}/CLAUDE.md\nGlobal instructions.</system-reminder>`;
+          const request = makeRequest({
+            rawHeaders: { ...CC_SESSION_HEADERS, "x-lore-project": "" },
+            messages: [
+              { role: "user", content: [{ type: "text", text: reminder }] },
+            ],
+          });
+          expect(getRequestProjectPath(request)).toMatchObject({
+            source: "cwd",
+          });
+          expect(
+            getRequestProjectPath(request).openingReminderProjectPath,
+          ).toBeUndefined();
+          expect(
+            getRequestProjectPath({
+              ...request,
+              rawHeaders: {
+                ...request.rawHeaders,
+                "x-lore-project": "/client/projects/one",
+              },
+            }),
+          ).toMatchObject({ path: "/client/projects/one", source: "header" });
+        },
+      ),
+    );
+  });
+
   test("an opening reminder agreeing with an authoritative system path keeps system precedence", () => {
     const request = makeRequest({
       rawHeaders: {
@@ -2053,6 +2090,149 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       const response = await harness.chat(body, "test-key", headers);
       expect(response.status).toBe(200);
       await response.text();
+    },
+  );
+
+  it.each(
+    ["history", "header", "system"].flatMap((source) =>
+      [false, true].map((slash) => ({ source, slash })),
+    ),
+  )(
+    "accepts canonical alias request provenance across $source (slash=$slash)",
+    async ({ source, slash }) => {
+      harness = await createHarness({
+        fixtures: [0, 1].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Alias coding reply",
+          }),
+        ),
+      });
+      const first = ensureProject("/client/projects/one");
+      mergeProjectInternal(ensureProject("/client/projects/alias"), first);
+      expect(projectId("/client/projects/alias")).toBe(first);
+      const headers = {
+        ...CC_SESSION_HEADERS,
+        "x-claude-code-request-class": "main",
+        "x-lore-project": "",
+      };
+      const initialBody = newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+      );
+      const initial = await harness.chat(initialBody, "test-key", headers);
+      expect(initial.status).toBe(200);
+      await initial.text();
+      const reminder =
+        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>";
+      const body =
+        source === "history" ? initialBody : newClaudeCodeBody(reminder);
+      body.messages = [
+        ...(body.messages as Array<Record<string, unknown>>),
+        ...(source === "history" ? [{ role: "user", content: reminder }] : []),
+        {
+          role: "user",
+          content: slash ? "/lore:amnesia:on" : "Continue coding",
+        },
+      ];
+      if (source === "header")
+        headers["x-lore-project"] = "/client/projects/one";
+      if (source === "system")
+        body.system = [
+          {
+            type: "text",
+            text: "You are Claude Code.\nWorking directory: /client/projects/one",
+          },
+        ];
+      const response = await harness.chat(body, "test-key", headers);
+      expect(response.status).toBe(200);
+      await response.text();
+      if (slash)
+        expect(harness.queryDB("SELECT amnesia FROM session_state")).toEqual([
+          { amnesia: 1 },
+        ]);
+      else expect(harness.upstreamBodies()).toHaveLength(2);
+    },
+  );
+
+  it.each(
+    [
+      "/var/home/alice/.claude",
+      "/mnt/homes/alice/.config/claude",
+      "/srv/users/alice/.claude",
+    ].flatMap((root) => [false, true].map((header) => ({ root, header }))),
+  )(
+    "nonstandard global roots never establish workspace authority ($root, header=$header)",
+    async ({ root, header }) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [0, 1].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Global instructions reply",
+          }),
+        ),
+      });
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => {
+          for (const [index, path] of [
+            root,
+            "/client/projects/one",
+            "/client/projects/two",
+          ].entries())
+            ltm.create({
+              projectPath: path,
+              scope: "project",
+              category: "preference",
+              title: `Global-root isolation ${index}`,
+              content: `private-global-root-isolation-${index}`,
+            });
+        },
+      );
+      for (const [index, project] of ["one", "two"].entries()) {
+        const response = await harness.chat(
+          newClaudeCodeBody(
+            `<system-reminder>Instructions from: ${root}/CLAUDE.md\nGlobal instructions shared by workspaces.</system-reminder>`,
+          ),
+          "test-key",
+          {
+            ...CC_SESSION_HEADERS,
+            "x-claude-code-session-id": `nonstandard-home-${index}`,
+            "x-claude-code-request-class": "main",
+            "x-lore-project": header ? `/client/projects/${project}` : "",
+            "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+          },
+        );
+        expect(response.status).toBe(200);
+        await response.text();
+        const forwarded = harness.upstreamBodies().at(-1) ?? "";
+        expect(forwarded).not.toContain("private-global-root-isolation-0");
+        if (header)
+          expect(forwarded).toContain(
+            `private-global-root-isolation-${index + 1}`,
+          );
+        else expect(forwarded).not.toContain("private-global-root-isolation-");
+        expect(forwarded).not.toContain(
+          `private-global-root-isolation-${index === 0 ? 2 : 1}`,
+        );
+      }
+      const states = harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state ORDER BY header_session_id",
+      );
+      expect(states).toHaveLength(2);
+      expect(new Set(states.map((state) => state.project_path)).size).toBe(2);
+      for (const [index, state] of states.entries()) {
+        if (header)
+          expect(state.project_path).toBe(
+            `/client/projects/${index === 0 ? "one" : "two"}`,
+          );
+        else expect(state.project_path).toMatch(/^\/__lore_unattributed__\//);
+      }
     },
   );
 
