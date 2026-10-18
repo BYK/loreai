@@ -35,14 +35,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { TextField, TextFieldInput } from "../ui/text-field";
+import { ProjectPicker } from "./ProjectPicker";
 
 /** One notice per action kind; the last completed result is kept visible. */
 type Notice = { kind: "forbidden" | "error" | "result"; text: string };
@@ -348,7 +342,6 @@ const MoveSessionsDialog: Component<{
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [target, setTarget] = createSignal<string | null>(null);
   const [includeChildren, setIncludeChildren] = createSignal(true);
-  let contentEl: HTMLElement | undefined;
 
   const page = ws.state.sessions.page(() =>
     props.open ? { projectId: props.project.id, cursor: cursor() } : null,
@@ -389,11 +382,13 @@ const MoveSessionsDialog: Component<{
   );
   const sessionList = () => [...loaded().items.values()];
   const canSubmit = () =>
-    selected().size > 0 && target() !== null && !props.pending;
+    selected().size > 0 &&
+    targets().some((project) => project.id === target()) &&
+    !props.pending;
 
   return (
     <Dialog open={props.open} onOpenChange={(open) => !open && props.onClose()}>
-      <DialogContent ref={(el) => (contentEl = el)} tabIndex={-1}>
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Move sessions</DialogTitle>
           <DialogDescription>
@@ -451,44 +446,12 @@ const MoveSessionsDialog: Component<{
           </Switch>
         </div>
         <div class="mt-3">
-          <Select
-            // modal={false}: a modal Select inside the modal dialog locks
-            // focus/hides outside content and its Escape focus-restore lands
-            // on <body>, breaking the dialog's focus trap.
-            modal={false}
-            onOpenChange={(open) => {
-              // Kobalte restores focus to the trigger a frame late; during
-              // that gap the unmounted listbox leaves focus on <body> and Tab
-              // escapes the dialog's focus scope — snap it back now.
-              if (!open) contentEl?.focus();
-            }}
+          <ProjectPicker
+            projects={targets()}
             value={target()}
             onChange={setTarget}
-            options={targets().map((p) => p.id)}
-            placeholder="Choose a target project"
-            itemComponent={(item) => (
-              <SelectItem item={item.item}>
-                {targets().find((p) => p.id === item.item.rawValue)?.name ||
-                  targets().find((p) => p.id === item.item.rawValue)?.path}
-              </SelectItem>
-            )}
             disabled={props.pending || targets().length === 0}
-          >
-            <SelectTrigger aria-label="Target project" class="h-10">
-              <SelectValue<string>>
-                {(state) =>
-                  state.selectedOption()
-                    ? (targets().find((p) => p.id === state.selectedOption())
-                        ?.name ??
-                      targets().find((p) => p.id === state.selectedOption())
-                        ?.path ??
-                      state.selectedOption())
-                    : "Choose a target project"
-                }
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent />
-          </Select>
+          />
           <Show when={targets().length === 0}>
             <div class="mt-2 text-xs text-muted">
               No other project exists to move sessions into.

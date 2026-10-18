@@ -11,14 +11,7 @@ import type { PromotionListResponse, PromotionRequest } from "~/contracts";
 import { ApiError } from "~/lib/api";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "~/components/ui/dialog";
+import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { TextField, TextFieldTextArea } from "~/components/ui/text-field";
 import { StateCard } from "./StateCard";
 import { PromotionIdentity } from "./PromotionIdentity";
@@ -504,71 +497,51 @@ export const PromotionsPage: Component = () => {
         </Match>
       </Switch>
 
-      <Dialog
+      <ConfirmDialog
         open={confirmation() !== null}
-        onOpenChange={(open) => {
-          if (!open) closeConfirmation();
-        }}
+        title={
+          confirmation()?.decision === "approved"
+            ? "Approve this promotion?"
+            : "Reject this promotion?"
+        }
+        description={
+          confirmation()?.decision === "approved"
+            ? `Approving makes this knowledge visible to every member of ${confirmation()?.request.team.name ?? "the team"} after the proposer syncs.`
+            : "Rejecting keeps this knowledge private to the proposer."
+        }
+        confirmLabel={
+          confirmation()?.decision === "approved"
+            ? "Approve promotion"
+            : "Reject promotion"
+        }
+        pending={acting()}
+        pendingLabel="Saving…"
+        contentTestId="promotion-decision-dialog"
+        confirmTestId="promotion-confirm-decision"
+        onConfirm={() => void confirmDecision()}
+        onCancel={closeConfirmation}
       >
-        <DialogContent
-          role="alertdialog"
-          aria-label="Confirm promotion decision"
-          data-testid="promotion-decision-dialog"
-        >
-          <DialogHeader>
-            <DialogTitle>
-              {confirmation()?.decision === "approved"
-                ? "Approve this promotion?"
-                : "Reject this promotion?"}
-            </DialogTitle>
-            <DialogDescription>
-              {confirmation()?.decision === "approved"
-                ? `Approving makes this knowledge visible to every member of ${confirmation()?.request.team.name ?? "the team"} after the proposer syncs.`
-                : "Rejecting keeps this knowledge private to the proposer."}
-            </DialogDescription>
-          </DialogHeader>
-          <TextField>
-            <label for="promotion-note" class="text-sm font-medium">
-              Optional note
-            </label>
-            <TextFieldTextArea
-              id="promotion-note"
-              aria-label="Decision note"
-              maxLength={500}
-              value={note()}
-              onInput={(event) =>
-                setNote(event.currentTarget.value.slice(0, 500))
-              }
-            />
-            <div class="text-right text-xs text-muted">{note().length}/500</div>
-          </TextField>
-          <Show when={actionError()}>
-            <p role="alert" class="text-sm text-danger">
-              {actionErrorMessage()}
-            </p>
-          </Show>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              disabled={acting()}
-              onClick={closeConfirmation}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={acting()}
-              data-testid="promotion-confirm-decision"
-              onClick={() => void confirmDecision()}
-            >
-              {acting()
-                ? "Saving…"
-                : confirmation()?.decision === "approved"
-                  ? "Approve promotion"
-                  : "Reject promotion"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        <TextField>
+          <label for="promotion-note" class="text-sm font-medium">
+            Optional note
+          </label>
+          <TextFieldTextArea
+            id="promotion-note"
+            aria-label="Decision note"
+            maxLength={500}
+            value={note()}
+            onInput={(event) =>
+              setNote(event.currentTarget.value.slice(0, 500))
+            }
+          />
+          <div class="text-right text-xs text-muted">{note().length}/500</div>
+        </TextField>
+        <Show when={actionError()}>
+          <p role="alert" class="text-sm text-danger">
+            {actionErrorMessage()}
+          </p>
+        </Show>
+      </ConfirmDialog>
     </section>
   );
 };
