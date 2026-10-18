@@ -28,6 +28,7 @@ import {
 } from "./provider-budgets";
 import {
   observeProviderQuotaHeaders,
+  recordProviderQuotaForegroundRequest,
   providerQuotaObservationStartedAt,
 } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
@@ -8652,25 +8653,40 @@ async function forwardToUpstream(
         responseTiming?.observedAt ??
         quotaObservationStartedAt ??
         providerQuotaObservationStartedAt();
-      const accepted = observeProviderQuotaHeaders(
-        response.headers,
+      // Quota persistence uses synchronous SQLite. Run it only after dispatch
+      // has returned the upstream response so optional capture cannot hold up
+      // the foreground response path.
+      const pacingObservation = recordProviderQuotaForegroundRequest(
         attribution,
         quotaObservedAt,
-        responseReceivedAt,
         quotaPacingEpoch,
       );
-      if (accepted) {
-        cacheAnthropicOrganizationFromResponse({
-          provider: attribution.provider,
-          credential: routingAuth,
-          sessionID,
-          observedAt: quotaObservedAt,
-          responseHeaders: response.headers,
-          upstreamURL: effectiveUpstreamBase,
-          responseURL: response.url,
-          directUpstreamResponse,
-        });
-      }
+      setImmediate(() => {
+        try {
+          const accepted = observeProviderQuotaHeaders(
+            response.headers,
+            attribution,
+            quotaObservedAt,
+            responseReceivedAt,
+            quotaPacingEpoch,
+            pacingObservation,
+          );
+          if (accepted) {
+            cacheAnthropicOrganizationFromResponse({
+              provider: attribution.provider,
+              credential: routingAuth,
+              sessionID,
+              observedAt: quotaObservedAt,
+              responseHeaders: response.headers,
+              upstreamURL: effectiveUpstreamBase,
+              responseURL: response.url,
+              directUpstreamResponse,
+            });
+          }
+        } catch {
+          // Deferred quota capture is best-effort and cannot affect dispatch.
+        }
+      });
     } catch {
       // Quota capture must never affect the proxied response.
     }

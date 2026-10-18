@@ -437,6 +437,58 @@ export function parseProviderQuotaHeaders(
   return [...windows.values()];
 }
 
+export interface ProviderQuotaPacingObservation {
+  pacingGeneration: string | null;
+  pacingObservationAllowed: boolean;
+}
+
+/** Record the foreground request in memory before deferred quota persistence. */
+export function recordProviderQuotaForegroundRequest(
+  attribution: CostAttribution,
+  observedAt: number,
+  capturedPacingEpoch?: number | null,
+): ProviderQuotaPacingObservation {
+  const pacingMatch = {
+    provider: attribution.provider,
+    account: attribution.account,
+    auth_kind: attribution.authKind,
+  };
+  let pacingGeneration: string | null = null;
+  let pacingObservationAllowed = false;
+  if (attribution.authKind === "subscription") {
+    try {
+      const pacingEpoch =
+        capturedPacingEpoch === undefined
+          ? capturePacingEpoch(pacingMatch)
+          : capturedPacingEpoch;
+      pacingGeneration = capturePacingGeneration(pacingMatch);
+      pacingObservationAllowed =
+        pacingEpoch !== null &&
+        isPacingEpochCurrent(pacingMatch, pacingEpoch) &&
+        pacingGeneration !== null &&
+        isPacingGenerationCurrent(pacingMatch, pacingGeneration);
+    } catch {
+      try {
+        log.info("provider pacing generation unavailable");
+      } catch {
+        // A failing diagnostic sink must not affect quota capture.
+      }
+    }
+    if (pacingObservationAllowed && pacingGeneration !== null) {
+      try {
+        recordForegroundRequest(pacingMatch, observedAt, pacingGeneration);
+      } catch {
+        try {
+          log.info("provider pacing observation failed");
+        } catch {
+          // A failing diagnostic sink must not affect quota capture.
+        }
+      }
+    }
+  }
+  return { pacingGeneration, pacingObservationAllowed };
+}
+
 /**
  * Parse quota headers from an upstream response and persist each window as
  * the latest snapshot for the attributed provider/account. Never throws —
@@ -450,47 +502,17 @@ export function observeProviderQuotaHeaders(
   observedAt: number = Date.now(),
   responseReceivedAt: number = Date.now(),
   capturedPacingEpoch?: number | null,
+  pacingObservation?: ProviderQuotaPacingObservation,
 ): boolean {
   let accepted = false;
   try {
-    const pacingMatch = {
-      provider: attribution.provider,
-      account: attribution.account,
-      auth_kind: attribution.authKind,
-    };
-    let pacingGeneration: string | null = null;
-    let pacingObservationAllowed = false;
-    if (attribution.authKind === "subscription") {
-      try {
-        const pacingEpoch =
-          capturedPacingEpoch === undefined
-            ? capturePacingEpoch(pacingMatch)
-            : capturedPacingEpoch;
-        pacingGeneration = capturePacingGeneration(pacingMatch);
-        pacingObservationAllowed =
-          pacingEpoch !== null &&
-          isPacingEpochCurrent(pacingMatch, pacingEpoch) &&
-          pacingGeneration !== null &&
-          isPacingGenerationCurrent(pacingMatch, pacingGeneration);
-      } catch {
-        try {
-          log.info("provider pacing generation unavailable");
-        } catch {
-          // A failing diagnostic sink must not affect quota capture.
-        }
-      }
-      if (pacingObservationAllowed && pacingGeneration !== null) {
-        try {
-          recordForegroundRequest(pacingMatch, observedAt, pacingGeneration);
-        } catch {
-          try {
-            log.info("provider pacing observation failed");
-          } catch {
-            // A failing diagnostic sink must not affect quota capture.
-          }
-        }
-      }
-    }
+    const { pacingGeneration, pacingObservationAllowed } =
+      pacingObservation ??
+      recordProviderQuotaForegroundRequest(
+        attribution,
+        observedAt,
+        capturedPacingEpoch,
+      );
     const windows = parseProviderQuotaHeaders(headers, responseReceivedAt);
     for (const w of windows) {
       const row = {

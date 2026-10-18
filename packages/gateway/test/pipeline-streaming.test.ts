@@ -2392,6 +2392,7 @@ describe("foreground subscription pacing", () => {
     const caller = new AbortController();
     let dispatchStarted = false;
     let pending: Promise<Response> | undefined;
+    const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
     try {
       core
         .db()
@@ -2449,10 +2450,16 @@ describe("foreground subscription pacing", () => {
       setUpstreamInterceptor(async () => {
         dispatchStarted = true;
         return new Response(validResponsesSSE("resp_pacing_dispatch"), {
-          headers: { "content-type": "text/event-stream" },
+          headers: {
+            "content-type": "text/event-stream",
+            "x-ratelimit-limit-requests": "60",
+            "x-ratelimit-remaining-requests": "59",
+            "x-ratelimit-reset-requests": "1h",
+          },
         });
       });
 
+      quotaPersistence.mockClear();
       pending = handleRequest(request, loadLocalConfig());
       await vi.waitFor(() => expect(dispatchStarted).toBe(true), {
         timeout: 10_000,
@@ -2460,8 +2467,19 @@ describe("foreground subscription pacing", () => {
       });
       const response = await pending;
       expect(response.status).toBe(200);
-      await response.text();
+      expect(quotaPersistence).not.toHaveBeenCalled();
+      const responseBody = response.body;
+      if (!responseBody) throw new Error("expected a streaming response body");
+      const reader = responseBody.getReader();
+      const firstChunk = await reader.read();
+      expect(firstChunk.done).toBe(false);
+      expect(quotaPersistence).not.toHaveBeenCalled();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(quotaPersistence).toHaveBeenCalled();
+      let chunk = await reader.read();
+      while (!chunk.done) chunk = await reader.read();
     } finally {
+      quotaPersistence.mockRestore();
       caller.abort(new DOMException("test finished", "AbortError"));
       const response = await pending?.catch(() => undefined);
       if (response?.body && !response.bodyUsed) {
