@@ -26,6 +26,9 @@ test.describe("context window", () => {
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name.includes("mobile"), "desktop layout only");
+    // The session pane responds to its container width, not the viewport.
+    // Give the three-pane shell enough room to show transcript and context side by side.
+    await page.setViewportSize({ width: 1920, height: 1080 });
     await openReader(page);
 
     const pane = page.getByTestId("context-window");
