@@ -8,6 +8,11 @@ import type {
 } from "~/contracts";
 import { ApiError } from "~/lib/api";
 import { useWorkspace } from "~/routes/workspace";
+import {
+  TextField,
+  TextFieldInput,
+  TextFieldLabel,
+} from "~/components/ui/text-field";
 import { Button } from "~/components/ui/button";
 import {
   Dialog,
@@ -346,16 +351,14 @@ export const TeamParityActions: Component<Props> = (props) => {
           onSubmit={(event) => void createTeam(event)}
         >
           <h2 class="font-semibold">Create a team</h2>
-          <label class="mt-3 block text-sm">
-            Team name
-            <input
-              class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-              value={createName()}
+          <TextField class="mt-3 text-sm" value={createName()} required>
+            <TextFieldLabel>Team name</TextFieldLabel>
+            <TextFieldInput
+              class="bg-surface"
               onInput={(event) => setCreateName(event.currentTarget.value)}
-              required
               maxLength={120}
             />
-          </label>
+          </TextField>
           <Show when={createError()}>
             <p class="mt-2 text-sm text-danger" role="alert">
               {createError()}
@@ -377,16 +380,15 @@ export const TeamParityActions: Component<Props> = (props) => {
           <p class="mt-1 text-sm text-muted">
             Search starts only when you select Find contributors.
           </p>
-          <label class="mt-3 block text-sm">
-            Repositories (optional, owner/repo)
-            <input
-              class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-              value={reposText()}
+          <TextField class="mt-3 text-sm" value={reposText()}>
+            <TextFieldLabel>Repositories (optional, owner/repo)</TextFieldLabel>
+            <TextFieldInput
+              class="bg-surface"
               onInput={(event) => setReposText(event.currentTarget.value)}
               placeholder="owner/repo"
               data-testid="team-discovery-repos"
             />
-          </label>
+          </TextField>
           <Button
             class="mt-3"
             size="sm"
@@ -570,26 +572,25 @@ export const TeamParityActions: Component<Props> = (props) => {
           }}
         >
           <div>
-            <label class="block text-sm">
-              Organization ID for a join request
-              <input
-                class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-                value={orgIdForRequest()}
+            <TextField class="text-sm" value={orgIdForRequest()}>
+              <TextFieldLabel>
+                Organization ID for a join request
+              </TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) =>
                   setOrgIdForRequest(event.currentTarget.value)
                 }
               />
-            </label>
-            <label class="mt-2 block text-sm">
-              Verified email domain
-              <input
-                class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-                value={domain()}
+            </TextField>
+            <TextField class="mt-2 text-sm" value={domain()} required>
+              <TextFieldLabel>Verified email domain</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => setDomain(event.currentTarget.value)}
                 placeholder="example.com"
-                required
               />
-            </label>
+            </TextField>
             <Show
               when={organizations()?.organizations.some(
                 (org) => org.id === selectedOrg(),
@@ -652,17 +653,15 @@ export const TeamParityActions: Component<Props> = (props) => {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={(event) => void createTeam(event)}>
-            <label class="block text-sm">
-              Team name
-              <input
-                class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-                value={createName()}
+            <TextField class="text-sm" value={createName()} required>
+              <TextFieldLabel>Team name</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => setCreateName(event.currentTarget.value)}
-                required
                 maxLength={120}
                 data-testid="team-create-name"
               />
-            </label>
+            </TextField>
             <Show when={createError()}>
               <p class="mt-2 text-sm text-danger" role="alert">
                 {createError()}
@@ -695,16 +694,14 @@ export const TeamParityActions: Component<Props> = (props) => {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={(event) => void joinTeam(event)}>
-            <label class="block text-sm">
-              Invitation token
-              <input
-                class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-                value={inviteToken()}
+            <TextField class="text-sm" value={inviteToken()} required>
+              <TextFieldLabel>Invitation token</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => setInviteToken(event.currentTarget.value)}
-                required
                 data-testid="team-invite-token"
               />
-            </label>
+            </TextField>
             <Show when={joinError()}>
               <p class="mt-2 text-sm text-danger" role="alert">
                 {joinError()}
@@ -736,16 +733,14 @@ export const TeamParityActions: Component<Props> = (props) => {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={(event) => void addMember(event)}>
-            <label class="block text-sm">
-              Account ID
-              <input
-                class="mt-1 h-9 w-full rounded-md border border-line bg-surface px-2"
-                value={accountId()}
+            <TextField class="text-sm" value={accountId()} required>
+              <TextFieldLabel>Account ID</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => setAccountId(event.currentTarget.value)}
-                required
                 data-testid="team-account-id"
               />
-            </label>
+            </TextField>
             <label class="mt-3 block text-sm">
               Role
               <select

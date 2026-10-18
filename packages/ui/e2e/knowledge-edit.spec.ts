@@ -27,6 +27,81 @@ async function projectKnowledgeCount(page: Page, projectId: string) {
 }
 
 test.describe("revision-checked knowledge editing (MEM-03)", () => {
+  test("preserves native decimal confidence typing and saves the entered fraction", async ({
+    page,
+  }, testInfo) => {
+    const viewport = testInfo.project.name.includes("mobile")
+      ? "mobile"
+      : "desktop";
+    const run = testInfo.retry + 1;
+    const projectId = await projectIdByName(
+      page,
+      `dd-apply-${viewport}-${run}`,
+    );
+    const response = await page.request.get(
+      `/api/v1/projects/${projectId}/knowledge`,
+    );
+    expect(response.ok()).toBe(true);
+    const entries = (await response.json()) as KnowledgeEntry[];
+    const entry = entries.find(
+      (item) =>
+        item.title ===
+        `Revision checked confidence ${viewport} ${run} disposable fixture`,
+    );
+    if (!entry) throw new Error("seeded confidence edit entry is missing");
+
+    await page.goto(`/ui/projects/${projectId}/knowledge/${entry.id}`);
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    const editor = page.getByTestId("knowledge-editor");
+    const confidence = editor.getByLabel(/^Confidence/);
+    await expect(confidence).toHaveAttribute("type", "number");
+    await expect(confidence).toHaveAttribute("required", "");
+    await expect(confidence).toHaveAttribute("min", "0");
+    await expect(confidence).toHaveAttribute("max", "1");
+    await expect(confidence).toHaveAttribute("step", "any");
+
+    // fill() skips the browser's intermediate decimal states that triggered
+    // Kobalte's value writeback; use real sequential key input for each form.
+    for (const value of [".1", "0.1", "0.375"]) {
+      await confidence.fill("");
+      await confidence.pressSequentially(value);
+      await expect(confidence).toHaveValue(value);
+      expect(
+        await confidence.evaluate(
+          (input: HTMLInputElement) => input.validity.valid,
+        ),
+      ).toBe(true);
+    }
+
+    for (const value of ["", "-0.1", "1.1"]) {
+      await confidence.fill(value);
+      expect(
+        await editor.evaluate((form: HTMLFormElement) => form.checkValidity()),
+      ).toBe(false);
+    }
+
+    await confidence.fill("");
+    await confidence.pressSequentially("0.375");
+    const saved = page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === "PATCH" &&
+        new URL(candidate.url()).pathname === `/api/v1/knowledge/${entry.id}`,
+    );
+    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    const patch = await saved;
+    expect(patch.ok()).toBe(true);
+    expect(patch.request().postDataJSON()).toEqual({
+      expected_revision: 1,
+      confidence: 0.375,
+    });
+    await expect(page.getByTestId("knowledge-save-success")).toContainText(
+      "Saved as v",
+    );
+    await page.reload();
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await expect(editor.getByLabel(/^Confidence/)).toHaveValue("0.375");
+  });
+
   test("refuses sharing a project title used by shared entries", async ({
     page,
   }, testInfo) => {

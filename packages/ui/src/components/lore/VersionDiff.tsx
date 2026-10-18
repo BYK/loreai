@@ -2,6 +2,7 @@ import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import type { Component } from "solid-js";
 
 import type { KnowledgeVersion } from "~/contracts";
+import { ToggleGroup, ToggleGroupItem } from "~/components/ui/toggle-group";
 import { diffText } from "~/lib/text-diff";
 import type { TextChange } from "~/lib/text-diff";
 
@@ -61,28 +62,23 @@ export const VersionDiff: Component<{
           <span class="text-muted">
             Changes from v{props.previous?.version}
           </span>
-          <div
+          <ToggleGroup
             class="inline-flex rounded-md border border-line p-0.5"
-            role="group"
+            size="sm"
+            value={fullText() ? "full" : "changes"}
+            onChange={(value) => {
+              // A view must remain selected when its pressed item is clicked again.
+              if (value !== null) setFullText(value === "full");
+            }}
             aria-label={`Version ${props.version.version} view`}
           >
-            <For each={[false, true]}>
-              {(full) => (
-                <button
-                  type="button"
-                  aria-pressed={fullText() === full}
-                  class="rounded px-2.5 py-1 font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  classList={{
-                    "bg-chrome": fullText() === full,
-                    "text-muted": fullText() !== full,
-                  }}
-                  onClick={() => setFullText(full)}
-                >
-                  {full ? "Full text" : "Changes"}
-                </button>
-              )}
-            </For>
-          </div>
+            <ToggleGroupItem value="changes" class="text-xs">
+              Changes
+            </ToggleGroupItem>
+            <ToggleGroupItem value="full" class="text-xs">
+              Full text
+            </ToggleGroupItem>
+          </ToggleGroup>
         </div>
         <Show when={!fullText()}>
           <p class="m-0 text-muted">

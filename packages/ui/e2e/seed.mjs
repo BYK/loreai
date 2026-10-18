@@ -250,11 +250,11 @@ for (const viewport of ["desktop", "mobile"]) {
   }
 }
 
-const knowledgeEditFixtureCount = 20;
+const knowledgeEditFixtureCount = 26;
 for (const viewport of ["desktop", "mobile"]) {
   for (const run of [1, 2, 3]) {
     const projectPath = join(root, `dd-apply-${viewport}-${run}`);
-    for (const purpose of ["edit", "restore"]) {
+    for (const purpose of ["edit", "restore", "confidence"]) {
       core.ltm.create({
         id: crypto.randomUUID(),
         projectPath,
