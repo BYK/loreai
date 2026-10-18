@@ -14,7 +14,10 @@ Copyright (c) 2023 Stefan E-K
 ```
 
 Copied files: `button.tsx`, `dialog.tsx`, `select.tsx`, `text-field.tsx`,
-`badge.tsx`, `separator.tsx`. Kobalte (`@kobalte/core`) supplies the headless
+`badge.tsx`, `separator.tsx`, `tabs.tsx`, `toggle-group.tsx`. The toggle group combines
+upstream `toggle-group.tsx` with the `toggleVariants` styles from `toggle.tsx`;
+the standalone toggle button recipe is not included.
+Kobalte (`@kobalte/core`) supplies the headless
 behaviour; the copied files only add class strings.
 
 ## Local modifications (Tailwind 4 port)
@@ -33,5 +36,7 @@ edited as follows (see `src/styles/app.css` for the token mapping):
 - `tailwindcss-animate` classes (`animate-in`, `fade-in-0`, `zoom-in-95`,
   `slide-in-from-*`) were removed; no animation dependency is bundled.
 - Double quotes / semicolons per the repository's oxfmt configuration.
+- Toggle group pressed items use Lore's `bg-chrome`/`text-text`, and inactive
+  items use `text-muted` with `bg-soft`/`text-text` hover styles.
 
 Keep this file up to date when copying further components.

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -515,4 +521,82 @@ describe("PromotionsPage", () => {
       ),
     );
   });
+  it.each(["approved", "rejected"] as const)(
+    "preserves %s notes, pending dismissal guards, failure retry and reopen resets",
+    async (decision) => {
+      let reject: ((error: Error) => void) | undefined;
+      const decidePromotion = vi
+        .fn<ApiClient["decidePromotion"]>()
+        .mockImplementationOnce(
+          () =>
+            new Promise((_resolve, fail) => {
+              reject = fail;
+            }),
+        )
+        .mockResolvedValue({ request: request({ status: decision }) });
+      renderPage(clientWith({ decidePromotion }));
+      const trigger = await screen.findByTestId(
+        decision === "approved" ? "promotion-approve" : "promotion-reject",
+      );
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole("alertdialog", {
+        name:
+          decision === "approved"
+            ? "Approve this promotion?"
+            : "Reject this promotion?",
+      });
+      expect(dialog).toHaveAccessibleDescription(
+        decision === "approved"
+          ? "Approving makes this knowledge visible to every member of Acme after the proposer syncs."
+          : "Rejecting keeps this knowledge private to the proposer.",
+      );
+      const input = within(dialog).getByRole("textbox", {
+        name: "Decision note",
+      });
+      expect(input).toHaveAttribute("maxlength", "500");
+      fireEvent.input(input, { target: { value: "n".repeat(501) } });
+      expect(input).toHaveValue("n".repeat(500));
+      expect(dialog).toHaveTextContent("500/500");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      fireEvent.click(trigger);
+      const reopened = await screen.findByRole("alertdialog");
+      expect(
+        within(reopened).getByRole("textbox", { name: "Decision note" }),
+      ).toHaveValue("");
+      fireEvent.input(
+        within(reopened).getByRole("textbox", { name: "Decision note" }),
+        { target: { value: "Keep this note" } },
+      );
+      fireEvent.click(screen.getByTestId("promotion-confirm-decision"));
+      expect(
+        within(reopened).getByRole("button", { name: "Saving…" }),
+      ).toBeDisabled();
+      expect(
+        within(reopened).getByRole("button", { name: "Cancel" }),
+      ).toBeDisabled();
+      fireEvent.click(
+        within(reopened).getByRole("button", { name: "Dismiss" }),
+      );
+      fireEvent.keyDown(reopened, { key: "Escape" });
+      expect(screen.getByRole("alertdialog")).toBe(reopened);
+      expect(decidePromotion).toHaveBeenCalledWith(
+        "request-1",
+        decision,
+        "Keep this note",
+      );
+      reject?.(new Error("Try this decision again"));
+      expect(await within(reopened).findByRole("alert")).toHaveTextContent(
+        "Try this decision again",
+      );
+      expect(
+        within(reopened).getByRole("textbox", { name: "Decision note" }),
+      ).toHaveValue("Keep this note");
+      fireEvent.click(screen.getByTestId("promotion-confirm-decision"));
+      await waitFor(() =>
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+      );
+      expect(decidePromotion).toHaveBeenCalledTimes(2);
+    },
+  );
 });

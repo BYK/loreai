@@ -1278,11 +1278,16 @@ export function inferClaudeCodeReminderProjectPath(
       continue;
     }
     // Four-space/tab-indented code and block quotes cannot be record headers.
-    const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(line);
+    const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(
+      line,
+    );
     if (!record) continue;
     // Parse the entire header before validating the path. Silently skipping a
     // real record with unsupported characters lets a forged second record win.
-    const match = /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(record[1]);
+    const match =
+      /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(
+        record[1],
+      );
     if (!match) throw new ProjectPathConflictError();
     const path = match[1].replace(/\/+$/, "");
     if (
@@ -1299,7 +1304,11 @@ export function inferClaudeCodeReminderProjectPath(
     // cannot be used to identify the active workspace.
     // Match user-global instruction roots, not every .claude ancestor: actual
     // workspaces can live in a project's .claude/worktrees directory.
-    if (/^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(path)) {
+    if (
+      /^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(
+        path,
+      )
+    ) {
       continue;
     }
     paths.add(path);

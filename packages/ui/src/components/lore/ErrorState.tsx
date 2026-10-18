@@ -1,3 +1,4 @@
+import { Button } from "~/components/ui/button";
 import type { JSX } from "solid-js";
 
 import { isApiError } from "~/lib/api";
@@ -30,16 +31,25 @@ export function errorStateFor(
         title="This page link is no longer valid"
         action={
           extra?.firstPage ? (
-            <button
-              class="text-xs text-accent underline"
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              class="h-auto px-0 py-0 text-xs underline"
               onClick={extra.firstPage}
             >
               First page
-            </button>
+            </Button>
           ) : (
-            <button class="text-xs text-accent underline" onClick={retry}>
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              class="h-auto px-0 py-0 text-xs underline"
+              onClick={retry}
+            >
               Retry
-            </button>
+            </Button>
           )
         }
       />
@@ -55,9 +65,15 @@ export function errorStateFor(
       kind="error"
       title={`${what} unavailable`}
       action={
-        <button class="text-xs text-accent underline" onClick={retry}>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          class="h-auto px-0 py-0 text-xs underline"
+          onClick={retry}
+        >
           Retry
-        </button>
+        </Button>
       }
     >
       {isApiError(error) ? error.message : String(error)}

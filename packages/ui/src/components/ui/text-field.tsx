@@ -41,6 +41,12 @@ type TextFieldInputProps<T extends ValidComponent = "input"> =
       | "url";
   };
 
+const textFieldInputClass = (className?: string) =>
+  cn(
+    "flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[invalid]:border-destructive data-[invalid]:text-destructive",
+    className,
+  );
+
 const TextFieldInput = <T extends ValidComponent = "input">(
   rawProps: PolymorphicProps<T, TextFieldInputProps<T>>,
 ) => {
@@ -55,10 +61,7 @@ const TextFieldInput = <T extends ValidComponent = "input">(
   return (
     <TextFieldPrimitive.Input
       type={local.type}
-      class={cn(
-        "flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[invalid]:border-destructive data-[invalid]:text-destructive",
-        local.class,
-      )}
+      class={textFieldInputClass(local.class)}
       {...others}
     />
   );
@@ -158,6 +161,7 @@ const TextFieldErrorMessage = <T extends ValidComponent = "div">(
 export {
   TextField,
   TextFieldInput,
+  textFieldInputClass,
   TextFieldTextArea,
   TextFieldLabel,
   TextFieldDescription,

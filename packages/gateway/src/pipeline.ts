@@ -3151,10 +3151,12 @@ export function applySessionPromptDeltas(
   const deltas = listSessionPromptDeltas(sessionID);
   if (!deltas.length) return messages;
 
-  const boundPath = expectedProjectID === undefined
-    ? loadSessionTracking(sessionID)?.projectPath
-    : undefined;
-  const ownerID = expectedProjectID ?? (boundPath ? projectId(boundPath) : undefined);
+  const boundPath =
+    expectedProjectID === undefined
+      ? loadSessionTracking(sessionID)?.projectPath
+      : undefined;
+  const ownerID =
+    expectedProjectID ?? (boundPath ? projectId(boundPath) : undefined);
   const owner = ownerID ? canonicalProjectId(ownerID) : undefined;
   const projectBound = expectedProjectID !== undefined || !!boundPath;
 
@@ -3177,7 +3179,11 @@ export function applySessionPromptDeltas(
     // gateway. Verify ownership independently before parsing or re-anchoring.
     // Request-bound callers always supply a project ID, including an unresolved
     // empty ID (which fails closed); unbound positional transforms have no owner.
-    if (projectBound && (!owner || canonicalProjectId(delta.projectID) !== owner)) continue;
+    if (
+      projectBound &&
+      (!owner || canonicalProjectId(delta.projectID) !== owner)
+    )
+      continue;
     const selector = parseMessageInsertSelector(delta.selector);
     // NB: name this `blockMessages`, NOT `messages` — the function parameter
     // `messages` (the conversation array) must stay in scope below for
@@ -5700,7 +5706,9 @@ export function resolveSessionProjectPath(
     if (previous && previous !== projectPath) {
       const previousID = projectId(previous);
       const nextID = projectId(projectPath);
-      const sameProject = previousID && nextID &&
+      const sameProject =
+        previousID &&
+        nextID &&
         canonicalProjectId(previousID) === canonicalProjectId(nextID);
       if (!sameProject) {
         // Every distinct-project rebind is a prompt-ownership boundary,
@@ -25623,7 +25631,9 @@ async function handleRequestInner(
     // Auxiliary payloads can quote slash commands from a conversation. Bypass
     // before even looking up a session so those records cannot mutate it.
     if (claudeCodeRequestClass === "auxiliary") {
-      log.info("claude-code side-channel: passthrough (explicit auxiliary class)");
+      log.info(
+        "claude-code side-channel: passthrough (explicit auxiliary class)",
+      );
       return await handlePassthrough(req, config);
     }
 
