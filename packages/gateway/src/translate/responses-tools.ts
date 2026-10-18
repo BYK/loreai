@@ -161,7 +161,10 @@ export function nativeResponsesCall(
   const custom = raw.type === "custom_tool_call";
   const search = raw.type === "tool_search_call";
   const namespaced =
-    raw.type === "function_call" && raw.namespace !== undefined;
+    raw.type === "function_call" &&
+    (mode === "request"
+      ? raw.namespace !== undefined
+      : raw.namespace !== undefined && raw.namespace !== null);
   if (!custom && !search && !namespaced) return null;
   // Client input must match the supported envelope exactly. Provider responses
   // may add fields over time, so retain only the understood wire subset before

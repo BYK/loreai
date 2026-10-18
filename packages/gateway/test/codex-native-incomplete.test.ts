@@ -10,7 +10,7 @@ import {
 } from "../src/translate/openai-responses";
 import type { GatewayResponse } from "../src/translate/types";
 
-function responseBody(args: string) {
+function responseBody(args: string, namespace: string | null = "files") {
   return {
     id: "resp_truncated",
     model: "gpt-test",
@@ -21,7 +21,7 @@ function responseBody(args: string) {
         id: "fc_truncated",
         type: "function_call",
         call_id: "call_truncated",
-        namespace: "files",
+        namespace,
         name: "read",
         arguments: args,
         status: "incomplete",
@@ -31,8 +31,8 @@ function responseBody(args: string) {
     usage: { input_tokens: 11, output_tokens: 4 },
   };
 }
-function upstream(args: string): Response {
-  const body = responseBody(args);
+function upstream(args: string, namespace: string | null = "files"): Response {
+  const body = responseBody(args, namespace);
   const item = body.output[0];
   const events = [
     {
@@ -138,4 +138,29 @@ describe.each(['{"path":', ""])("truncated namespaced arguments %j", (args) => {
       ),
     ).toThrow("Unsupported cross-provider request");
   });
+});
+
+test("accepts upstream plain function calls with a null namespace", async () => {
+  const item = responseBody('{"query":"lighthouse"}', null).output[0];
+  const response = accumulateResponsesNonStreamJSON({
+    ...responseBody('{"query":"lighthouse"}', null),
+    status: "completed",
+    output: [{ ...item, status: "completed" }],
+  });
+  const streamed = await accumulateResponsesSSEStream(
+    upstream('{"query":"lighthouse"}', null),
+    { validation: "public" },
+  );
+
+  for (const result of [response, streamed]) {
+    expect(result.content).toMatchObject([
+      {
+        type: "tool_use",
+        id: "call_truncated",
+        name: "read",
+        input: { query: "lighthouse" },
+      },
+    ]);
+    expect(result.rawOutputItems?.[0]).not.toHaveProperty("provider_extension");
+  }
 });
