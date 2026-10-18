@@ -496,7 +496,7 @@ const MoveSessionsDialog: Component<{
   );
 };
 
-/** Merge-duplicates action for the projects list (welcome) page. */
+/** Merge-duplicates action for the workspace navigation. */
 export const MergeProjectsAction: Component = () => {
   const ws = useWorkspace();
   const actions = ws.state.projectActions;

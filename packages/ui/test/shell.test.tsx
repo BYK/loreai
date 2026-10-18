@@ -955,22 +955,8 @@ describe("shell: project navigation and real-data path", () => {
     );
     expect(selectedProject).toBeDefined();
     expect(pane("list")).toHaveTextContent("lore");
-    expect(client.calls).toEqual([
-      "projects",
-      "entry:k-wal",
-      "knowledge:p-lore",
-    ]);
-    expect(client.pageOpts).toContainEqual({
-      projectId: "p-lore",
-      opts: {
-        cursor: null,
-        limit: 50,
-        q: undefined,
-        category: undefined,
-        scope: undefined,
-        sort: [{ field: "updated_at", dir: "desc" }],
-      },
-    });
+    expect(client.calls).toEqual(["projects", "entry:k-wal"]);
+    expect(client.pageOpts).toHaveLength(0);
   });
 
   it("decodes percent-encoded ids from the URL exactly once", async () => {
@@ -1010,18 +996,8 @@ describe("shell: project navigation and real-data path", () => {
     expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
       "Keep SQLite",
     );
-    expect(client.calls).toEqual(["entry:k/1%2", "knowledge:team/lore v2"]);
-    expect(client.pageOpts).toContainEqual({
-      projectId: "team/lore v2",
-      opts: {
-        cursor: null,
-        limit: 50,
-        q: undefined,
-        category: undefined,
-        scope: undefined,
-        sort: [{ field: "updated_at", dir: "desc" }],
-      },
-    });
+    expect(client.calls).toEqual(["entry:k/1%2"]);
+    expect(client.pageOpts).toHaveLength(0);
     expect(pane("list")).toHaveTextContent("lore");
     expect(screen.queryByTestId("knowledge-row")).toBeNull();
     expect(await screen.findByTestId("nav-project")).toHaveAttribute(
@@ -1654,6 +1630,32 @@ describe("shell: empty, error, not-found and locked states", () => {
     mount("/projects/p-lore/sessions?cursor=abc", client);
     expect(await screen.findByText("No captured sessions")).toBeInTheDocument();
     expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("does not load knowledge pages while viewing a knowledge entry", async () => {
+    let knowledgePageCalls = 0;
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        knowledgePageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount(`/projects/p-lore/knowledge/${entryAt(0).id}`, client);
+
+    expect(
+      await screen.findByRole("heading", { name: entryAt(0).title }),
+    ).toBeInTheDocument();
+    expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("keeps merge-projects available from navigation on narrow layouts", async () => {
+    stubSinglePaneViewport();
+    mount("/", fakeClient());
+
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+
+    const drawer = await screen.findByTestId("nav-drawer");
+    expect(within(drawer).getByTestId("merge-projects")).toBeVisible();
   });
 
   it("does not load session pages while browsing knowledge", async () => {

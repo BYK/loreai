@@ -25,7 +25,6 @@ import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
 import { RestoreKnowledgeAction } from "~/components/lore/RestoreKnowledgeAction";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
-import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { WorkspaceSearch } from "~/components/lore/WorkspaceSearch";
 import { SessionList } from "~/components/lore/SessionList";
@@ -106,8 +105,7 @@ export const Browse: Component<{
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
   );
   const pageSource = createMemo(() =>
-    (props.view === "knowledge-table" || props.view === "entry") &&
-    activeProjectId()
+    props.view === "knowledge-table" && activeProjectId()
       ? { projectId: activeProjectId()!, query: query() }
       : null,
   );
@@ -225,7 +223,6 @@ export const Browse: Component<{
           <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
             <h1 class="mb-3 text-[25px] font-semibold">Select an item</h1>
             <p class="mb-6 text-sm text-muted">Pick an item from the list.</p>
-            <MergeProjectsAction />
           </div>
         );
       case "project":

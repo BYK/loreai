@@ -25,6 +25,7 @@ import { ListPane } from "~/components/shell/ListPane";
 import { Nav } from "~/components/shell/Nav";
 import { AppBar } from "~/components/shell/AppBar";
 import { cn } from "~/lib/utils";
+import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { sectionProjects } from "~/components/shell/nav-projects";
 import { pins } from "~/state/pins";
 import {
@@ -285,6 +286,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       activeProjectId={activeProjectId()}
       stale={ws.state.projects.status()}
       workspaceFilter={query()}
+      footer={<MergeProjectsAction />}
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
