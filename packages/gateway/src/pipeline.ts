@@ -20245,6 +20245,12 @@ async function handleProvisionalConversationTurn(
       credentialFingerprint,
       config,
     );
+    // Project resolution above retires a transaction-local projection, not an
+    // existing live session. Clear its recall only after commit and before
+    // publishing the new identity/owner; rollback and canonical aliases retain it.
+    if (!sameLogicalProjectPath(state.projectPath, projectPath)) {
+      state.recallStore = new Map();
+    }
     if (upstreamUpdate.changed) {
       if (upstreamState.lastUpstream) {
         state.lastUpstream = upstreamState.lastUpstream;

@@ -105,7 +105,12 @@ import {
 import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
 import { translateAnthropicStreamToResponses } from "../src/stream/openai-responses";
 import { translateAnthropicStreamToGemini } from "../src/stream/gemini";
-import { buildRecallMarker, recallStoreKey } from "../src/recall";
+import {
+  buildRecallMarker,
+  cleanupRecallStore,
+  expandRecallMarkers,
+  recallStoreKey,
+} from "../src/recall";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import {
   makeConversationFixtures,
@@ -7089,6 +7094,168 @@ describe("Pipeline — streaming responses", () => {
       await resetPipelineState();
     }
   });
+
+  it.each(["distinct", "same", "canonical-alias", "rollback"] as const)(
+    "retires live recall after provisional header migration without restarting (%s)",
+    async (transition) => {
+      const alias = `live-recall-migration-alias-${transition}`;
+      const canonical = `live-recall-migration-canonical-${transition}`;
+      const projectA = `/test/provisional-live-recall/${transition}/project-a`;
+      const projectB =
+        transition === "same"
+          ? projectA
+          : `/test/provisional-live-recall/${transition}/project-b`;
+      const secret = "private-provisional-live-recall-knowledge";
+      const query =
+        "one two three four five six seven eight nine migration terms";
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(projectA);
+      const bodies: unknown[] = [];
+      let restoreStorage = (): void => {};
+      if (transition === "canonical-alias") {
+        const first = core.ensureProject(projectA);
+        core.mergeProjectInternal(core.ensureProject(projectB), first);
+        expect(core.projectId(projectB)).toBe(first);
+      }
+      ltm.create({
+        projectPath: projectA,
+        category: "gotcha",
+        title: "Private provisional recall migration terms",
+        content: `${query} ${secret}`,
+        scope: "project",
+        crossProject: false,
+      });
+      setUpstreamInterceptor(async (body) => {
+        bodies.push(body);
+        return new Response(
+          bodies.length === 1
+            ? recallResponsesSSE("resp_live_recall_migration", query)
+            : validResponsesSSE(
+                `resp_live_recall_migration_${bodies.length}`,
+                "answer",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      try {
+        const initial = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias, "x-lore-project": "" },
+        });
+        const originalMessages = structuredClone(initial.messages);
+        const first = await handleRequest(initial, loadLocalConfig());
+        expect(first.status).toBe(200);
+        const wire = await first.text();
+        await vi.waitFor(() => {
+          const state = [...getActiveSessions().values()].find(
+            (candidate) => candidate.headerSessionId === alias,
+          );
+          expect(state?.recallStore.size).toBe(1);
+        });
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === alias,
+        )!;
+        expect(state.projectPath).toBe(projectA);
+        expect(state.projectPathProvisional).toBe(true);
+        expect(JSON.stringify([...state.recallStore.values()])).toContain(
+          secret,
+        );
+        // Responses emits the recall marker and final answer as separate native
+        // text parts. Preserve those boundaries when rebuilding client history.
+        const textParts = new Map<string, string>();
+        for (const line of wire.split("\n")) {
+          if (!line.startsWith("data: {")) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type !== "response.output_text.delta") continue;
+          const key = `${event.item_id}:${event.content_index}`;
+          textParts.set(key, (textParts.get(key) ?? "") + event.delta);
+        }
+        const assistantContent = [...textParts.values()].map((text) => ({
+          type: "text" as const,
+          text,
+        }));
+        expect(JSON.stringify(assistantContent)).toContain("<!-- lore-recall:");
+        const history: GatewayRequest["messages"] = [
+          ...originalMessages,
+          { role: "assistant", content: assistantContent },
+          {
+            role: "user",
+            content: [{ type: "text", text: "continue after migration" }],
+          },
+        ];
+        // Prove this client-visible anchor and its real transcript prefix can
+        // replay A's recall, rather than passing through orphan-anchor cleanup.
+        const control = makeResponsesRequest({
+          sessionHeaders: {},
+          messages: structuredClone(history),
+        });
+        const controlStore = new Map(state.recallStore);
+        cleanupRecallStore(control, controlStore);
+        expect(controlStore.size).toBe(1);
+        expandRecallMarkers(control, controlStore);
+        expect(JSON.stringify(control.messages)).toContain(secret);
+
+        if (transition === "rollback") {
+          const fault = vi.spyOn(temporal, "store").mockImplementation(() => {
+            throw new Error("synthetic provisional commit failure");
+          });
+          restoreStorage = () => {
+            fault.mockRestore();
+          };
+        }
+        const migrated = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: {
+              "x-session-affinity": alias,
+              "x-lore-session-id": canonical,
+              "x-lore-project": projectB,
+            },
+          }),
+          loadLocalConfig(),
+        );
+        expect(migrated.status).toBe(200);
+        expect(await migrated.text()).toContain("event: response.completed");
+        await new Promise<void>((resolve) => {
+          scheduleStreamingPostResponseForTest(
+            state.sessionID,
+            resolve,
+            resolve,
+          );
+        });
+        restoreStorage();
+        restoreStorage = (): void => {};
+        const rolledBack = transition === "rollback";
+        expect(state.headerSessionId).toBe(rolledBack ? alias : canonical);
+        expect(state.projectPath).toBe(rolledBack ? projectA : projectB);
+        expect(loadSessionTracking(state.sessionID)?.projectPath).toBe(
+          rolledBack ? projectA : projectB,
+        );
+        if (rolledBack) expect(state.recallStore.size).toBe(1);
+        expect(getActiveSessions().get(state.sessionID)).toBe(state);
+        const continued = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: rolledBack
+              ? { "x-session-affinity": alias, "x-lore-project": projectA }
+              : { "x-lore-session-id": canonical, "x-lore-project": projectB },
+            messages: history,
+          }),
+          loadLocalConfig(),
+        );
+        expect(continued.status).toBe(200);
+        expect(await continued.text()).toContain("event: response.completed");
+        if (transition === "distinct") {
+          expect(JSON.stringify(bodies.at(-1))).not.toContain(secret);
+          expect(state.recallStore.size).toBe(0);
+        } else {
+          expect(JSON.stringify(bodies.at(-1))).toContain(secret);
+          expect(state.recallStore.size).toBe(1);
+        }
+      } finally {
+        restoreStorage();
+        cwd.mockRestore();
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
 
   it("accounts a successful provisional canonical migration exactly once", async () => {
     const alias = "accounted-migration-alias";
