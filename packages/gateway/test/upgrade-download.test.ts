@@ -69,14 +69,21 @@ test.skipIf(process.platform === "win32")(
       return Reflect.apply(originalFs.openSync, originalFs, args);
     });
     try {
-      const directory = createUpgradeDownloadDirectory(
-        join(root, "lore"),
-        join(root, "install-path"),
-      );
-      closeUpgradeDownloadDirectory(directory);
+      const create = () =>
+        createUpgradeDownloadDirectory(
+          join(root, "lore"),
+          join(root, "install-path"),
+        );
+      if (process.platform === "darwin") {
+        expect(create).toThrow(/ELOOP/);
+        expect(readdirSync(moved)).toEqual([]);
+      } else {
+        const directory = create();
+        closeUpgradeDownloadDirectory(directory);
+        expect(readdirSync(moved)).toEqual([".owner"]);
+      }
       expect(swapped.value).toBe(true);
       expect(readdirSync(victim)).toEqual(["sentinel"]);
-      expect(readdirSync(moved)).toEqual([".owner"]);
     } finally {
       vi.mocked(openSync).mockRestore();
       vi.unstubAllEnvs();
@@ -279,7 +286,14 @@ test.skipIf(process.platform === "win32")(
       );
       const output = openUpgradeDownloadFile(directory, "lore.download");
       writeFileSync(output, "partial binary");
-      expect(readFileSync(output, "utf8")).toBe("partial binary");
+      expect(
+        readFileSync(
+          process.platform === "darwin"
+            ? join(directory.path, "lore.download")
+            : output,
+          "utf8",
+        ),
+      ).toBe("partial binary");
       expect(readdirSync(directory.path)).toEqual(
         process.platform === "linux" ? [".owner"] : [".owner", "lore.download"],
       );
@@ -370,14 +384,11 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test.skipIf(process.platform !== "linux")(
+test.skipIf(process.platform !== "darwin")(
   "Darwin retains a truncated output and starts the next download in a new directory",
   () => {
-    const platform = Object.getOwnPropertyDescriptor(process, "platform");
-    if (!platform) throw new Error("Missing platform descriptor");
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-darwin-retain-"));
     vi.stubEnv("TMPDIR", root);
-    Object.defineProperty(process, "platform", { value: "darwin" });
     try {
       const executable = join(root, "lore");
       const receipt = join(root, "install-path");
@@ -392,7 +403,6 @@ test.skipIf(process.platform !== "linux")(
       closeUpgradeDownloadDirectory(second);
       expect(readFileSync(join(first.path, "lore.download"))).toHaveLength(0);
     } finally {
-      Object.defineProperty(process, "platform", platform);
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
     }
@@ -607,7 +617,13 @@ test.skipIf(process.platform === "win32")(
       ]);
 
       await applyPatch(old, patch, output);
-      expect(readFileSync(output)).toEqual(replacement);
+      expect(
+        readFileSync(
+          process.platform === "darwin"
+            ? join(root, "lore.download.opened")
+            : output,
+        ),
+      ).toEqual(replacement);
       expect(readFileSync(victim, "utf8")).toBe("do not change");
     } finally {
       closeUpgradeDownloadDirectory(directory);
@@ -634,7 +650,8 @@ test.skipIf(process.platform === "win32")(
     vi.mocked(readdirSync).mockImplementation((...args) => {
       const names = Reflect.apply(originalFs.readdirSync, originalFs, args);
       if (
-        /\/(?:proc\/self|dev)\/fd\/\d+$/.test(String(args[0])) &&
+        (/\/proc\/self\/fd\/\d+$/.test(String(args[0])) ||
+          String(args[0]) === directory.path) &&
         !replacement.path
       ) {
         replacement.path = directory.path;
@@ -711,3 +728,48 @@ test("refuses Windows pathname staging before creating an output file", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.platform !== "darwin")(
+  "rejects a real-directory ABA swap before writing marker contents",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-aba-"));
+    vi.stubEnv("TMPDIR", root);
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const moved = join(root, "original");
+    const replacement = join(root, "replacement");
+    const swapped = { value: false };
+    vi.mocked(openSync).mockImplementation((...args) => {
+      if (
+        !swapped.value &&
+        String(args[0]).endsWith("/.owner") &&
+        (Number(args[1]) & constants.O_CREAT) !== 0
+      ) {
+        swapped.value = true;
+        const path = String(args[0]);
+        const parent = path.slice(0, path.lastIndexOf("/"));
+        renameSync(parent, moved);
+        mkdirSync(parent, { mode: 0o700 });
+        const fd = Reflect.apply(originalFs.openSync, originalFs, args);
+        renameSync(parent, replacement);
+        renameSync(moved, parent);
+        return fd;
+      }
+      return Reflect.apply(originalFs.openSync, originalFs, args);
+    });
+    try {
+      expect(() =>
+        createUpgradeDownloadDirectory(
+          join(root, "lore"),
+          join(root, "receipt"),
+        ),
+      ).toThrow(/directory or file changed/);
+      expect(swapped.value).toBe(true);
+      expect(readFileSync(join(replacement, ".owner"))).toHaveLength(0);
+    } finally {
+      vi.mocked(openSync).mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

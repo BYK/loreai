@@ -28,8 +28,8 @@ const GHCR_REQUEST_TIMEOUT = 10_000;
 /** Maximum number of retry attempts for transient failures */
 const GHCR_MAX_RETRIES = 1;
 
-/** Timeout for large blob downloads (30 seconds) */
-const GHCR_BLOB_TIMEOUT = 30_000;
+/** Allow full standalone archives (~135 MiB compressed) on slower connections. */
+const GHCR_BLOB_TIMEOUT = 5 * 60_000;
 
 const SHA256_OCI_DIGEST = /^sha256:([a-f0-9]{64})$/;
 

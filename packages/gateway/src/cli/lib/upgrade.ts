@@ -16,16 +16,14 @@
  * detection, setup spawning, and Sentry SDK telemetry.
  */
 
-import { createHash } from "node:crypto";
 import {
   createWriteStream,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
-  readFileSync,
   statSync,
 } from "node:fs";
-import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
@@ -35,6 +33,7 @@ import { getMeta, setMeta } from "@loreai/core";
 
 import {
   cleanupOldBinary,
+  hashBinaryFile,
   fetchWithUpgradeError,
   getBinaryFilename,
   getBinaryPaths,
@@ -330,7 +329,7 @@ async function streamDecompressToFile(
     const counted = stream.pipeThrough(counting);
     await pipeline(
       Readable.fromWeb(counted as never),
-      createWriteStream(destPath),
+      createWriteStream(destPath, { start: 0 }),
     );
   } finally {
     progress.done();
@@ -375,6 +374,7 @@ async function downloadStableToPath(
   version: string,
   destPath: string,
   lifecycleLock: LifecycleLock,
+  destFd: number,
 ): Promise<void> {
   const url = getBinaryDownloadUrl(version);
   const headers = getGitHubHeaders();
@@ -406,7 +406,13 @@ async function downloadStableToPath(
 
   const body = await response.arrayBuffer();
   lifecycleLock.assertOwned();
-  await writeFile(destPath, Buffer.from(body));
+  // Darwin opening /dev/fd duplicates the descriptor and ignores O_TRUNC.
+  // Discard a partially decompressed gzip before writing the raw fallback.
+  ftruncateSync(destFd, 0);
+  await pipeline(
+    Readable.from([Buffer.from(body)]),
+    createWriteStream(destPath, { start: 0 }),
+  );
 }
 
 /** Max probe attempts before giving up */
@@ -539,6 +545,15 @@ export async function downloadBinaryToTemp(
             "Check your internet connection and try again.",
     );
   } else {
+    // A failed delta can leave bytes and an advanced shared Darwin offset.
+    // Truncate this exact inode and use positional writes for either fallback.
+    if (downloadDir.fileFd === undefined) {
+      throw new UpgradeError(
+        "execution_failed",
+        "Upgrade download file is unavailable",
+      );
+    }
+    ftruncateSync(downloadDir.fileFd, 0);
     // Full download
     const fullStart = Date.now();
     if (nightly) {
@@ -548,6 +563,7 @@ export async function downloadBinaryToTemp(
         downloadTag ?? version,
         writePath,
         lifecycleLock,
+        downloadDir.fileFd,
       );
     }
     const elapsed = ((Date.now() - fullStart) / 1000).toFixed(1);
@@ -556,9 +572,7 @@ export async function downloadBinaryToTemp(
 
   const verifiedSize = await waitForBinaryVisible(writePath);
   if (expectedStableSha256) {
-    const actualSha256 = createHash("sha256")
-      .update(readFileSync(writePath))
-      .digest("hex");
+    const actualSha256 = await hashBinaryFile(writePath);
     if (actualSha256 !== expectedStableSha256) {
       throw new UpgradeError(
         "execution_failed",

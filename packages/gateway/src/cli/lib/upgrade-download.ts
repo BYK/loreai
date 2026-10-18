@@ -1,5 +1,6 @@
 /** Private, identity-bound staging for standalone upgrade downloads. */
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -20,6 +21,8 @@ import { UpgradeError } from "./errors";
 
 const PREFIX = "lore-upgrade-download-";
 const MARKER = ".owner";
+// Darwin <sys/fcntl.h>: reject symlinks in every pathname component.
+const DARWIN_O_NOFOLLOW_ANY = 0x20000000;
 const LINUX_O_TMPFILE = 0o20000000 | constants.O_DIRECTORY;
 
 function requireHandleBoundDownloads(): void {
@@ -67,17 +70,65 @@ function anchoredPath(
   directory: UpgradeDownloadDirectory,
   name: string,
 ): string {
-  return anchoredDirectoryFile(directory.fd, name);
+  // Darwin fdescfs duplicates a descriptor but cannot resolve children of a
+  // directory descriptor. Linux procfs supports that lookup.
+  return process.platform === "darwin"
+    ? join(directory.path, name)
+    : join(`/proc/self/fd/${directory.fd}`, name);
 }
 
-function anchoredDirectoryFile(fd: number, name: string): string {
-  const root =
-    process.platform === "linux"
-      ? `/proc/self/fd/${fd}`
-      : process.platform === "darwin"
-        ? `/dev/fd/${fd}`
-        : "";
-  return join(root, name);
+function openDirectoryFile(
+  directory: UpgradeDownloadDirectory,
+  name: string,
+  flags: number,
+  mode?: number,
+): number {
+  if (basename(name) !== name || name === "." || name === "..") {
+    throw new Error("Invalid standalone upgrade download filename");
+  }
+  const fd = openSync(
+    anchoredPath(directory, name),
+    process.platform === "darwin"
+      ? (flags & ~(constants.O_NOFOLLOW ?? 0)) | DARWIN_O_NOFOLLOW_ANY
+      : flags,
+    mode,
+  );
+  try {
+    if (process.platform === "darwin") {
+      const file = fstatSync(fd, { bigint: true });
+      // BSD stat runs with its own kernel-pinned cwd. Comparing both the cwd
+      // and leaf to our opened handles also catches replace-then-restore (ABA)
+      // directory swaps; checking directory.path before/after open cannot.
+      // Never change the parent process's cwd or write before this succeeds.
+      const checked = spawnSync(
+        "/usr/bin/stat",
+        ["-f", "%d:%i", ".", `./${name}`],
+        {
+          cwd: directory.path,
+          encoding: "utf8",
+          env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+          timeout: 5_000,
+          maxBuffer: 1024,
+        },
+      );
+      if (
+        !file.isFile() ||
+        file.nlink !== 1n ||
+        checked.status !== 0 ||
+        checked.stdout !==
+          `${directory.device}:${directory.inode}\n${file.dev}:${file.ino}\n`
+      ) {
+        throw new UpgradeError(
+          "execution_failed",
+          "Standalone upgrade download directory or file changed while opening",
+        );
+      }
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
 }
 
 function scope(executable: string, receiptPath: string): string {
@@ -120,6 +171,7 @@ export function openUpgradeDownloadDirectory(
   path: string,
 ): UpgradeDownloadDirectory {
   requireHandleBoundDownloads();
+  path = join(realpathSync(dirname(path)), basename(path));
   const fd = openSync(
     path,
     constants.O_RDONLY |
@@ -188,8 +240,9 @@ export function openUpgradeDownloadFile(
             );
           }
         })()
-      : openSync(
-          anchoredPath(directory, name),
+      : openDirectoryFile(
+          directory,
+          name,
           constants.O_CREAT |
             constants.O_EXCL |
             constants.O_RDWR |
@@ -210,8 +263,9 @@ function hasMarker(
   directory: UpgradeDownloadDirectory,
   expected: string,
 ): boolean {
-  const fd = openSync(
-    anchoredPath(directory, MARKER),
+  const fd = openDirectoryFile(
+    directory,
+    MARKER,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
   );
   try {
@@ -241,8 +295,9 @@ export function createUpgradeDownloadDirectory(
   directory.expectedScope = scope(executable, receiptPath);
   try {
     if (reused) return directory;
-    const markerFd = openSync(
-      anchoredPath(directory, MARKER),
+    const markerFd = openDirectoryFile(
+      directory,
+      MARKER,
       constants.O_CREAT |
         constants.O_EXCL |
         constants.O_WRONLY |
