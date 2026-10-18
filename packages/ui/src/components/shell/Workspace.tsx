@@ -154,6 +154,9 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     q?: string;
     list_q?: string;
   }>();
+  const [queryDraft, setQueryDraft] = createSignal(
+    typeof search.list_q === "string" ? search.list_q : "",
+  );
   const navigate = useNavigate();
   const [layoutState, setLayoutState] = createSignal(loadPaneLayout());
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());
@@ -199,8 +202,6 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   // Keep the project-list filter separate from route-level content `q` values.
   const query = () =>
     typeof search.list_q === "string" ? search.list_q : "in:inbox";
-  const queryInput = () =>
-    typeof search.list_q === "string" ? search.list_q : "";
   const rootPath = useResolvedPath(() => "/");
   const projectPattern = useResolvedPath(() => "/projects/:projectId/*");
   const projectExactPattern = useResolvedPath(() => "/projects/:projectId");
@@ -285,6 +286,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
   const backHref = () => withWorkspaceFilter("/", query());
   function setSearchQuery(value: string) {
+    setQueryDraft(value);
     setSearch(
       {
         list_q: value === "" || value === "in:inbox" ? undefined : value,
@@ -465,7 +467,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
               controls={full()}
             />
           }
-          query={queryInput()}
+          query={queryDraft()}
           onQueryInput={setSearchQuery}
         >
           <ProjectListBody

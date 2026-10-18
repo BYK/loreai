@@ -761,6 +761,22 @@ describe("shell: project navigation and real-data path", () => {
     });
   });
 
+  it("keeps the inbox filter draft visible while omitting it from the URL", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    fireEvent.input(filter, { target: { value: "in:inbox" } });
+
+    expect(filter).toHaveValue("in:inbox");
+    await waitFor(() => expect(history.get()).toBe("/"));
+  });
+
   it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {
     mount("/", fakeClient());
     const divider = await screen.findByTestId("list-divider");
