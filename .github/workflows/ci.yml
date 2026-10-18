@@ -154,8 +154,23 @@ jobs:
       - uses: pnpm/action-setup@v6
       - name: Install runtime test dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Test verified bootstrap and shared installation runtime
-        run: pnpm exec vitest run packages/gateway/test/install-bootstrap.test.ts packages/gateway/test/install-download.test.ts --maxWorkers=2
+      - name: Test verified installation and native updater runtime
+        run: >-
+          pnpm exec vitest run
+          packages/gateway/test/install-bootstrap.test.ts packages/gateway/test/install-download.test.ts
+          packages/gateway/test/upgrade-macos.test.ts packages/gateway/test/upgrade-download.test.ts
+          packages/gateway/test/upgrade-artifact-auth.test.ts packages/gateway/test/upgrade-command.test.ts
+          packages/gateway/test/upgrade-lifecycle.test.ts
+          --maxWorkers=2 --coverage.enabled --coverage.reporter=lcov
+
+      - name: Upload native macOS coverage
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-macos
+          path: coverage/lcov.info
+          retention-days: 1
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Vitest suite, sharded across parallel runners.
@@ -256,7 +271,7 @@ jobs:
   # Merge the shard blobs into a single coverage report and publish the results.
   coverage:
     name: Coverage report
-    needs: [changes, unit-test]
+    needs: [changes, unit-test, install-script-portability]
     if: needs.changes.outputs.code == 'true' && !cancelled()
     runs-on: ubuntu-24.04
     # Coverage Action posts PR comments and commit statuses.
@@ -289,6 +304,23 @@ jobs:
           test "$(find .vitest-reports -maxdepth 1 -name 'blob-*.json' | wc -l)" -eq 4
           pnpm exec vitest run --merge-reports --coverage.enabled --coverage.reporter=text-summary --coverage.reporter=lcov
 
+      # Native-only branches are absent from the Linux shard reports. LCOV
+      # uses repository-relative source paths, so union its line/branch hits
+      # with macOS before the coverage action analyzes the PR patch.
+      - name: Download native macOS coverage
+        uses: actions/download-artifact@v7
+        with:
+          name: coverage-macos
+          path: coverage-macos
+
+      - name: Merge Linux and macOS coverage
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes lcov
+          # V8 can emit negative branch counters; LCOV clamps these to zero
+          # while preserving line hits and reporting a warning.
+          lcov --branch-coverage --ignore-errors negative --add-tracefile coverage/lcov.info --add-tracefile coverage-macos/lcov.info --output-file coverage/combined.info
+
       # codecov.yml keeps project status informational and PR comments enabled.
       # The 80% patch target is enforced on pull requests, and informational on
       # pushes where there is no PR patch to compare.
@@ -296,7 +328,7 @@ jobs:
         uses: getsentry/coverage-action@0.4.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: ./coverage/lcov.info
+          files: ./coverage/combined.info
           coverage-format: lcov
           enable-tests: "false"
           target-patch: "80"

@@ -255,6 +255,15 @@ export function cleanupOldBinary(oldPath: string): void {
   });
 }
 
+/** Read from byte zero even when Darwin fdescfs shares an advanced offset. */
+export async function hashBinaryFile(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const bytes of createReadStream(path, { start: 0 })) {
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+}
+
 /**
  * Install a binary to the target directory.
  */
@@ -291,7 +300,7 @@ export async function installBinary(
       0o700,
     );
     try {
-      for await (const bytes of createReadStream(sourcePath)) {
+      for await (const bytes of createReadStream(sourcePath, { start: 0 })) {
         const chunk = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
         let offset = 0;
         while (offset < chunk.length) {

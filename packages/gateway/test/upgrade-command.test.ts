@@ -75,7 +75,9 @@ function receiptFixture(stale = true): {
   receipt: string;
   installDir: string;
 } {
-  const home = mkdtempSync(join(tmpdir(), "lore-upgrade-command-"));
+  const home = realpathSync(
+    mkdtempSync(join(tmpdir(), "lore-upgrade-command-")),
+  );
   state.home = home;
   vi.stubEnv("HOME", home);
   const installDir = join(home, "bin");

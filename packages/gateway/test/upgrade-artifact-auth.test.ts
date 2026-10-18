@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -23,6 +24,7 @@ vi.mock("../src/cli/lib/delta-upgrade", () => ({
 import type { LifecycleLock } from "../src/lifecycle-lock";
 import { getPlatformBinaryName } from "../src/cli/lib/binary";
 import { downloadBinaryToTemp } from "../src/cli/lib/upgrade";
+import { attemptDeltaUpgrade } from "../src/cli/lib/delta-upgrade";
 import {
   closeUpgradeDownloadDirectory,
   openUpgradeDownloadDirectory,
@@ -205,46 +207,33 @@ describe("stable upgrade artifact authentication", () => {
     }
   });
 
-  it.skipIf(process.platform !== "linux")(
+  it.skipIf(process.platform !== "darwin")(
     "retains and truncates a rejected Darwin download without unlinking its name",
     async () => {
-      const platform = Object.getOwnPropertyDescriptor(process, "platform");
-      if (!platform) throw new Error("Missing platform descriptor");
-      Object.defineProperty(process, "platform", { value: "darwin" });
-      try {
-        const {
-          binary,
-          executable,
-          lifecycleLock,
+      const {
+        binary,
+        executable,
+        lifecycleLock,
+        version,
+        privateRoot,
+        downloadDirectory,
+      } = fixture({ expectedBinarySha256: "0".repeat(64) });
+      await expect(
+        downloadBinaryToTemp(
           version,
-          privateRoot,
+          lifecycleLock,
+          undefined,
+          false,
+          executable,
           downloadDirectory,
-        } = fixture({ expectedBinarySha256: "0".repeat(64) });
-        await expect(
-          downloadBinaryToTemp(
-            version,
-            lifecycleLock,
-            undefined,
-            false,
-            executable,
-            downloadDirectory,
-          ),
-        ).rejects.toThrow(/binary checksum mismatch/i);
-        const namedOutput = join(
-          privateRoot,
-          `${basename(executable)}.download`,
-        );
-        expect(readFileSync(namedOutput)).toEqual(binary);
-        openedDirectories.splice(
-          openedDirectories.indexOf(downloadDirectory),
-          1,
-        );
-        closeUpgradeDownloadDirectory(downloadDirectory);
-        expect(readFileSync(namedOutput)).toHaveLength(0);
-        expect(readFileSync(executable, "utf8")).toBe("old binary");
-      } finally {
-        Object.defineProperty(process, "platform", platform);
-      }
+        ),
+      ).rejects.toThrow(/binary checksum mismatch/i);
+      const namedOutput = join(privateRoot, `${basename(executable)}.download`);
+      expect(readFileSync(namedOutput)).toEqual(binary);
+      openedDirectories.splice(openedDirectories.indexOf(downloadDirectory), 1);
+      closeUpgradeDownloadDirectory(downloadDirectory);
+      expect(readFileSync(namedOutput)).toHaveLength(0);
+      expect(readFileSync(executable, "utf8")).toBe("old binary");
     },
   );
 
@@ -556,4 +545,85 @@ describe("stable upgrade artifact authentication", () => {
       expect(lstatSync(victim).mode & 0o777).toBe(0o600);
     },
   );
+});
+
+it.skipIf(process.platform !== "darwin")(
+  "truncates partially decompressed bytes before the raw stable fallback",
+  async () => {
+    const { binary, executable, lifecycleLock, version, downloadDirectory } =
+      fixture();
+    const fetchFixture = globalThis.fetch;
+    let partialGzipReachedDisk = false;
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (!requestUrl(input).endsWith(`${getPlatformBinaryName()}.gz`)) {
+        return fetchFixture(input, init);
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(gzipSync(Buffer.alloc(128 * 1024, 120)));
+            // Fail only after the real decompression pipeline has written more
+            // bytes than the raw fallback contains, making the stale tail real.
+            const deadline = Date.now() + 5_000;
+            while (
+              downloadDirectory.fileFd === undefined ||
+              fstatSync(downloadDirectory.fileFd).size <= binary.length
+            ) {
+              if (Date.now() > deadline) {
+                controller.error(
+                  new Error("Decompressed fixture never reached disk"),
+                );
+                return;
+              }
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
+            partialGzipReachedDisk = true;
+            controller.error(new Error("Interrupted gzip response"));
+          },
+        }),
+      );
+    }) as typeof fetch;
+    const result = await downloadBinaryToTemp(
+      version,
+      lifecycleLock,
+      undefined,
+      false,
+      executable,
+      downloadDirectory,
+    );
+    expect(partialGzipReachedDisk).toBe(true);
+    expect(readFileSync(result.tempBinaryPath)).toEqual(binary);
+  },
+);
+
+it("truncates a partial delta before downloading the full replacement", async () => {
+  const { binary, executable, lifecycleLock, version, downloadDirectory } =
+    fixture();
+  vi.mocked(attemptDeltaUpgrade).mockImplementationOnce(
+    async (_version, _source, output) => {
+      writeFileSync(
+        output,
+        "partial delta output longer than the complete binary".repeat(10),
+      );
+      return null;
+    },
+  );
+  const result = await downloadBinaryToTemp(
+    version,
+    lifecycleLock,
+    undefined,
+    false,
+    executable,
+    downloadDirectory,
+  );
+  expect(
+    readFileSync(
+      process.platform === "darwin"
+        ? join(downloadDirectory.path, `${basename(executable)}.download`)
+        : result.tempBinaryPath,
+    ),
+  ).toEqual(binary);
 });
