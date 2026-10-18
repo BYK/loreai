@@ -1815,14 +1815,24 @@ function conflictsWithConfidentSessionProject(
   }
   const live = sessions.get(sessionID);
   if (live?.projectPath && live.projectPathProvisional === false) {
-    return live.projectPath !== pathResult.path;
+    return !sameLogicalProjectPath(live.projectPath, pathResult.path);
   }
   const persisted = loadSessionTracking(sessionID);
   return (
     !!persisted?.projectPath &&
     persisted.projectPathProvisional === false &&
-    persisted.projectPath !== pathResult.path
+    !sameLogicalProjectPath(persisted.projectPath, pathResult.path)
   );
+}
+
+function sameLogicalProjectPath(previous: string, next: string): boolean {
+  if (previous === next) return true;
+  const previousID = projectId(previous);
+  const nextID = projectId(next);
+  // Only tenant-scoped, already-established identity proves an alias. Neither
+  // path prefixes nor missing project rows authorize a project switch.
+  const owner = previousID ? canonicalProjectId(previousID) : undefined;
+  return !!owner && !!nextID && owner === canonicalProjectId(nextID);
 }
 
 /** Reject a project switch before any session-scoped prompt data or controls run. */
@@ -2807,6 +2817,16 @@ export function idleResumeReshuffled(
   return lastTurnWasIdle && !cacheWarm;
 }
 
+function projectOwnedPromptDeltas(sessionID: string, projectID: string) {
+  const owner = projectID ? canonicalProjectId(projectID) : undefined;
+  if (!owner) return [];
+  // Ownership must be checked before any mutation/surfaced-state reconstruction:
+  // filtering only at replay lets compression launder foreign text into this owner.
+  return listSessionPromptDeltas(sessionID).filter(
+    (block) => canonicalProjectId(block.projectID) === owner,
+  );
+}
+
 /**
  * Re-anchor the existing durable delta blocks (same content) to a fresh, tool-
  * pair-safe near-tail index in the current (post-reshuffle) message array, so a
@@ -2831,13 +2851,15 @@ export function reanchorExistingDelta(
   projectPath: string,
   messages: GatewayMessage[],
 ): number | null {
-  const blocks = listSessionPromptDeltas(sessionID);
+  const blocks = projectOwnedPromptDeltas(
+    sessionID,
+    ensureProject(projectPath),
+  );
   if (!blocks.length) return null;
   const reInsertAt = safeDeltaInsertIndex(
     messages,
     Math.max(0, messages.length - 1),
   );
-  const projectID = ensureProject(projectPath);
   // Rewrite each block's insertAt while preserving content + mutation signature
   // + chronological (seq) order. Snapshot before mutating the table.
   const preserved = blocks.map((b) => {
@@ -2848,7 +2870,11 @@ export function reanchorExistingDelta(
       selectorObj = { target: "messages" };
     }
     selectorObj.insertAt = reInsertAt;
-    return { content: b.content, selector: JSON.stringify(selectorObj) };
+    return {
+      projectID: b.projectID,
+      content: b.content,
+      selector: JSON.stringify(selectorObj),
+    };
   });
   // Atomic delete + re-append so a crash mid-rewrite can never leave the
   // session with a partial block set (which would drop surfaced-set history and
@@ -2860,7 +2886,7 @@ export function reanchorExistingDelta(
     for (const p of preserved) {
       appendSessionPromptDelta({
         sessionID,
-        projectID,
+        projectID: p.projectID,
         selector: p.selector,
         content: p.content,
       });
@@ -3723,8 +3749,7 @@ export function deliveredContextEntries(
   }
   const delivered = new Map<string, ltm.KnowledgeEntry>();
   const resolved = new Map<string, string>();
-  for (const block of listSessionPromptDeltas(sessionID)) {
-    if (block.projectID !== projectID) continue;
+  for (const block of projectOwnedPromptDeltas(sessionID, projectID)) {
     if (!parseMessageInsertSelector(block.selector)) continue;
     const messages = parseDeltaMessages(block.content);
     const payload =
@@ -3908,7 +3933,7 @@ export function appendKnowledgePromptDelta(input: {
   // `entries` supplies content for SYNTHETIC context-source ids (see
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
   const projectID = ensureProject(input.projectPath);
-  const blocks = listSessionPromptDeltas(input.sessionID);
+  const blocks = projectOwnedPromptDeltas(input.sessionID, projectID);
   // Selection snapshots can outlive a versioned edit. Rank ordinary entries
   // by tenant-scoped logical identity, never by a superseded physical ID.
   // Synthetic sources retain their own separate identity namespace.
@@ -4488,7 +4513,7 @@ function acceptedKnowledgeCandidate(
   if (!pin?.entryKeys?.length) return undefined;
   const projectID = ensureProject(projectPath);
   const deltaDigest = acceptedKnowledgeDeltaDigest(
-    listSessionPromptDeltas(sessionID),
+    projectOwnedPromptDeltas(sessionID, projectID),
     projectID,
     pin.entryKeys,
   );
@@ -21758,8 +21783,11 @@ async function handleConversationTurnPrepared(
           // is late; otherwise the shared deadline fails closed with 503.
           const acceptedPin = ltmPinnedText.get(sessionID);
           const acceptedProof = acceptedKnowledgePins.get(sessionID);
-          const existingDeltas = listSessionPromptDeltas(sessionID);
           const currentProjectID = ensureProject(projectPath);
+          const existingDeltas = projectOwnedPromptDeltas(
+            sessionID,
+            currentProjectID,
+          );
           const deltaDigest = acceptedPin?.entryKeys
             ? acceptedKnowledgeDeltaDigest(
                 existingDeltas,

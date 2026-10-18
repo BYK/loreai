@@ -22,11 +22,17 @@ import {
   ensureProject,
   saveSessionTracking,
   appendSessionPromptDelta,
+  listSessionPromptDeltas,
+  mergeProjectInternal,
+  projectId,
 } from "@loreai/core";
 import { registerSink } from "../../core/src/log";
 import { credentialTenantFingerprint } from "../src/auth";
 import {
   applySessionPromptDeltas,
+  reanchorDeltaOnCompression,
+  appendKnowledgePromptDelta,
+  surfaceSignature,
   pendingPipelineSessionClaimCountForTest,
   setBeforeUpstreamCaptureForTest,
 } from "../src/pipeline";
@@ -540,7 +546,7 @@ describe("isClaudeCodeSideChannel", () => {
     "fenced instruction records never establish reminder provenance (%s)",
     (fence) => {
       for (const realProject of [undefined, "/client/projects/actual"]) {
-        const reminder = `<system-reminder>\nInstructions from: /home/dev/.claude/CLAUDE.md\nExample configuration:\n${fence}markdown\nInstructions from: /client/projects/quoted/CLAUDE.md\n${fence}\n${realProject ? `Instructions from: ${realProject}/CLAUDE.md\n` : ""}</system-reminder>`;
+        const reminder = `<system-reminder>\nInstructions from: ${realProject ?? "/home/dev/.claude"}/CLAUDE.md\nExample configuration:\n${fence}markdown\nInstructions from: /client/projects/quoted/CLAUDE.md\n${fence}\n</system-reminder>`;
         const result = getRequestProjectPath(
           makeRequest({
             rawHeaders: { ...CC_SESSION_HEADERS },
@@ -635,11 +641,34 @@ describe("isClaudeCodeSideChannel", () => {
     ).toThrow("Conflicting project paths");
   });
 
-  test("a global instruction file and quoted cwd do not outrank the project instruction file", () => {
+  test("a global instruction body cannot outrank an independent project header", () => {
     const reminder = `<system-reminder>
 Instructions from: /home/dev/.claude/CLAUDE.md
 Instructions from: /client/projects/new-claude/CLAUDE.md
 cwd: /client/projects/wrong
+</system-reminder>`;
+    expect(
+      getRequestProjectPath(
+        makeRequest({
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-lore-project": "/client/projects/new-claude",
+          },
+          messages: [
+            { role: "user", content: [{ type: "text", text: reminder }] },
+          ],
+        }),
+      ),
+    ).toMatchObject({
+      path: "/client/projects/new-claude",
+      source: "header",
+    });
+  });
+
+  test("a second record-shaped body line cannot change the initial project", () => {
+    const reminder = `<system-reminder>
+Instructions from: /client/projects/one/CLAUDE.md
+Instructions from: /client/projects/two/CLAUDE.md
 </system-reminder>`;
     expect(
       getRequestProjectPath(
@@ -650,27 +679,7 @@ cwd: /client/projects/wrong
           ],
         }),
       ),
-    ).toMatchObject({
-      path: "/client/projects/new-claude",
-      source: "inferred",
-    });
-  });
-
-  test("two unrelated project instruction files in one reminder fail closed", () => {
-    const reminder = `<system-reminder>
-Instructions from: /client/projects/one/CLAUDE.md
-Instructions from: /client/projects/two/CLAUDE.md
-</system-reminder>`;
-    expect(() =>
-      getRequestProjectPath(
-        makeRequest({
-          rawHeaders: { ...CC_SESSION_HEADERS },
-          messages: [
-            { role: "user", content: [{ type: "text", text: reminder }] },
-          ],
-        }),
-      ),
-    ).toThrow("Conflicting project paths");
+    ).toMatchObject({ path: "/client/projects/one", source: "inferred" });
   });
 
   test("nested project instructions agree with the project header", () => {
@@ -693,12 +702,12 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     ).toMatchObject({ path: "/client/projects/app", source: "header" });
   });
 
-  test("nested instruction files without an independent project path remain ambiguous", () => {
+  test("a nested record-shaped body line cannot retarget the initial project", () => {
     const reminder = `<system-reminder>
 Instructions from: /client/projects/app/CLAUDE.md
 Instructions from: /client/projects/app/src/CLAUDE.md
 </system-reminder>`;
-    expect(() =>
+    expect(
       getRequestProjectPath(
         makeRequest({
           rawHeaders: { ...CC_SESSION_HEADERS },
@@ -707,7 +716,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
           ],
         }),
       ),
-    ).toThrow("Conflicting project paths");
+    ).toMatchObject({ path: "/client/projects/app", source: "inferred" });
   });
 
   test("a reminder cannot claim another session's synthetic project bucket", () => {
@@ -1000,12 +1009,15 @@ describe("handleRequest — Claude Code side-channel routing", () => {
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(200);
     await response.text();
-    expect(harness.upstreamBodies()).toHaveLength(0);
+    expect(harness.upstreamBodies()).toHaveLength(1);
     expect(
-      harness.queryDB("SELECT project_path FROM session_state"),
-    ).toHaveLength(0);
+      harness.upstreamBodies()[0].includes("private-forged-project-knowledge"),
+    ).toBe(false);
+    expect(harness.queryDB("SELECT project_path FROM session_state")).toEqual([
+      { project_path: "/client/projects/my app" },
+    ]);
   });
 
   it("stores an explicitly classified main turn even when legacy meta heuristics would match", async () => {
@@ -1149,7 +1161,10 @@ Instructions from: /client/projects/${project}/CLAUDE.md
       const resp = await harness.chat(newClaudeCodeBody(reminder), "test-key", {
         ...CC_SESSION_HEADERS,
         "x-claude-code-session-id": `remote-session-${index}`,
-        "x-lore-project": "",
+        // Later file-looking lines are body text, so a global first file needs
+        // independent workspace attribution rather than a scan of its contents.
+        "x-lore-project": `/client/projects/${project}`,
+        "x-claude-code-request-class": "main",
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       });
       expect(resp.status).toBe(200);
@@ -1809,6 +1824,306 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       ).toEqual([{ project_path: "/client/projects/different" }]);
     } finally {
       cwd.mockRestore();
+    }
+  });
+
+  it("never relabels a foreign durable delta during compression", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const original = ensureProject("/client/projects/original");
+    const current = ensureProject("/client/projects/current");
+    const sessionID = "foreign-delta-compression";
+    saveSessionTracking(sessionID, {
+      projectPath: "/client/projects/current",
+      projectPathProvisional: false,
+    });
+    for (const [projectID, marker] of [
+      [original, "foreign-compression-knowledge"],
+      [current, "current-compression-knowledge"],
+    ]) {
+      appendSessionPromptDelta({
+        sessionID,
+        projectID,
+        selector: JSON.stringify({ target: "messages", insertAt: 0 }),
+        content: JSON.stringify({
+          role: "user",
+          content: [{ type: "text", text: marker }],
+        }),
+      });
+    }
+    const messages: GatewayRequest["messages"] = [
+      { role: "user", content: [{ type: "text", text: "Continue coding" }] },
+    ];
+    reanchorDeltaOnCompression(
+      sessionID,
+      "/client/projects/current",
+      messages,
+      true,
+    );
+    const forwarded = JSON.stringify(
+      applySessionPromptDeltas(messages, sessionID, current),
+    );
+    expect(forwarded.includes("foreign-compression-knowledge")).toBe(false);
+    expect(forwarded.includes("current-compression-knowledge")).toBe(true);
+    expect(
+      listSessionPromptDeltas(sessionID).some(
+        (row) =>
+          row.projectID === current &&
+          row.content.includes("foreign-compression-knowledge"),
+      ),
+    ).toBe(false);
+  });
+
+  it("never debounces current knowledge into a foreign durable row", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const original = ensureProject("/client/projects/original");
+    const current = ensureProject("/client/projects/current");
+    const sessionID = "foreign-delta-debounce";
+    saveSessionTracking(sessionID, {
+      projectPath: "/client/projects/current",
+      projectPathProvisional: false,
+    });
+    const id = ltm.create({
+      projectPath: "/client/projects/current",
+      scope: "project",
+      category: "gotcha",
+      title: "Current knowledge",
+      content: "current-before-edit",
+    });
+    const pin = [
+      `${id}:${surfaceSignature("Current knowledge", "current-before-edit")}`,
+    ];
+    appendSessionPromptDelta({
+      sessionID,
+      projectID: original,
+      selector: JSON.stringify({
+        target: "messages",
+        insertAt: 0,
+        debounceAt: 61000,
+        mut: { changed: [], removed: [] },
+      }),
+      content: JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "foreign-debounce-knowledge" }],
+      }),
+    });
+    ltm.update(id, { content: "current-after-edit" });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: "/client/projects/current",
+        insertAt: 0,
+        previousKeys: pin,
+        nextKeys: pin,
+        entries: [],
+        now: 5000,
+      }),
+    ).toBe(true);
+    const messages: GatewayRequest["messages"] = [
+      { role: "user", content: [{ type: "text", text: "Continue coding" }] },
+    ];
+    for (let turn = 0; turn < 2; turn++) {
+      if (turn === 1) {
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath: "/client/projects/current",
+            insertAt: 0,
+            previousKeys: pin,
+            nextKeys: pin,
+            entries: [],
+            now: 10000,
+          }),
+        ).toBe(false);
+      }
+      const forwarded = JSON.stringify(
+        applySessionPromptDeltas(messages, sessionID, current),
+      );
+      expect(forwarded.includes("current-after-edit")).toBe(true);
+      expect(forwarded.includes("foreign-debounce-knowledge")).toBe(false);
+    }
+  });
+
+  it.each([
+    [
+      "/home/dev/.claude",
+      "Instructions from: /client/projects/foreign/CLAUDE.md",
+    ],
+    [
+      "/client/projects/one",
+      "Instructions from: /client/projects/foreign/CLAUDE.md",
+    ],
+    ["/client/projects/one", "Contents of ordinary prose, not a file header."],
+  ])(
+    "unfenced instruction body cannot attribute or reject a workspace (%s, %s)",
+    async (root, bodyText) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [
+          makeFixtureEntry({
+            seq: 0,
+            requestMessages: [],
+            responseText: "Coding reply",
+          }),
+        ],
+      });
+      const tenant = credentialTenantFingerprint({
+        scheme: "api-key",
+        value: "test-key",
+      });
+      withTenant(tenant, () =>
+        ltm.create({
+          projectPath: "/client/projects/foreign",
+          scope: "project",
+          category: "preference",
+          title: "Foreign preference",
+          content: "private-unfenced-foreign-knowledge",
+        }),
+      );
+      const response = await harness.chat(
+        newClaudeCodeBody(
+          `<system-reminder>Instructions from: ${root}/CLAUDE.md\nExample instruction header:\n${bodyText}\n</system-reminder>`,
+        ),
+        "test-key",
+        {
+          ...CC_SESSION_HEADERS,
+          "x-claude-code-request-class": "main",
+          "x-lore-project": "",
+          "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+        },
+      );
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.upstreamBodies()).toHaveLength(1);
+      expect(
+        harness
+          .upstreamBodies()[0]
+          .includes("private-unfenced-foreign-knowledge"),
+      ).toBe(false);
+      const [state] = harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state",
+      );
+      expect(state.project_path).not.toBe("/client/projects/foreign");
+      if (root === "/client/projects/one")
+        expect(state.project_path).toBe(root);
+    },
+  );
+
+  it.each([false, true])(
+    "accepts an established canonical project alias on continuation and slash commands (%s)",
+    async (slash) => {
+      harness = await createHarness({
+        fixtures: [0, 1].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Coding reply",
+          }),
+        ),
+      });
+      const remote = "https://github.com/example/canonical-alias-fixture.git";
+      const first = ensureProject("/client/projects/one", undefined, remote);
+      const alias = ensureProject("/client/projects/alias", undefined, remote);
+      mergeProjectInternal(alias, first);
+      expect(projectId("/client/projects/alias")).toBe(first);
+      const headers = {
+        ...CC_SESSION_HEADERS,
+        "x-claude-code-request-class": "main",
+        "x-lore-project": "",
+      };
+      const initial = await harness.chat(
+        newClaudeCodeBody(
+          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+        ),
+        "test-key",
+        headers,
+      );
+      expect(initial.status).toBe(200);
+      await initial.text();
+      const body = newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>",
+      );
+      if (slash)
+        body.messages = [
+          ...(body.messages as Array<Record<string, unknown>>),
+          { role: "user", content: "/lore:amnesia:on" },
+        ];
+      const response = await harness.chat(body, "test-key", headers);
+      expect(response.status).toBe(200);
+      await response.text();
+    },
+  );
+
+  it("accepts a canonical alias slash command after waiting for a coding turn", async () => {
+    harness = await createHarness({
+      fixtures: [0, 1].map((seq) =>
+        makeFixtureEntry({
+          seq,
+          requestMessages: [],
+          responseText: "Coding reply",
+        }),
+      ),
+    });
+    const first = ensureProject("/client/projects/one");
+    mergeProjectInternal(ensureProject("/client/projects/alias"), first);
+    expect(projectId("/client/projects/alias")).toBe(first);
+    const headers = {
+      ...CC_SESSION_HEADERS,
+      "x-claude-code-request-class": "main",
+      "x-lore-project": "",
+    };
+    const codingBody = () =>
+      newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+      );
+    const initial = await harness.chat(codingBody(), "test-key", headers);
+    expect(initial.status).toBe(200);
+    await initial.text();
+    let release = () => {};
+    let entered = () => {};
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    setBeforeUpstreamCaptureForTest(async () => {
+      entered();
+      await blocked;
+    });
+    try {
+      const nextBody = codingBody();
+      nextBody.messages = [
+        ...(nextBody.messages as Array<Record<string, unknown>>),
+        { role: "user", content: "Continue with the next coding task" },
+      ];
+      const coding = harness.chat(nextBody, "test-key", headers);
+      await ready;
+      const body = newClaudeCodeBody(
+        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>",
+      );
+      body.messages = [
+        ...(body.messages as Array<Record<string, unknown>>),
+        { role: "user", content: "/lore:amnesia:on" },
+      ];
+      const queued = harness.chat(body, "test-key", headers);
+      await vi.waitFor(() =>
+        expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+      );
+      release();
+      const codingResponse = await coding;
+      expect(codingResponse.status).toBe(200);
+      await codingResponse.text();
+      const response = await queued;
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.queryDB("SELECT amnesia FROM session_state")).toEqual([
+        { amnesia: 1 },
+      ]);
+    } finally {
+      release();
     }
   });
 

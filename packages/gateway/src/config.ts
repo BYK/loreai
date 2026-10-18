@@ -1247,89 +1247,55 @@ export class ProjectPathConflictError extends Error {
 }
 
 /**
- * Claude Code's opening reminder lists instruction files, including global
- * files under ~/.claude. Other text can quote arbitrary paths, so only actual
- * instruction-file records can bind a session. Nested instruction directories
- * need an independent project header to distinguish a root from a subproject.
+ * Only an instruction-file header at the start of the reminder can provide
+ * provenance. Everything after that first header is file content: additional
+ * record-looking lines cannot be distinguished from examples inside the file.
+ * A global first file therefore requires independent workspace attribution.
  */
 export function inferClaudeCodeReminderProjectPath(
   reminder: string,
-  headerPath?: string,
 ): InferredProjectPath | null {
-  const paths = new Set<string>();
-  let fence: { marker: string; length: number } | undefined;
-  for (const line of reminder.split(/\r?\n/)) {
-    // Instruction bodies are Markdown, not additional client provenance. In
-    // particular, record-shaped fenced examples must never select a project.
-    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (fence) {
-      if (
-        delimiter &&
-        delimiter[1][0] === fence.marker &&
-        delimiter[1].length >= fence.length &&
-        !delimiter[2].trim()
-      ) {
-        fence = undefined;
-      }
-      continue;
-    }
-    if (delimiter) {
-      fence = { marker: delimiter[1][0], length: delimiter[1].length };
-      continue;
-    }
-    // Four-space/tab-indented code and block quotes cannot be record headers.
-    const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(
-      line,
+  const line = reminder.split(/\r?\n/).find((part) => part.trim());
+  if (!line) return null;
+  // The client-generated first header bounds the file body. Never scan that
+  // body for more provenance, even for unfenced examples or ordinary prose.
+  const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+(.*)$/.exec(
+    line,
+  );
+  if (!record) return null;
+  // Parse the entire header before validating the path. Silently skipping a
+  // real record with unsupported characters lets a forged second record win.
+  const match =
+    /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(
+      record[1],
     );
-    if (!record) continue;
-    // Parse the entire header before validating the path. Silently skipping a
-    // real record with unsupported characters lets a forged second record win.
-    const match =
-      /^(\/.*)\/(?:CLAUDE|AGENTS|\.lore)\.md(?:[ \t]*(?:\([^\r\n]*\))?[ \t]*:?[ \t]*)$/.exec(
-        record[1],
-      );
-    if (!match) throw new ProjectPathConflictError();
-    const path = match[1].replace(/\/+$/, "");
-    if (
-      !path ||
-      path.length > MAX_PROJECT_PATH_LENGTH ||
-      /[\u0000-\u001f\u007f]/.test(path) ||
-      path.includes("//") ||
-      path.split("/").some((part) => part === "." || part === "..") ||
-      isUnattributedPath(path)
-    ) {
-      throw new ProjectPathConflictError();
-    }
-    // User-level Claude Code instructions are shared across projects. They
-    // cannot be used to identify the active workspace.
-    // Match user-global instruction roots, not every .claude ancestor: actual
-    // workspaces can live in a project's .claude/worktrees directory.
-    if (
-      /^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(
-        path,
-      )
-    ) {
-      continue;
-    }
-    paths.add(path);
+  if (!match) throw new ProjectPathConflictError();
+  const path = match[1].replace(/\/+$/, "");
+  if (
+    !path ||
+    path.length > MAX_PROJECT_PATH_LENGTH ||
+    [...path].some(
+      (character) =>
+        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    ) ||
+    path.includes("//") ||
+    path.split("/").some((part) => part === "." || part === "..") ||
+    isUnattributedPath(path)
+  ) {
+    throw new ProjectPathConflictError();
   }
-  if (paths.size > 1) {
-    if (
-      !headerPath ||
-      !paths.has(headerPath) ||
-      [...paths].some(
-        (candidate) =>
-          candidate !== headerPath &&
-          !candidate.startsWith(`${headerPath}/`) &&
-          !headerPath.startsWith(`${candidate}/`),
-      )
-    ) {
-      throw new ProjectPathConflictError();
-    }
-    return { path: headerPath, authoritative: true };
+  // User-level Claude Code instructions are shared across projects. They
+  // cannot be used to identify the active workspace.
+  // Match user-global instruction roots, not every .claude ancestor: actual
+  // workspaces can live in a project's .claude/worktrees directory.
+  if (
+    /^(?:\/(?:home|Users)\/[^/]+|\/root)\/(?:\.claude|\.config\/claude)$/.test(
+      path,
+    )
+  ) {
+    return null;
   }
-  const path = paths.values().next().value;
-  return path ? { path, authoritative: true } : null;
+  return { path, authoritative: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,7 +1383,7 @@ export function getProjectPath(
   // means the request's project identity is inconsistent. Validate it even when
   // system inference would otherwise return early.
   const reminderPath = openingReminder
-    ? inferClaudeCodeReminderProjectPath(openingReminder, headerPath)
+    ? inferClaudeCodeReminderProjectPath(openingReminder)
     : null;
   if (
     reminderPath &&

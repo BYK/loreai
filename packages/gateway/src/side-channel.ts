@@ -29,7 +29,6 @@
  */
 import {
   ProjectPathConflictError,
-  extractProjectHeader,
   getProjectPath,
   inferClaudeCodeReminderProjectPath,
   inferProjectPathDetailed,
@@ -112,14 +111,13 @@ export function getRequestProjectPath(req: GatewayRequest): ProjectPathResult {
     // The first reminder can be retained across turns. A later instruction
     // record naming a different project means it no longer identifies the
     // current workspace; reject before reading or storing either project's data.
-    const headerPath = extractProjectHeader(req.rawHeaders);
     for (const message of req.messages.slice(1)) {
       if (message.role !== "user") continue;
       for (const block of message.content) {
         if (block.type !== "text") continue;
         const reminder = openingReminderText(block.text);
         const later = reminder
-          ? inferClaudeCodeReminderProjectPath(reminder, headerPath)
+          ? inferClaudeCodeReminderProjectPath(reminder)
           : null;
         if (later && later.path !== result.path) {
           throw new ProjectPathConflictError();
@@ -178,11 +176,5 @@ export function isClaudeCodeSideChannel(req: GatewayRequest): boolean {
     return true;
   }
   const reminder = claudeCodeOpeningReminder(req);
-  return (
-    !reminder ||
-    !inferClaudeCodeReminderProjectPath(
-      reminder,
-      extractProjectHeader(req.rawHeaders),
-    )
-  );
+  return !reminder || !inferClaudeCodeReminderProjectPath(reminder);
 }
