@@ -284,6 +284,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     <Nav
       activeProjectId={activeProjectId()}
       stale={ws.state.projects.status()}
+      workspaceFilter={query()}
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];

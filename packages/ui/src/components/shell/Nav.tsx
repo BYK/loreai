@@ -8,7 +8,11 @@ import {
   useConnection,
   type ConnectionState,
 } from "~/lib/connection";
-import { allKnowledgeHref, duplicatesHref } from "~/lib/href";
+import {
+  allKnowledgeHref,
+  duplicatesHref,
+  withWorkspaceFilter,
+} from "~/lib/href";
 import type { KeyStatus } from "~/state/status";
 import { StaleBadge } from "../lore/StaleBadge";
 
@@ -82,9 +86,12 @@ export interface NavProps {
   stale?: KeyStatus;
   footer?: JSX.Element;
   class?: string;
+  workspaceFilter?: string;
 }
 
 export const Nav: Component<NavProps> = (props) => {
+  const withFilter = (href: string) =>
+    withWorkspaceFilter(href, props.workspaceFilter ?? "");
   const homePath = useResolvedPath(() => "/");
   const allKnowledgePath = useResolvedPath(() => "/knowledge");
   const entitiesPath = useResolvedPath(() => "/entities/*");
@@ -117,11 +124,16 @@ export const Nav: Component<NavProps> = (props) => {
       class={cn("flex min-h-full flex-col bg-nav px-2 py-2", props.class)}
     >
       <div class="px-3 py-1 text-[11px] font-medium text-muted">Workspace</div>
-      <NavItem href="/" active={!!atHome()} testId="nav-projects" end>
+      <NavItem
+        href={withFilter("/")}
+        active={!!atHome()}
+        testId="nav-projects"
+        end
+      >
         Projects
       </NavItem>
       <NavItem
-        href={allKnowledgeHref()}
+        href={withFilter(allKnowledgeHref())}
         active={!!atAllKnowledge()}
         testId="nav-all-knowledge"
         end
@@ -134,29 +146,38 @@ export const Nav: Component<NavProps> = (props) => {
         </div>
       </Show>
       <NavHeading>Memory</NavHeading>
-      <NavItem href="/entities" active={!!atEntities()} testId="nav-entities">
+      <NavItem
+        href={withFilter("/entities")}
+        active={!!atEntities()}
+        testId="nav-entities"
+      >
         Entities
       </NavItem>
       <NavItem
-        href="/contradictions"
+        href={withFilter("/contradictions")}
         active={!!atContradictions()}
         testId="nav-contradictions"
       >
         Contradictions
       </NavItem>
       <NavItem
-        href="/promotions"
+        href={withFilter("/promotions")}
         active={!!atPromotions()}
         testId="nav-promotions"
         end
       >
         Promotions
       </NavItem>
-      <NavItem href="/team" active={!!atTeam()} testId="nav-team" end>
+      <NavItem
+        href={withFilter("/team")}
+        active={!!atTeam()}
+        testId="nav-team"
+        end
+      >
         Team
       </NavItem>
       <NavItem
-        href="/conflicts"
+        href={withFilter("/conflicts")}
         active={!!atConflicts()}
         testId="nav-conflicts"
         end
@@ -177,7 +198,7 @@ export const Nav: Component<NavProps> = (props) => {
       >
         {(projectId) => (
           <NavItem
-            href={duplicatesHref(projectId())}
+            href={withFilter(duplicatesHref(projectId()))}
             active={!!atDuplicates()}
             testId="nav-duplicates"
           >
@@ -186,14 +207,22 @@ export const Nav: Component<NavProps> = (props) => {
         )}
       </Show>
       <NavHeading>Operations</NavHeading>
-      <NavItem href="/warming" active={!!atWarming()} testId="nav-warming">
+      <NavItem
+        href={withFilter("/warming")}
+        active={!!atWarming()}
+        testId="nav-warming"
+      >
         Cache warming
       </NavItem>
-      <NavItem href="/costs" active={!!atCosts()} testId="nav-costs">
+      <NavItem
+        href={withFilter("/costs")}
+        active={!!atCosts()}
+        testId="nav-costs"
+      >
         Cost intelligence
       </NavItem>
       <NavItem
-        href="/model-usage"
+        href={withFilter("/model-usage")}
         active={!!atModelUsage()}
         testId="nav-model-usage"
       >

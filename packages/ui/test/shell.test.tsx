@@ -795,6 +795,20 @@ describe("shell: project navigation and real-data path", () => {
     await waitFor(() => expect(filter).toHaveValue("SQLite"));
   });
 
+  it("preserves the project-list filter when following workspace navigation", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/?list_q=lore", fakeClient());
+
+    fireEvent.click(await screen.findByTestId("nav-all-knowledge"));
+
+    await waitFor(() => expect(history.get()).toBe("/knowledge?list_q=lore"));
+  });
+
   it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {
     mount("/", fakeClient());
     const divider = await screen.findByTestId("list-divider");
