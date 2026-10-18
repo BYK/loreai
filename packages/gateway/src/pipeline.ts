@@ -17917,7 +17917,7 @@ async function handleCompactionInner(
   if (
     sessionState.projectPathProvisional === true ||
     (pathResult.source !== "cwd" &&
-      sessionState.projectPath !== pathResult.path)
+      !sameLogicalProjectPath(sessionState.projectPath, pathResult.path))
   ) {
     return errorResponse(
       403,
@@ -17935,7 +17935,12 @@ async function handleCompactionInner(
   if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
     return errorResponse(404, "No authenticated session found");
   }
-  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
+  // Waiting may publish an established alias of the authorized workspace.
+  // Recheck its logical owner, never a prefix or an unresolved project name.
+  if (
+    sessionState.projectPathProvisional === true ||
+    !sameLogicalProjectPath(sessionState.projectPath, authorizedProjectPath)
+  ) {
     return errorResponse(
       403,
       "Project path does not match the authenticated session",

@@ -2155,6 +2155,170 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     },
   );
 
+  it.each(["one", "alias", "distinct", "unknown"])(
+    "authorizes reminder-only compaction by canonical owner (%s)",
+    async (project) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [0, 1, 2].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Compaction setup reply",
+          }),
+        ),
+      });
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => {
+          const first = ensureProject("/client/projects/one");
+          const alias = ensureProject("/client/projects/alias");
+          mergeProjectInternal(alias, first);
+          expect(projectId("/client/projects/alias")).toBe(first);
+          for (const name of ["one", "distinct"])
+            ltm.create({
+              projectPath: `/client/projects/${name}`,
+              scope: "project",
+              category: "preference",
+              title: `Compaction owner ${name}`,
+              content: `private-compaction-owner-${name}`,
+            });
+        },
+      );
+      const headers = {
+        ...CC_SESSION_HEADERS,
+        "x-lore-project": "",
+        "x-claude-code-request-class": "main",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      };
+      const first = await harness.chat(
+        newClaudeCodeBody(
+          "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md\nReal workspace instructions.</system-reminder>",
+        ),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(harness.upstreamBodies()[0]).toContain(
+        "private-compaction-owner-one",
+      );
+      const body = newClaudeCodeBody(
+        `<system-reminder>Instructions from: /client/projects/${project}/CLAUDE.md\nReal workspace instructions.</system-reminder>`,
+      );
+      body.system =
+        "You are an anchored context summarization assistant for coding sessions.";
+      body.tools = [];
+      const response = await harness.chat(body, "test-key", {
+        ...headers,
+        "x-claude-code-request-class": "compaction",
+      });
+      expect(response.status).toBe(
+        project === "one" || project === "alias" ? 200 : 403,
+      );
+      const text = await response.text();
+      expect(text).not.toContain("private-compaction-owner-distinct");
+      if (response.status === 200)
+        expect(text).toContain("private-compaction-owner-one");
+      expect(harness.queryDB("SELECT project_path FROM session_state")).toEqual(
+        [{ project_path: "/client/projects/one" }],
+      );
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => expect(projectId("/client/projects/unknown")).toBeUndefined(),
+      );
+    },
+  );
+
+  it.each(["alias", "distinct"])(
+    "authorizes reminder-only compaction after a queued project transition (%s)",
+    async (target) => {
+      harness = await createHarness({
+        fixtures: [0, 1, 2, 3].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Queued compaction setup reply",
+          }),
+        ),
+      });
+      const firstID = ensureProject("/client/projects/one");
+      mergeProjectInternal(ensureProject("/client/projects/alias"), firstID);
+      expect(projectId("/client/projects/alias")).toBe(firstID);
+      const reminder = (name: string) =>
+        `<system-reminder>Instructions from: /client/projects/${name}/CLAUDE.md\nReal workspace instructions.</system-reminder>`;
+      const headers = {
+        ...CC_SESSION_HEADERS,
+        "x-lore-project": "",
+        "x-claude-code-request-class": "main",
+      };
+      const first = await harness.chat(
+        newClaudeCodeBody(reminder("one")),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.text();
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      setBeforeUpstreamCaptureForTest(async () => {
+        entered();
+        await gate;
+      });
+      try {
+        const continuation = newClaudeCodeBody(
+          target === "alias"
+            ? reminder("alias")
+            : "Continue in the authoritative workspace.",
+        );
+        if (target === "distinct")
+          continuation.system =
+            "You are Claude Code.\nWorking directory: /client/projects/distinct";
+        (continuation.messages as Array<unknown>).push({
+          role: "user",
+          content: "Continue in the registered alias.",
+        });
+        const coding = harness.chat(continuation, "test-key", {
+          ...headers,
+          "x-lore-project": target === "distinct" ? "/client/projects/one" : "",
+        });
+        await ready;
+        const compact = newClaudeCodeBody(reminder("one"));
+        compact.system =
+          "You are an anchored context summarization assistant for coding sessions.";
+        compact.tools = [];
+        const queued = harness.chat(compact, "test-key", {
+          ...headers,
+          "x-claude-code-request-class": "compaction",
+        });
+        await vi.waitFor(() =>
+          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+        );
+        release();
+        const codingResponse = await coding;
+        expect(codingResponse.status).toBe(200);
+        await codingResponse.text();
+        const response = await queued;
+        expect(response.status).toBe(target === "alias" ? 200 : 403);
+        await response.text();
+        expect(
+          harness.queryDB("SELECT project_path FROM session_state"),
+        ).toEqual([{ project_path: `/client/projects/${target}` }]);
+      } finally {
+        release();
+      }
+    },
+  );
+
   it.each(
     [
       "/var/home/alice/.claude",
