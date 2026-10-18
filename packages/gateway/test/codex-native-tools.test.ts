@@ -68,6 +68,7 @@ describe("Codex native tool replay", () => {
       execution: "server",
       call_id: null,
       status: "completed",
+      name: "web_search",
       arguments: { paths: ["files"] },
     },
     {

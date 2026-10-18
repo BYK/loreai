@@ -85,6 +85,45 @@ export function assertNativeResponsesCall(raw: Record<string, unknown>): void {
           : [];
   if (allowed.length === 0) throw new InvalidCrossProviderRequestError();
   assertKnownNativeFields(raw, allowed);
+  if (
+    (raw.id !== undefined && typeof raw.id !== "string") ||
+    (raw.status !== undefined && typeof raw.status !== "string")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (raw.type === "tool_search_call") {
+    // Hosted search calls bypass client call normalization, but their opaque
+    // provenance still needs the same required-field and type guarantees.
+    const serverOwned = raw.execution === "server" && raw.call_id === null;
+    const clientOwned =
+      typeof raw.call_id === "string" &&
+      raw.call_id.length > 0 &&
+      (raw.execution === undefined || raw.execution === "client");
+    if (
+      (!serverOwned && !clientOwned) ||
+      (serverOwned &&
+        (typeof raw.name !== "string" || raw.name.length === 0)) ||
+      (raw.name !== undefined && typeof raw.name !== "string") ||
+      raw.arguments === null ||
+      typeof raw.arguments !== "object" ||
+      Array.isArray(raw.arguments) ||
+      (raw.namespace !== undefined && typeof raw.namespace !== "string")
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    return;
+  }
+  if (
+    typeof raw.call_id !== "string" ||
+    raw.call_id.length === 0 ||
+    typeof raw.name !== "string" ||
+    raw.name.length === 0 ||
+    (raw.namespace !== undefined && typeof raw.namespace !== "string") ||
+    (raw.type === "custom_tool_call" && typeof raw.input !== "string") ||
+    (raw.type === "function_call" && typeof raw.arguments !== "string")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
 }
 
 /** Hosted search is completed by the provider and has no client call identity. */

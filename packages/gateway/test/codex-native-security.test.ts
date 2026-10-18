@@ -158,6 +158,25 @@ describe("Codex native tool security boundaries", () => {
       call_id: null,
     },
     {
+      type: "tool_search_call",
+      execution: "server",
+      call_id: null,
+      arguments: {},
+    },
+    {
+      type: "tool_search_call",
+      execution: "server",
+      call_id: null,
+      name: "web_search",
+    },
+    {
+      type: "tool_search_call",
+      execution: "server",
+      call_id: null,
+      name: "web_search",
+      arguments: "{}",
+    },
+    {
       type: "function_call",
       call_id: "files-call",
       name: "read",
@@ -309,6 +328,7 @@ describe("Codex native tool security boundaries", () => {
       call_id: null,
       execution: "server",
       status: "completed",
+      name: "web_search",
       arguments: { paths: ["files"] },
     },
     {
@@ -381,6 +401,41 @@ describe("Codex native tool security boundaries", () => {
         delete provenance.raw.tools;
       } else {
         provenance.raw.tools = {};
+      }
+
+      expect(() =>
+        buildOpenAIResponsesUpstreamRequest(
+          request,
+          "https://provider.example",
+        ),
+      ).toThrow("Unsupported cross-provider request");
+    },
+  );
+
+  test.each([
+    "missing name",
+    "missing arguments",
+    "wrong arguments type",
+  ] as const)(
+    "rejects persisted server-owned tool_search_call with %s on replay",
+    (malformation) => {
+      const call = serverOwnedSearchItems[0];
+      const request = parseOpenAIResponsesRequest({ input: [{ ...call }] }, {});
+      const provenance = request.messages
+        .flatMap((message) => message.provenanceContent ?? [])
+        .find(
+          (block) =>
+            block.type === "opaque" && block.raw.type === "tool_search_call",
+        );
+      if (!provenance || provenance.type !== "opaque") {
+        throw new Error("expected server-owned Responses provenance");
+      }
+      if (malformation === "missing name") {
+        delete provenance.raw.name;
+      } else if (malformation === "missing arguments") {
+        delete provenance.raw.arguments;
+      } else {
+        provenance.raw.arguments = "{}";
       }
 
       expect(() =>
