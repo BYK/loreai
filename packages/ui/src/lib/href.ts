@@ -34,20 +34,19 @@ export function buildHref(
 export const projectHref = (projectId: string) =>
   buildHref(["projects", projectId]);
 
-/** Merge the active workspace query into a destination without replacing
- *  query parameters that already belong to that destination. */
-export function withWorkspaceQuery(href: string, query: string): string {
-  if (!query || query === "in:inbox") return href;
+/** Merge the active project-list filter without changing route-level queries. */
+export function withWorkspaceFilter(href: string, filter: string): string {
+  if (!filter || filter === "in:inbox") return href;
   const hashIndex = href.indexOf("#");
   const hash = hashIndex >= 0 ? href.slice(hashIndex) : "";
   const withoutHash = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
   const queryIndex = withoutHash.indexOf("?");
   const path = queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
   const existing = queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : "";
-  const hasQuery = existing
+  const hasFilter = existing
     .split("&")
-    .some((parameter) => parameter.split("=", 1)[0] === "q");
-  const appended = hasQuery ? "" : queryString({ q: query }).slice(1);
+    .some((parameter) => parameter.split("=", 1)[0] === "list_q");
+  const appended = hasFilter ? "" : queryString({ list_q: filter }).slice(1);
   const serialized = [existing, appended].filter(Boolean).join("&");
   return `${path}${serialized ? `?${serialized}` : ""}${hash}`;
 }

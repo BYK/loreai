@@ -13,7 +13,7 @@ import {
   sessionHref,
   searchHref,
   duplicatesHref,
-  withWorkspaceQuery,
+  withWorkspaceFilter,
 } from "~/lib/href";
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
@@ -35,9 +35,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const withQuery = (href: string) =>
-    withWorkspaceQuery(
+    withWorkspaceFilter(
       href,
-      typeof searchParams.q === "string" ? searchParams.q : "",
+      typeof searchParams.list_q === "string" ? searchParams.list_q : "",
     );
   const [scope, setScope] = createSignal<RecallScope>("all");
   const sessions = ws.state.sessions.page(() => ({

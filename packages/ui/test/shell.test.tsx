@@ -704,7 +704,7 @@ describe("shell: project navigation and real-data path", () => {
     for (const base of [undefined, "/ui"]) {
       const prefix = base ?? "";
       const { history, unmount } = mount(
-        `${prefix}/?q=lore`,
+        `${prefix}/?list_q=lore`,
         client,
         undefined,
         base,
@@ -715,11 +715,11 @@ describe("shell: project navigation and real-data path", () => {
       const project = await screen.findByRole("link", { name: "lore" });
       expect(project).toHaveAttribute(
         "href",
-        `${prefix}/projects/p-lore?q=lore`,
+        `${prefix}/projects/p-lore?list_q=lore`,
       );
       fireEvent.click(project);
       await waitFor(() =>
-        expect(history.get()).toBe(`${prefix}/projects/p-lore?q=lore`),
+        expect(history.get()).toBe(`${prefix}/projects/p-lore?list_q=lore`),
       );
       expect(screen.getByTestId("project-list-body")).toBe(list);
       expect(list.scrollTop).toBe(192);
@@ -727,7 +727,7 @@ describe("shell: project navigation and real-data path", () => {
       fireEvent.click(await screen.findByRole("link", { name: /s-42/ }));
       await waitFor(() =>
         expect(history.get()).toBe(
-          `${prefix}/projects/p-lore/sessions/s-42?q=lore`,
+          `${prefix}/projects/p-lore/sessions/s-42?list_q=lore`,
         ),
       );
       expect(screen.getByTestId("project-list-body")).toBe(list);
@@ -739,6 +739,26 @@ describe("shell: project navigation and real-data path", () => {
       );
       unmount();
     }
+  });
+
+  it("keeps the project-list filter separate from content search", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/search?q=SQLite", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    expect(filter).toHaveValue("");
+    fireEvent.input(filter, { target: { value: "lore" } });
+
+    await waitFor(() => {
+      const params = new URLSearchParams(history.get().split("?")[1]);
+      expect(params.get("q")).toBe("SQLite");
+      expect(params.get("list_q")).toBe("lore");
+    });
   });
 
   it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {
@@ -1276,8 +1296,10 @@ describe("shell: workspace knowledge and search", () => {
     expect(allKnowledge).toHaveAttribute("aria-current", "page");
     expect(projects).not.toHaveAttribute("aria-current");
     expect(nav.querySelector('[data-testid="nav-project"]')).toBeNull();
-    expect(pane("list")).toHaveTextContent("No projects match");
-    expect(within(pane("list")).queryByTestId("nav-project")).toBeNull();
+    expect(
+      within(pane("list")).getByRole("searchbox", { name: "Search list" }),
+    ).toHaveValue("");
+    expect(within(pane("list")).getAllByTestId("nav-project")).toHaveLength(2);
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
     if (!firstRow) throw new Error("Missing all-knowledge table row");

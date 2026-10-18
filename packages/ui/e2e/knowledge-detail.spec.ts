@@ -207,7 +207,9 @@ test.describe("knowledge detail provenance and history", () => {
   test.describe("mobile", () => {
     test.use({ viewport: { width: 393, height: 852 }, isMobile: true });
 
-    test("back from detail preserves the table query", async ({ page }) => {
+    test("back from detail does not copy the table query to the workspace", async ({
+      page,
+    }) => {
       const { project, live } = await projectAndEntry(page);
       await page.goto(
         `/ui/projects/${project.id}/knowledge?q=SQLite&sort=title:asc`,
@@ -217,7 +219,7 @@ test.describe("knowledge detail provenance and history", () => {
       );
       await expect(page.getByTestId("knowledge-document")).toBeVisible();
       await page.getByTestId("mobile-back").click();
-      await expect(page).toHaveURL("/ui?q=SQLite");
+      await expect(page).toHaveURL("/ui");
     });
   });
 });

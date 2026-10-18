@@ -10,7 +10,7 @@ import {
 import { A } from "@solidjs/router";
 
 import type { ProjectSummary } from "~/contracts";
-import { withWorkspaceQuery } from "~/lib/href";
+import { withWorkspaceFilter } from "~/lib/href";
 import { sectionProjects } from "~/components/shell/nav-projects";
 import { pins } from "~/state/pins";
 import { cn } from "~/lib/utils";
@@ -56,7 +56,7 @@ export const ProjectListBody: Component<{
     return (
       <div class="group flex items-center">
         <A
-          href={withWorkspaceQuery(
+          href={withWorkspaceFilter(
             `/projects/${encodeURIComponent(project.id)}`,
             props.query,
           )}

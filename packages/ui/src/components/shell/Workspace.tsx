@@ -11,6 +11,7 @@ import {
   A,
   type RouteSectionProps,
   useMatch,
+  useNavigate,
   useResolvedPath,
   useSearchParams,
 } from "@solidjs/router";
@@ -36,7 +37,7 @@ import {
   type Pane,
   type PaneLayout,
 } from "~/state/pane-layout";
-import { withWorkspaceQuery } from "~/lib/href";
+import { withWorkspaceFilter } from "~/lib/href";
 
 type LayoutMode = "full" | "split" | "single";
 
@@ -112,36 +113,48 @@ const RestorePopover: Component<{
   children: JSX.Element;
   canRestore: boolean;
   onRestore: () => void;
-}> = (props) => (
-  <PopoverPrimitive.Root>
-    <PopoverPrimitive.Trigger
-      data-testid={`pane-chip-${props.pane}`}
-      class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft"
-    >
-      {props.label} ▾
-    </PopoverPrimitive.Trigger>
-    <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Content class="z-50 w-64 rounded-md border border-hairline bg-surface p-2">
-        <div class="max-h-[70vh] overflow-y-auto">{props.children}</div>
-        <Show when={props.canRestore}>
-          <PopoverPrimitive.CloseButton
-            type="button"
-            aria-label="Restore"
-            class="mt-2 w-full rounded px-2 py-1 text-left text-xs text-accent hover:bg-soft"
-            onClick={props.onRestore}
-          >
-            Restore
-          </PopoverPrimitive.CloseButton>
-        </Show>
-      </PopoverPrimitive.Content>
-    </PopoverPrimitive.Portal>
-  </PopoverPrimitive.Root>
-);
+}> = (props) => {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <PopoverPrimitive.Root open={open()} onOpenChange={setOpen}>
+      <PopoverPrimitive.Trigger
+        data-testid={`pane-chip-${props.pane}`}
+        class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft"
+      >
+        {props.label} ▾
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content
+          class="z-50 w-64 rounded-md border border-hairline bg-surface p-2"
+          onClick={(event: MouseEvent) => {
+            if ((event.target as HTMLElement).closest("a")) setOpen(false);
+          }}
+        >
+          <div class="max-h-[70vh] overflow-y-auto">{props.children}</div>
+          <Show when={props.canRestore}>
+            <PopoverPrimitive.CloseButton
+              type="button"
+              aria-label="Restore"
+              class="mt-2 w-full rounded px-2 py-1 text-left text-xs text-accent hover:bg-soft"
+              onClick={props.onRestore}
+            >
+              Restore
+            </PopoverPrimitive.CloseButton>
+          </Show>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
+  );
+};
 
 export const Workspace: Component<RouteSectionProps> = (props) => {
   const ws = useWorkspace();
   const outlet = children(() => props.children);
-  const [search, setSearch] = useSearchParams<{ q?: string }>();
+  const [search, setSearch] = useSearchParams<{
+    q?: string;
+    list_q?: string;
+  }>();
+  const navigate = useNavigate();
   const [layoutState, setLayoutState] = createSignal(loadPaneLayout());
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());
   const [navOpen, setNavOpen] = createSignal(false);
@@ -183,8 +196,11 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
       savePaneLayout(layoutState());
     }
   };
-  const query = () => (typeof search.q === "string" ? search.q : "in:inbox");
-  const queryInput = () => (typeof search.q === "string" ? search.q : "");
+  // Keep the project-list filter separate from route-level content `q` values.
+  const query = () =>
+    typeof search.list_q === "string" ? search.list_q : "in:inbox";
+  const queryInput = () =>
+    typeof search.list_q === "string" ? search.list_q : "";
   const rootPath = useResolvedPath(() => "/");
   const projectPattern = useResolvedPath(() => "/projects/:projectId/*");
   const projectExactPattern = useResolvedPath(() => "/projects/:projectId");
@@ -267,13 +283,23 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
     />
   );
   const participants = [{ id: "you", kind: "user" as const, label: "You" }];
-  const backHref = () => withWorkspaceQuery("/", query());
+  const backHref = () => withWorkspaceFilter("/", query());
   function setSearchQuery(value: string) {
     setSearch(
-      { q: value === "" || value === "in:inbox" ? undefined : value },
+      {
+        list_q: value === "" || value === "in:inbox" ? undefined : value,
+      },
       { replace: true },
     );
   }
+
+  const restoreList = () => {
+    dispatch({ type: "restore", pane: "list" });
+    if (mode() !== "full" && itemSelected()) {
+      // Narrow layouts cannot show the list beside a selected document.
+      navigate(backHref());
+    }
+  };
 
   function resizeFromKeyboard(event: KeyboardEvent) {
     if (!showDivider()) return;
@@ -360,7 +386,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
                 type="button"
                 data-testid="pane-chip-list"
                 class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft"
-                onClick={() => dispatch({ type: "restore", pane: "list" })}
+                onClick={restoreList}
               >
                 List ▾
               </button>
@@ -422,6 +448,7 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
         <ListPane
           visible={showList()}
           full={full()}
+          fillRemaining={mode() === "split" && showLeft()}
           maximized={activeMaximized() === "list"}
           width={layoutState().listWidth}
           header={

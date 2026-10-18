@@ -46,6 +46,7 @@ function restoreListScroll(
 export const ListPane: Component<{
   visible: boolean;
   full: boolean;
+  fillRemaining: boolean;
   maximized: boolean;
   width: number;
   header: JSX.Element;
@@ -104,8 +105,12 @@ export const ListPane: Component<{
       aria-hidden={!props.visible}
       hidden={!props.visible}
       class={cn(
-        "flex min-h-0 flex-none flex-col overflow-hidden border-r border-hairline bg-surface",
-        !props.full && "w-full",
+        "flex min-h-0 flex-col overflow-hidden border-r border-hairline bg-surface",
+        props.full
+          ? "flex-none"
+          : props.fillRemaining
+            ? "min-w-0 flex-1"
+            : "w-full flex-none",
         props.maximized && "flex-1",
       )}
       style={

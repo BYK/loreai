@@ -265,6 +265,29 @@ test.describe("persistent workspace panes", () => {
     await expect(document).toBeVisible();
   });
 
+  test("fits the project list beside navigation in split mode", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 900, height: 900 });
+    await page.goto("/ui");
+
+    const row = page.locator('[data-layout-mode="split"]');
+    const navigation = row.locator('[data-pane="nav"]');
+    const list = row.locator(LIST);
+    await expect(navigation).toBeVisible();
+    await expect(list).toBeVisible();
+
+    const bounds = await row.evaluate((element) => {
+      const pane = element.querySelector<HTMLElement>('[data-pane="list"]');
+      if (!pane) throw new Error("project list pane is not rendered");
+      return {
+        rowRight: element.getBoundingClientRect().right,
+        listRight: pane.getBoundingClientRect().right,
+      };
+    });
+    expect(Math.abs(bounds.listRight - bounds.rowRight)).toBeLessThanOrEqual(1);
+  });
+
   test("maximizes Participants to fill the workspace", async ({
     page,
   }, testInfo) => {
@@ -421,6 +444,49 @@ test.describe("persistent workspace panes", () => {
     await chip.click();
     await expect(list).toBeVisible();
     await expect(page.getByTestId("pane-chip-list")).toHaveCount(0);
+  });
+
+  test("restores the list chip on selected routes in narrow modes", async ({
+    page,
+  }) => {
+    for (const width of [1000, 400]) {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto("/ui");
+
+      const list = page.locator(LIST);
+      await list.getByTestId("nav-project").filter({ hasText: "lore" }).click();
+      await page.getByTestId("pane-min-list").click();
+      await page.setViewportSize({ width, height: 800 });
+
+      const chip = page.getByTestId("pane-chip-list");
+      await expect(chip).toBeVisible();
+      await chip.click();
+
+      await expect(page).toHaveURL(/\/ui\/?$/);
+      await expect(list).toBeVisible();
+      await expect(page.getByTestId("document-pane")).toBeHidden();
+      await expect(chip).toHaveCount(0);
+    }
+  });
+
+  test("closes the navigation restore popover after following a link", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/ui");
+    await page
+      .locator(LIST)
+      .getByTestId("nav-project")
+      .filter({ hasText: "lore" })
+      .click();
+    await page.getByTestId("pane-min-nav").click();
+
+    await page.getByTestId("pane-chip-nav").click();
+    await expect(page.getByTestId("nav-projects")).toBeVisible();
+    await page.getByTestId("nav-projects").click();
+
+    await expect(page).toHaveURL(/\/ui\/?$/);
+    await expect(page.getByTestId("nav-projects")).toHaveCount(0);
   });
 
   test("persists minimized panes and keyboard divider resizing across reload", async ({
