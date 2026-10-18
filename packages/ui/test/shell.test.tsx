@@ -768,13 +768,31 @@ describe("shell: project navigation and real-data path", () => {
       addEventListener: () => {},
       removeEventListener: () => {},
     }));
-    const { history } = mount("/", fakeClient());
+    const { history } = mount("/?list_q=lore", fakeClient());
     const filter = await screen.findByTestId("nav-project-filter");
 
     fireEvent.input(filter, { target: { value: "in:inbox" } });
 
     expect(filter).toHaveValue("in:inbox");
     await waitFor(() => expect(history.get()).toBe("/"));
+  });
+
+  it("syncs the project-list filter draft with URL history", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/?list_q=lore", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    expect(filter).toHaveValue("lore");
+    history.set({ value: "/" });
+    await waitFor(() => expect(filter).toHaveValue(""));
+
+    history.set({ value: "/?list_q=SQLite" });
+    await waitFor(() => expect(filter).toHaveValue("SQLite"));
   });
 
   it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {

@@ -157,6 +157,9 @@ export const Workspace: Component<RouteSectionProps> = (props) => {
   const [queryDraft, setQueryDraft] = createSignal(
     typeof search.list_q === "string" ? search.list_q : "",
   );
+  createEffect(() =>
+    setQueryDraft(typeof search.list_q === "string" ? search.list_q : ""),
+  );
   const navigate = useNavigate();
   const [layoutState, setLayoutState] = createSignal(loadPaneLayout());
   const [mode, setMode] = createSignal<LayoutMode>(currentMode());

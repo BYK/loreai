@@ -133,6 +133,40 @@ describe("SessionWorkspace", () => {
     expect(screen.getByTestId("transcript-content")).toBe(transcript);
   });
 
+  it("uses the available pane width instead of the viewport width", () => {
+    mockDesktop(true);
+    let resize = (_width: number, _target: Element) => {};
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          resize = (width, target) =>
+            callback(
+              [
+                {
+                  target,
+                  contentRect: { width } as DOMRectReadOnly,
+                } as ResizeObserverEntry,
+              ],
+              this as unknown as ResizeObserver,
+            );
+        }
+
+        observe(target: Element) {
+          resize(800, target);
+        }
+
+        disconnect() {}
+      },
+    );
+
+    mount();
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+
+    resize(900, screen.getByRole("tablist"));
+    expect(screen.queryByRole("tablist")).toBeNull();
+  });
+
   it("keeps the same transcript DOM node across a breakpoint flip", () => {
     let matches = false;
     const listeners = new Set<(e: MediaQueryListEvent) => void>();
