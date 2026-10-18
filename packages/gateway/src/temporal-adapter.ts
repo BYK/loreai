@@ -469,97 +469,85 @@ export function resolveToolResults(
   messages: LoreMessageWithParts[],
   recallMessageId?: (message: LoreMessageWithParts) => string,
 ): void {
-  // --- Pass 1: Queue tool_result parts by callID in source order ---
-  // Native Responses call IDs may be reused across retained checkpoint history;
-  // matching one result per call prevents a later result overwriting an earlier one.
-  const resultsByCallID = new Map<
-    string,
-    Array<{
-      output: string;
-      blocks?: LoreContentBlock[];
-      nativeResponsesOutputArray?: true;
-      toolName?: string;
-      responsesOutput?: Record<string, unknown>;
-      isError: boolean;
-    }>
-  >();
-
-  for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (isToolPart(part) && part.tool === "result") {
-        const results = resultsByCallID.get(part.callID) ?? [];
-        if (part.state.status === "completed") {
-          results.push({
-            output: part.state.output,
-            blocks: part.state.blocks,
-            nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
-            toolName: part.toolName,
-            responsesOutput: part.responsesOutput,
-            isError: false,
-          });
-        } else if (part.state.status === "error") {
-          results.push({
-            output: part.state.error,
-            blocks: part.state.blocks,
-            nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
-            toolName: part.toolName,
-            responsesOutput: part.responsesOutput,
-            isError: true,
-          });
-        }
-        if (results.length > 0) resultsByCallID.set(part.callID, results);
-      }
-    }
-  }
-
-  // --- Pass 2: Resolve pending tool_use → completed where a result exists ---
+  // Group pending calls by assistant message. Native Responses call IDs can be
+  // reused across turns: a result belongs to the newest preceding call group,
+  // while multiple same-ID calls within one assistant turn retain source order.
+  const pendingByCallID = new Map<string, Array<{ parts: LoreToolPart[] }>>();
   const now = Date.now();
   for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (
-        isToolPart(part) &&
-        part.tool !== "result" &&
-        part.state.status === "pending"
-      ) {
-        const result = resultsByCallID.get(part.callID)?.shift();
-        if (result) {
-          const callType = part.responsesCall?.type ?? "function_call";
-          const outputType =
-            result.responsesOutput?.type ?? "function_call_output";
-          const expectedOutput =
-            callType === "tool_search_call"
-              ? "tool_search_output"
-              : callType === "custom_tool_call"
-                ? "custom_tool_call_output"
-                : "function_call_output";
-          if (outputType !== expectedOutput)
-            throw new InvalidCrossProviderRequestError();
-          if (result.responsesOutput)
-            part.responsesOutput = result.responsesOutput;
-          if (result.toolName) part.toolName = result.toolName;
-          part.state = result.isError
-            ? {
-                status: "error",
-                input: part.state.input,
-                error: result.output,
-                ...(result.blocks ? { blocks: result.blocks } : undefined),
-                ...(result.nativeResponsesOutputArray
-                  ? { nativeResponsesOutputArray: true as const }
-                  : {}),
-                time: { start: now, end: now },
-              }
-            : {
-                status: "completed",
-                input: part.state.input,
-                output: result.output,
-                ...(result.blocks ? { blocks: result.blocks } : undefined),
-                ...(result.nativeResponsesOutputArray
-                  ? { nativeResponsesOutputArray: true as const }
-                  : {}),
-                time: { start: now, end: now },
-              };
+    if (msg.info.role === "assistant") {
+      const callsByID = new Map<string, LoreToolPart[]>();
+      for (const part of msg.parts) {
+        if (
+          isToolPart(part) &&
+          part.tool !== "result" &&
+          part.state.status === "pending"
+        ) {
+          const calls = callsByID.get(part.callID) ?? [];
+          calls.push(part);
+          callsByID.set(part.callID, calls);
         }
       }
+      for (const [callID, parts] of callsByID) {
+        const groups = pendingByCallID.get(callID) ?? [];
+        groups.push({ parts });
+        pendingByCallID.set(callID, groups);
+      }
+    }
+
+    for (const part of msg.parts) {
+      if (
+        !isToolPart(part) ||
+        part.tool !== "result" ||
+        (part.state.status !== "completed" && part.state.status !== "error")
+      )
+        continue;
+
+      const groups = pendingByCallID.get(part.callID);
+      const group = groups?.[groups.length - 1];
+      const call = group?.parts.shift();
+      if (!group || !call) continue;
+      if (group.parts.length === 0) groups?.pop();
+      if (groups?.length === 0) pendingByCallID.delete(part.callID);
+
+      const callType = call.responsesCall?.type ?? "function_call";
+      const outputType = part.responsesOutput?.type ?? "function_call_output";
+      const expectedOutput =
+        callType === "tool_search_call"
+          ? "tool_search_output"
+          : callType === "custom_tool_call"
+            ? "custom_tool_call_output"
+            : "function_call_output";
+      if (outputType !== expectedOutput)
+        throw new InvalidCrossProviderRequestError();
+      if (part.responsesOutput) call.responsesOutput = part.responsesOutput;
+      if (part.toolName) call.toolName = part.toolName;
+      call.state =
+        part.state.status === "error"
+          ? {
+              status: "error",
+              input: call.state.input,
+              error: part.state.error,
+              ...(part.state.blocks
+                ? { blocks: part.state.blocks }
+                : undefined),
+              ...(part.state.nativeResponsesOutputArray
+                ? { nativeResponsesOutputArray: true as const }
+                : {}),
+              time: { start: now, end: now },
+            }
+          : {
+              status: "completed",
+              input: call.state.input,
+              output: part.state.output,
+              ...(part.state.blocks
+                ? { blocks: part.state.blocks }
+                : undefined),
+              ...(part.state.nativeResponsesOutputArray
+                ? { nativeResponsesOutputArray: true as const }
+                : {}),
+              time: { start: now, end: now },
+            };
     }
   }
 

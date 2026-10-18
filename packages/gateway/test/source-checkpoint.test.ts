@@ -332,7 +332,7 @@ it("accepts a suffix against the retained Lore checkpoint", async () => {
   expect(delta.loreMessages).toHaveLength(prefix.length + 1);
 });
 
-it("pairs reused native call IDs one-to-one across a checkpoint suffix with an error result", async () => {
+it("pairs reused native call IDs in source order across a checkpoint suffix", async () => {
   setModelLimits({ context: 1_000_000, output: 2_000 });
   setMaxLayer0Tokens(500_000);
   const callID = "reused-native-call";
@@ -379,9 +379,12 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix with an e
       ],
     },
   ];
+  const completedPrefix = toolTurn("prefix", "prefix result");
+  const missingResultPrefix = toolTurn("middle", "middle result");
   const prefix = [
     ...semanticHistory(6).messages,
-    ...toolTurn("prefix", "prefix result"),
+    ...completedPrefix,
+    missingResultPrefix[0],
   ];
   const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
   accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
@@ -414,7 +417,7 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix with an e
       (part): part is LoreToolPart =>
         isToolPart(part) && part.tool !== "result" && part.callID === callID,
     );
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(3);
   expect(
     calls.map((part) =>
       part.state.status === "completed"
@@ -423,9 +426,10 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix with an e
           ? part.state.error
           : null,
     ),
-  ).toEqual(["prefix result", "suffix error"]);
+  ).toEqual(["prefix result", null, "suffix error"]);
   expect(calls.map((part) => part.state.status)).toEqual([
     "completed",
+    "pending",
     "error",
   ]);
 });
