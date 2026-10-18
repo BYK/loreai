@@ -25,6 +25,35 @@ export function assertNativeResponsesOutput(
         ? ["type", "id", "call_id", "execution", "tools", "status"]
         : [];
   assertKnownNativeFields(raw, allowed);
+  if (
+    (raw.id !== undefined &&
+      (typeof raw.id !== "string" || raw.id.length === 0)) ||
+    (raw.status !== undefined && raw.status !== "completed")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (raw.type === "custom_tool_call_output") {
+    if (
+      typeof raw.call_id !== "string" ||
+      raw.call_id.length === 0 ||
+      (typeof raw.output !== "string" && !Array.isArray(raw.output)) ||
+      (raw.namespace !== undefined && typeof raw.namespace !== "string")
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  }
+  if (raw.type === "tool_search_output") {
+    // Server-owned search outputs bypass client-call matching, so validate
+    // their required payload and ownership shape before storing or replaying.
+    const serverOwned = raw.execution === "server" && raw.call_id === null;
+    const clientOwned =
+      typeof raw.call_id === "string" &&
+      raw.call_id.length > 0 &&
+      (raw.execution === undefined || raw.execution === "client");
+    if (!Array.isArray(raw.tools) || (!serverOwned && !clientOwned)) {
+      throw new InvalidCrossProviderRequestError();
+    }
+  }
 }
 
 /** Revalidate durable native call envelopes before replay to an upstream. */

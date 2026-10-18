@@ -147,6 +147,17 @@ describe("Codex native tool security boundaries", () => {
     { ...searchCall, arguments: [] },
     { ...searchCall, arguments: "private-token" },
     {
+      type: "tool_search_output",
+      execution: "server",
+      call_id: null,
+      tools: {},
+    },
+    {
+      type: "tool_search_output",
+      execution: "server",
+      call_id: null,
+    },
+    {
       type: "function_call",
       call_id: "files-call",
       name: "read",
@@ -329,7 +340,7 @@ describe("Codex native tool security boundaries", () => {
   test.each(serverOwnedSearchItems)(
     "rejects unknown fields in persisted server-owned $type provenance on replay",
     (item) => {
-      const request = parseOpenAIResponsesRequest({ input: [item] }, {});
+      const request = parseOpenAIResponsesRequest({ input: [{ ...item }] }, {});
       const provenance = request.messages
         .flatMap((message) => message.provenanceContent ?? [])
         .find(
@@ -339,6 +350,38 @@ describe("Codex native tool security boundaries", () => {
         throw new Error("expected server-owned Responses provenance");
       }
       provenance.raw.provider_private_field = "native-private-sentinel";
+
+      expect(() =>
+        buildOpenAIResponsesUpstreamRequest(
+          request,
+          "https://provider.example",
+        ),
+      ).toThrow("Unsupported cross-provider request");
+    },
+  );
+
+  test.each(["missing", "non-array"] as const)(
+    "rejects persisted server-owned tool_search_output with %s tools on replay",
+    (malformation) => {
+      const output = serverOwnedSearchItems[1];
+      const request = parseOpenAIResponsesRequest(
+        { input: [{ ...output }] },
+        {},
+      );
+      const provenance = request.messages
+        .flatMap((message) => message.provenanceContent ?? [])
+        .find(
+          (block) =>
+            block.type === "opaque" && block.raw.type === "tool_search_output",
+        );
+      if (!provenance || provenance.type !== "opaque") {
+        throw new Error("expected server-owned Responses provenance");
+      }
+      if (malformation === "missing") {
+        delete provenance.raw.tools;
+      } else {
+        provenance.raw.tools = {};
+      }
 
       expect(() =>
         buildOpenAIResponsesUpstreamRequest(
