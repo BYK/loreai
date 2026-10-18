@@ -470,9 +470,9 @@ export function resolveToolResults(
   recallMessageId?: (message: LoreMessageWithParts) => string,
 ): void {
   // Group pending calls by assistant message. Native Responses call IDs can be
-  // reused across turns: a result belongs to the newest preceding call group,
-  // while multiple same-ID calls within one assistant turn retain source order.
-  const pendingByCallID = new Map<string, Array<{ parts: LoreToolPart[] }>>();
+  // reused across turns, so a newer group supersedes older unresolved groups;
+  // within one assistant turn, same-ID calls retain source order.
+  const pendingByCallID = new Map<string, { parts: LoreToolPart[] }>();
   const now = Date.now();
   for (const msg of messages) {
     if (msg.info.role === "assistant") {
@@ -489,9 +489,7 @@ export function resolveToolResults(
         }
       }
       for (const [callID, parts] of callsByID) {
-        const groups = pendingByCallID.get(callID) ?? [];
-        groups.push({ parts });
-        pendingByCallID.set(callID, groups);
+        pendingByCallID.set(callID, { parts });
       }
     }
 
@@ -503,12 +501,10 @@ export function resolveToolResults(
       )
         continue;
 
-      const groups = pendingByCallID.get(part.callID);
-      const group = groups?.[groups.length - 1];
+      const group = pendingByCallID.get(part.callID);
       const call = group?.parts.shift();
       if (!group || !call) continue;
-      if (group.parts.length === 0) groups?.pop();
-      if (groups?.length === 0) pendingByCallID.delete(part.callID);
+      if (group.parts.length === 0) pendingByCallID.delete(part.callID);
 
       const callType = call.responsesCall?.type ?? "function_call";
       const outputType = part.responsesOutput?.type ?? "function_call_output";

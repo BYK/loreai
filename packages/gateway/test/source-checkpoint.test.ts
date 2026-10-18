@@ -390,6 +390,18 @@ it("pairs reused native call IDs in source order across a checkpoint suffix", as
   accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
 
   const suffix = toolTurn("suffix", "suffix error", true);
+  suffix[1].content.push({
+    type: "tool_result",
+    toolUseId: callID,
+    toolName: "read",
+    content: [{ type: "text", text: "orphan result" }],
+    responsesOutput: {
+      type: "function_call_output",
+      id: "output-orphan",
+      call_id: callID,
+      status: "completed",
+    },
+  });
   const timing = new PreparationTiming({
     protocol: "openai-responses",
     stream: true,
