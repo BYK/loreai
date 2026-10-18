@@ -160,6 +160,7 @@ jobs:
           packages/gateway/test/install-bootstrap.test.ts packages/gateway/test/install-download.test.ts
           packages/gateway/test/upgrade-macos.test.ts packages/gateway/test/upgrade-download.test.ts
           packages/gateway/test/upgrade-artifact-auth.test.ts packages/gateway/test/upgrade-command.test.ts
+          packages/gateway/test/upgrade-lifecycle.test.ts
           --maxWorkers=2 --coverage.enabled --coverage.reporter=lcov
 
       - name: Upload native macOS coverage

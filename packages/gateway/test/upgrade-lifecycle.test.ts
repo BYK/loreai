@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -65,7 +66,9 @@ function fileIdentity(path: string): ExecutableIdentity {
 }
 
 function upgradeFixture(): UpgradeFixture {
-  const home = mkdtempSync(join(tmpdir(), "lore-upgrade-recovery-"));
+  const home = realpathSync(
+    mkdtempSync(join(tmpdir(), "lore-upgrade-recovery-")),
+  );
   temporaryDirectories.push(home);
   const installDir = join(home, "bin");
   const stateDir = join(home, ".lore");
