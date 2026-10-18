@@ -332,11 +332,15 @@ it("accepts a suffix against the retained Lore checkpoint", async () => {
   expect(delta.loreMessages).toHaveLength(prefix.length + 1);
 });
 
-it("pairs reused native call IDs one-to-one across a checkpoint suffix", async () => {
+it("pairs reused native call IDs one-to-one across a checkpoint suffix with an error result", async () => {
   setModelLimits({ context: 1_000_000, output: 2_000 });
   setMaxLayer0Tokens(500_000);
   const callID = "reused-native-call";
-  const toolTurn = (label: string, output: string): GatewayMessage[] => [
+  const toolTurn = (
+    label: string,
+    output: string,
+    isError = false,
+  ): GatewayMessage[] => [
     {
       role: "assistant",
       content: [
@@ -363,6 +367,7 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix", async (
           type: "tool_result",
           toolUseId: callID,
           toolName: "read",
+          ...(isError ? { isError: true } : {}),
           content: [{ type: "text", text: output }],
           responsesOutput: {
             type: "function_call_output",
@@ -381,7 +386,7 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix", async (
   const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
   accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
 
-  const suffix = toolTurn("suffix", "suffix result");
+  const suffix = toolTurn("suffix", "suffix error", true);
   const timing = new PreparationTiming({
     protocol: "openai-responses",
     stream: true,
@@ -412,9 +417,17 @@ it("pairs reused native call IDs one-to-one across a checkpoint suffix", async (
   expect(calls).toHaveLength(2);
   expect(
     calls.map((part) =>
-      part.state.status === "completed" ? part.state.output : null,
+      part.state.status === "completed"
+        ? part.state.output
+        : part.state.status === "error"
+          ? part.state.error
+          : null,
     ),
-  ).toEqual(["prefix result", "suffix result"]);
+  ).toEqual(["prefix result", "suffix error"]);
+  expect(calls.map((part) => part.state.status)).toEqual([
+    "completed",
+    "error",
+  ]);
 });
 
 it("refuses a suffix when its retained checkpoint is unavailable", async () => {
