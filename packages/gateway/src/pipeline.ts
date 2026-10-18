@@ -1,6 +1,7 @@
 import {
   assertNoNativeResponsesTools,
   nativeResponsesCall,
+  stripUnknownNativeResponsesCallFields,
 } from "./translate/responses-tools";
 /**
  * Core request processing pipeline for the Lore gateway.
@@ -16577,7 +16578,9 @@ export function accumulateResponsesNonStreamJSON(
     id: asString(json.id),
     model: asString(json.model),
     content,
-    rawOutputItems: replayableOutput,
+    rawOutputItems: replayableOutput?.map(
+      stripUnknownNativeResponsesCallFields,
+    ),
     stopReason,
     usageComplete:
       typeof usage?.input_tokens === "number" &&
@@ -24544,6 +24547,7 @@ export function loreMessagesToGateway(
   allowNativeResponsesInstructions = false,
 ): GatewayMessage[] {
   const out: GatewayMessage[] = [];
+  const outputSourceIDs: string[] = [];
   const sourceResponsesInstructions = [
     ...provenanceByMessageId.values(),
   ].flatMap((candidate) => candidate.responsesInstructions ?? []);
@@ -24875,9 +24879,47 @@ export function loreMessagesToGateway(
       throw new InvalidCrossProviderRequestError();
     }
     out.push(message);
+    outputSourceIDs.push(msg.info.id);
   }
 
   if (allowNativeResponsesInstructions) {
+    const sourceEntries = [...provenanceByMessageId.entries()];
+    const sourceOrderByID = new Map(
+      sourceEntries.map(([id], index) => [id, index]),
+    );
+    const outputIDs = new Set(outputSourceIDs);
+    for (const [sourceID, candidate] of sourceEntries) {
+      if (!candidate.responsesInstructions?.length || outputIDs.has(sourceID)) {
+        continue;
+      }
+      // Compression may remove the ordinary message carrying a late native
+      // instruction. Reinsert an instruction-only seam at its source position;
+      // filtering the instruction list would silently change request semantics.
+      if (candidate.role !== "user" && candidate.role !== "assistant") {
+        throw new InvalidCrossProviderRequestError();
+      }
+      const sourceOrder = sourceOrderByID.get(sourceID);
+      if (sourceOrder === undefined)
+        throw new InvalidCrossProviderRequestError();
+      const insertionIndex = outputSourceIDs.findIndex((id) => {
+        const retainedOrder = sourceOrderByID.get(id);
+        return retainedOrder !== undefined && retainedOrder > sourceOrder;
+      });
+      const placeholder: GatewayMessage = {
+        role: candidate.role,
+        content: [],
+        responsesInstructions: [...candidate.responsesInstructions],
+      };
+      if (insertionIndex < 0) {
+        out.push(placeholder);
+        outputSourceIDs.push(sourceID);
+      } else {
+        out.splice(insertionIndex, 0, placeholder);
+        outputSourceIDs.splice(insertionIndex, 0, sourceID);
+      }
+      outputIDs.add(sourceID);
+    }
+
     const replayedResponsesInstructions = out.flatMap(
       (message) => message.responsesInstructions ?? [],
     );

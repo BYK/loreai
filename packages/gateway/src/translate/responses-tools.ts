@@ -14,6 +14,36 @@ function assertKnownNativeFields(
   }
 }
 
+function nativeResponsesCallFields(raw: Record<string, unknown>): string[] {
+  return raw.type === "custom_tool_call"
+    ? ["type", "id", "call_id", "name", "namespace", "input", "status"]
+    : raw.type === "tool_search_call"
+      ? [
+          "type",
+          "id",
+          "call_id",
+          "name",
+          "namespace",
+          "execution",
+          "arguments",
+          "status",
+        ]
+      : raw.type === "function_call" && raw.namespace !== undefined
+        ? ["type", "id", "call_id", "name", "namespace", "arguments", "status"]
+        : [];
+}
+
+/** Drop provider extensions from upstream native calls before replay or persistence. */
+export function stripUnknownNativeResponsesCallFields(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowed = nativeResponsesCallFields(raw);
+  if (allowed.length === 0) return raw;
+  return Object.fromEntries(
+    Object.entries(raw).filter(([key]) => allowed.includes(key)),
+  );
+}
+
 /** Native envelopes are stored on Lore parts, so only supported wire fields may cross that persistence boundary. */
 export function assertNativeResponsesOutput(
   raw: Record<string, unknown>,
@@ -58,31 +88,7 @@ export function assertNativeResponsesOutput(
 
 /** Revalidate durable native call envelopes before replay to an upstream. */
 export function assertNativeResponsesCall(raw: Record<string, unknown>): void {
-  const allowed =
-    raw.type === "custom_tool_call"
-      ? ["type", "id", "call_id", "name", "namespace", "input", "status"]
-      : raw.type === "tool_search_call"
-        ? [
-            "type",
-            "id",
-            "call_id",
-            "name",
-            "namespace",
-            "execution",
-            "arguments",
-            "status",
-          ]
-        : raw.type === "function_call" && raw.namespace !== undefined
-          ? [
-              "type",
-              "id",
-              "call_id",
-              "name",
-              "namespace",
-              "arguments",
-              "status",
-            ]
-          : [];
+  const allowed = nativeResponsesCallFields(raw);
   if (allowed.length === 0) throw new InvalidCrossProviderRequestError();
   assertKnownNativeFields(raw, allowed);
   // Calls can be in progress in input history and incomplete/failed in
@@ -157,24 +163,27 @@ export function nativeResponsesCall(
   const namespaced =
     raw.type === "function_call" && raw.namespace !== undefined;
   if (!custom && !search && !namespaced) return null;
-  // Arbitrary envelope keys become durable with the tool part; never persist
-  // unrecognized request/provider metadata through this native replay path.
-  assertNativeResponsesCall(raw);
+  // Client input must match the supported envelope exactly. Provider responses
+  // may add fields over time, so retain only the understood wire subset before
+  // validation, replay, or durable capture.
+  const call =
+    mode === "response" ? stripUnknownNativeResponsesCallFields(raw) : raw;
+  assertNativeResponsesCall(call);
   if (
-    typeof raw.call_id !== "string" ||
-    !raw.call_id ||
-    (!search && (typeof raw.name !== "string" || !raw.name)) ||
-    (raw.namespace !== undefined && typeof raw.namespace !== "string") ||
-    (custom && typeof raw.input !== "string") ||
-    (namespaced && typeof raw.arguments !== "string") ||
+    typeof call.call_id !== "string" ||
+    !call.call_id ||
+    (!search && (typeof call.name !== "string" || !call.name)) ||
+    (call.namespace !== undefined && typeof call.namespace !== "string") ||
+    (custom && typeof call.input !== "string") ||
+    (namespaced && typeof call.arguments !== "string") ||
     (search &&
-      (!raw.arguments ||
-        typeof raw.arguments !== "object" ||
-        Array.isArray(raw.arguments)))
+      (!call.arguments ||
+        typeof call.arguments !== "object" ||
+        Array.isArray(call.arguments)))
   ) {
     throw new InvalidCrossProviderRequestError();
   }
-  const { input, arguments: args, name, call_id: callId, ...envelope } = raw;
+  const { input, arguments: args, name, call_id: callId, ...envelope } = call;
   let normalizedInput = custom ? input : args;
   if (namespaced) {
     try {

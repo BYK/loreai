@@ -602,6 +602,71 @@ it("retains late Responses instructions in a complete source checkpoint", async 
   );
 });
 
+it("replays late Responses instructions when compression drops their seam", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const source = messages.slice(0, 6).map((message, index) => ({
+    ...message,
+    provenanceContent: [
+      {
+        type: "opaque" as const,
+        raw: {
+          type: "message",
+          id: `source-${index}`,
+          role: message.role,
+          content: `message ${index}`,
+        },
+        responsesItem: true as const,
+      },
+    ],
+    provenancePositions: [0],
+  }));
+  const instruction = {
+    id: "msg_compressed_instruction",
+    type: "message" as const,
+    role: "developer" as const,
+    content: "late instruction survives gradient compression",
+  };
+  source[1] = { ...source[1], responsesInstructions: [instruction] };
+
+  const { prepared } = await prepare(source);
+  const instructionMessageID = prepared.loreMessages[1]?.info.id;
+  if (!instructionMessageID) throw new Error("missing instruction source ID");
+  const compressedMessages = prepared.loreMessages.filter(
+    (message) => message.info.id !== instructionMessageID,
+  );
+  const replayed = loreMessagesToGateway(
+    compressedMessages,
+    prepared.provenanceByMessageId,
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+  );
+
+  expect(
+    replayed.flatMap((message) => message.responsesInstructions ?? []),
+  ).toEqual([instruction]);
+  const instructionIndex = replayed.findIndex(
+    (message) => message.responsesInstructions?.length,
+  );
+  const previousIndex = replayed.findIndex((message) =>
+    message.content.some(
+      (block) => block.type === "text" && block.text.includes("message 0"),
+    ),
+  );
+  const nextIndex = replayed.findIndex((message) =>
+    message.content.some(
+      (block) => block.type === "text" && block.text.includes("message 2"),
+    ),
+  );
+  expect(instructionIndex).toBeGreaterThan(previousIndex);
+  expect(instructionIndex).toBeLessThan(nextIndex);
+  expect(replayed[instructionIndex]?.content).toEqual([]);
+});
+
 it("reconciles historical edits even when the old boundary is unchanged", async () => {
   accept((await prepare(messages)).prepared);
   const edited = structuredClone(messages);

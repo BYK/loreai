@@ -25,6 +25,7 @@ function responseBody(args: string) {
         name: "read",
         arguments: args,
         status: "incomplete",
+        provider_extension: "ignored-upstream-field",
       },
     ],
     usage: { input_tokens: 11, output_tokens: 4 },
@@ -75,7 +76,16 @@ function verify(response: GatewayResponse, args: string) {
     input: args,
     responsesCall: { namespace: "files" },
   });
-  expect(response.rawOutputItems).toEqual(responseBody(args).output);
+  const expectedRawItem = Object.fromEntries(
+    Object.entries(responseBody(args).output[0] ?? {}).filter(
+      ([key]) => key !== "provider_extension",
+    ),
+  );
+  expect(response.rawOutputItems).toEqual([expectedRawItem]);
+  expect(
+    response.content[0]?.type === "tool_use" &&
+      response.content[0].responsesCall,
+  ).not.toHaveProperty("provider_extension");
 }
 
 describe.each(['{"path":', ""])("truncated namespaced arguments %j", (args) => {
