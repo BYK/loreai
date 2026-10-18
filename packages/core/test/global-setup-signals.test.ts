@@ -7,14 +7,12 @@ import setup, { type GlobalSetupDependencies } from "./global-setup";
 
 type FakeProcess = EventEmitter & {
   pid: number;
-  platform: NodeJS.Platform;
-  kill: ReturnType<typeof vi.fn>;
+  kill: ReturnType<typeof vi.fn<NodeJS.Process["kill"]>>;
 };
 
 const ownedRoots = new Set<string>();
 
 afterEach(async () => {
-  vi.unstubAllGlobals();
   await Promise.all(
     [...ownedRoots].map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -24,8 +22,7 @@ afterEach(async () => {
 function fakeProcess(): FakeProcess {
   const emitter = new EventEmitter() as FakeProcess;
   emitter.pid = 1234;
-  emitter.platform = process.platform;
-  emitter.kill = vi.fn(() => true);
+  emitter.kill = vi.fn<NodeJS.Process["kill"]>(() => true);
   return emitter;
 }
 
@@ -33,13 +30,15 @@ async function initialize(fake: FakeProcess): Promise<{
   root: string;
   teardown: () => Promise<void>;
 }> {
-  vi.stubGlobal("process", fake);
   const context: { loreTestRoot?: string } = {};
-  const teardown = await setup({
-    provide(key: "loreTestRoot", value: string) {
-      context[key] = value;
-    },
-  } as never);
+  const teardown = await setup(
+    {
+      provide(key: "loreTestRoot", value: string) {
+        context[key] = value;
+      },
+    } as never,
+    { signalOwner: fake },
+  );
   const root = context.loreTestRoot;
   if (!root) throw new Error("global setup did not provide loreTestRoot");
   ownedRoots.add(root);
@@ -48,11 +47,31 @@ async function initialize(fake: FakeProcess): Promise<{
 
 function ownedRootDependencies(
   createRoot: GlobalSetupDependencies["createRoot"],
+  signalOwner: FakeProcess,
 ): GlobalSetupDependencies {
-  return { createRoot };
+  return { createRoot, signalOwner };
 }
 
 describe("database isolation signal cleanup", () => {
+  test("keeps Node scheduling available while a signal fixture owns setup", async () => {
+    const runtimeProcess = globalThis.process;
+    const fake = fakeProcess();
+    const { root } = await initialize(fake);
+    expect(globalThis.process === runtimeProcess).toBe(true);
+
+    // Fork IPC and Vitest's deferred timer restoration share the real process.
+    // Fake signal handling must leave that runtime available across awaits.
+    await new Promise<void>((resolve) => {
+      globalThis.process.nextTick(() => {
+        fake.emit("SIGTERM");
+        resolve();
+      });
+    });
+
+    expect(fake.kill).toHaveBeenCalledExactlyOnceWith(fake.pid, "SIGTERM");
+    expect(() => lstatSync(root)).toThrow();
+  });
+
   test.each(["SIGINT", "SIGTERM"] as const)(
     "%s removes the owned root and re-raises when no other handler exists",
     async (signal) => {
@@ -70,7 +89,6 @@ describe("database isolation signal cleanup", () => {
 
   test("a signal during root allocation is handled after allocation", async () => {
     const fake = fakeProcess();
-    vi.stubGlobal("process", fake);
     let createdRoot = "";
     let release = () => {};
     const ready = new Promise<void>((resolve) => {
@@ -94,7 +112,7 @@ describe("database isolation signal cleanup", () => {
         createdRoot = owned.path;
         await ready;
         return owned;
-      }),
+      }, fake),
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     fake.emit("SIGTERM");
@@ -108,7 +126,6 @@ describe("database isolation signal cleanup", () => {
 
   test("a project provision failure cleans the allocated root", async () => {
     const fake = fakeProcess();
-    vi.stubGlobal("process", fake);
     let createdRoot = "";
 
     await expect(
@@ -123,7 +140,7 @@ describe("database isolation signal cleanup", () => {
           const owned = await createOwnedRoot(options);
           createdRoot = owned.path;
           return owned;
-        }),
+        }, fake),
       ),
     ).rejects.toThrow("intentional provision failure");
 
