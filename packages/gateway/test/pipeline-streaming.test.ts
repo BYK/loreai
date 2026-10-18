@@ -2392,6 +2392,7 @@ describe("foreground subscription pacing", () => {
     const caller = new AbortController();
     let dispatchStarted = false;
     let pending: Promise<Response> | undefined;
+    const upstreamResponse: { value: Response | null } = { value: null };
     const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
     try {
       core
@@ -2449,14 +2450,19 @@ describe("foreground subscription pacing", () => {
       request.signal = caller.signal;
       setUpstreamInterceptor(async () => {
         dispatchStarted = true;
-        return new Response(validResponsesSSE("resp_pacing_dispatch"), {
-          headers: {
-            "content-type": "text/event-stream",
-            "x-ratelimit-limit-requests": "60",
-            "x-ratelimit-remaining-requests": "59",
-            "x-ratelimit-reset-requests": "1h",
+        const response = new Response(
+          validResponsesSSE("resp_pacing_dispatch"),
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "x-ratelimit-limit-requests": "60",
+              "x-ratelimit-remaining-requests": "59",
+              "x-ratelimit-reset-requests": "1h",
+            },
           },
-        });
+        );
+        upstreamResponse.value = response;
+        return response;
       });
 
       quotaPersistence.mockClear();
@@ -2467,6 +2473,10 @@ describe("foreground subscription pacing", () => {
       });
       const response = await pending;
       expect(response.status).toBe(200);
+      upstreamResponse.value?.headers.set(
+        "x-ratelimit-remaining-requests",
+        "0",
+      );
       expect(quotaPersistence).not.toHaveBeenCalled();
       const responseBody = response.body;
       if (!responseBody) throw new Error("expected a streaming response body");
@@ -2476,6 +2486,9 @@ describe("foreground subscription pacing", () => {
       expect(quotaPersistence).not.toHaveBeenCalled();
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(quotaPersistence).toHaveBeenCalled();
+      expect(quotaPersistence).toHaveBeenCalledWith(
+        expect.objectContaining({ remaining: 59 }),
+      );
       let chunk = await reader.read();
       while (!chunk.done) chunk = await reader.read();
     } finally {

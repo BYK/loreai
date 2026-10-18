@@ -8661,10 +8661,11 @@ async function forwardToUpstream(
         quotaObservedAt,
         quotaPacingEpoch,
       );
+      const quotaResponseHeaders = new Headers(response.headers);
       setImmediate(() => {
         try {
           const accepted = observeProviderQuotaHeaders(
-            response.headers,
+            quotaResponseHeaders,
             attribution,
             quotaObservedAt,
             responseReceivedAt,
@@ -8677,7 +8678,7 @@ async function forwardToUpstream(
               credential: routingAuth,
               sessionID,
               observedAt: quotaObservedAt,
-              responseHeaders: response.headers,
+              responseHeaders: quotaResponseHeaders,
               upstreamURL: effectiveUpstreamBase,
               responseURL: response.url,
               directUpstreamResponse,
