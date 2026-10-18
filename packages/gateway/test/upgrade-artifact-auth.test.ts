@@ -207,46 +207,33 @@ describe("stable upgrade artifact authentication", () => {
     }
   });
 
-  it.skipIf(process.platform !== "linux")(
+  it.skipIf(process.platform !== "darwin")(
     "retains and truncates a rejected Darwin download without unlinking its name",
     async () => {
-      const platform = Object.getOwnPropertyDescriptor(process, "platform");
-      if (!platform) throw new Error("Missing platform descriptor");
-      Object.defineProperty(process, "platform", { value: "darwin" });
-      try {
-        const {
-          binary,
-          executable,
-          lifecycleLock,
+      const {
+        binary,
+        executable,
+        lifecycleLock,
+        version,
+        privateRoot,
+        downloadDirectory,
+      } = fixture({ expectedBinarySha256: "0".repeat(64) });
+      await expect(
+        downloadBinaryToTemp(
           version,
-          privateRoot,
+          lifecycleLock,
+          undefined,
+          false,
+          executable,
           downloadDirectory,
-        } = fixture({ expectedBinarySha256: "0".repeat(64) });
-        await expect(
-          downloadBinaryToTemp(
-            version,
-            lifecycleLock,
-            undefined,
-            false,
-            executable,
-            downloadDirectory,
-          ),
-        ).rejects.toThrow(/binary checksum mismatch/i);
-        const namedOutput = join(
-          privateRoot,
-          `${basename(executable)}.download`,
-        );
-        expect(readFileSync(namedOutput)).toEqual(binary);
-        openedDirectories.splice(
-          openedDirectories.indexOf(downloadDirectory),
-          1,
-        );
-        closeUpgradeDownloadDirectory(downloadDirectory);
-        expect(readFileSync(namedOutput)).toHaveLength(0);
-        expect(readFileSync(executable, "utf8")).toBe("old binary");
-      } finally {
-        Object.defineProperty(process, "platform", platform);
-      }
+        ),
+      ).rejects.toThrow(/binary checksum mismatch/i);
+      const namedOutput = join(privateRoot, `${basename(executable)}.download`);
+      expect(readFileSync(namedOutput)).toEqual(binary);
+      openedDirectories.splice(openedDirectories.indexOf(downloadDirectory), 1);
+      closeUpgradeDownloadDirectory(downloadDirectory);
+      expect(readFileSync(namedOutput)).toHaveLength(0);
+      expect(readFileSync(executable, "utf8")).toBe("old binary");
     },
   );
 
