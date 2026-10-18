@@ -129,7 +129,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_GATEWAY_AUTH_TOKEN</code></td>
-<td>Gateway access credential required for remote/hosted data-plane requests. It is sent as <code dir="auto">x-lore-gateway-token</code> and remains separate from provider API keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256 visible ASCII characters without commas. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.</td>
+<td>Optional gateway access credential for remote/hosted data-plane requests. It is sent as <code dir="auto">x-lore-gateway-token</code> and remains separate from provider API keys/bearer tokens. When configured, it must be 32-256 visible ASCII characters without commas and clients must supply it. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_GIT_REMOTE</code></td>
@@ -176,8 +176,8 @@
 <td>Platform target string used to locate the vendored embedding model directory when running the SEA (single executable) binary. Format: <code dir="auto">${platform}-${arch}</code> (e.g. <code dir="auto">darwin-arm64</code>, <code dir="auto">linux-x64</code>). Defaults to the current host. Override this to pre-warm the embedding model cache on a machine of one platform and run the binary on another (CI cross-builds, OCI images). Env: <code dir="auto">LORE_TARGET=&lt;platform&gt;-&lt;arch&gt;</code>.</td>
 </tr>
 <tr>
-<td><code dir="auto">LORE_UPSTREAM_EXTRA_HEADERS</code></td>
-<td>Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the <code dir="auto">openai_provider_headers</code> config key (TOML map of header name → value). Codex appends these to every outbound request to the OpenAI-compatible upstream, which now points at the Lore gateway. The gateway reads the same env var and re-injects them on the actual upstream call — this is a belt-and-suspenders pass-through so a user with a custom corporate proxy gets headers on both hops.</td>
+<td><code dir="auto">LORE_UPSTREAM_EXTRA_HEADERS</code><br><strong>Default:</strong> <code dir="auto">""</code></td>
+<td>LORE_UPSTREAM_EXTRA_HEADERS forwards newline-separated <code dir="auto">Name: Value</code> headers to Codex’s HTTP provider and Lore’s upstream requests. Explicit header values override persisted Codex headers. Codex excludes provider-authentication and gateway-access headers from this passthrough.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_WORKER_MODEL</code><br><strong>Parser:</strong> <code dir="auto">parseWorkerModelEnv</code></td>
