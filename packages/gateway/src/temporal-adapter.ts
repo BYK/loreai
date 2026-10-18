@@ -469,24 +469,27 @@ export function resolveToolResults(
   messages: LoreMessageWithParts[],
   recallMessageId?: (message: LoreMessageWithParts) => string,
 ): void {
-  // --- Pass 1: Index all tool_result parts by callID ---
+  // --- Pass 1: Queue tool_result parts by callID in source order ---
+  // Native Responses call IDs may be reused across retained checkpoint history;
+  // matching one result per call prevents a later result overwriting an earlier one.
   const resultsByCallID = new Map<
     string,
-    {
+    Array<{
       output: string;
       blocks?: LoreContentBlock[];
       nativeResponsesOutputArray?: true;
       toolName?: string;
       responsesOutput?: Record<string, unknown>;
       isError: boolean;
-    }
+    }>
   >();
 
   for (const msg of messages) {
     for (const part of msg.parts) {
       if (isToolPart(part) && part.tool === "result") {
+        const results = resultsByCallID.get(part.callID) ?? [];
         if (part.state.status === "completed") {
-          resultsByCallID.set(part.callID, {
+          results.push({
             output: part.state.output,
             blocks: part.state.blocks,
             nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
@@ -495,7 +498,7 @@ export function resolveToolResults(
             isError: false,
           });
         } else if (part.state.status === "error") {
-          resultsByCallID.set(part.callID, {
+          results.push({
             output: part.state.error,
             blocks: part.state.blocks,
             nativeResponsesOutputArray: part.state.nativeResponsesOutputArray,
@@ -504,6 +507,7 @@ export function resolveToolResults(
             isError: true,
           });
         }
+        if (results.length > 0) resultsByCallID.set(part.callID, results);
       }
     }
   }
@@ -517,7 +521,7 @@ export function resolveToolResults(
         part.tool !== "result" &&
         part.state.status === "pending"
       ) {
-        const result = resultsByCallID.get(part.callID);
+        const result = resultsByCallID.get(part.callID)?.shift();
         if (result) {
           const callType = part.responsesCall?.type ?? "function_call";
           const outputType =

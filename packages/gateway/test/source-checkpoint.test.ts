@@ -18,6 +18,8 @@ import {
   saveGradientState,
   SourceWindowStore,
   withSavepoint,
+  isToolPart,
+  type LoreToolPart,
 } from "@loreai/core";
 import { close } from "../../core/src/db";
 import {
@@ -328,6 +330,91 @@ it("accepts a suffix against the retained Lore checkpoint", async () => {
   expect(timing.observations.source_converted_messages).toBe(1);
   expect(delta.temporalInput.assistantIndex).toBe(prefix.length + 1);
   expect(delta.loreMessages).toHaveLength(prefix.length + 1);
+});
+
+it("pairs reused native call IDs one-to-one across a checkpoint suffix", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const callID = "reused-native-call";
+  const toolTurn = (label: string, output: string): GatewayMessage[] => [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: callID,
+          name: "read",
+          input: { label },
+          responsesCall: {
+            type: "function_call",
+            id: `item-${label}`,
+            call_id: callID,
+            name: "read",
+            arguments: JSON.stringify({ label }),
+            status: "completed",
+          },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: callID,
+          toolName: "read",
+          content: [{ type: "text", text: output }],
+          responsesOutput: {
+            type: "function_call_output",
+            id: `output-${label}`,
+            call_id: callID,
+            status: "completed",
+          },
+        },
+      ],
+    },
+  ];
+  const prefix = [
+    ...semanticHistory(6).messages,
+    ...toolTurn("prefix", "prefix result"),
+  ];
+  const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
+  accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
+
+  const suffix = toolTurn("suffix", "suffix result");
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    stream: true,
+  });
+  const delta = await prepareSemanticMessages({
+    messages: suffix,
+    projectPath,
+    sessionID,
+    noStore: false,
+    protocol: "openai-responses",
+    checkpointProtocol,
+    checkpointBoundarySafe: true,
+    sourcePrefix: {
+      sourceCount: prefix.length,
+      sourceDigest: digestChain(prefix),
+    },
+    timing,
+  });
+
+  expect(timing.observations.source_checkpoint_hit).toBe(1);
+  expect(timing.observations.source_converted_messages).toBe(suffix.length);
+  const calls = delta.loreMessages
+    .flatMap((message) => message.parts)
+    .filter(
+      (part): part is LoreToolPart =>
+        isToolPart(part) && part.tool !== "result" && part.callID === callID,
+    );
+  expect(calls).toHaveLength(2);
+  expect(
+    calls.map((part) =>
+      part.state.status === "completed" ? part.state.output : null,
+    ),
+  ).toEqual(["prefix result", "suffix result"]);
 });
 
 it("refuses a suffix when its retained checkpoint is unavailable", async () => {

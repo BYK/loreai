@@ -166,6 +166,189 @@ describe("Codex native tool security boundaries", () => {
     }
   });
 
+  test.each(["call", "output"] as const)(
+    "rejects unknown native %s fields when replaying persisted request data",
+    (kind) => {
+      const request =
+        kind === "call"
+          ? parseOpenAIResponsesRequest({ input: [customCall] }, {})
+          : parseOpenAIResponsesRequest(
+              {
+                input: [
+                  {
+                    type: "custom_tool_call_output",
+                    call_id: "patch-call",
+                    output: "done",
+                  },
+                ],
+              },
+              {},
+            );
+
+      if (kind === "call") {
+        const message = request.messages.find((entry) =>
+          entry.content.some((block) => block.type === "tool_use"),
+        );
+        const call = message?.content.find(
+          (block) => block.type === "tool_use",
+        );
+        if (!call || call.type !== "tool_use")
+          throw new Error("expected native Responses call");
+        if (message) delete message.provenanceContent;
+        call.responsesCall = {
+          ...call.responsesCall,
+          provider_private_field: "native-private-sentinel",
+        };
+      } else {
+        const message = request.messages.find((entry) =>
+          entry.content.some((block) => block.type === "tool_result"),
+        );
+        const output = message?.content.find(
+          (block) => block.type === "tool_result",
+        );
+        if (!output || output.type !== "tool_result")
+          throw new Error("expected native Responses output");
+        if (message) delete message.provenanceContent;
+        output.responsesOutput = {
+          ...output.responsesOutput,
+          provider_private_field: "native-private-sentinel",
+        };
+      }
+
+      expect(() =>
+        buildOpenAIResponsesUpstreamRequest(
+          request,
+          "https://provider.example",
+        ),
+      ).toThrow("Unsupported cross-provider request");
+    },
+  );
+
+  test.each([
+    [
+      "function_call",
+      {
+        type: "function_call",
+        id: "item-call",
+        call_id: "read-call",
+        name: "read",
+        arguments: "{}",
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+    [
+      "custom_tool_call",
+      {
+        ...customCall,
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+    [
+      "tool_search_call",
+      {
+        ...searchCall,
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+    [
+      "function_call_output",
+      {
+        type: "function_call_output",
+        id: "item-output",
+        call_id: "read-call",
+        output: "done",
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+    [
+      "custom_tool_call_output",
+      {
+        type: "custom_tool_call_output",
+        id: "item-output",
+        call_id: "patch-call",
+        output: "done",
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+    [
+      "tool_search_output",
+      {
+        type: "tool_search_output",
+        id: "item-output",
+        call_id: "search-call",
+        tools: [],
+        provider_private_field: "native-private-sentinel",
+      },
+    ],
+  ])("rejects unknown native persistence fields in %s", (_kind, item) => {
+    expect(() => parseOpenAIResponsesRequest({ input: [item] }, {})).toThrow(
+      "Unsupported cross-provider request",
+    );
+    try {
+      parseOpenAIResponsesRequest({ input: [item] }, {});
+    } catch (error) {
+      expect((error as Error).message).not.toContain("native-private-sentinel");
+    }
+  });
+
+  const serverOwnedSearchItems = [
+    {
+      type: "tool_search_call",
+      id: "hosted-call",
+      call_id: null,
+      execution: "server",
+      status: "completed",
+      arguments: { paths: ["files"] },
+    },
+    {
+      type: "tool_search_output",
+      id: "hosted-output",
+      call_id: null,
+      execution: "server",
+      status: "completed",
+      tools: [],
+    },
+  ];
+
+  test.each(serverOwnedSearchItems)(
+    "rejects unknown fields in server-owned $type before checkpointing",
+    (item) => {
+      expect(() =>
+        parseOpenAIResponsesRequest(
+          {
+            input: [
+              { ...item, provider_private_field: "native-private-sentinel" },
+            ],
+          },
+          {},
+        ),
+      ).toThrow("Unsupported cross-provider request");
+    },
+  );
+
+  test.each(serverOwnedSearchItems)(
+    "rejects unknown fields in persisted server-owned $type provenance on replay",
+    (item) => {
+      const request = parseOpenAIResponsesRequest({ input: [item] }, {});
+      const provenance = request.messages
+        .flatMap((message) => message.provenanceContent ?? [])
+        .find(
+          (block) => block.type === "opaque" && block.raw.type === item.type,
+        );
+      if (!provenance || provenance.type !== "opaque") {
+        throw new Error("expected server-owned Responses provenance");
+      }
+      provenance.raw.provider_private_field = "native-private-sentinel";
+
+      expect(() =>
+        buildOpenAIResponsesUpstreamRequest(
+          request,
+          "https://provider.example",
+        ),
+      ).toThrow("Unsupported cross-provider request");
+    },
+  );
+
   test.each([
     { name: "Anthropic", build: buildAnthropicRequest },
     {

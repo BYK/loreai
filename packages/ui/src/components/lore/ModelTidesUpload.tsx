@@ -19,14 +19,7 @@ import type { WeeklyUsageSnapshot } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "~/components/ui/dialog";
+import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
 
 const PRIVACY_TEXT =
@@ -75,8 +68,8 @@ const SnapshotTable: Component<{ snapshot: WeeklyUsageSnapshot }> = (props) => (
 );
 
 /**
- * A confirm dialog gated on typing exactly `YES`. `lines` renders the
- * CLI state lines above the input.
+ * A domain-specific confirmation gated on typing exactly `YES`. The caller
+ * renders the reviewed snapshot and state lines above the input.
  */
 const YesDialog: Component<{
   open: boolean;
@@ -101,47 +94,30 @@ const YesDialog: Component<{
     ),
   );
   return (
-    <Dialog
+    <ConfirmDialog
       open={props.open}
-      onOpenChange={(open) => {
-        if (!open && !props.pending) props.onCancel();
-      }}
+      title={props.title}
+      description={props.description}
+      confirmLabel={props.confirmLabel}
+      destructive={props.destructive}
+      pending={props.pending}
+      confirmDisabled={value() !== "YES"}
+      onConfirm={props.onConfirm}
+      onCancel={props.onCancel}
     >
-      <DialogContent role="alertdialog" aria-label={props.title}>
-        <DialogHeader>
-          <DialogTitle>{props.title}</DialogTitle>
-          <DialogDescription>{props.description}</DialogDescription>
-        </DialogHeader>
-        {props.children}
-        <TextField class="mt-3">
-          <TextFieldInput
-            aria-label={`Type YES to confirm`}
-            placeholder="Type YES to confirm"
-            value={value()}
-            onInput={(e) => setValue(e.currentTarget.value)}
-          />
-        </TextField>
-        <Show when={props.error}>
-          <p class="mt-2 text-xs text-danger">{props.error}</p>
-        </Show>
-        <DialogFooter>
-          <Button
-            variant="outline"
-            disabled={props.pending}
-            onClick={props.onCancel}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant={props.destructive ? "destructive" : "default"}
-            disabled={props.pending || value() !== "YES"}
-            onClick={props.onConfirm}
-          >
-            {props.pending ? "Working…" : props.confirmLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      {props.children}
+      <TextField class="mt-3">
+        <TextFieldInput
+          aria-label={`Type YES to confirm`}
+          placeholder="Type YES to confirm"
+          value={value()}
+          onInput={(e) => setValue(e.currentTarget.value)}
+        />
+      </TextField>
+      <Show when={props.error}>
+        <p class="mt-2 text-xs text-danger">{props.error}</p>
+      </Show>
+    </ConfirmDialog>
   );
 };
 

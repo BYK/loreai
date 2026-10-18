@@ -1,3 +1,4 @@
+import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -116,23 +117,29 @@ export const SessionList: Component<{
       </Switch>
       <div class="mt-4 flex justify-between text-xs">
         <Show when={props.cursor}>
-          <button
-            class="text-accent underline"
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            class="h-auto px-0 py-0 text-xs underline"
             onClick={() => navigate(sessionsHref(props.projectId, null, q()))}
           >
             First page
-          </button>
+          </Button>
         </Show>
-        <button
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
           disabled={!data()?.next_cursor}
-          class="text-accent underline disabled:opacity-40"
+          class="h-auto px-0 py-0 text-xs underline"
           onClick={() => {
             const next = data()?.next_cursor;
             if (next) navigate(sessionsHref(props.projectId, next, q()));
           }}
         >
           Next page
-        </button>
+        </Button>
       </div>
     </div>
   );

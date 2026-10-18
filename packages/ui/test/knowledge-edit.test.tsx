@@ -237,6 +237,34 @@ afterEach(async () => {
 });
 
 describe("KnowledgeEditor", () => {
+  it("keeps labeled fields and native form constraints when editing", async () => {
+    mountEditor();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const title = screen.getByLabelText("Title") as HTMLInputElement;
+    const content = screen.getByLabelText("Content") as HTMLTextAreaElement;
+    const confidence = screen.getByLabelText(/^Confidence/) as HTMLInputElement;
+    expect(title).toHaveValue("Current title");
+    expect(title).toBeRequired();
+    expect(content).toHaveValue("Current content");
+    expect(content).toBeRequired();
+    expect(confidence).toBeRequired();
+    expect(confidence).toHaveAttribute("min", "0");
+    expect(confidence).toHaveAttribute("max", "1");
+    expect(confidence).toHaveAttribute("step", "any");
+    fireEvent.input(title, { target: { value: "" } });
+    fireEvent.input(content, { target: { value: "" } });
+    expect(title.validity.valueMissing).toBe(true);
+    expect(content.validity.valueMissing).toBe(true);
+    fireEvent.input(confidence, { target: { value: "1.1" } });
+    expect(confidence.validity.rangeOverflow).toBe(true);
+    fireEvent.input(confidence, { target: { value: "0.375" } });
+    expect(confidence.validity.valid).toBe(true);
+    const form = screen.getByTestId("knowledge-editor");
+    if (!(form instanceof HTMLFormElement))
+      throw new Error("Expected an editor form");
+    expect(new FormData(form).get("confidence")).toBe("0.375");
+  });
+
   it("waits for the current revision and keeps projectless entries shared", async () => {
     const mounted = mountEditor({
       currentEntry: entry({ project_id: null }),

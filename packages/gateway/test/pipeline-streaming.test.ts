@@ -27,6 +27,9 @@ import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import type { FixtureEntry } from "../src/recorder";
 import type { GatewayRequest } from "../src/translate/types";
+import { measureKnowledgeDelivery } from "../src/knowledge-delivery";
+import { parseOpenAIResponsesRequest } from "../src/translate/openai-responses";
+import { loreSessionToken } from "../src/pipeline";
 
 vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
@@ -2834,6 +2837,144 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("filters default task delivery while keeping omitted facts in the frozen catalog and recall", async () => {
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const originalFilter = core.config().knowledge.taskFilter;
+    const projectPath = `/tmp/lore-task-filter-wire-${Date.now()}`;
+    const headerSessionID = `task-filter-wire-${Date.now()}`;
+    const upstreamBodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(
+        typeof body === "string" ? body : JSON.stringify(body),
+      );
+      return new Response(validResponsesSSE("task_filter_wire"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    try {
+      core.embedding._restoreProvider({ provider: null });
+      const omitted = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "pattern",
+        title: "Ledger pattern",
+        content:
+          "PatternFullText ledger settlement uses the conventional layout.",
+      });
+      const retained = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Ledger settlement",
+        content:
+          "GotchaFullText ledger settlement commits records before clearing pending work.",
+      });
+      const initial = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": headerSessionID,
+            "x-lore-project": projectPath,
+          },
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "Start a coding session." }],
+            },
+          ],
+        }),
+        loadLocalConfig(),
+      );
+      expect(initial.status).toBe(200);
+      await initial.text();
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": headerSessionID,
+            "x-lore-project": projectPath,
+          },
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "Start a coding session." }],
+            },
+            { role: "assistant", content: [{ type: "text", text: "Ready." }] },
+            {
+              role: "user",
+              content: [{ type: "text", text: "Repair ledger settlement." }],
+            },
+          ],
+        }),
+        loadLocalConfig(),
+      );
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(upstreamBodies).toHaveLength(2);
+      const session = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === headerSessionID,
+      );
+      if (!session) throw new Error("Gateway session was not created");
+      const wire = upstreamBodies[1];
+      const actual = parseOpenAIResponsesRequest(JSON.parse(wire), {});
+      const delivery = measureKnowledgeDelivery(
+        actual.messages,
+        [ltm.get(omitted)!, ltm.get(retained)!],
+        loreSessionToken(session.sessionID),
+      );
+      expect(delivery.states).toEqual(["absent", "full"]);
+      expect(wire).toContain(`k:${omitted}`);
+      expect(wire).not.toContain("PatternFullText");
+      expect(
+        await core.runRecall({
+          query: "Ledger pattern",
+          id: `k:${omitted}`,
+          projectPath,
+        }),
+      ).toContain("PatternFullText");
+
+      // Switching the policy in a warm session must invalidate the selection,
+      // not rewrite its prefix or require the user to change tasks first.
+      core.config().knowledge.taskFilter = false;
+      const unfiltered = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": headerSessionID,
+            "x-lore-project": projectPath,
+          },
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "Start a coding session." }],
+            },
+            { role: "assistant", content: [{ type: "text", text: "Ready." }] },
+            {
+              role: "user",
+              content: [{ type: "text", text: "Repair ledger settlement." }],
+            },
+          ],
+        }),
+        loadLocalConfig(),
+      );
+      expect(unfiltered.status).toBe(200);
+      await unfiltered.text();
+      expect(upstreamBodies).toHaveLength(3);
+      const next = parseOpenAIResponsesRequest(
+        JSON.parse(upstreamBodies[2]),
+        {},
+      );
+      expect(next.system).toEqual(actual.system);
+      expect(
+        measureKnowledgeDelivery(
+          next.messages,
+          [ltm.get(omitted)!],
+          loreSessionToken(session.sessionID),
+        ).states,
+      ).toEqual(["full"]);
+    } finally {
+      core.config().knowledge.taskFilter = originalFilter;
+      core.embedding._restoreProvider(savedProvider);
+    }
+  });
+
   it("credits only the entries whose full text reaches the durable knowledge delta", async () => {
     const savedProvider = core.embedding._saveAndClearProvider();
     const projectPath = `/tmp/lore-delta-credit-${Date.now()}`;
@@ -2924,6 +3065,20 @@ describe("Pipeline — streaming responses", () => {
       const wire = upstreamBodies.at(-1);
       if (!wire) throw new Error("No upstream request was sent");
       expect(wire.includes("Lore knowledge update")).toBe(true);
+      const actualRequest = parseOpenAIResponsesRequest(JSON.parse(wire), {});
+      const delivery = measureKnowledgeDelivery(
+        actualRequest.messages,
+        ids.map((id) => ltm.get(id)!),
+        loreSessionToken(sessionID),
+        { providerID: "openai", modelID: actualRequest.model },
+      );
+      expect(delivery).toMatchObject({
+        full: 1,
+        hintOnly: 1,
+        absent: 0,
+        blocks: 1,
+      });
+      expect(delivery.deltaTextTokens).toBeGreaterThan(delivery.fullTextTokens);
       const fullyDelivered = fixtures.flatMap((entry, index) =>
         wire.includes(entry.content.trim()) ? [ids[index]] : [],
       );
@@ -4116,7 +4271,7 @@ describe("Pipeline — streaming responses", () => {
             }),
         );
       const failed = await handleRequest(
-        request("continue the task"),
+        request("continue the rollback task"),
         loadLocalConfig(),
       );
       expect(failed.status).toBe(503);
@@ -4127,8 +4282,12 @@ describe("Pipeline — streaming responses", () => {
       ).toBeNull();
       prewarm.mockRestore();
       prewarm = undefined;
+      // Only the deliberately blocked request uses the short preparation budget.
+      if (priorTimeout === undefined)
+        delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
       const retry = await handleRequest(
-        request("continue the task"),
+        request("continue the rollback task"),
         loadLocalConfig(),
       );
       expect(retry.status).toBe(200);
@@ -4210,13 +4369,18 @@ describe("Pipeline — streaming responses", () => {
         req.rawHeaders["x-lore-project"] = projectPath;
         return req;
       };
-      await (
-        await handleRequest(request("begin session"), loadLocalConfig())
-      ).text();
+      const firstResponse = await handleRequest(
+        request("begin session"),
+        loadLocalConfig(),
+      );
+      expect(firstResponse.status).toBe(200);
+      await firstResponse.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
-      const second = request("continue with the current project");
-      await (await handleRequest(second, loadLocalConfig())).text();
+      const second = request("continue with the pinned read failure");
+      const secondResponse = await handleRequest(second, loadLocalConfig());
+      expect(secondResponse.status).toBe(200);
+      await secondResponse.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -7537,7 +7701,7 @@ describe("Pipeline — streaming responses", () => {
         messages: [
           { role: "user", content: [{ type: "text", text: "first" }] },
           { role: "assistant", content: [{ type: "text", text: "answer" }] },
-          { role: "user", content: [{ type: "text", text: "second" }] },
+          { role: "user", content: [{ type: "text", text: "second release" }] },
         ],
       });
       second.rawHeaders["x-lore-project"] = projectPath;

@@ -165,6 +165,67 @@ describe("resolveToolResults", () => {
     expect(resultParts).toHaveLength(0);
   });
 
+  test("matches reused tool call IDs to results in source order", () => {
+    const messages = gatewayMessagesToLore(
+      [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_reused",
+              name: "read",
+              input: { path: "first" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "call_reused",
+              content: [{ type: "text", text: "first output" }],
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_reused",
+              name: "read",
+              input: { path: "second" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "call_reused",
+              content: [{ type: "text", text: "second output" }],
+            },
+          ],
+        },
+      ],
+      "sess-reused-call-id",
+    );
+
+    resolveToolResults(messages);
+
+    const firstCall = messages[0]?.parts.find(
+      (part) => isToolPart(part) && part.tool !== "result",
+    );
+    const secondCall = messages[2]?.parts.find(
+      (part) => isToolPart(part) && part.tool !== "result",
+    );
+    expect(toolStateOf(firstCall).output).toBe("first output");
+    expect(toolStateOf(secondCall).output).toBe("second output");
+  });
+
   test("user message with only tool_result parts gets placeholder text with recall ID after stripping", () => {
     const messages = gatewayMessagesToLore(makeToolConversation(), "sess-2");
     resolveToolResults(messages);

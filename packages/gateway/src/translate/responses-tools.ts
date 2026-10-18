@@ -5,6 +5,59 @@ import type {
 } from "./types";
 import { InvalidCrossProviderRequestError } from "./errors";
 
+function assertKnownNativeFields(
+  raw: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  if (Object.keys(raw).some((key) => !allowed.includes(key))) {
+    throw new InvalidCrossProviderRequestError();
+  }
+}
+
+/** Native envelopes are stored on Lore parts, so only supported wire fields may cross that persistence boundary. */
+export function assertNativeResponsesOutput(
+  raw: Record<string, unknown>,
+): void {
+  const allowed =
+    raw.type === "custom_tool_call_output"
+      ? ["type", "id", "call_id", "output", "status", "namespace"]
+      : raw.type === "tool_search_output"
+        ? ["type", "id", "call_id", "execution", "tools", "status"]
+        : [];
+  assertKnownNativeFields(raw, allowed);
+}
+
+/** Revalidate durable native call envelopes before replay to an upstream. */
+export function assertNativeResponsesCall(raw: Record<string, unknown>): void {
+  const allowed =
+    raw.type === "custom_tool_call"
+      ? ["type", "id", "call_id", "name", "namespace", "input", "status"]
+      : raw.type === "tool_search_call"
+        ? [
+            "type",
+            "id",
+            "call_id",
+            "name",
+            "namespace",
+            "execution",
+            "arguments",
+            "status",
+          ]
+        : raw.type === "function_call" && raw.namespace !== undefined
+          ? [
+              "type",
+              "id",
+              "call_id",
+              "name",
+              "namespace",
+              "arguments",
+              "status",
+            ]
+          : [];
+  if (allowed.length === 0) throw new InvalidCrossProviderRequestError();
+  assertKnownNativeFields(raw, allowed);
+}
+
 /** Hosted search is completed by the provider and has no client call identity. */
 export function isServerOwnedResponsesSearch(
   raw: Record<string, unknown>,
@@ -27,6 +80,9 @@ export function nativeResponsesCall(
   const namespaced =
     raw.type === "function_call" && raw.namespace !== undefined;
   if (!custom && !search && !namespaced) return null;
+  // Arbitrary envelope keys become durable with the tool part; never persist
+  // unrecognized request/provider metadata through this native replay path.
+  assertNativeResponsesCall(raw);
   if (
     typeof raw.call_id !== "string" ||
     !raw.call_id ||
@@ -66,20 +122,25 @@ export function responsesCallItem(
   block: GatewayToolUseBlock,
 ): Record<string, unknown> {
   const envelope = block.responsesCall ?? { type: "function_call" };
+  const persistedNativeCall = block.responsesCall !== undefined;
   if (envelope.type === "custom_tool_call") {
     if (typeof block.input !== "string")
       throw new InvalidCrossProviderRequestError();
-    return {
+    const item = {
       ...envelope,
       call_id: block.id,
       name: block.name,
       input: block.input,
     };
+    if (persistedNativeCall) assertNativeResponsesCall(item);
+    return item;
   }
   if (envelope.type === "tool_search_call") {
-    return { ...envelope, call_id: block.id, arguments: block.input };
+    const item = { ...envelope, call_id: block.id, arguments: block.input };
+    if (persistedNativeCall) assertNativeResponsesCall(item);
+    return item;
   }
-  return {
+  const item = {
     ...envelope,
     call_id: block.id,
     name: block.name,
@@ -88,6 +149,8 @@ export function responsesCallItem(
         ? envelope.arguments
         : JSON.stringify(block.input),
   };
+  if (persistedNativeCall) assertNativeResponsesCall(item);
+  return item;
 }
 
 export function responsesOutputItem(
@@ -107,9 +170,13 @@ export function responsesOutputItem(
       throw new InvalidCrossProviderRequestError();
     }
     if (!Array.isArray(tools)) throw new InvalidCrossProviderRequestError();
-    return { ...base, tools };
+    const item = { ...base, tools };
+    if (envelope) assertNativeResponsesOutput(item);
+    return item;
   }
-  return { ...base, output };
+  const item = { ...base, output };
+  if (envelope) assertNativeResponsesOutput(item);
+  return item;
 }
 
 /** A foreign wire format cannot carry grammars, namespaces, or native call kinds. */

@@ -41,6 +41,7 @@ import {
 export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
+import { knowledgeRecallToken } from "./knowledge-recall-token";
 import { isDeepStrictEqual } from "node:util";
 import type {
   ContextBoundaryProtocol,
@@ -3517,12 +3518,7 @@ export function buildKnowledgeDeltaMessage(
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
         .map((e) => {
-          const recallId =
-            e.category === "lat.md"
-              ? `lat:${e.id}`
-              : e.id.startsWith("d:") || e.id.startsWith("t:")
-                ? e.id
-                : `k:${e.id}`;
+          const recallId = knowledgeRecallToken(e);
           return `* [${recallId}] ${Array.from(e.title).slice(0, 120).join("")} (${e.category})`;
         })
         .join("\n")}${
@@ -3879,6 +3875,15 @@ export function appendKnowledgePromptDelta(input: {
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
   const projectID = ensureProject(input.projectPath);
   const blocks = listSessionPromptDeltas(input.sessionID);
+  // Selection snapshots can outlive a versioned edit. Rank ordinary entries
+  // by tenant-scoped logical identity, never by a superseded physical ID.
+  // Synthetic sources retain their own separate identity namespace.
+  const priorityKeys = input.entries.map((entry) =>
+    entry.category === ltm.RECALLED_CONTEXT_CATEGORY ||
+    entry.category === "lat.md"
+      ? `synthetic:${entry.id}`
+      : `knowledge:${ltm.logicalIdOf(entry.id)}`,
+  );
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
   // Synthetic selections (recalled context and lat.md) don't live in knowledge.
   // Supply their current content so an edited section can be surfaced too.
@@ -3975,6 +3980,7 @@ export function appendKnowledgePromptDelta(input: {
     input.overflow,
     entryKeyIds(surfacedKeys),
     Infinity,
+    priorityKeys,
   );
   if (!current.messages.length) return false;
 
@@ -4001,6 +4007,8 @@ export function appendKnowledgePromptDelta(input: {
       projectID,
       input.overflow,
       entryKeyIds(input.previousKeys),
+      MAX_CUMULATIVE_DELTA_ENTRIES,
+      priorityKeys,
     );
     if (!rendered.messages.length) return false;
     // Legacy blocks lack source IDs and signatures. Their text cannot be
@@ -4047,6 +4055,8 @@ export function appendKnowledgePromptDelta(input: {
         ),
         ...entryKeyIds(surfacedKeys),
       ]),
+      MAX_CUMULATIVE_DELTA_ENTRIES,
+      priorityKeys,
     );
     if (!rendered.messages.length) return false;
     const content = JSON.stringify(rendered.messages);
@@ -4198,6 +4208,7 @@ function renderCurrentDelta(
   overflow?: Array<{ id: string; category: string; title: string }>,
   retainedRemovedIds?: Set<string>,
   maxEntries = MAX_CUMULATIVE_DELTA_ENTRIES,
+  priorityKeys: readonly string[] = [],
 ): {
   messages: GatewayMessage[];
   mut: DeltaMutation;
@@ -4206,11 +4217,16 @@ function renderCurrentDelta(
 } {
   const removed = new Set(merged.removed);
   const changed: DeltaMutation["changed"] = [];
+  const priorities = new Map<string, number>();
+  for (const [index, key] of priorityKeys.entries()) {
+    if (!priorities.has(key)) priorities.set(key, index);
+  }
   const entries: Array<{
     id: string;
     category: string;
     title: string;
     content: string;
+    priority: number;
   }> = [];
   for (const retired of merged.changed.slice(0, -maxEntries)) {
     if (retainedRemovedIds?.has(retired.id)) removed.add(retired.id);
@@ -4246,6 +4262,12 @@ function renderCurrentDelta(
       category: current.category,
       title: current.title,
       content: current.content,
+      priority:
+        priorities.get(
+          currentKnowledge
+            ? `knowledge:${currentKnowledge.logical_id}`
+            : `synthetic:${mutation.id}`,
+        ) ?? Number.MAX_SAFE_INTEGER,
     });
     changed.push({
       ...mutation,
@@ -4272,6 +4294,10 @@ function renderCurrentDelta(
     }
   }
   const renderedIds: string[] = [];
+  // ID-sorted fingerprints stabilize the cache but never define packing rank.
+  // Pack a new/rebuilt delta in current selector order; replay stays immutable.
+  // Edited entries retain old surfaced handles and their selected logical rank.
+  entries.sort((a, b) => a.priority - b.priority);
   const messages = buildKnowledgeDeltaMessage(
     entries,
     persistedRemoved,
@@ -21657,6 +21683,7 @@ async function handleConversationTurnPrepared(
           projectPath,
           cfg.knowledge.contextSources,
           taskSelection.identity,
+          cfg.knowledge.taskFilter,
         );
         let cached = ltmSessionCache.get(sessionID);
         const taskShift =
@@ -21763,6 +21790,7 @@ async function handleConversationTurnPrepared(
                       selectionRevision,
                       [...stickyIds].sort(),
                       cfg.knowledge.contextSources,
+                      cfg.knowledge.taskFilter,
                     ]),
                   )
                   .digest("hex")}`
@@ -22283,6 +22311,7 @@ async function handleConversationTurnPrepared(
         projectPath,
         cfg.knowledge.contextSources,
         taskSelection.identity,
+        cfg.knowledge.taskFilter,
       );
       // Step 6 may already have saved refreshRevision to the session cache.
       // Preserve its task-switch decision when Layer 4 replaces that turn's
@@ -25032,10 +25061,16 @@ function taskSelectionRevision(
   projectPath: string,
   contextSources: Parameters<typeof ltm.selectionRevision>[1],
   taskHint: string,
+  taskFilter: boolean,
 ): string {
-  const revision = ltm.selectionRevision(projectPath, contextSources);
+  // A policy toggle must refresh a cached selection and admit its newly
+  // eligible facts through a new delta. Existing prefix and replay bytes stay
+  // frozen, just as they do when the user changes the selected task.
+  const revision = `${ltm.selectionRevision(projectPath, contextSources)}:filter:${Number(taskFilter)}`;
   return taskHint
-    ? `${revision}:task:${createHash("sha256").update(taskHint).digest("hex")}`
+    ? `${revision}:task:${createHash("sha256")
+        .update(JSON.stringify([taskHint, taskFilter]))
+        .digest("hex")}`
     : revision;
 }
 

@@ -4,6 +4,7 @@ import {
   Show,
   createEffect,
   createSignal,
+  createUniqueId,
   onCleanup,
   onMount,
 } from "solid-js";
@@ -22,6 +23,13 @@ import { formatConfidence, formatWhen } from "~/lib/format";
 import { duplicatesHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
+import {
+  TextField,
+  TextFieldInput,
+  TextFieldLabel,
+  TextFieldTextArea,
+  textFieldInputClass,
+} from "~/components/ui/text-field";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { StateCard } from "~/components/lore/StateCard";
 import {
@@ -108,6 +116,7 @@ export const KnowledgeEditor: Component<{
   const [content, setContent] = createSignal("");
   const [category, setCategory] =
     createSignal<(typeof CATEGORIES)[number]>("decision");
+  const confidenceInputId = `confidence-${createUniqueId()}`;
   const [confidenceText, setConfidenceText] = createSignal("0.8");
   const [confidenceEdited, setConfidenceEdited] = createSignal(false);
   const confidence = () => {
@@ -621,13 +630,10 @@ export const KnowledgeEditor: Component<{
           onSubmit={(event) => void save(event)}
         >
           <div class="grid gap-3 sm:grid-cols-2">
-            <label class="grid gap-1 text-sm font-medium">
-              Title
-              <input
-                class="h-10 rounded-md border border-input bg-surface px-3 text-sm"
-                name="title"
-                required
-                value={title()}
+            <TextField class="text-sm" value={title()} name="title" required>
+              <TextFieldLabel>Title</TextFieldLabel>
+              <TextFieldInput
+                class="bg-surface"
                 onInput={(event) => {
                   setTitle(event.currentTarget.value);
                   setDirty(true);
@@ -683,7 +689,7 @@ export const KnowledgeEditor: Component<{
                   </span>
                 )}
               </Show>
-            </label>
+            </TextField>
             <label class="grid gap-1 text-sm font-medium">
               Category
               <select
@@ -703,14 +709,19 @@ export const KnowledgeEditor: Component<{
                 </For>
               </select>
             </label>
-            <label class="grid gap-1 text-sm font-medium">
-              Confidence (
-              {confidence() === undefined
-                ? "enter 0 to 1"
-                : formatConfidence(confidence() ?? 0)}
-              )
+            <TextField class="text-sm" required>
+              <TextFieldLabel for={confidenceInputId}>
+                Confidence (
+                {confidence() === undefined
+                  ? "enter 0 to 1"
+                  : formatConfidence(confidence() ?? 0)}
+                )
+              </TextFieldLabel>
+              {/* Kobalte writes input.value after every input event, erasing
+                  native number-editing states such as a leading decimal point. */}
               <input
-                class="h-10 rounded-md border border-input bg-surface px-3 text-sm"
+                class={textFieldInputClass("bg-surface")}
+                id={confidenceInputId}
                 name="confidence"
                 type="number"
                 required
@@ -725,7 +736,7 @@ export const KnowledgeEditor: Component<{
                   setSuccess("");
                 }}
               />
-            </label>
+            </TextField>
             <fieldset class="grid gap-2 border-0 p-0 text-sm font-medium">
               <legend>Scope</legend>
               <label class="flex items-center gap-2 font-normal">
@@ -764,20 +775,17 @@ export const KnowledgeEditor: Component<{
               </Show>
             </fieldset>
           </div>
-          <label class="grid gap-1 text-sm font-medium">
-            Content
-            <textarea
-              class="min-h-40 rounded-md border border-input bg-surface px-3 py-2 text-sm leading-relaxed"
-              name="content"
-              required
-              value={content()}
+          <TextField class="text-sm" value={content()} name="content" required>
+            <TextFieldLabel>Content</TextFieldLabel>
+            <TextFieldTextArea
+              class="min-h-40 bg-surface leading-relaxed"
               onInput={(event) => {
                 setContent(event.currentTarget.value);
                 setDirty(true);
                 setSuccess("");
               }}
             />
-          </label>
+          </TextField>
           <Show when={conflict()}>
             <div
               class="rounded-md border border-gold/40 bg-gold-soft px-3 py-2 text-sm"

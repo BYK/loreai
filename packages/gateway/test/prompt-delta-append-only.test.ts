@@ -35,9 +35,13 @@ import {
   appendKnowledgePromptDelta,
   applySessionPromptDeltas,
   fnv1a,
+  fullSurfaceBaseline,
+  ltmEntryKeys,
+  loreSessionToken,
   reanchorExistingDelta,
 } from "../src/pipeline";
 import type { GatewayMessage } from "../src/translate/types";
+import { measureKnowledgeDelivery } from "../src/knowledge-delivery";
 
 const PROJECT = "/tmp/lore-delta-append-only";
 
@@ -78,6 +82,146 @@ function seedDistillation(id: string, observations: string): void {
 }
 
 describe("append-only durable knowledge deltas", () => {
+  it.each([false, true])(
+    "preserves selected logical priority across an intervening edit (surfaced: %s)",
+    (surfaced) => {
+      const sessionID = `intervening-edit-${surfaced}`;
+      const projectPath = `${PROJECT}/intervening-edit-${surfaced}`;
+      const strongerId = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Selected first",
+        content: "Initial priority guidance.",
+      });
+      const weakerId = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Selected second",
+        content: "Weaker competing guidance. ".repeat(45).trim(),
+      });
+      const stronger = ltm.get(strongerId)!;
+      const weaker = ltm.get(weakerId)!;
+      expect(stronger.id < weaker.id).toBe(true);
+      const previousKeys = fullSurfaceBaseline([stronger.id, weaker.id]);
+      if (surfaced) {
+        expect(
+          appendKnowledgePromptDelta({
+            sessionID,
+            projectPath,
+            insertAt: 0,
+            previousKeys: fullSurfaceBaseline([stronger.id]),
+            nextKeys: ltmEntryKeys([stronger]),
+            entries: [stronger],
+            now: 0,
+          }),
+        ).toBe(true);
+      }
+      // Selection is a real, now-stale snapshot. Rendering must keep its rank
+      // while resolving a new physical version and retaining the surfaced handle.
+      const revised = "Stronger current guidance. ".repeat(45).trim();
+      ltm.update(stronger.id, { content: revised });
+      expect(ltm.getByLogical(stronger.logical_id)?.id).not.toBe(stronger.id);
+      expect(
+        appendKnowledgePromptDelta({
+          sessionID,
+          projectPath,
+          insertAt: 0,
+          previousKeys,
+          nextKeys: ltmEntryKeys([stronger, weaker]),
+          entries: [stronger, weaker],
+          now: 100_000,
+        }),
+      ).toBe(true);
+      const latest = deltaText(
+        listSessionPromptDeltas(sessionID).at(-1)!.content,
+      );
+      expect(latest).toContain(revised);
+      expect(latest).not.toContain(weaker.content);
+      expect(latest).toContain(`[k:${weaker.id}]`);
+    },
+  );
+
+  it("packs the highest-ranked entry before UUID-sorted mutations and freezes replay", () => {
+    const sessionID = "relevance-before-uuid";
+    const entries = ["Earlier weak match", "Later strong match"]
+      .map((title, index) => {
+        const content =
+          `Delivery sentinel ${index}. ${"Bounded synthetic detail. ".repeat(45)}`.trim();
+        const id = ltm.create({
+          projectPath: PROJECT,
+          scope: "project",
+          category: "gotcha",
+          title,
+          content,
+        });
+        return { id, category: "gotcha", title, content };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const [weaker, stronger] = entries;
+    expect(weaker.id).not.toBe(stronger.id);
+    for (const entry of entries)
+      expect(ltm.get(entry.id)?.content).toBe(entry.content);
+    const input = {
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 0,
+      previousKeys: fullSurfaceBaseline(entries.map((entry) => entry.id)),
+      // Stable set fingerprints sort UUIDs; packing must retain selector rank.
+      nextKeys: ltmEntryKeys(entries),
+      entries: [stronger, weaker],
+      now: 0,
+    };
+    expect(appendKnowledgePromptDelta(input)).toBe(true);
+    const first = listSessionPromptDeltas(sessionID)[0].content;
+    const request: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "Current task" }] },
+    ];
+    const wire = applySessionPromptDeltas(request, sessionID);
+    const actual = wire
+      .flatMap((message) => message.content)
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    expect(actual).toContain(stronger.content);
+    expect(actual).not.toContain(weaker.content);
+    expect(actual).toContain(`[k:${weaker.id}]`);
+    expect(
+      measureKnowledgeDelivery(
+        wire,
+        [stronger, weaker],
+        loreSessionToken(sessionID),
+      ),
+    ).toMatchObject({
+      states: ["full", "hint"],
+      full: 1,
+      hintOnly: 1,
+      absent: 0,
+      blocks: 1,
+    });
+    expect(
+      measureKnowledgeDelivery(
+        request,
+        [stronger, weaker],
+        loreSessionToken(sessionID),
+      ),
+    ).toMatchObject({
+      states: ["absent", "absent"],
+      blocks: 0,
+      deltaTextTokens: 0,
+    });
+    expect(
+      appendKnowledgePromptDelta({
+        ...input,
+        entries: [weaker, stronger],
+        now: 100_000,
+      }),
+    ).toBe(false);
+    expect(listSessionPromptDeltas(sessionID)[0].content).toBe(first);
+    expect(applySessionPromptDeltas(request, sessionID)).toEqual(wire);
+  });
+
   it("retires older task additions across repeated compactions", () => {
     const sessionID = `bounded-task-switch-${Date.now()}`;
     const entries = Array.from({ length: 40 }, (_, index) => {

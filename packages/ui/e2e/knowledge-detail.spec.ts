@@ -44,6 +44,97 @@ async function fileLinkProjectAndEntry(page: Page) {
 }
 
 test.describe("knowledge detail provenance and history", () => {
+  test("compares consecutive versions and offers a keyboard-accessible full-text view", async ({
+    page,
+  }) => {
+    const { project, live } = await projectAndEntry(page);
+    await page.route(
+      `**/api/v1/knowledge/${live.id}/versions`,
+      async (route) => {
+        const response = await route.fetch();
+        const history = await response.json();
+        for (const version of history.versions) {
+          version.content = version.is_current
+            ? "Use WAL journaling.\nKeep lexical recall."
+            : "Use rollback journaling.\nKeep lexical recall.";
+        }
+        await route.fulfill({ response, json: history });
+      },
+    );
+    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    const current = page.getByTestId("knowledge-version-2");
+    await current.locator("summary").click();
+    const content = current.getByTestId("version-content");
+    await expect(content.locator("del")).toHaveText("rollback");
+    await expect(content.locator("ins")).toHaveText("WAL");
+    const fullText = current.getByRole("button", {
+      name: "Full text",
+      exact: true,
+    });
+    const changes = current.getByRole("button", {
+      name: "Changes",
+      exact: true,
+    });
+    const selector = current.getByRole("group", { name: "Version 2 view" });
+    await changes.click();
+    await expect(changes).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("ArrowRight");
+    await expect(fullText).toBeFocused();
+    await expect(changes).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Enter");
+    await expect(fullText).toHaveAttribute("aria-pressed", "true");
+    await fullText.click();
+    await expect(fullText).toHaveAttribute("aria-pressed", "true");
+    await expect(selector.getByRole("button", { pressed: true })).toHaveCount(
+      1,
+    );
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(fullText).toBeFocused();
+    await expect(content).toHaveText(
+      "Use WAL journaling.\nKeep lexical recall.",
+    );
+    await expect(content.locator("ins, del")).toHaveCount(0);
+    await page.keyboard.press("Home");
+    await expect(changes).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(changes).toHaveAttribute("aria-pressed", "true");
+    await expect(content.locator("del")).toHaveText("rollback");
+  });
+
+  test("shows exact complete text without a view selector for oversized history", async ({
+    page,
+  }) => {
+    const { project, live } = await projectAndEntry(page);
+    const content = "Use WAL journaling.\n".repeat(1000);
+    await page.route(
+      `**/api/v1/knowledge/${live.id}/versions`,
+      async (route) => {
+        const response = await route.fetch();
+        const history = await response.json();
+        for (const version of history.versions) {
+          version.content = version.is_current
+            ? content
+            : "Old journal.\n".repeat(1000);
+        }
+        await route.fulfill({ response, json: history });
+      },
+    );
+    await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    const current = page.getByTestId("knowledge-version-2");
+    await current.locator("summary").click();
+    await expect(current).toContainText(
+      "Changes too large to compare. Showing full text.",
+    );
+    await expect(
+      current.getByRole("group", { name: "Version 2 view" }),
+    ).toHaveCount(0);
+    expect(await current.getByTestId("version-content").textContent()).toBe(
+      content,
+    );
+    await expect(current.locator("ins, del")).toHaveCount(0);
+  });
+
   test("shows current and superseded versions with old content", async ({
     page,
   }) => {

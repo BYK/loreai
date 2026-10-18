@@ -1,5 +1,7 @@
 import { extractProviderHeader } from "../config";
 import {
+  assertNativeResponsesCall,
+  assertNativeResponsesOutput,
   isServerOwnedResponsesSearch,
   nativeResponsesCall,
   responsesCallItem,
@@ -717,6 +719,13 @@ function createInputItemsBuilder(): {
     }
 
     if (isServerOwnedResponsesSearch(raw)) {
+      // Server-owned items remain opaque provenance, but still become durable
+      // replay data and must satisfy the same native envelope allowlists.
+      if (itemType === "tool_search_call") {
+        assertNativeResponsesCall(raw);
+      } else {
+        assertNativeResponsesOutput(raw);
+      }
       sawConversationItem = true;
       pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
       return;
@@ -795,6 +804,9 @@ function createInputItemsBuilder(): {
         throw new InvalidCrossProviderRequestError();
       }
       sawConversationItem = true;
+      if (itemType !== "function_call_output") {
+        assertNativeResponsesOutput(raw);
+      }
       const {
         output: _output,
         tools: _tools,
@@ -1611,6 +1623,13 @@ function buildResponsesInput(
         }
         if (block.responsesItem) {
           if (block.raw.type === "item_reference") continue;
+          // Revalidate opaque native envelopes at replay: retained checkpoints
+          // may have been written before the current allowlist was enforced.
+          if (block.raw.type === "tool_search_call") {
+            assertNativeResponsesCall(block.raw);
+          } else if (block.raw.type === "tool_search_output") {
+            assertNativeResponsesOutput(block.raw);
+          }
           if (block.raw.type === "function_call_output") {
             assertResponsesToolOutputEnvelope(block.raw);
             if (
