@@ -4,6 +4,7 @@ import {
   type CreateOwnedRootOptions,
   type OwnedPath,
 } from "./helpers/owned-path";
+import type { EventEmitter } from "node:events";
 import type { TestProject } from "vitest/node";
 
 function reportCleanupFailure(error: unknown): void {
@@ -17,12 +18,17 @@ function reportCleanupFailure(error: unknown): void {
 
 export interface GlobalSetupDependencies {
   createRoot?: (options: CreateOwnedRootOptions) => Promise<OwnedPath>;
+  signalOwner?: Pick<NodeJS.Process, "pid" | "kill"> &
+    Pick<EventEmitter, "on" | "off" | "once" | "listenerCount">;
 }
 
 export default async function setup(
   project: TestProject,
   dependencies: GlobalSetupDependencies = {},
 ): Promise<() => Promise<void>> {
+  // Fork IPC and Vitest's deferred nextTick restoration share global process.
+  // Signal fixtures must inject their owner rather than replace that runtime.
+  const signalOwner = dependencies.signalOwner ?? process;
   let owned: OwnedPath | undefined;
   let pendingSignal: "SIGINT" | "SIGTERM" | undefined;
   let initializing = true;
@@ -39,8 +45,8 @@ export default async function setup(
     }
   };
   const onExit = (): void => {
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
+    signalOwner.off("SIGINT", onSigint);
+    signalOwner.off("SIGTERM", onSigterm);
     removeOwnedRootSync();
   };
   const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
@@ -50,14 +56,14 @@ export default async function setup(
     }
     if (pendingSignal && pendingSignal !== signal) return;
     pendingSignal = signal;
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
+    signalOwner.off("SIGINT", onSigint);
+    signalOwner.off("SIGTERM", onSigterm);
 
     // Vitest may own worker shutdown through another signal handler. Inspect the
     // live listener set after removing Lore's handlers, not a setup-time snapshot.
-    if (process.listenerCount(signal) === 0) {
+    if (signalOwner.listenerCount(signal) === 0) {
       removeOwnedRootSync();
-      process.kill(process.pid, signal);
+      signalOwner.kill(signalOwner.pid, signal);
     }
   };
   const onSigint = (): void => onSignal("SIGINT");
@@ -65,9 +71,9 @@ export default async function setup(
 
   // Global teardown runs before Vitest closes its worker pool. Keep cleanup on
   // process exit so live workers cannot race recursive removal.
-  process.once("exit", onExit);
-  process.on("SIGINT", onSigint);
-  process.on("SIGTERM", onSigterm);
+  signalOwner.once("exit", onExit);
+  signalOwner.on("SIGINT", onSigint);
+  signalOwner.on("SIGTERM", onSigterm);
 
   try {
     owned = await (dependencies.createRoot ?? createOwnedRoot)({
@@ -84,11 +90,11 @@ export default async function setup(
     initializing = false;
     const signal = pendingSignal;
     pendingSignal = undefined;
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
-    process.off("exit", onExit);
+    signalOwner.off("SIGINT", onSigint);
+    signalOwner.off("SIGTERM", onSigterm);
+    signalOwner.off("exit", onExit);
     if (owned) removeOwnedRootSync();
-    if (signal) process.kill(process.pid, signal);
+    if (signal) signalOwner.kill(signalOwner.pid, signal);
     throw error;
   }
 

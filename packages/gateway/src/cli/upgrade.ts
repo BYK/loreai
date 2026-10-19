@@ -23,12 +23,10 @@
  * detection, setup spawning, release notes, and Sentry SDK telemetry.
  */
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VERSION } from "./version";
-import { isDowngrade, installBinary } from "./lib/binary";
+import { hashBinaryFile, isDowngrade, installBinary } from "./lib/binary";
 import { UpgradeError } from "./lib/errors";
 import {
   stageStandaloneUpgradeReceipt,
@@ -403,9 +401,9 @@ Examples:
       );
 
       // Install: replace the current binary atomically
-      const downloadedSha256 = createHash("sha256")
-        .update(readFileSync(downloadResult.tempBinaryPath))
-        .digest("hex");
+      const downloadedSha256 = await hashBinaryFile(
+        downloadResult.tempBinaryPath,
+      );
       const receiptInstallDir =
         provenance.pathInstallDir ??
         (process.platform === "win32" ? undefined : dirname(upgradeExecutable));

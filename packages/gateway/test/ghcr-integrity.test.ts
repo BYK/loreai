@@ -7,6 +7,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function sha256(value: string): string {
@@ -76,3 +77,58 @@ describe("GHCR blob integrity", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+it.each([false, true])(
+  "allows a verified blob body taking more than thirty seconds (redirect=%s)",
+  async (redirect) => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
+      const controller = new AbortController();
+      setTimeout(
+        () =>
+          controller.abort(
+            new DOMException("Download timed out", "TimeoutError"),
+          ),
+        delay,
+      );
+      return controller.signal;
+    });
+    const content = "slow verified nightly blob";
+    let calls = 0;
+    globalThis.fetch = vi.fn(async (_input, init?: RequestInit) => {
+      if (redirect && calls++ === 0) {
+        return new Response(null, {
+          status: 307,
+          headers: { Location: "https://blob.test/nightly.gz" },
+        });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            const timer = setTimeout(() => {
+              controller.enqueue(new TextEncoder().encode(content));
+              controller.close();
+            }, 45_000);
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                controller.error(init.signal?.reason);
+              },
+              { once: true },
+            );
+          },
+        }),
+      );
+    }) as unknown as typeof fetch;
+    const result = downloadNightlyBlob(
+      "token",
+      `sha256:${sha256(content)}`,
+    ).then(
+      async (response) => ({ content: await response.text() }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(await result).toEqual({ content });
+  },
+);
