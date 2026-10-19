@@ -88,18 +88,24 @@ describe("Basic pipeline", () => {
     // First turn
     const resp1 = await harness.chat(makeBody("What is 2+2?"));
     expect(resp1.status).toBe(200);
+    const body1 = (await resp1.json()) as Record<string, unknown>;
+    expect(Array.isArray(body1.content)).toBe(true);
     expect(
       harness.queryDB("SELECT COUNT(*) AS n FROM projects WHERE path = ?", [
         REPLAY_PROJECT,
       ]),
     ).toEqual([{ n: 1 }]);
+    const sessionQuery = "SELECT session_id FROM session_state ORDER BY session_id";
+    const firstSessions = harness.queryDB<{ session_id: string }>(sessionQuery);
+    expect(firstSessions).toHaveLength(1);
 
-    // Second turn — same first user message means same fingerprint → same session
+    // Preserve the original user prefix and actual reply: changing the first
+    // user message changes the fingerprint and silently tests a new session.
     const resp2 = await harness.chat(
-      makeBody("What is 3+3?", [
+      makeBody("What is 2+2?", [
         {
           role: "assistant",
-          content: [{ type: "text", text: "Four." }],
+          content: body1.content,
         },
         { role: "user", content: "What is 3+3?" },
       ]),
@@ -117,6 +123,13 @@ describe("Basic pipeline", () => {
         expect(parseMarker(block.text as string)).toBeNull();
       }
     }
+    expect(harness.queryDB(sessionQuery)).toEqual(firstSessions);
+    expect(
+      harness.queryDB(
+        "SELECT DISTINCT session_id FROM temporal_messages ORDER BY session_id",
+      ),
+    ).toEqual(firstSessions);
+    expect(harness.upstreamBodies()).toHaveLength(2);
   });
 
   it("response includes stop_reason and content", async () => {
