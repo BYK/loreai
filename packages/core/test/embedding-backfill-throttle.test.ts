@@ -831,7 +831,7 @@ describe("temporal re-chunk backfill CPU throttle", () => {
     }
   });
 
-  it("admits another project's healthy history past a full failed project", async () => {
+  it.each([0, 1_100])("admits another project's healthy history past a full failed project (drain clock step %i ms)", async (clockStep) => {
     for (let i = 0; i < 512; i++) {
       const id = `a-rejected-${String(i).padStart(5, "0")}`;
       insertMsg(id, pid);
@@ -851,8 +851,21 @@ describe("temporal re-chunk backfill CPU throttle", () => {
         return result;
       });
     });
-    for (let drain = 0; drain < 64; drain++) {
-      await expect(drainTemporalEmbeddingQueueOnce()).rejects.toThrow();
+    let seedTime = Date.now();
+    const seedClock = vi.spyOn(Date, "now").mockImplementation(() => seedTime);
+    const freshRows = db().query(
+      "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE project_id = ? AND failures = 0",
+    );
+    try {
+      // Due retries also consume drain turns. Establish the failed-owner state
+      // with a bounded walk rather than assuming every turn handles fresh rows.
+      for (let drain = 0; drain < 128; drain++) {
+        if ((freshRows.get(pid) as { n: number }).n === 0) break;
+        seedTime += clockStep;
+        await expect(drainTemporalEmbeddingQueueOnce()).rejects.toThrow();
+      }
+    } finally {
+      seedClock.mockRestore();
     }
     expect(
       db()
@@ -861,6 +874,13 @@ describe("temporal re-chunk backfill CPU throttle", () => {
         )
         .get(),
     ).toEqual({ n: 512 });
+
+    if (clockStep > 0) {
+      expect(
+        (db().query("SELECT MAX(failures) AS n FROM temporal_embedding_queue WHERE project_id = ?")
+          .get(pid) as { n: number }).n,
+      ).toBeGreaterThan(1);
+    }
 
     // The healthy owner lies beyond the bounded first page of projects.
     for (const index of Array.from({ length: 20 }, (_, i) => i)) {
