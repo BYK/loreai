@@ -88,7 +88,14 @@ const NON_WORKSPACE_INSTRUCTION_FILES = [
   "/nonstandard/home/.claude/rules/AGENTS.md",
   "/nonstandard/home/.config/claude/rules/backend/CLAUDE.md",
   "/client/projects/local/docs/README.md",
+  "/client/projects/CLAUDE.md (archive)/docs/README.md",
+  "/client/projects/AGENTS.md archive/docs/README.md",
+  "/client/projects/.lore.md archive/docs/README.md",
 ];
+
+const COMPLETE_WORKSPACE_CASES = ["", "/client/projects/my app"].flatMap(
+  (header) => [true, false].map((agrees) => ({ header, agrees })),
+);
 
 /**
  * A realistic auto-mode classifier system prompt: self-contained classification
@@ -836,6 +843,40 @@ describe("isClaudeCodeSideChannel", () => {
     });
   });
 
+  test.each(COMPLETE_WORKSPACE_CASES)(
+    "complete system workspace attribution (header=$header, agrees=$agrees)",
+    ({ header, agrees }) => {
+      const path = "/client/projects/my app";
+      const reminderPath = agrees ? path : `${path} other`;
+      const request = makeRequest({
+        system: `You are Claude Code.\nWorking directory: ${path}\nFollow the coding instructions.`,
+        rawHeaders: { ...CC_SESSION_HEADERS, "x-lore-project": header },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `<system-reminder>Instructions from: ${reminderPath}/CLAUDE.md</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      });
+      if (agrees) {
+        expect(getRequestProjectPath(request)).toMatchObject({
+          path,
+          source: "inferred",
+          openingReminderProjectPath: path,
+        });
+      } else {
+        expect(() => getRequestProjectPath(request)).toThrow(
+          "Conflicting project paths",
+        );
+      }
+    },
+  );
+
   test("an opening reminder conflicting with an authoritative system path fails closed", () => {
     expect(() =>
       getRequestProjectPath(
@@ -1509,6 +1550,75 @@ Instructions from: /client/projects/${project}/CLAUDE.md
     expect(harness.queryDB("SELECT * FROM temporal_messages")).toEqual([]);
     expect(harness.upstreamBodies()).toEqual([]);
   });
+
+  it.each(COMPLETE_WORKSPACE_CASES)(
+    "complete system workspace ingress (header=$header, agrees=$agrees)",
+    async ({ header, agrees }) => {
+      const path = "/client/projects/my app";
+      const reminderPath = agrees ? path : `${path} other`;
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: agrees
+          ? [
+              makeFixtureEntry({
+                seq: 0,
+                requestMessages: [],
+                responseText: "Complete workspace reply",
+              }),
+            ]
+          : [],
+      });
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => {
+          for (const [projectPath, marker] of [
+            [path, "private-complete-workspace-own"],
+            ["/client/projects/my", "private-complete-workspace-prefix"],
+            [`${path} other`, "private-complete-workspace-other"],
+          ]) {
+            ltm.create({
+              projectPath,
+              scope: "project",
+              category: "preference",
+              title: marker,
+              content: marker,
+            });
+          }
+        },
+      );
+      const request = newClaudeCodeBody(
+        `<system-reminder>Instructions from: ${reminderPath}/CLAUDE.md</system-reminder>`,
+      );
+      request.system = `You are Claude Code.\nWorking directory: ${path}\nFollow the coding instructions.`;
+      const response = await harness.chat(request, "test-key", {
+        ...CC_SESSION_HEADERS,
+        "x-claude-code-request-class": "main",
+        "x-lore-project": header,
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+      });
+      expect(response.status).toBe(agrees ? 200 : 400);
+      await response.text();
+      if (agrees) {
+        expect(
+          harness.queryDB("SELECT project_path FROM session_state"),
+        ).toEqual([{ project_path: path }]);
+        expect(harness.upstreamBodies()).toHaveLength(1);
+        const forwarded = harness.upstreamBodies()[0];
+        expect(forwarded).toContain("private-complete-workspace-own");
+        expect(forwarded).not.toContain("private-complete-workspace-prefix");
+        expect(forwarded).not.toContain("private-complete-workspace-other");
+      } else {
+        expect(
+          harness.queryDB("SELECT project_path FROM session_state"),
+        ).toEqual([]);
+        expect(harness.queryDB("SELECT * FROM temporal_messages")).toEqual([]);
+        expect(harness.upstreamBodies()).toEqual([]);
+      }
+    },
+  );
 
   it("rejects conflicting system and reminder paths before session admission", async () => {
     harness = await createHarness({ fixtures: [] });

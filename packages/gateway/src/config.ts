@@ -1190,7 +1190,9 @@ export const PROJECT_PATH_PATTERNS: RegExp[] = [
   /["']?cwd["']?\s*[:=]\s*["']?(\/[^\s"',}]+)/,
   // Working directory: /path/to/project
   // Accepts any absolute path — the "Working directory" prefix is unambiguous.
-  /[Ww]orking\s+directory[:=]\s*(\/[^\s"',]+)/,
+  // A workspace may contain spaces; the next line, not its first space, ends
+  // this structural value. Truncation would manufacture a conflicting owner.
+  /[Ww]orking[ \t]+directory[:=][ \t]*(\/[^\r\n\u2028\u2029]+)/,
   // CLAUDE.md / AGENTS.md / .lore.md file path → take the directory.
   // Accepts any absolute path — the known filename suffix is unambiguous.
   /(\/[^\s"',]+)\/(?:CLAUDE|AGENTS|\.lore)\.md/,
@@ -1227,7 +1229,7 @@ export function inferProjectPathDetailed(
     const match = PROJECT_PATH_PATTERNS[i].exec(systemPrompt);
     if (match?.[1]) {
       // Strip trailing slashes for consistency
-      const path = match[1].replace(/\/+$/, "");
+      const path = match[1].trimEnd().replace(/\/+$/, "");
       if (!path) return null;
       return { path, authoritative: i < AUTHORITATIVE_PATTERN_COUNT };
     }
@@ -1328,9 +1330,13 @@ export function inferClaudeCodeReminderProjectPath(
     end = reminderHeaderEnd(value, opening);
   }
   const files = /\/(?:CLAUDE|AGENTS|\.lore)\.md(?=[ \t(:]|$)/g;
+  const terminalSeparator = value.lastIndexOf("/", end - 1);
   let pathEnd: number | undefined;
   let recognizedFile = false;
   for (const file of value.slice(0, end).matchAll(files)) {
+    // A known-looking directory is not a malformed terminal instruction file:
+    // /CLAUDE.md archive/docs/README.md must retain independent attribution.
+    if (file.index !== terminalSeparator) continue;
     recognizedFile = true;
     let suffix = file.index + file[0].length;
     while (suffix < end && (value[suffix] === " " || value[suffix] === "\t"))
