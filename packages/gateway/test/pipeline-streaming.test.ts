@@ -105,7 +105,11 @@ import {
 import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
 import { translateAnthropicStreamToResponses } from "../src/stream/openai-responses";
 import { translateAnthropicStreamToGemini } from "../src/stream/gemini";
-import { buildRecallMarker, recallStoreKey } from "../src/recall";
+import {
+  buildRecallMarker,
+  recallStoreKey,
+  RECALL_TOOL_NAME,
+} from "../src/recall";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import {
   makeConversationFixtures,
@@ -289,7 +293,7 @@ function recallResponsesSSE(
     type: "function_call",
     id: `fc_${id}`,
     call_id: `call_${id}`,
-    name: "recall",
+    name: RECALL_TOOL_NAME,
     arguments: JSON.stringify({ query }),
     status: "completed",
   };
@@ -556,7 +560,9 @@ describe("principal Responses transport recovery", () => {
       expect(output).not.toContain("response.failed");
       expect(output).not.toContain("private upstream read failure");
       expect(calls).toBe(2);
-      expect(forwardedBodies[0]).toContain('"name":"recall"');
+      expect(forwardedBodies[0]).toContain(
+        `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
+      );
       expect(forwardedBodies[1]).toBe(forwardedBodies[0]);
     } finally {
       setUpstreamInterceptor(undefined);
@@ -667,7 +673,7 @@ describe("non-stream recall usage aggregation", () => {
                   type: "function_call",
                   id: "fc_model_identity_recall",
                   call_id: "call_model_identity_recall",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({ query: "model identity budget" }),
                   status: "completed",
                 },
@@ -1266,7 +1272,8 @@ describe("non-stream recall usage aggregation", () => {
           if (
             !tools?.some(
               (tool) =>
-                tool.name === "recall" || tool.function?.name === "recall",
+                tool.name === RECALL_TOOL_NAME ||
+                tool.function?.name === RECALL_TOOL_NAME,
             )
           ) {
             recoveryCalls.count++;
@@ -1381,7 +1388,7 @@ describe("non-stream recall usage aggregation", () => {
                       }
                     : {
                         call_id: `call_${id}`,
-                        name: "recall",
+                        name: RECALL_TOOL_NAME,
                         arguments: JSON.stringify({
                           query:
                             "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
@@ -1559,7 +1566,7 @@ describe("non-stream recall usage aggregation", () => {
                   type: "function_call",
                   id: "fc_recall_abort",
                   call_id: "call_recall_abort",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({
                     query:
                       "one two three four five six seven eight nine technical terms",
@@ -1619,7 +1626,7 @@ describe("non-stream recall usage aggregation", () => {
                 type: "function_call",
                 id: "fc_no_store_recall",
                 call_id: "call_no_store_recall",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
                 arguments: JSON.stringify({
                   query:
                     "one two three four five six seven eight nine private terms",
@@ -1706,7 +1713,7 @@ describe("non-stream recall usage aggregation", () => {
                 type: "function_call",
                 id: "fc_failed_json_recall",
                 call_id: "call_failed_json_recall",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
                 arguments: JSON.stringify({
                   query: "failed json recall usage",
                 }),
@@ -1823,7 +1830,7 @@ describe("non-stream recall usage aggregation", () => {
                   type: "function_call",
                   id: "fc_failed_budget_principal",
                   call_id: "call_failed_budget_principal",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({
                     query:
                       "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
@@ -2079,7 +2086,7 @@ describe("non-stream recall usage aggregation", () => {
                   type: "function_call",
                   id: "fc_failed_json_recall",
                   call_id: "call_failed_json_recall",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({
                     query: "failed json recall usage",
                   }),
@@ -2109,7 +2116,7 @@ describe("non-stream recall usage aggregation", () => {
                     type: "function_call",
                     id: "fc_private_repeated_recall",
                     call_id: "call_private_repeated_recall",
-                    name: "recall",
+                    name: RECALL_TOOL_NAME,
                     arguments: JSON.stringify({
                       query: "private repeated recall query",
                     }),
@@ -2179,7 +2186,7 @@ describe("non-stream recall usage aggregation", () => {
                   type: "function_call",
                   id: "fc_private_recovery_recall",
                   call_id: "call_private_recovery_recall",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({
                     query: "private recovery query",
                   }),
@@ -2262,7 +2269,7 @@ describe("non-stream recall usage aggregation", () => {
         request.stream = false;
         request.rawHeaders["x-lore-no-store"] = "true";
         request.extras = {
-          tool_choice: { type: "function", name: "recall" },
+          tool_choice: { type: "function", name: RECALL_TOOL_NAME },
           prompt_cache_key: "private-cache-key",
         };
         const response = await handleRequest(request, loadLocalConfig());
@@ -2276,7 +2283,9 @@ describe("non-stream recall usage aggregation", () => {
         expect(body).not.toContain("private recovery reasoning");
         expect(body).not.toContain("private repeated recall query");
         expect(body).not.toContain("fc_private_repeated_recall");
-        expect(body).not.toContain('"name":"recall"');
+        expect(body).not.toContain(
+          `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
+        );
 
         const recoveryBody = upstreamBodies[2];
         expect(recoveryBody).toBeDefined();
@@ -2286,7 +2295,7 @@ describe("non-stream recall usage aggregation", () => {
           expect.objectContaining({ name: "read" }),
         ]);
         expect(JSON.stringify(recoveryBody?.input)).toContain(
-          '"name":"recall"',
+          `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
         );
         expect(JSON.stringify(recoveryBody?.input)).not.toContain(
           "private repeated recall query",
@@ -2708,7 +2717,7 @@ describe("Pipeline — streaming responses", () => {
         // forward must use the original transcript without the stored result.
         expect(request.messages[historyLength].content[0]).toMatchObject({
           type: "tool_use",
-          name: "recall",
+          name: RECALL_TOOL_NAME,
         });
         expect(upstreamBodies[0].includes("PRIVATE_LORE_RECALL_RESULT")).toBe(
           false,
@@ -5304,7 +5313,7 @@ describe("Pipeline — streaming responses", () => {
                 type: "function_call",
                 id: "fc_recall_accounting",
                 call_id: "call_recall_accounting",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
               },
             }) +
             responsesEvent("response.function_call_arguments.done", {
@@ -5318,7 +5327,7 @@ describe("Pipeline — streaming responses", () => {
                 type: "function_call",
                 id: "fc_recall_accounting",
                 call_id: "call_recall_accounting",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
                 arguments: args,
                 status: "completed",
               },
@@ -5333,7 +5342,7 @@ describe("Pipeline — streaming responses", () => {
                     type: "function_call",
                     id: "fc_recall_accounting",
                     call_id: "call_recall_accounting",
-                    name: "recall",
+                    name: RECALL_TOOL_NAME,
                     arguments: args,
                     status: "completed",
                   },
@@ -5800,7 +5809,7 @@ describe("Pipeline — streaming responses", () => {
               type: "function_call",
               id: "fc_private_recall",
               call_id: "call_private_recall",
-              name: "recall",
+              name: RECALL_TOOL_NAME,
               arguments: '{"query":"private context"}',
             },
           ],
@@ -7288,7 +7297,7 @@ describe("Pipeline — streaming responses", () => {
                 type: "function_call",
                 id: "fc_recall_abort",
                 call_id: "call_recall_abort",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
                 arguments: "",
               },
             }) +
@@ -7303,7 +7312,7 @@ describe("Pipeline — streaming responses", () => {
                 type: "function_call",
                 id: "fc_recall_abort",
                 call_id: "call_recall_abort",
-                name: "recall",
+                name: RECALL_TOOL_NAME,
                 arguments: args,
                 status: "completed",
               },
@@ -7318,7 +7327,7 @@ describe("Pipeline — streaming responses", () => {
                     type: "function_call",
                     id: "fc_recall_abort",
                     call_id: "call_recall_abort",
-                    name: "recall",
+                    name: RECALL_TOOL_NAME,
                     arguments: args,
                     status: "completed",
                   },
@@ -7492,7 +7501,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       request.extras = {
-        tool_choice: { type: "function", name: "recall" },
+        tool_choice: { type: "function", name: RECALL_TOOL_NAME },
         prompt_cache_key: "private-cache-key",
       };
       const response = await handleRequest(request, loadLocalConfig());

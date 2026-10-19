@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 // ---------------------------------------------------------------------------
 // Helpers: build Anthropic SSE events for fixtures
@@ -77,7 +78,7 @@ function anthropicRecallStream(query: string): Response {
       content_block: {
         type: "tool_use",
         id: "toolu_recall_001",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: {},
       },
     }) +
@@ -611,7 +612,7 @@ function anthropicMixedToolsStream(query: string): Response {
       content_block: {
         type: "tool_use",
         id: "toolu_recall_mix",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: {},
       },
     }) +
@@ -816,7 +817,7 @@ function anthropicFollowupRecallStream(query: string): Response {
       content_block: {
         type: "tool_use",
         id: "toolu_recall_2",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: {},
       },
     }) +

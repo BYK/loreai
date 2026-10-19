@@ -11,7 +11,11 @@ import {
   setRecallPersistenceCommitObserverForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
+import {
+  executeRecall,
+  MAX_RECALL_DEPTH,
+  RECALL_TOOL_NAME,
+} from "../src/recall";
 import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import type { GatewayRequest, SessionState } from "../src/translate/types";
 
@@ -70,7 +74,7 @@ function recallOnlyResponse(inputTokens = 1): Response {
         content_block: {
           type: "tool_use",
           id: "tool_recall",
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           input: {},
         },
       }) +
@@ -97,7 +101,7 @@ function request(signal?: AbortSignal): GatewayRequest {
     model: "claude-test",
     system: "test",
     messages: [{ role: "user", content: [{ type: "text", text: "question" }] }],
-    tools: [{ name: "recall", description: "recall", inputSchema: {} }],
+    tools: [{ name: RECALL_TOOL_NAME, description: "recall", inputSchema: {} }],
     stream: true,
     maxTokens: 32,
     metadata: {},
@@ -480,16 +484,19 @@ describe.each([true, false])(
       let calls = 0;
       const req = request();
       req.tools.push({ name: "Read", description: "Read", inputSchema: {} });
-      req.metadata.tool_choice = { type: "tool", name: "recall" };
+      req.metadata.tool_choice = { type: "tool", name: RECALL_TOOL_NAME };
       setUpstreamInterceptor(async (upstream) => {
         calls++;
         if (calls < MAX_RECALL_DEPTH) return recallOnlyResponse();
         const body = upstream as Record<string, unknown>;
         expect(body.tools).toEqual([
-          expect.objectContaining({ name: "recall" }),
+          expect.objectContaining({ name: RECALL_TOOL_NAME }),
           expect.objectContaining({ name: "Read" }),
         ]);
-        expect(body.tool_choice).toEqual({ type: "tool", name: "recall" });
+        expect(body.tool_choice).toEqual({
+          type: "tool",
+          name: RECALL_TOOL_NAME,
+        });
         expect(JSON.stringify(body.messages)).toContain(
           "The recall budget for this turn has been used",
         );

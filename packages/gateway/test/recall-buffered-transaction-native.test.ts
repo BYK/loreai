@@ -24,6 +24,7 @@ import {
 } from "./helpers/recall-buffered";
 import {
   RECALL_GATEWAY_TOOL,
+  RECALL_TOOL_NAME,
   buildAnchoredRecallMarker,
   recallAnchorContext,
 } from "../src/recall";
@@ -111,7 +112,7 @@ test("normalizes native recall ownership before replaying stored markers", async
       expect.objectContaining({
         type: "tool_use",
         id: toolUseId,
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input,
       }),
     ]),

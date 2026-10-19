@@ -21,6 +21,7 @@ import {
   recallStoreKey,
   buildRecallMarker,
   recallAnchorContext,
+  RECALL_TOOL_NAME,
 } from "../src/recall";
 import type {
   GatewayRequest,
@@ -264,7 +265,7 @@ describe("RecallAwareAccumulator — recall-only (Case 1)", () => {
       textBlockStart(0),
       textDelta(0, "Let me search my memory."),
       contentBlockStop(0),
-      toolUseBlockStart(1, "recall", "toolu_recall"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall"),
       inputJsonDelta(1, '{"query":"config"}'),
       contentBlockStop(1),
       messageDelta("tool_use"),
@@ -306,7 +307,7 @@ describe("RecallAwareAccumulator — recall-only (Case 1)", () => {
       textBlockStart(0),
       textDelta(0, "Searching..."),
       contentBlockStop(0),
-      toolUseBlockStart(1, "recall", "toolu_recall"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall"),
       inputJsonDelta(1, '{"query":"config path"}'),
       contentBlockStop(1),
       messageDelta("tool_use"),
@@ -317,7 +318,7 @@ describe("RecallAwareAccumulator — recall-only (Case 1)", () => {
     expect(resp.content).toHaveLength(2);
     expect(resp.content[0].type).toBe("text");
     expect(resp.content[1].type).toBe("tool_use");
-    expect((resp.content[1] as { name: string }).name).toBe("recall");
+    expect((resp.content[1] as { name: string }).name).toBe(RECALL_TOOL_NAME);
     expect(resp.stopReason).toBe("tool_use");
   });
 });
@@ -335,7 +336,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       textDelta(0, "Working on it."),
       contentBlockStop(0),
       // recall at index 1 — suppressed
-      toolUseBlockStart(1, "recall", "toolu_recall"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall"),
       inputJsonDelta(1, '{"query":"test"}'),
       contentBlockStop(1),
       // Read at index 2 — should become index 1 for client
@@ -379,7 +380,8 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
     const recallEvents = parsed.filter(
       (e) =>
         e.event === "content_block_start" &&
-        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+        (e.data.content_block as Record<string, unknown>)?.name ===
+          RECALL_TOOL_NAME,
     );
     expect(recallEvents).toHaveLength(0);
   });
@@ -393,7 +395,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       textDelta(0, "hello"),
       contentBlockStop(0),
       // recall at 1 — suppressed
-      toolUseBlockStart(1, "recall"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME),
       inputJsonDelta(1, '{"query":"x"}'),
       contentBlockStop(1),
       // Read at 2 → becomes 1
@@ -440,7 +442,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       inputJsonDelta(1, "{}"),
       contentBlockStop(1),
       // recall at 2 — suppressed
-      toolUseBlockStart(2, "recall"),
+      toolUseBlockStart(2, RECALL_TOOL_NAME),
       inputJsonDelta(2, '{"query":"x"}'),
       contentBlockStop(2),
       messageDelta("tool_use"),
@@ -462,7 +464,8 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
     const recallEvents = parsed.filter(
       (e) =>
         e.event === "content_block_start" &&
-        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+        (e.data.content_block as Record<string, unknown>)?.name ===
+          RECALL_TOOL_NAME,
     );
     expect(recallEvents).toHaveLength(0);
   });
@@ -477,7 +480,7 @@ describe("RecallAwareAccumulator — mixed tools (Case 2)", () => {
       toolUseBlockStart(1, "Read"),
       contentBlockStop(1),
       // recall at 2 — suppressed
-      toolUseBlockStart(2, "recall"),
+      toolUseBlockStart(2, RECALL_TOOL_NAME),
       inputJsonDelta(2, '{"query":"x"}'),
       contentBlockStop(2),
       // Bash at 3 — forwarded as index 2
@@ -517,7 +520,7 @@ describe("RecallAwareAccumulator — edge cases", () => {
     const accum = createRecallAwareAccumulator();
     const events = [
       messageStart(),
-      toolUseBlockStart(0, "recall"),
+      toolUseBlockStart(0, RECALL_TOOL_NAME),
       inputJsonDelta(0, '{"query":"x"}'),
       contentBlockStop(0),
       messageDelta("tool_use"),
@@ -547,7 +550,7 @@ describe("RecallAwareAccumulator — edge cases", () => {
       textBlockStart(1),
       textDelta(1, "Let me search."),
       contentBlockStop(1),
-      toolUseBlockStart(2, "recall"),
+      toolUseBlockStart(2, RECALL_TOOL_NAME),
       inputJsonDelta(2, '{"query":"x"}'),
       contentBlockStop(2),
       messageDelta("tool_use"),
@@ -614,7 +617,9 @@ describe("RecallAwareAccumulator — edge cases", () => {
 
 describe("RecallAwareAccumulator — blockOffset", () => {
   test("applies blockOffset to all emitted block indices", () => {
-    const accum = createRecallAwareAccumulator("recall", { blockOffset: 5 });
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+      blockOffset: 5,
+    });
     const events = [
       messageStart(),
       textBlockStart(0),
@@ -663,14 +668,16 @@ describe("RecallAwareAccumulator — blockOffset", () => {
   });
 
   test("blockOffset + recall suppression re-indexes correctly", () => {
-    const accum = createRecallAwareAccumulator("recall", { blockOffset: 3 });
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+      blockOffset: 3,
+    });
     const events = [
       messageStart(),
       textBlockStart(0),
       textDelta(0, "Searching..."),
       contentBlockStop(0),
       // recall at 1 — suppressed
-      toolUseBlockStart(1, "recall", "toolu_recall"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall"),
       inputJsonDelta(1, '{"query":"test"}'),
       contentBlockStop(1),
       // Read at 2 — re-indexed past suppression + offset
@@ -706,7 +713,8 @@ describe("RecallAwareAccumulator — blockOffset", () => {
     const recallEvents = parsed.filter(
       (e) =>
         e.event === "content_block_start" &&
-        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+        (e.data.content_block as Record<string, unknown>)?.name ===
+          RECALL_TOOL_NAME,
     );
     expect(recallEvents).toHaveLength(0);
 
@@ -714,7 +722,9 @@ describe("RecallAwareAccumulator — blockOffset", () => {
   });
 
   test("blockOffset 0 behaves same as no offset", () => {
-    const accum = createRecallAwareAccumulator("recall", { blockOffset: 0 });
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+      blockOffset: 0,
+    });
     const events = [
       messageStart(),
       textBlockStart(0),
@@ -738,7 +748,7 @@ describe("RecallAwareAccumulator — blockOffset", () => {
 
 describe("RecallAwareAccumulator — suppressMessageStart", () => {
   test("suppresses message_start when flag is set", () => {
-    const accum = createRecallAwareAccumulator("recall", {
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
       suppressMessageStart: true,
     });
     const events = [
@@ -763,7 +773,7 @@ describe("RecallAwareAccumulator — suppressMessageStart", () => {
   });
 
   test("forwards message_start by default", () => {
-    const accum = createRecallAwareAccumulator("recall");
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME);
     const events = [
       messageStart(),
       textBlockStart(0),
@@ -788,7 +798,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
   test("simulates two chained recall follow-ups with correct indexing", () => {
     // Simulate: original stream had 2 client blocks (text + thinking) + 1 marker = 3
     // First continuation should use blockOffset=3
-    const cont1 = createRecallAwareAccumulator("recall", {
+    const cont1 = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
       blockOffset: 3,
       suppressMessageStart: true,
     });
@@ -798,7 +808,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
       textDelta(0, "Based on the results..."),
       contentBlockStop(0),
       // Model calls recall again
-      toolUseBlockStart(1, "recall", "toolu_recall_2"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall_2"),
       inputJsonDelta(1, '{"id":"t:abc123"}'),
       contentBlockStop(1),
       messageDelta("tool_use"),
@@ -822,7 +832,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
     expect(cont1.heldBackEvents()).toContain("message_delta");
 
     // Second continuation: blockOffset = 3 (prev) + 1 (cont1 client blocks) + 1 (marker) = 5
-    const cont2 = createRecallAwareAccumulator("recall", {
+    const cont2 = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
       blockOffset: 5,
       suppressMessageStart: true,
     });
@@ -861,7 +871,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       textDelta(0, "Let me search memory and read the file."),
       contentBlockStop(0),
       // recall at index 1 — will be suppressed
-      toolUseBlockStart(1, "recall", "toolu_recall_1"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall_1"),
       inputJsonDelta(1, '{"query":"gateway architecture"}'),
       contentBlockStop(1),
       // Read at index 2 — will be re-indexed to 1 for client
@@ -896,7 +906,8 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const recallEvents = parsed.filter(
       (e) =>
         e.event === "content_block_start" &&
-        (e.data.content_block as Record<string, unknown>)?.name === "recall",
+        (e.data.content_block as Record<string, unknown>)?.name ===
+          RECALL_TOOL_NAME,
     );
     expect(recallEvents).toHaveLength(0);
 
@@ -911,7 +922,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(recallBlock).toBeDefined();
     if (!recallBlock) throw new Error("expected recall block");
     expect(recallBlock.id).toBe("toolu_recall_1");
-    expect(recallBlock.name).toBe("recall");
+    expect(recallBlock.name).toBe(RECALL_TOOL_NAME);
 
     // --- Step 4: Replace recall with marker in response for post-processing ---
     const markerResp = replaceRecallWithMarker(resp);
@@ -923,7 +934,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // No recall tool_use blocks remain
     expect(
       markerResp.content.every((b) => {
-        if (b.type === "tool_use") return b.name !== "recall";
+        if (b.type === "tool_use") return b.name !== RECALL_TOOL_NAME;
         return true;
       }),
     ).toBe(true);
@@ -982,7 +993,11 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       ],
       tools: [
         { name: "Read", description: "Read a file", inputSchema: {} },
-        { name: "recall", description: "Search memory", inputSchema: {} },
+        {
+          name: RECALL_TOOL_NAME,
+          description: "Search memory",
+          inputSchema: {},
+        },
       ],
       stream: true,
       maxTokens: 4096,
@@ -1006,7 +1021,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     expect(assistantMsg.content[0].type).toBe("text");
     expect(assistantMsg.content[1].type).toBe("tool_use");
     expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe(
-      "recall",
+      RECALL_TOOL_NAME,
     );
     expect((assistantMsg.content[1] as GatewayToolUseBlock).id).toBe(
       "toolu_recall_1",
@@ -1035,7 +1050,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       textBlockStart(0),
       textDelta(0, "I'll search, read, and run."),
       contentBlockStop(0),
-      toolUseBlockStart(1, "recall", "toolu_recall_2"),
+      toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall_2"),
       inputJsonDelta(1, '{"query":"patterns"}'),
       contentBlockStop(1),
       toolUseBlockStart(2, "Read", "toolu_read_2"),
@@ -1118,7 +1133,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       tools: [
         { name: "Read", description: "", inputSchema: {} },
         { name: "Bash", description: "", inputSchema: {} },
-        { name: "recall", description: "", inputSchema: {} },
+        { name: RECALL_TOOL_NAME, description: "", inputSchema: {} },
       ],
       stream: true,
       maxTokens: 4096,
@@ -1140,7 +1155,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     const assistantMsg = nextReq.messages[1];
     expect(assistantMsg.content).toHaveLength(4);
     expect((assistantMsg.content[1] as GatewayToolUseBlock).name).toBe(
-      "recall",
+      RECALL_TOOL_NAME,
     );
     expect((assistantMsg.content[2] as GatewayToolUseBlock).name).toBe("Read");
     expect((assistantMsg.content[3] as GatewayToolUseBlock).name).toBe("Bash");
@@ -1218,7 +1233,7 @@ describe("RecallAwareAccumulator — usage scaling", () => {
   }
 
   test("scales the terminal message_delta on a non-recall stream", () => {
-    const accum = createRecallAwareAccumulator("recall", {
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
       scaleClientUsage: true,
     });
     const sse = processAll(accum, [bigMessageStart(), fullMessageDelta()]);
@@ -1234,12 +1249,12 @@ describe("RecallAwareAccumulator — usage scaling", () => {
   });
 
   test("scales the held-back message_delta on a recall (continuation) stream", () => {
-    const accum = createRecallAwareAccumulator("recall", {
+    const accum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
       scaleClientUsage: true,
     });
     processAll(accum, [
       bigMessageStart(),
-      toolUseBlockStart(0, "recall"),
+      toolUseBlockStart(0, RECALL_TOOL_NAME),
       inputJsonDelta(0, "{}"),
       contentBlockStop(0),
       fullMessageDelta(),
@@ -1614,7 +1629,7 @@ describe("Recall streaming marker emission — Anthropic split vs non-Anthropic 
 
     const recallToolUse = req.messages[2].content[0] as GatewayToolUseBlock;
     expect(recallToolUse.type).toBe("tool_use");
-    expect(recallToolUse.name).toBe("recall");
+    expect(recallToolUse.name).toBe(RECALL_TOOL_NAME);
     expect(recallToolUse.id).toBe("toolu_recall_split");
 
     const toolResult = req.messages[3].content[0] as {

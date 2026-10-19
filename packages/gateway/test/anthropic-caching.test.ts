@@ -14,6 +14,7 @@ import {
   type AnthropicRequestOptions,
 } from "../src/translate/anthropic";
 import type { GatewayRequest } from "../src/translate/types";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,7 +116,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     const req = makeRequest({
       tools: [
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "recall",
           gatewayOwned: true,
           inputSchema: schema,
@@ -171,7 +172,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     const req = makeRequest({
       tools: [
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "recall",
           gatewayOwned: true,
           inputSchema: { anyOf: [{ type: "object" }] },
@@ -795,7 +796,7 @@ describe("buildAnthropicRequest — tool caching", () => {
           inputSchema: { type: "object" },
         },
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "Search memory",
           inputSchema: { type: "object" },
         },
@@ -891,7 +892,7 @@ describe("buildAnthropicRequest — full layered caching", () => {
           inputSchema: { type: "object" },
         },
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "Search memory",
           inputSchema: { type: "object" },
         },

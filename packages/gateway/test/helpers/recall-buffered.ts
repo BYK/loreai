@@ -6,6 +6,7 @@ import * as core from "@loreai/core";
 import { ltm } from "@loreai/core";
 import { loadConfig } from "../../src/config";
 import { clearAllCosts } from "../../src/cost-tracker";
+import { RECALL_TOOL_NAME } from "../../src/recall";
 import {
   getActiveSessions,
   resetPipelineState,
@@ -72,7 +73,7 @@ export function providerResponse(
   const tool = {
     type: "tool_use",
     id: `call_${round}`,
-    name: "recall",
+    name: RECALL_TOOL_NAME,
     input: recallInput,
   };
   const toolCalls = [

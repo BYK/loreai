@@ -8,6 +8,7 @@ import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import { setUpstreamInterceptor } from "../src/pipeline";
+import { RECALL_TOOL_NAME } from "../src/recall";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 
 function event(type: string, data: Record<string, unknown>): string {
@@ -19,7 +20,7 @@ function recallResponse(inputTokens: number): string {
     type: "function_call",
     id: "fc_codex_principal",
     call_id: "call_codex_principal",
-    name: "recall",
+    name: RECALL_TOOL_NAME,
     arguments: JSON.stringify({
       query:
         "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron",

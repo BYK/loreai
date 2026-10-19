@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchArgUrl } from "./helpers/fetch-url";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
 // stubbed responses regardless of whether a fetch interceptor is installed on
@@ -1849,7 +1850,7 @@ describe("createGatewayLLMClient.prompt", () => {
                   type: "function_call",
                   id: "fc_private_worker",
                   call_id: "call_private_worker",
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({ query: privateValue }),
                   status: "completed",
                 },

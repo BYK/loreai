@@ -1454,7 +1454,11 @@ describe("buildRecallFollowUpRequest", () => {
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       [
         { name: "Read", description: "Read", inputSchema: {} },
-        { name: "recall", description: "Recall", inputSchema: {} },
+        {
+          name: RECALL_TOOL_NAME,
+          description: "Recall",
+          inputSchema: {},
+        },
       ],
     );
 
@@ -1507,7 +1511,7 @@ describe("buildRecallFollowUpRequest", () => {
     expect(followUp.tools).toHaveLength(2);
     expect(followUp.tools.map((t) => t.name).sort()).toEqual([
       "Read",
-      "recall",
+      RECALL_TOOL_NAME,
     ]);
   });
 
@@ -1580,7 +1584,11 @@ describe("buildRecallFollowUpRequest", () => {
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       [
         { name: "Read", description: "Read", inputSchema: {} },
-        { name: "recall", description: "Recall", inputSchema: {} },
+        {
+          name: RECALL_TOOL_NAME,
+          description: "Recall",
+          inputSchema: {},
+        },
       ],
     );
 
@@ -1641,7 +1649,7 @@ describe("buildRecallFollowUpRequest", () => {
         type: "function_call",
         id: "fc_1",
         call_id: recallBlock.id,
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         arguments: JSON.stringify(recallBlock.input),
       },
     ];

@@ -20,6 +20,7 @@ import {
   translateAnthropicStreamToResponses,
 } from "../src/stream/openai-responses";
 import { accumulateResponsesNonStreamJSON } from "../src/pipeline";
+import { RECALL_TOOL_NAME } from "../src/recall";
 import type { GatewayResponse } from "../src/translate/types";
 import { validateResponsesUsage } from "../src/usage-validation";
 
@@ -789,7 +790,7 @@ describe("accumulateResponsesSSEStream", () => {
           type: "function_call",
           id: "fc_private_snapshot",
           call_id: "call_private_snapshot",
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           arguments: JSON.stringify({ query: privateValue }),
           status: "completed",
         },
