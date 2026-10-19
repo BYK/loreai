@@ -62,7 +62,7 @@ export type {
   GatewayEnv,
   GatewayRequestEnv,
 } from "./routes/types";
-export { responseCompletionCallbacks } from "./routes/control";
+export { responseCompletionCallbacks } from "./response-completion";
 export { handleModelsPassthrough } from "./routes/models";
 
 // ---------------------------------------------------------------------------

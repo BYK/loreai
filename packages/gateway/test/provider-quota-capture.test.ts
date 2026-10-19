@@ -1,5 +1,6 @@
 import { dirname } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import * as core from "@loreai/core";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeReplayInterceptor } from "./helpers/replay";
 import {
@@ -22,7 +23,12 @@ import {
   _resetCostAttributionForTest,
   recordSuccessfulAnthropicOAuthAuth,
 } from "../src/cost-attribution";
-import { db, isProviderQuotaStale, listProviderQuotas } from "@loreai/core";
+import {
+  db,
+  isProviderQuotaStale,
+  listProviderQuotas,
+  log,
+} from "@loreai/core";
 
 const quotaHeaders = {
   "anthropic-ratelimit-unified-5h-utilization": "0.23",
@@ -171,6 +177,243 @@ it("captures quota on the first successful Anthropic OAuth response", async () =
         quota.provider === "anthropic" && quota.authKind === "subscription",
     ),
   ).toHaveLength(2);
+});
+
+it("attributes quota to the credential that configured headers actually send", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  const oauthCredential = {
+    scheme: "bearer" as const,
+    value: "sk-ant-oat01-replaced-before-dispatch",
+  };
+  recordSuccessfulAnthropicOAuthAuth({
+    credential: oauthCredential,
+    upstreamURL: "https://api.anthropic.com/v1/messages",
+    responseURL: "https://api.anthropic.com/v1/messages",
+    responseStatus: 200,
+    directUpstreamResponse: true,
+  });
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Credential override" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({
+    fixtures: [fixture],
+    configOverrides: {
+      upstreamExtraHeaders: { "x-api-key": "configured-api-key" },
+      upstreamExtraHeaderBases: ["https://api.anthropic.com"],
+    },
+  });
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...quotaHeaders,
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Credential override" }],
+      },
+      null,
+      { authorization: `Bearer ${oauthCredential.value}` },
+    );
+    await consumeResponseAndQuotaCapture(response);
+    expect(response.status).toBe(200);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+
+  const replacementCredential = {
+    scheme: "api-key" as const,
+    value: "configured-api-key",
+  };
+  const quotas = listProviderQuotas().filter(
+    (row) => row.provider === "anthropic",
+  );
+  expect(quotas.length).toBeGreaterThan(0);
+  expect(quotas.every((row) => row.authKind === "api_key")).toBe(true);
+  expect(
+    quotas.every(
+      (row) =>
+        row.account === authFingerprint(replacementCredential).slice(0, 12),
+    ),
+  ).toBe(true);
+});
+
+it("waits for the downstream HTTP response to finish before quota persistence", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Hold the stream open" }],
+    responseText: "Completed after release",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  let releaseBody: (() => void) | undefined;
+  let signalResponseHeld: (() => void) | undefined;
+  const bodyGate = new Promise<void>((resolve) => {
+    releaseBody = resolve;
+  });
+  const responseHeld = new Promise<void>((resolve) => {
+    signalResponseHeld = resolve;
+  });
+  const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
+  setUpstreamInterceptor(async (...args) => {
+    const response = await replay(...args);
+    for (const [name, value] of Object.entries(quotaHeaders)) {
+      response.headers.set(name, value);
+    }
+    if (!response.body) throw new Error("expected a streaming replay body");
+    const sourceBody = new Uint8Array(await response.arrayBuffer());
+    const firstEventEnd =
+      sourceBody.findIndex(
+        (byte, index) => byte === 10 && sourceBody[index + 1] === 10,
+      ) + 2;
+    if (firstEventEnd < 2) throw new Error("expected an SSE event boundary");
+    let stage = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (stage === 0) {
+            stage = 1;
+            controller.enqueue(sourceBody.slice(0, firstEventEnd));
+            return;
+          }
+          if (stage === 1) {
+            stage = 2;
+            signalResponseHeld?.();
+            await bodyGate;
+            const remainder = sourceBody.slice(firstEventEnd);
+            if (remainder.length > 0) controller.enqueue(remainder);
+            return;
+          }
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(body, {
+      status: response.status,
+      headers: response.headers,
+    });
+  });
+
+  let clientReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let clientDrain: Promise<void> | undefined;
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: true,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Hold the stream open" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-test-token" },
+    );
+    expect(response.status).toBe(200);
+    if (!response.body) throw new Error("expected a streaming client body");
+    const reader = response.body.getReader();
+    clientReader = reader;
+    clientDrain = (async () => {
+      let part = await reader.read();
+      while (!part.done) part = await reader.read();
+    })();
+    await responseHeld;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(quotaPersistence).not.toHaveBeenCalled();
+
+    releaseBody?.();
+    await clientDrain;
+    await _waitForProviderQuotaCapturesForTest();
+    expect(quotaPersistence).toHaveBeenCalled();
+  } finally {
+    releaseBody?.();
+    await clientReader?.cancel().catch(() => {});
+    await clientDrain?.catch(() => {});
+    await _waitForProviderQuotaCapturesForTest();
+    quotaPersistence.mockRestore();
+    setUpstreamInterceptor(undefined);
+  }
+});
+
+it("does not read quota rows synchronously from the post-response curation gate", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Check post-response pacing" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  let observing = false;
+  let tracedSpans = 0;
+  let quotaReads = 0;
+  const silentSink: log.LogSink = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
+  };
+  log.registerSink({
+    ...silentSink,
+    withDbSpan(sql, fn) {
+      if (observing) {
+        tracedSpans++;
+        if (/\bprovider_quotas\b/i.test(sql)) quotaReads++;
+      }
+      return fn();
+    },
+  });
+  setPostResponseStartObserverForTest(() => {
+    observing = true;
+  });
+  setUpstreamInterceptor(replay);
+
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Check post-response pacing" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-test-token" },
+    );
+    await response.text();
+    expect(tracedSpans).toBeGreaterThan(0);
+    expect(quotaReads).toBe(0);
+  } finally {
+    setPostResponseStartObserverForTest(undefined);
+    setUpstreamInterceptor(undefined);
+    log.registerSink(silentSink);
+    _resetCostAttributionForTest();
+  }
 });
 
 it("keeps a later-started quota observation when responses complete out of order", async () => {

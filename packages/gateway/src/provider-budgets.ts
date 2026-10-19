@@ -57,6 +57,7 @@ type PacingState = {
 // Prime before the gateway accepts requests. Request/response pacing fences
 // only consult this in-memory snapshot and never synchronously read SQLite.
 let pacingStateSnapshot: PacingState | null = null;
+let providerQuotaRowsSnapshot: ProviderQuotaRow[] | null = null;
 
 export type BudgetMatch = {
   provider: string;
@@ -273,6 +274,31 @@ function refreshPacingStateSnapshot(): PacingState {
 /** Load durable switches and generations before the gateway accepts requests. */
 export function initializeProviderPacingState(): void {
   refreshPacingStateSnapshot();
+  refreshProviderQuotaRowsSnapshot();
+}
+
+function refreshProviderQuotaRowsSnapshot(): void {
+  try {
+    providerQuotaRowsSnapshot = listProviderQuotas();
+  } catch {
+    // Foreground curation gates fail open when the startup snapshot is unavailable.
+    providerQuotaRowsSnapshot = [];
+  }
+}
+
+/** Keep the foreground curation snapshot current after an accepted quota write. */
+export function recordProviderQuotaSnapshot(row: ProviderQuotaRow): void {
+  const rows = providerQuotaRowsSnapshot;
+  if (!rows) return;
+  const index = rows.findIndex(
+    (existing) =>
+      existing.provider === row.provider &&
+      existing.authKind === row.authKind &&
+      existing.account === row.account &&
+      existing.window === row.window,
+  );
+  if (index === -1) rows.push(row);
+  else rows[index] = row;
 }
 
 /** Stored switches; invalid or duplicate state disables pacing. Never throws. */
@@ -646,6 +672,7 @@ export function _resetPacingTrackerForTest(): void {
   requestGaps.clear();
   providerPacingEpochs.clear();
   refreshPacingStateSnapshot();
+  refreshProviderQuotaRowsSnapshot();
 }
 
 export function _pacingTrackerSizesForTest(): {
@@ -929,7 +956,16 @@ export function isSessionCurationPacingPaused(
   upstream?: { providerID?: string; url?: string },
 ): boolean {
   try {
-    return isCurationPacingPaused(sessionBudgetMatch(sessionID, upstream));
+    const match = sessionBudgetMatch(sessionID, upstream);
+    if (!match || match.auth_kind !== "subscription") return false;
+    if (!isPacingEnabled(match.provider, match.account)) return false;
+    return statusFor(
+      providerQuotaRowsSnapshot ?? [],
+      match.provider,
+      match.account,
+      true,
+      Date.now(),
+    ).throttling;
   } catch {
     return false;
   }

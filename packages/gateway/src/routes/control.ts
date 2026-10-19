@@ -8,14 +8,8 @@ import { embedding, log } from "@loreai/core";
 import { workerHealthSummary } from "../worker-health";
 import { VERSION } from "../cli/version";
 import { errorResponse, jsonResponse } from "../management-access";
+import { responseCompletionCallbacks } from "../response-completion";
 import type { RouteModule } from "./types";
-
-/**
- * Callbacks the node:http bridge runs once a response has fully flushed to
- * the client. Keyed by Response identity, so handlers must return the exact
- * object they registered (Hono passes handler responses through untouched).
- */
-export const responseCompletionCallbacks = new WeakMap<Response, () => void>();
 
 export function handleHealth(): Response {
   // Subsystem health so silent degradation (embeddings dropping to FTS-only,
@@ -95,14 +89,16 @@ export const controlRoutes: RouteModule = {
           ...(method === "POST" ? { shutdown: "requested" } : {}),
         });
         if (method === "POST") {
-          responseCompletionCallbacks.set(response, () => {
-            try {
-              void Promise.resolve(options.onShutdown?.()).catch((error) => {
+          responseCompletionCallbacks.set(response, {
+            onResponseFinished: () => {
+              try {
+                void Promise.resolve(options.onShutdown?.()).catch((error) => {
+                  log.error("remote shutdown callback failed:", error);
+                });
+              } catch (error) {
                 log.error("remote shutdown callback failed:", error);
-              });
-            } catch (error) {
-              log.error("remote shutdown callback failed:", error);
-            }
+              }
+            },
           });
         }
         return response;

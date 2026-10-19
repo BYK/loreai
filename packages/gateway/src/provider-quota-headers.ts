@@ -11,6 +11,7 @@ import {
   capturePacingGeneration,
   isPacingGenerationCurrent,
   isPacingEpochCurrent,
+  recordProviderQuotaSnapshot,
   recordForegroundRequest,
   recordQuotaObservation,
 } from "./provider-budgets";
@@ -560,6 +561,7 @@ export function observeProviderQuotaHeaders(
       };
       if (upsertProviderQuota(row)) {
         accepted = true;
+        recordProviderQuotaSnapshot(row);
         if (pacingObservationAllowed && pacingGeneration !== null) {
           try {
             recordQuotaObservation(row, pacingGeneration);
