@@ -9111,6 +9111,8 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("does not learn Tier-2 header evidence from failed requests", async () => {
+    // Header evidence must not depend on importing the checkout's project memory.
+    const projectPath = "/test/tier2-failed-header-evidence";
     const candidateHeader = "x-candidate-session";
     const globalHeader = "x-global-session";
     const candidateValue = "candidate-session-a";
@@ -9148,11 +9150,12 @@ describe("Pipeline — streaming responses", () => {
     ): Promise<void> => {
       const response = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders,
+          sessionHeaders: { ...sessionHeaders, "x-lore-project": projectPath },
           messages: messages(seed, number),
         }),
         loadLocalConfig(),
       );
+      if (succeeds) expect(response.status).toBe(200);
       const body = await response.text();
       expect(body).toContain(
         succeeds ? "event: response.completed" : "Gateway request failed",
@@ -9246,6 +9249,8 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("keeps failed Tier-2 promotion retries provisional until success", async () => {
+    // Keep the real preparation path, with a project owned only by this fixture.
+    const projectPath = "/test/tier2-provisional-promotion-retry";
     const headerName = "x-retry-session";
     const targetValue = "retry-session-target";
     const distinctValue = "retry-session-other";
@@ -9280,11 +9285,12 @@ describe("Pipeline — streaming responses", () => {
     ): Promise<void> => {
       const response = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: headerValue },
+          sessionHeaders: { [headerName]: headerValue, "x-lore-project": projectPath },
           messages: messages(seed, number),
         }),
         loadLocalConfig(),
       );
+      if (succeeds) expect(response.status).toBe(200);
       const body = await response.text();
       expect(body).toContain(
         succeeds ? "event: response.completed" : "Gateway request failed",
@@ -9326,7 +9332,7 @@ describe("Pipeline — streaming responses", () => {
       expect(store).not.toHaveBeenCalled();
 
       const slash = makeResponsesRequest({
-        sessionHeaders: { [headerName]: targetValue },
+        sessionHeaders: { [headerName]: targetValue, "x-lore-project": projectPath },
         messages: [
           {
             role: "user",
@@ -9344,12 +9350,13 @@ describe("Pipeline — streaming responses", () => {
       // consumes EOF and the post-response finalizer commits the turn.
       const validation = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: targetValue },
+          sessionHeaders: { [headerName]: targetValue, "x-lore-project": projectPath },
           messages: messages("target session", 3),
         }),
         loadLocalConfig(),
       );
       expect(target?.headerSessionId).toBeUndefined();
+      expect(validation.status).toBe(200);
       expect(await validation.text()).toContain("event: response.completed");
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -9994,6 +10001,12 @@ describe("Pipeline — streaming responses", () => {
     async (route) => {
       const oldAffinity = `queued-revoked-${route}-old`;
       const newAffinity = `queued-revoked-${route}-new`;
+      // Exercise real ownership/preparation without the checkout's ambient memory.
+      const projectPath = `/test/queued-revoked-${route}`;
+      const oldHeaders = {
+        "x-session-affinity": oldAffinity,
+        "x-lore-project": projectPath,
+      };
       const history: GatewayRequest["messages"] = Array.from(
         { length: 12 },
         (_, index) => ({
@@ -10031,18 +10044,22 @@ describe("Pipeline — streaming responses", () => {
 
       try {
         const seed = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
+          sessionHeaders: oldHeaders,
           messages: [history[0]],
         });
-        await (await handleRequest(seed, loadLocalConfig())).text();
+        const seedResponse = await handleRequest(seed, loadLocalConfig());
+        expect(seedResponse.status).toBe(200);
+        await seedResponse.text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
         const setup = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
+          sessionHeaders: oldHeaders,
           messages: history,
         });
-        await (await handleRequest(setup, loadLocalConfig())).text();
+        const setupResponse = await handleRequest(setup, loadLocalConfig());
+        expect(setupResponse.status).toBe(200);
+        await setupResponse.text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
@@ -10051,7 +10068,7 @@ describe("Pipeline — streaming responses", () => {
           rotationWaitingResolve,
         );
         const rotation = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": newAffinity },
+          sessionHeaders: { ...oldHeaders, "x-session-affinity": newAffinity },
           messages: [
             ...history,
             {
@@ -10073,20 +10090,20 @@ describe("Pipeline — streaming responses", () => {
         const headers = {
           authorization: "Bearer test-key",
           "content-type": "application/json",
-          "x-lore-project": process.cwd(),
+          "x-lore-project": projectPath,
           "x-lore-provider": "openai",
           "x-lore-upstream-url": "https://api.openai.com/v1",
           "x-session-affinity": oldAffinity,
         };
         if (route === "regular") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
           });
           request.stream = false;
           queued = handleRequest(request, loadLocalConfig());
         } else if (route === "structural") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
             messages: [
               {
                 role: "user",
@@ -10104,7 +10121,7 @@ describe("Pipeline — streaming responses", () => {
           queued = handleRequest(request, loadLocalConfig());
         } else if (route === "slash") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
             messages: [
               {
                 role: "user",
@@ -10119,7 +10136,7 @@ describe("Pipeline — streaming responses", () => {
             new Request("http://gateway.test/v1/compact", {
               method: "POST",
               headers,
-              body: JSON.stringify({ project_path: process.cwd() }),
+              body: JSON.stringify({ project_path: projectPath }),
             }),
             loadLocalConfig(),
           );
