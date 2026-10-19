@@ -3432,8 +3432,29 @@ describe("Pipeline — streaming responses", () => {
     } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
+      // Retire this fixture's large committed corpus before later tests share
+      // the file-level DB; resetting sessions alone does not retire knowledge.
+      const removeFixtureKnowledge = db().query(
+        "DELETE FROM knowledge WHERE project_id = ?",
+      );
+      for (const path of [projectPath, otherPath]) {
+        const id = core.projectId(path);
+        if (id) removeFixtureKnowledge.run(id);
+      }
       core.embedding._restoreProvider(savedProvider);
     }
+    // This large corpus belongs to one fixture, not to later session/latency cases.
+    const fixtureProject = core.projectId(projectPath);
+    const foreignFixtureProject = core.projectId(otherPath);
+    if (!fixtureProject || !foreignFixtureProject)
+      throw new Error("Fixture projects were not created");
+    expect(
+      db()
+        .query(
+          "SELECT COUNT(*) AS count FROM knowledge WHERE project_id IN (?, ?)",
+        )
+        .get(fixtureProject, foreignFixtureProject),
+    ).toEqual({ count: 0 });
   });
 
   it("does not reassign an earlier full bullet to a later selected entry", async () => {
