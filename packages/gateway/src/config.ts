@@ -1295,15 +1295,43 @@ export function inferClaudeCodeReminderProjectPath(
   if (line.length > MAX_PROJECT_PATH_LENGTH + 4096) {
     throw new ProjectPathConflictError();
   }
-  const value = line.slice(record[0].length);
-  if (!value.startsWith("/") || /[\r\n\u2028\u2029]/.test(value)) {
+  const rawValue = line.slice(record[0].length);
+  const windowsDrive = /^[A-Za-z]:[\\/]/.test(rawValue);
+  const windowsUNC = /^\\\\[^\\/]+[\\/][^\\/]+[\\/]/.test(rawValue);
+  const windowsPath = windowsDrive || windowsUNC;
+  // Normalize only for validation. Windows client paths are not POSIX gateway
+  // project identities; accepting their syntax must not invent an owner.
+  const value = windowsPath ? rawValue.replaceAll("\\", "/") : rawValue;
+  if (
+    (!value.startsWith("/") && !windowsDrive) ||
+    /[\r\n\u2028\u2029]/.test(value)
+  ) {
     throw new ProjectPathConflictError();
   }
   let end = reminderHeaderEnd(value);
   if (value[end - 1] === ":") end = reminderHeaderEnd(value, end - 1);
-  const files = /\/(?:CLAUDE|AGENTS|\.lore)\.md/g;
+  // References inside trailing metadata annotations are not instruction files.
+  // Consume balanced suffixes backwards in linear time, after the header cap;
+  // parentheses within an actual directory name remain part of the path.
+  while (value[end - 1] === ")") {
+    let depth = 0;
+    let opening = end - 1;
+    for (; opening >= 0; opening--) {
+      if (value[opening] === ")") depth++;
+      else if (value[opening] === "(" && --depth === 0) break;
+    }
+    if (
+      opening < 1 ||
+      (value[opening - 1] !== " " && value[opening - 1] !== "\t")
+    )
+      break;
+    end = reminderHeaderEnd(value, opening);
+  }
+  const files = /\/(?:CLAUDE|AGENTS|\.lore)\.md(?=[ \t(:]|$)/g;
   let pathEnd: number | undefined;
-  for (const file of value.matchAll(files)) {
+  let recognizedFile = false;
+  for (const file of value.slice(0, end).matchAll(files)) {
+    recognizedFile = true;
     let suffix = file.index + file[0].length;
     while (suffix < end && (value[suffix] === " " || value[suffix] === "\t"))
       suffix++;
@@ -1314,18 +1342,33 @@ export function inferClaudeCodeReminderProjectPath(
     if (pathEnd !== undefined) throw new ProjectPathConflictError();
     pathEnd = file.index;
   }
-  if (pathEnd === undefined) throw new ProjectPathConflictError();
-  const path = value.slice(0, pathEnd).replace(/\/+$/, "");
+  // Unknown instruction files are context, not workspace provenance. Still
+  // validate their header, and do not hide a malformed recognized root file.
+  if (pathEnd === undefined && recognizedFile)
+    throw new ProjectPathConflictError();
+  const path = value.slice(0, pathEnd ?? end).replace(/\/+$/, "");
   if (
     !path ||
     path.length > MAX_PROJECT_PATH_LENGTH ||
     hasProjectPathControlCharacter(path) ||
-    path.includes("//") ||
+    (windowsUNC ? path.slice(2) : path).includes("//") ||
     path.split("/").some((part) => part === "." || part === "..") ||
     isUnattributedPath(path)
   ) {
     throw new ProjectPathConflictError();
   }
+  // CLAUDE.local.md, recursively loaded rules, and imports can have user/global
+  // scope. They must neither reject a valid coding turn nor select a project.
+  // Preserve independent attribution and the first-header-only body boundary.
+  if (windowsPath || pathEnd === undefined) return null;
+  // A rule's basename does not make its directory a workspace, including rules
+  // named CLAUDE.md or AGENTS.md under a shared user configuration directory.
+  if (
+    ["/.claude/rules", "/.config/claude/rules"].some(
+      (root) => path.endsWith(root) || path.includes(`${root}/`),
+    )
+  )
+    return null;
   // User-level Claude Code instructions are shared across projects. They
   // cannot be used to identify the active workspace.
   // Home layouts are arbitrary on remote clients. Terminal instruction roots
