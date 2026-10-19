@@ -10,6 +10,7 @@ import {
   STANDARD_TOOLS,
 } from "./helpers/fixtures";
 import {
+  _waitForProviderQuotaCapturesForTest,
   getActiveSessions,
   setPostResponseStartObserverForTest,
   setUpstreamInterceptor,
@@ -48,10 +49,18 @@ function trustTestAnthropicOAuthCredential(): void {
 
 let harness: Harness | undefined;
 afterEach(async () => {
+  await _waitForProviderQuotaCapturesForTest();
   await harness?.teardown();
   harness = undefined;
   _resetCostAttributionForTest();
 });
+
+async function consumeResponseAndQuotaCapture(
+  response: Response,
+): Promise<void> {
+  await response.text();
+  await _waitForProviderQuotaCapturesForTest();
+}
 
 it("persists upstream quota headers without touching the client response", async () => {
   db().exec("DELETE FROM provider_quotas");
@@ -85,7 +94,7 @@ it("persists upstream quota headers without touching the client response", async
     null,
     { authorization: "Bearer sk-ant-oat01-test-token" },
   );
-  await response.text();
+  await consumeResponseAndQuotaCapture(response);
   expect(response.status).toBe(200);
 
   const quotas = listProviderQuotas().filter(
@@ -150,7 +159,7 @@ it("captures quota on the first successful Anthropic OAuth response", async () =
       null,
       { authorization: "Bearer sk-ant-oat01-first-request" },
     );
-    await response.text();
+    await consumeResponseAndQuotaCapture(response);
     expect(response.status).toBe(200);
   } finally {
     setUpstreamFetchOverrideForTest(previousFetchOverride);
@@ -220,12 +229,12 @@ it("keeps a later-started quota observation when responses complete out of order
     now += 1_000;
     release[1]();
     const newerResponse = await newer;
-    await newerResponse.text();
+    await consumeResponseAndQuotaCapture(newerResponse);
 
     now += 1_000;
     release[0]();
     const olderResponse = await older;
-    await olderResponse.text();
+    await consumeResponseAndQuotaCapture(olderResponse);
   } finally {
     nowSpy.mockRestore();
     for (const resolve of release) resolve();
@@ -291,7 +300,7 @@ it.each([
         null,
         { authorization: "Bearer sk-ant-oat01-test-token" },
       );
-      await response.text();
+      await consumeResponseAndQuotaCapture(response);
     } finally {
       nowSpy.mockRestore();
     }
@@ -352,7 +361,7 @@ it("anchors wrapped quota resets to upstream header receipt, not wrapper complet
       null,
       { authorization: "Bearer sk-ant-oat01-test-token" },
     );
-    await response.text();
+    await consumeResponseAndQuotaCapture(response);
   } finally {
     setUpstreamFetchOverrideForTest(previousFetchOverride);
     nowSpy.mockRestore();
@@ -414,9 +423,7 @@ it("attributes quota headers to the session credential on the provisional path",
     "x-claude-code-session-id": alias,
   });
   expect(initial.status).toBe(200);
-  await initial.text();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await consumeResponseAndQuotaCapture(initial);
 
   db().exec("DELETE FROM provider_quotas");
 
@@ -427,7 +434,7 @@ it("attributes quota headers to the session credential on the provisional path",
     "x-claude-code-session-id": alias,
     "x-lore-session-id": "claude-session-after-plugin",
   });
-  await response.text();
+  await consumeResponseAndQuotaCapture(response);
   expect(response.status).toBe(200);
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "anthropic");
@@ -496,9 +503,7 @@ it("caller-selected Codex headers do not establish subscription quota attributio
     body: JSON.stringify(request),
   });
   expect(initial.status).toBe(200);
-  await initial.text();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await consumeResponseAndQuotaCapture(initial);
 
   db().exec("DELETE FROM provider_quotas");
 
@@ -513,7 +518,7 @@ it("caller-selected Codex headers do not establish subscription quota attributio
     },
     body: JSON.stringify(request),
   });
-  await migrated.text();
+  await consumeResponseAndQuotaCapture(migrated);
   expect(migrated.status).toBe(200);
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "openai");
@@ -579,7 +584,7 @@ it("records Codex subscription auth only after direct ChatGPT success", async ()
         tools: [],
       }),
     });
-    await response.text();
+    await consumeResponseAndQuotaCapture(response);
     expect(response.status).toBe(200);
 
     const quotas = listProviderQuotas().filter(

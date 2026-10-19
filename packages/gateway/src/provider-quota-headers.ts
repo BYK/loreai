@@ -442,10 +442,13 @@ export interface ProviderQuotaPacingObservation {
   pacingObservationAllowed: boolean;
 }
 
-/** Record the foreground request in memory before deferred quota persistence. */
-export function recordProviderQuotaForegroundRequest(
+/**
+ * Snapshot whether a quota response may affect pacing without recording a
+ * foreground request. Background workers use this so their cadence cannot
+ * contaminate the foreground request-gap EWMA.
+ */
+export function captureProviderQuotaPacingObservation(
   attribution: CostAttribution,
-  observedAt: number,
   capturedPacingEpoch?: number | null,
 ): ProviderQuotaPacingObservation {
   const pacingMatch = {
@@ -474,19 +477,45 @@ export function recordProviderQuotaForegroundRequest(
         // A failing diagnostic sink must not affect quota capture.
       }
     }
-    if (pacingObservationAllowed && pacingGeneration !== null) {
+  }
+  return { pacingGeneration, pacingObservationAllowed };
+}
+
+/** Record the foreground request in memory before deferred quota persistence. */
+export function recordProviderQuotaForegroundRequest(
+  attribution: CostAttribution,
+  observedAt: number,
+  capturedPacingEpoch?: number | null,
+): ProviderQuotaPacingObservation {
+  const pacingObservation = captureProviderQuotaPacingObservation(
+    attribution,
+    capturedPacingEpoch,
+  );
+  if (
+    attribution.authKind === "subscription" &&
+    pacingObservation.pacingObservationAllowed &&
+    pacingObservation.pacingGeneration !== null
+  ) {
+    const pacingMatch = {
+      provider: attribution.provider,
+      account: attribution.account,
+      auth_kind: attribution.authKind,
+    };
+    try {
+      recordForegroundRequest(
+        pacingMatch,
+        observedAt,
+        pacingObservation.pacingGeneration,
+      );
+    } catch {
       try {
-        recordForegroundRequest(pacingMatch, observedAt, pacingGeneration);
+        log.info("provider pacing observation failed");
       } catch {
-        try {
-          log.info("provider pacing observation failed");
-        } catch {
-          // A failing diagnostic sink must not affect quota capture.
-        }
+        // A failing diagnostic sink must not affect quota capture.
       }
     }
   }
-  return { pacingGeneration, pacingObservationAllowed };
+  return pacingObservation;
 }
 
 /**

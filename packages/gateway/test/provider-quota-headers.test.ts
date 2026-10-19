@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import {
+  captureProviderQuotaPacingObservation,
   parseProviderQuotaHeaders,
   observeProviderQuotaHeaders,
 } from "../src/provider-quota-headers";
@@ -385,6 +386,74 @@ describe("observeProviderQuotaHeaders", () => {
         rateTracks: 0,
         requestGaps: 0,
       });
+    } finally {
+      if (previousPacing === null) {
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
+      } else {
+        db()
+          .query(
+            "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          )
+          .run("provider_pacing", previousPacing);
+      }
+      _resetPacingTrackerForTest();
+    }
+  });
+
+  test("worker quota observations do not record foreground request gaps", () => {
+    const previousPacing = getKV("provider_pacing");
+    const match = {
+      provider: "anthropic",
+      account: "acct",
+      auth_kind: "subscription" as const,
+    };
+    try {
+      db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
+      _resetPacingTrackerForTest();
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: "acct",
+          enabled: false,
+        }),
+      ).toBe(true);
+      expect(
+        setPacingEnabled({
+          provider: "anthropic",
+          account: "acct",
+          enabled: true,
+        }),
+      ).toBe(true);
+      const requestEpoch = capturePacingEpoch(match);
+      expect(requestEpoch).not.toBeNull();
+      const pacingObservation = captureProviderQuotaPacingObservation(
+        attribution,
+        requestEpoch,
+      );
+      expect(pacingObservation.pacingObservationAllowed).toBe(true);
+
+      expect(
+        observeProviderQuotaHeaders(
+          headers({
+            "anthropic-ratelimit-unified-5h-utilization": "0.5",
+            "anthropic-ratelimit-unified-5h-reset": "1999999999",
+          }),
+          attribution,
+          NOW,
+          NOW,
+          undefined,
+          pacingObservation,
+        ),
+      ).toBe(true);
+      expect(
+        listProviderQuotas().some(
+          (quota) =>
+            quota.provider === "anthropic" &&
+            quota.authKind === "subscription" &&
+            quota.account === "acct",
+        ),
+      ).toBe(true);
+      expect(_pacingTrackerSizesForTest().requestGaps).toBe(0);
     } finally {
       if (previousPacing === null) {
         db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");

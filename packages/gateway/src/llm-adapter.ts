@@ -53,6 +53,7 @@ import {
   resolveCostAttribution,
 } from "./cost-attribution";
 import {
+  captureProviderQuotaPacingObservation,
   observeProviderQuotaHeaders,
   providerQuotaObservationStartedAt,
 } from "./provider-quota-headers";
@@ -4445,6 +4446,10 @@ export function createGatewayLLMClient(
                     quotaObservationStartedAt,
                     quotaObservationReceivedTimes.get(response) ?? Date.now(),
                     quotaPacingEpoch,
+                    captureProviderQuotaPacingObservation(
+                      attribution,
+                      quotaPacingEpoch,
+                    ),
                   );
                   if (acceptedQuota) {
                     cacheAnthropicOrganizationFromResponse({

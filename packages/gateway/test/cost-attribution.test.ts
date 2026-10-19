@@ -653,6 +653,58 @@ describe("resolveCostAttribution", () => {
     expect(withoutOrganization.account).toBe("default");
   });
 
+  test("trusts direct Anthropic responses when Bun leaves Response.url empty", () => {
+    const sessionID = "anthropic-empty-response-url-session";
+    const responseHeaders = new Headers({
+      "anthropic-organization-id": "org-empty-url",
+    });
+    recordSuccessfulAnthropicOAuthAuth({
+      credential: OAUTH_CREDENTIAL,
+      upstreamURL: ANTHROPIC_URL,
+      responseURL: "",
+      responseStatus: 200,
+      directUpstreamResponse: true,
+    });
+
+    const attribution = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      upstreamURL: ANTHROPIC_URL,
+      credential: OAUTH_CREDENTIAL,
+      responseHeaders,
+      responseURL: "",
+      responseStatus: 200,
+      directUpstreamResponse: true,
+    });
+    cacheAnthropicOrganizationFromResponse({
+      provider: attribution.provider,
+      credential: OAUTH_CREDENTIAL,
+      sessionID,
+      observedAt: 1,
+      responseHeaders,
+      upstreamURL: ANTHROPIC_URL,
+      responseURL: "",
+      directUpstreamResponse: true,
+    });
+
+    expect(isVerifiedAnthropicOAuthCredential(OAUTH_CREDENTIAL)).toBe(true);
+    expect(attribution).toMatchObject({
+      authKind: "subscription",
+      account: createHash("sha256")
+        .update("org-empty-url")
+        .digest("hex")
+        .slice(0, 12),
+    });
+    expect(
+      resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: ANTHROPIC_URL,
+        credential: OAUTH_CREDENTIAL,
+      }).account,
+    ).toBe(attribution.account);
+  });
+
   test("oversized Anthropic organization IDs do not select or cache an account", () => {
     const credential = {
       scheme: "bearer" as const,

@@ -86,6 +86,8 @@ import {
   setMaxDetachedPipelineRequestsForTest,
   setPipelineResetSettleTimeoutForTest,
   setPipelineResetPauseForTest,
+  setProviderQuotaCaptureSchedulerForTest,
+  _waitForProviderQuotaCapturesForTest,
   setBeforeUpstreamCaptureForTest,
   setPostResponseStartObserverForTest,
   setRecallPersistenceCommitObserverForTest,
@@ -2393,6 +2395,7 @@ describe("foreground subscription pacing", () => {
     let dispatchStarted = false;
     let pending: Promise<Response> | undefined;
     const upstreamResponse: { value: Response | null } = { value: null };
+    let releaseQuotaCapture: (() => void) | undefined;
     const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
     try {
       core
@@ -2466,6 +2469,9 @@ describe("foreground subscription pacing", () => {
       });
 
       quotaPersistence.mockClear();
+      setProviderQuotaCaptureSchedulerForTest((callback) => {
+        releaseQuotaCapture = callback;
+      });
       pending = handleRequest(request, loadLocalConfig());
       await vi.waitFor(() => expect(dispatchStarted).toBe(true), {
         timeout: 10_000,
@@ -2484,7 +2490,9 @@ describe("foreground subscription pacing", () => {
       const firstChunk = await reader.read();
       expect(firstChunk.done).toBe(false);
       expect(quotaPersistence).not.toHaveBeenCalled();
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      releaseQuotaCapture?.();
+      releaseQuotaCapture = undefined;
+      await _waitForProviderQuotaCapturesForTest();
       expect(quotaPersistence).toHaveBeenCalled();
       expect(quotaPersistence).toHaveBeenCalledWith(
         expect.objectContaining({ remaining: 59 }),
@@ -2492,12 +2500,15 @@ describe("foreground subscription pacing", () => {
       let chunk = await reader.read();
       while (!chunk.done) chunk = await reader.read();
     } finally {
-      quotaPersistence.mockRestore();
       caller.abort(new DOMException("test finished", "AbortError"));
       const response = await pending?.catch(() => undefined);
       if (response?.body && !response.bodyUsed) {
         await response.body.cancel().catch(() => {});
       }
+      releaseQuotaCapture?.();
+      await _waitForProviderQuotaCapturesForTest();
+      setProviderQuotaCaptureSchedulerForTest(undefined);
+      quotaPersistence.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState({ fast: true });
       core

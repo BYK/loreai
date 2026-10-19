@@ -24,6 +24,8 @@ const MAX_ANTHROPIC_ACCOUNT_KEYS = 256;
 const MAX_ANTHROPIC_ORGANIZATION_ID_LENGTH = 128;
 const MAX_ANTHROPIC_SUBSCRIPTION_CREDENTIALS = 256;
 const MAX_OPENAI_SUBSCRIPTION_CREDENTIALS = 256;
+// These identity sets are admission-only: evicting a trusted credential could
+// reclassify its account and bypass established account-scoped pacing settings.
 type AnthropicAccountCacheEntry = { account: string; observedAt: number };
 const anthropicAccounts = new Map<string, AnthropicAccountCacheEntry>();
 const anthropicSessionAccounts = new Map<string, AnthropicAccountCacheEntry>();
@@ -38,6 +40,15 @@ function isCanonicalAnthropicBackend(value?: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isCanonicalDirectAnthropicResponse(
+  responseURL: string | undefined,
+  upstreamURL: string | undefined,
+): boolean {
+  // upstreamFetch uses manual redirects and rejects redirects. Bun may leave
+  // Response.url empty, so the direct request target is authoritative then.
+  return isCanonicalAnthropicBackend(responseURL?.trim() || upstreamURL);
 }
 
 /**
@@ -58,7 +69,7 @@ export function recordSuccessfulAnthropicOAuthAuth(input: {
     input.responseStatus < 200 ||
     input.responseStatus >= 300 ||
     !isCanonicalAnthropicBackend(input.upstreamURL) ||
-    !isCanonicalAnthropicBackend(input.responseURL) ||
+    !isCanonicalDirectAnthropicResponse(input.responseURL, input.upstreamURL) ||
     credential?.scheme !== "bearer" ||
     !credential.value.startsWith("sk-ant-oat")
   ) {
@@ -343,7 +354,7 @@ export function resolveCostAttribution(input: {
     input.responseStatus >= 200 &&
     input.responseStatus < 300 &&
     isCanonicalAnthropicBackend(upstreamURL) &&
-    isCanonicalAnthropicBackend(input.responseURL);
+    isCanonicalDirectAnthropicResponse(input.responseURL, upstreamURL);
   const responseAnthropicOrganizationID =
     provider === "anthropic" && trustedAnthropicResponse
       ? anthropicOrganizationID(responseHeaders)
@@ -395,7 +406,7 @@ export function cacheAnthropicOrganizationFromResponse(input: {
   if (
     !input.directUpstreamResponse ||
     !isCanonicalAnthropicBackend(input.upstreamURL) ||
-    !isCanonicalAnthropicBackend(input.responseURL) ||
+    !isCanonicalDirectAnthropicResponse(input.responseURL, input.upstreamURL) ||
     !isVerifiedAnthropicOAuthCredential(input.credential)
   ) {
     return;

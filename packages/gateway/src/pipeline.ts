@@ -1145,6 +1145,23 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
+const pendingProviderQuotaCaptures = new Set<Promise<void>>();
+let providerQuotaCaptureSchedulerForTest:
+  | ((callback: () => void) => void)
+  | undefined;
+
+export function setProviderQuotaCaptureSchedulerForTest(
+  scheduler: ((callback: () => void) => void) | undefined,
+): void {
+  providerQuotaCaptureSchedulerForTest = scheduler;
+}
+
+export async function _waitForProviderQuotaCapturesForTest(): Promise<void> {
+  while (pendingProviderQuotaCaptures.size > 0) {
+    await Promise.all(pendingProviderQuotaCaptures);
+  }
+}
+
 export function setPassthroughBodyReadPauseForTest(
   pause: Promise<void> | undefined,
   onWait: () => void = () => {},
@@ -1258,6 +1275,16 @@ async function resetPipelineStateInner(opts?: {
     [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
     settleTimeoutMs(),
   );
+  // Even fast resets must fence this short SQLite write before test databases
+  // or gateway storage are torn down; it remains detached from foreground work.
+  const quotaCaptures = [...pendingProviderQuotaCaptures];
+  await boundedSettle(quotaCaptures, settleTimeoutMs());
+  if (
+    quotaCaptures.some((capture) => pendingProviderQuotaCaptures.has(capture))
+  )
+    throw new Error(
+      "provider quota capture did not settle before pipeline reset",
+    );
   streamingPostResponseGeneration++;
   pipelineGenerationAbort = new AbortController();
   streamingPostResponseFinalizers.clear();
@@ -8662,7 +8689,7 @@ async function forwardToUpstream(
         quotaPacingEpoch,
       );
       const quotaResponseHeaders = new Headers(response.headers);
-      setImmediate(() => {
+      scheduleProviderQuotaCapture(() => {
         try {
           const accepted = observeProviderQuotaHeaders(
             quotaResponseHeaders,
@@ -17519,6 +17546,29 @@ function trackBackground(p: Promise<unknown>, state?: SessionState): void {
     if (state) state.backgroundWorkCount!--;
   };
   void p.then(settled, settled);
+}
+
+function scheduleProviderQuotaCapture(capture: () => void): void {
+  const schedule =
+    providerQuotaCaptureSchedulerForTest ??
+    ((callback: () => void) => {
+      setImmediate(callback);
+    });
+  const pending = new Promise<void>((resolve) => {
+    schedule(() => {
+      try {
+        capture();
+      } finally {
+        resolve();
+      }
+    });
+  });
+  pendingProviderQuotaCaptures.add(pending);
+  trackBackground(pending);
+  void pending.then(
+    () => pendingProviderQuotaCaptures.delete(pending),
+    () => pendingProviderQuotaCaptures.delete(pending),
+  );
 }
 
 function scheduleBackgroundWorkForTenant(
