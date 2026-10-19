@@ -18409,7 +18409,9 @@ async function handleCompactEndpointInner(
     );
   }
 
-  if (!isConfidentlyBoundToProject(state, projectPath)) {
+  // A registered alias names the same tenant-scoped owner; authorization must
+  // only inspect existing identities, never create a project to accept a path.
+  if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",
@@ -18440,10 +18442,9 @@ async function handleCompactEndpointInner(
       { status: 404, headers: { "content-type": "application/json" } },
     );
   }
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== projectPath
-  ) {
+  // Recheck the live logical owner after waiting: a turn may change either the
+  // binding flags or its spelling without changing the authenticated identity.
+  if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",

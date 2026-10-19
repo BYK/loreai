@@ -2228,9 +2228,16 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     },
   );
 
-  it.each(["one", "alias", "distinct", "unknown"])(
-    "authorizes reminder-only compaction by canonical owner (%s)",
-    async (project) => {
+  it.each(
+    ["one", "alias", "distinct", "unknown"].flatMap((project) =>
+      ["reminder-only", "explicit HTTP"].map((transport) => ({
+        project,
+        transport,
+      })),
+    ),
+  )(
+    "authorizes $transport compaction by canonical owner ($project)",
+    async ({ project, transport }) => {
       harness = await createHarness({
         configOverrides: {
           remoteGateway: true,
@@ -2285,10 +2292,23 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       body.system =
         "You are an anchored context summarization assistant for coding sessions.";
       body.tools = [];
-      const response = await harness.chat(body, "test-key", {
-        ...headers,
-        "x-claude-code-request-class": "compaction",
-      });
+      const response =
+        transport === "explicit HTTP"
+          ? await harness.request("/v1/compact", {
+              method: "POST",
+              headers: {
+                ...headers,
+                "x-api-key": "test-key",
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                project_path: `/client/projects/${project}`,
+              }),
+            })
+          : await harness.chat(body, "test-key", {
+              ...headers,
+              "x-claude-code-request-class": "compaction",
+            });
       expect(response.status).toBe(
         project === "one" || project === "alias" ? 200 : 403,
       );
@@ -2306,9 +2326,16 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     },
   );
 
-  it.each(["alias", "distinct"])(
-    "authorizes reminder-only compaction after a queued project transition (%s)",
-    async (target) => {
+  it.each(
+    ["alias", "distinct"].flatMap((target) =>
+      ["reminder-only", "explicit HTTP"].map((transport) => ({
+        target,
+        transport,
+      })),
+    ),
+  )(
+    "authorizes $transport compaction after a queued project transition ($target)",
+    async ({ target, transport }) => {
       harness = await createHarness({
         fixtures: [0, 1, 2, 3].map((seq) =>
           makeFixtureEntry({
@@ -2321,6 +2348,16 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       const firstID = ensureProject("/client/projects/one");
       mergeProjectInternal(ensureProject("/client/projects/alias"), firstID);
       expect(projectId("/client/projects/alias")).toBe(firstID);
+      // A successful authorization must produce a real owner-scoped summary,
+      // not depend on whether asynchronous distillation leaves a raw tail.
+      for (const name of ["one", "distinct"])
+        ltm.create({
+          projectPath: `/client/projects/${name}`,
+          scope: "project",
+          category: "preference",
+          title: `Queued compaction owner ${name}`,
+          content: `private-queued-compaction-owner-${name}`,
+        });
       const reminder = (name: string) =>
         `<system-reminder>Instructions from: /client/projects/${name}/CLAUDE.md\nReal workspace instructions.</system-reminder>`;
       const headers = {
@@ -2335,6 +2372,9 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       );
       expect(first.status).toBe(200);
       await first.text();
+      expect(harness.upstreamBodies()[0]).toContain(
+        "private-queued-compaction-owner-one",
+      );
       let release!: () => void;
       let entered!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -2369,10 +2409,21 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         compact.system =
           "You are an anchored context summarization assistant for coding sessions.";
         compact.tools = [];
-        const queued = harness.chat(compact, "test-key", {
-          ...headers,
-          "x-claude-code-request-class": "compaction",
-        });
+        const queued =
+          transport === "explicit HTTP"
+            ? harness.request("/v1/compact", {
+                method: "POST",
+                headers: {
+                  ...headers,
+                  "x-api-key": "test-key",
+                  "content-type": "application/json",
+                },
+                body: JSON.stringify({ project_path: "/client/projects/one" }),
+              })
+            : harness.chat(compact, "test-key", {
+                ...headers,
+                "x-claude-code-request-class": "compaction",
+              });
         await vi.waitFor(() =>
           expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
         );
@@ -2382,7 +2433,12 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         await codingResponse.text();
         const response = await queued;
         expect(response.status).toBe(target === "alias" ? 200 : 403);
-        await response.text();
+        const summary = await response.text();
+        expect(summary).not.toContain(
+          "private-queued-compaction-owner-distinct",
+        );
+        if (target === "alias")
+          expect(summary).toContain("private-queued-compaction-owner-one");
         expect(
           harness.queryDB("SELECT project_path FROM session_state"),
         ).toEqual([{ project_path: `/client/projects/${target}` }]);
