@@ -95,7 +95,8 @@ describe("Basic pipeline", () => {
         REPLAY_PROJECT,
       ]),
     ).toEqual([{ n: 1 }]);
-    const sessionQuery = "SELECT session_id FROM session_state ORDER BY session_id";
+    const sessionQuery =
+      "SELECT session_id FROM session_state ORDER BY session_id";
     const firstSessions = harness.queryDB<{ session_id: string }>(sessionQuery);
     expect(firstSessions).toHaveLength(1);
 
