@@ -18,6 +18,9 @@ import {
 } from "./helpers/fixtures";
 import { parseMarker } from "../src/session";
 
+// Protocol fixtures must not import the checkout's unrelated instruction memory.
+const REPLAY_PROJECT = "/test/gateway-replay";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -49,6 +52,7 @@ describe("Basic pipeline", () => {
 
   it("first response contains no session marker in content", async () => {
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
       ]),
@@ -74,6 +78,7 @@ describe("Basic pipeline", () => {
   it("second turn reuses session via fingerprint — no marker needed", async () => {
     // 2 fixtures: one for each upstream call (first turn + second turn)
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
         { userMessage: "What is 3+3?", assistantText: "Six." },
@@ -83,6 +88,11 @@ describe("Basic pipeline", () => {
     // First turn
     const resp1 = await harness.chat(makeBody("What is 2+2?"));
     expect(resp1.status).toBe(200);
+    expect(
+      harness.queryDB("SELECT COUNT(*) AS n FROM projects WHERE path = ?", [
+        REPLAY_PROJECT,
+      ]),
+    ).toEqual([{ n: 1 }]);
 
     // Second turn — same first user message means same fingerprint → same session
     const resp2 = await harness.chat(
@@ -111,6 +121,7 @@ describe("Basic pipeline", () => {
 
   it("response includes stop_reason and content", async () => {
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
       ]),
