@@ -9285,7 +9285,10 @@ describe("Pipeline — streaming responses", () => {
     ): Promise<void> => {
       const response = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: headerValue, "x-lore-project": projectPath },
+          sessionHeaders: {
+            [headerName]: headerValue,
+            "x-lore-project": projectPath,
+          },
           messages: messages(seed, number),
         }),
         loadLocalConfig(),
@@ -9332,7 +9335,10 @@ describe("Pipeline — streaming responses", () => {
       expect(store).not.toHaveBeenCalled();
 
       const slash = makeResponsesRequest({
-        sessionHeaders: { [headerName]: targetValue, "x-lore-project": projectPath },
+        sessionHeaders: {
+          [headerName]: targetValue,
+          "x-lore-project": projectPath,
+        },
         messages: [
           {
             role: "user",
@@ -9350,7 +9356,10 @@ describe("Pipeline — streaming responses", () => {
       // consumes EOF and the post-response finalizer commits the turn.
       const validation = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: targetValue, "x-lore-project": projectPath },
+          sessionHeaders: {
+            [headerName]: targetValue,
+            "x-lore-project": projectPath,
+          },
           messages: messages("target session", 3),
         }),
         loadLocalConfig(),
