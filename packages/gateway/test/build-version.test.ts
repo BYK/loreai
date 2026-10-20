@@ -71,3 +71,27 @@ it("preserves local staging identity and refuses official staging in a local reb
   expect(() => stagingVersion(local, "1.0.0", true)).toThrow("regenerate");
   expect(() => stagingVersion("1.0.0", "1.0.1", true)).toThrow("regenerate");
 });
+
+it("uses local identities by default, including CI, until official publishing explicitly opts in", () => {
+  vi.stubEnv("LORE_OFFICIAL_BUILD", "");
+  vi.stubEnv("CI", "true");
+  try {
+    expect(buildVersion("1.0.0")).toMatch(/^1\.0\.0\+local\./);
+    vi.stubEnv("LORE_OFFICIAL_BUILD", "1");
+    expect(buildVersion("1.0.0")).toBe("1.0.0");
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+it("retains delta eligibility for an official nightly build", async () => {
+  vi.resetModules();
+  vi.doMock("../src/cli/version", () => ({ VERSION: "1.0.0-dev.123" }));
+  try {
+    const { canAttemptDelta } = await import("../src/cli/lib/delta-upgrade");
+    expect(canAttemptDelta("1.0.0-dev.124")).toBe(true);
+  } finally {
+    vi.doUnmock("../src/cli/version");
+    vi.resetModules();
+  }
+});
