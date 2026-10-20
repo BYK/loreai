@@ -1277,16 +1277,56 @@ function reminderHeaderEnd(value: string, end = value.length): number {
 }
 
 /**
- * Only an instruction-file header at the start of the reminder can provide
- * provenance. Everything after that first header is file content: additional
- * record-looking lines cannot be distinguished from examples inside the file.
- * A global first file therefore requires independent workspace attribution.
+ * Only the opening client Environment record can supply a working directory.
+ * Instruction files may be inherited from any ancestor, so even their first
+ * header cannot identify the active workspace. Their bodies remain opaque.
  */
 export function inferClaudeCodeReminderProjectPath(
   reminder: string,
 ): InferredProjectPath | null {
-  const line = reminder.split(/\r?\n/).find((part) => part.trim());
+  const lines = reminder.split(/\r?\n/);
+  const firstLine = lines.findIndex((part) => part.trim());
+  const line = lines[firstLine];
   if (!line) return null;
+  if (line === "# Environment") {
+    let seenDirectory = false;
+    let directory: string | undefined;
+    let metadataLength = line.length;
+    for (const field of lines.slice(firstLine + 1)) {
+      if (field.trim() && !field.startsWith("- ")) break;
+      metadataLength += field.length + 1;
+      if (metadataLength > MAX_PROJECT_PATH_LENGTH + 4096) {
+        throw new ProjectPathConflictError();
+      }
+      if (!field.trim()) continue;
+      // Only fields in the opening metadata list can supply a directory; the
+      // boundary above keeps subsequent prose and file contents opaque.
+      const marker = /^- Primary working directory:[ \t]*/.exec(field);
+      if (!marker) continue;
+      if (seenDirectory) throw new ProjectPathConflictError();
+      seenDirectory = true;
+      const rawDirectory = field.slice(marker[0].length);
+      const drive = /^[A-Za-z]:[\\/]/.test(rawDirectory);
+      const unc = /^\\\\[^\\/]+[\\/][^\\/]+[\\/]/.test(rawDirectory);
+      const normalized =
+        drive || unc ? rawDirectory.replaceAll("\\", "/") : rawDirectory;
+      const path = normalized.trimEnd().replace(/\/+$/, "");
+      if (
+        !path ||
+        (!path.startsWith("/") && !drive) ||
+        path.length > MAX_PROJECT_PATH_LENGTH ||
+        hasProjectPathControlCharacter(rawDirectory) ||
+        /[\u2028\u2029]/.test(rawDirectory) ||
+        (unc ? path.slice(2) : path).includes("//") ||
+        path.split("/").some((part) => part === "." || part === "..") ||
+        isUnattributedPath(path)
+      )
+        throw new ProjectPathConflictError();
+      // Windows syntax is valid client metadata, not a POSIX gateway identity.
+      if (!drive && !unc) directory = path;
+    }
+    return directory ? { path: directory, authoritative: true } : null;
+  }
   // The client-generated first header bounds the file body. Never scan that
   // body for more provenance, even for unfenced examples or ordinary prose.
   const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+/.exec(line);
@@ -1363,27 +1403,10 @@ export function inferClaudeCodeReminderProjectPath(
   ) {
     throw new ProjectPathConflictError();
   }
-  // CLAUDE.local.md, recursively loaded rules, and imports can have user/global
-  // scope. They must neither reject a valid coding turn nor select a project.
-  // Preserve independent attribution and the first-header-only body boundary.
-  if (windowsPath || pathEnd === undefined) return null;
-  // A rule's basename does not make its directory a workspace, including rules
-  // named CLAUDE.md or AGENTS.md under a shared user configuration directory.
-  if (
-    ["/.claude/rules", "/.config/claude/rules"].some(
-      (root) => path.endsWith(root) || path.includes(`${root}/`),
-    )
-  )
-    return null;
-  // User-level Claude Code instructions are shared across projects. They
-  // cannot be used to identify the active workspace.
-  // Home layouts are arbitrary on remote clients. Terminal instruction roots
-  // need independent attribution, regardless of their parent directory. Do not
-  // exclude all .claude ancestors: real workspaces can live in .claude/worktrees.
-  if (path.endsWith("/.claude") || path.endsWith("/.config/claude")) {
-    return null;
-  }
-  return { path, authoritative: true };
+  // Root files, rules, global files and imports may all be shared by siblings.
+  // File location never establishes cwd, including a known root basename;
+  // preserve independent headers/system metadata or the unattributed fallback.
+  return null;
 }
 
 // ---------------------------------------------------------------------------

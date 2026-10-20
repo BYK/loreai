@@ -127,8 +127,13 @@ const NEW_CLAUDE_SYSTEM = [
   "Follow the user's request.",
   "Keep the response concise.",
 ];
-const NEW_CLAUDE_REMINDER =
-  "<system-reminder>\nContents of /client/projects/new-claude/CLAUDE.md\n</system-reminder>\nFix the bug";
+// Both isolated 2.1.289 and 2.1.302 captures put this explicit metadata in the
+// first user text block; ancestor/project instruction files occupy a later one.
+function environmentWorkspaceReminder(path: string): string {
+  return `<system-reminder>\n# Environment\n\n- Primary working directory: ${path}\n- Platform: linux\n</system-reminder>`;
+}
+
+const NEW_CLAUDE_REMINDER = `${environmentWorkspaceReminder("/client/projects/new-claude")}\nFix the bug`;
 
 function newClaudeCodeBody(
   reminder = NEW_CLAUDE_REMINDER,
@@ -155,6 +160,258 @@ function newClaudeCodeBody(
 // ---------------------------------------------------------------------------
 // hasClaudeCodeCodingPrompt
 // ---------------------------------------------------------------------------
+
+describe("environment workspace provenance", () => {
+  const workspace = "/client/workspaces/one";
+  const ancestor =
+    "<system-reminder>\nInstructions from: /client/workspaces/CLAUDE.md\nShared ancestor instructions.\n</system-reminder>";
+
+  it.each(["", workspace])(
+    "reads explicit environment metadata (header=%s)",
+    (header) => {
+      const result = getRequestProjectPath(
+        makeRequest({
+          system: NEW_CLAUDE_SYSTEM.join("\n"),
+          rawHeaders: { ...CC_SESSION_HEADERS, "x-lore-project": header },
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: environmentWorkspaceReminder(workspace) },
+                { type: "text", text: ancestor },
+              ],
+            },
+          ],
+        }),
+      );
+      expect(result.path).toBe(workspace);
+      expect(result.openingReminderProjectPath).toBe(workspace);
+    },
+  );
+
+  it.each(["header", "system", "absent"])(
+    "never treats an ancestor instruction file as cwd (source=%s)",
+    (source) => {
+      const result = getRequestProjectPath(
+        makeRequest({
+          system:
+            source === "system"
+              ? `You are Claude Code.\nWorking directory: ${workspace}`
+              : NEW_CLAUDE_SYSTEM.join("\n"),
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-lore-project": source === "header" ? workspace : "",
+          },
+          messages: [
+            { role: "user", content: [{ type: "text", text: ancestor }] },
+          ],
+        }),
+      );
+      expect(result.path).toBe(source === "absent" ? process.cwd() : workspace);
+      expect(result.openingReminderProjectPath).toBeUndefined();
+    },
+  );
+
+  it("never promotes environment-looking instruction body text", () => {
+    const result = getRequestProjectPath(
+      makeRequest({
+        system: NEW_CLAUDE_SYSTEM.join("\n"),
+        rawHeaders: CC_SESSION_HEADERS,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `<system-reminder>\nContents of /client/workspaces/CLAUDE.md\n# Environment\n\n- Primary working directory: ${workspace}\n</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(result.path).toBe(process.cwd());
+    expect(result.openingReminderProjectPath).toBeUndefined();
+  });
+
+  it("recognizes a classless coding turn with explicit environment metadata", () => {
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          system: NEW_CLAUDE_SYSTEM.join("\n"),
+          rawHeaders: CC_SESSION_HEADERS,
+          tools: [{ name: "read", description: "Read", inputSchema: {} }],
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: environmentWorkspaceReminder(workspace) },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps explicit auxiliary requests as passthrough despite copied environment metadata", () => {
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          system: NEW_CLAUDE_SYSTEM.join("\n"),
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-claude-code-request-class": "auxiliary",
+          },
+          tools: [{ name: "read", description: "Read", inputSchema: {} }],
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: environmentWorkspaceReminder(workspace) },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("preserves complete explicit environment paths", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(
+          "/client/workspaces/my app",
+          "/client/workspaces/日本語",
+          "/client/workspaces/app/.claude/worktrees/feature",
+          "/client/workspaces/my (nested (workspace))",
+        ),
+        (path) => {
+          const result = getRequestProjectPath(
+            makeRequest({
+              rawHeaders: CC_SESSION_HEADERS,
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: environmentWorkspaceReminder(path) },
+                  ],
+                },
+              ],
+            }),
+          );
+          expect(result.path).toBe(path);
+          expect(result.openingReminderProjectPath).toBe(path);
+        },
+      ),
+    );
+  });
+
+  it.each([
+    "relative/project",
+    "C:relative",
+    "/client/invalid\u0000project",
+    "/client/../other",
+    "/client//other",
+    "/__lore_unattributed__/forged",
+    `/client/${"x".repeat(1024)}`,
+    "/client/invalid\u2028project",
+  ])("rejects malformed explicit environment metadata (%s)", (path) => {
+    expect(() =>
+      getRequestProjectPath(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS, "x-lore-project": workspace },
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: environmentWorkspaceReminder(path) },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toThrow("Conflicting project paths");
+  });
+
+  it.each(["header", "system", "duplicate"])(
+    "rejects contradictory explicit environment metadata (%s)",
+    (source) => {
+      let reminder = environmentWorkspaceReminder(workspace);
+      if (source === "duplicate")
+        reminder = reminder.replace(
+          "- Platform: linux",
+          "- Primary working directory: /client/workspaces/two",
+        );
+      expect(() =>
+        getRequestProjectPath(
+          makeRequest({
+            system:
+              source === "system"
+                ? "Working directory: /client/workspaces/two"
+                : "",
+            rawHeaders: {
+              ...CC_SESSION_HEADERS,
+              "x-lore-project":
+                source === "header" ? "/client/workspaces/two" : "",
+            },
+            messages: [
+              { role: "user", content: [{ type: "text", text: reminder }] },
+            ],
+          }),
+        ),
+      ).toThrow("Conflicting project paths");
+    },
+  );
+
+  it.each([
+    "```\n# Environment\n\n- Primary working directory: /client/workspaces/one\n```",
+    "    # Environment\n\n- Primary working directory: /client/workspaces/one",
+  ])("ignores quoted or indented environment examples (%s)", (example) => {
+    const result = getRequestProjectPath(
+      makeRequest({
+        rawHeaders: CC_SESSION_HEADERS,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `<system-reminder>\n${example}\n</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(result.source).toBe("cwd");
+    expect(result.openingReminderProjectPath).toBeUndefined();
+  });
+
+  it.each([
+    String.raw`C:\projects\example`,
+    String.raw`\\server\share\example`,
+  ])(
+    "validates Windows environment syntax without minting a POSIX owner (%s)",
+    (path) => {
+      const result = getRequestProjectPath(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS, "x-lore-project": workspace },
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: environmentWorkspaceReminder(path) },
+              ],
+            },
+          ],
+        }),
+      );
+      expect(result).toMatchObject({ path: workspace, source: "header" });
+      expect(result.openingReminderProjectPath).toBeUndefined();
+    },
+  );
+});
 
 describe("hasClaudeCodeCodingPrompt", () => {
   test("false when only the billing header is present (no coding-prompt marker)", () => {
@@ -622,6 +879,10 @@ describe("isClaudeCodeSideChannel", () => {
                     content: [
                       {
                         type: "text",
+                        text: environmentWorkspaceReminder(path),
+                      },
+                      {
+                        type: "text",
                         text: `<system-reminder>\n${marker} ${path}/${file}.md${suffix}\n</system-reminder>`,
                       },
                     ],
@@ -646,14 +907,18 @@ describe("isClaudeCodeSideChannel", () => {
         const reminder = `<system-reminder>\nInstructions from: ${realProject ?? "/home/dev/.claude"}/CLAUDE.md\nExample configuration:\n${fence}markdown\nInstructions from: /client/projects/quoted/CLAUDE.md\n${fence}\n</system-reminder>`;
         const result = getRequestProjectPath(
           makeRequest({
-            rawHeaders: { ...CC_SESSION_HEADERS },
+            rawHeaders: {
+              ...CC_SESSION_HEADERS,
+              "x-lore-project": realProject ?? "",
+            },
             messages: [
               { role: "user", content: [{ type: "text", text: reminder }] },
             ],
           }),
         );
-        expect(result.source).toBe(realProject ? "inferred" : "cwd");
-        expect(result.openingReminderProjectPath).toBe(realProject);
+        expect(result.source).toBe(realProject ? "header" : "cwd");
+        if (realProject) expect(result.path).toBe(realProject);
+        expect(result.openingReminderProjectPath).toBeUndefined();
       }
     },
   );
@@ -857,7 +1122,7 @@ describe("isClaudeCodeSideChannel", () => {
             content: [
               {
                 type: "text",
-                text: `<system-reminder>Instructions from: ${reminderPath}/CLAUDE.md</system-reminder>`,
+                text: environmentWorkspaceReminder(reminderPath),
               },
             ],
           },
@@ -945,13 +1210,16 @@ Instructions from: /client/projects/two/CLAUDE.md
     expect(
       getRequestProjectPath(
         makeRequest({
-          rawHeaders: { ...CC_SESSION_HEADERS },
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-lore-project": "/client/projects/one",
+          },
           messages: [
             { role: "user", content: [{ type: "text", text: reminder }] },
           ],
         }),
       ),
-    ).toMatchObject({ path: "/client/projects/one", source: "inferred" });
+    ).toMatchObject({ path: "/client/projects/one", source: "header" });
   });
 
   test("nested project instructions agree with the project header", () => {
@@ -982,13 +1250,16 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     expect(
       getRequestProjectPath(
         makeRequest({
-          rawHeaders: { ...CC_SESSION_HEADERS },
+          rawHeaders: {
+            ...CC_SESSION_HEADERS,
+            "x-lore-project": "/client/projects/app",
+          },
           messages: [
             { role: "user", content: [{ type: "text", text: reminder }] },
           ],
         }),
       ),
-    ).toMatchObject({ path: "/client/projects/app", source: "inferred" });
+    ).toMatchObject({ path: "/client/projects/app", source: "header" });
   });
 
   test("a reminder cannot claim another session's synthetic project bucket", () => {
@@ -1173,6 +1444,151 @@ describe("handleRequest — Claude Code side-channel routing", () => {
     return harness?.teardown();
   });
 
+  it.each(["conflicting", "duplicate", "malformed"])(
+    "environment workspace provenance rejects invalid ingress before memory access (%s)",
+    async (kind) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [
+          makeFixtureEntry({
+            seq: 0,
+            requestMessages: [],
+            responseText: "Unexpected upstream attempt",
+          }),
+        ],
+      });
+      let reminder = environmentWorkspaceReminder(
+        kind === "malformed"
+          ? "/client/invalid\u0000project"
+          : "/client/workspaces/one",
+      );
+      if (kind === "duplicate")
+        reminder = reminder.replace(
+          "- Platform: linux",
+          "- Primary working directory: /client/workspaces/two",
+        );
+      const response = await harness.chat(
+        newClaudeCodeBody(reminder),
+        "test-key",
+        {
+          ...CC_SESSION_HEADERS,
+          "x-claude-code-request-class": "main",
+          "x-lore-project":
+            kind === "conflicting" ? "/client/workspaces/two" : "",
+          "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+        },
+      );
+      expect(response.status).toBe(400);
+      await response.text();
+      expect(harness.upstreamBodies()).toHaveLength(0);
+      expect(harness.queryDB("SELECT session_id FROM session_state")).toEqual(
+        [],
+      );
+      expect(
+        harness.queryDB("SELECT session_id FROM temporal_messages"),
+      ).toEqual([]);
+    },
+  );
+
+  it.each(["environment", "file-with-header", "file-without-header"])(
+    "environment workspace provenance isolates sibling sessions (%s)",
+    async (source) => {
+      harness = await createHarness({
+        configOverrides: {
+          remoteGateway: true,
+          gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        },
+        fixtures: [0, 1].map((seq) =>
+          makeFixtureEntry({
+            seq,
+            requestMessages: [],
+            responseText: "Workspace reply",
+          }),
+        ),
+      });
+      withTenant(
+        credentialTenantFingerprint({ scheme: "api-key", value: "test-key" }),
+        () => {
+          for (const project of ["ancestor", "one", "two"]) {
+            ltm.create({
+              projectPath:
+                project === "ancestor"
+                  ? "/client/workspaces"
+                  : `/client/workspaces/${project}`,
+              scope: "project",
+              category: "preference",
+              title: `Environment owner ${project}`,
+              content: `private-environment-owner-${project}`,
+            });
+          }
+        },
+      );
+      for (const [index, project] of ["one", "two"].entries()) {
+        const path = `/client/workspaces/${project}`;
+        const files =
+          "<system-reminder>\nContents of /client/workspaces/CLAUDE.md\nShared ancestor context.\n</system-reminder>";
+        const body = newClaudeCodeBody();
+        body.messages = [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  source === "environment"
+                    ? environmentWorkspaceReminder(path)
+                    : files,
+              },
+              { type: "text", text: files },
+              { type: "text", text: "Continue coding." },
+            ],
+          },
+        ];
+        const response = await harness.chat(body, "test-key", {
+          ...CC_SESSION_HEADERS,
+          "x-claude-code-session-id": `environment-owner-${index}`,
+          "x-claude-code-request-class": "main",
+          "x-lore-project": source === "file-with-header" ? path : "",
+          "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+        });
+        expect(response.status).toBe(200);
+        await response.text();
+        const forwarded = harness.upstreamBodies()[index];
+        expect(forwarded.includes("private-environment-owner-ancestor")).toBe(
+          false,
+        );
+        expect(forwarded.includes(`private-environment-owner-${project}`)).toBe(
+          source !== "file-without-header",
+        );
+        expect(
+          forwarded.includes(
+            `private-environment-owner-${project === "one" ? "two" : "one"}`,
+          ),
+        ).toBe(false);
+      }
+      const bindings = harness.queryDB<{ project_path: string }>(
+        "SELECT project_path FROM session_state",
+      );
+      expect(bindings).toHaveLength(2);
+      if (source === "file-without-header") {
+        expect(new Set(bindings.map((row) => row.project_path)).size).toBe(2);
+        for (const row of bindings)
+          expect(row.project_path).toMatch(/^\/__lore_unattributed__\//);
+      } else {
+        expect(bindings).toEqual(
+          expect.arrayContaining([
+            { project_path: "/client/workspaces/one" },
+            { project_path: "/client/workspaces/two" },
+          ]),
+        );
+      }
+      expect(harness.upstreamBodies()).toHaveLength(2);
+    },
+  );
+
   it.each(NON_WORKSPACE_INSTRUCTION_FILES)(
     "non-workspace instruction files reach upstream without selecting body claims (%s)",
     async (file) => {
@@ -1248,7 +1664,7 @@ describe("handleRequest — Claude Code side-channel routing", () => {
     "/client/projects/日本語",
     "/client/projects/app/.claude/worktrees/feature",
   ])(
-    "rejects an existing session's unsupported reminder project switch to %s",
+    "rejects an existing session's conflicting environment project switch to %s",
     async (nextPath) => {
       harness = await createHarness({
         configOverrides: {
@@ -1282,9 +1698,7 @@ describe("handleRequest — Claude Code side-channel routing", () => {
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       };
       const initial = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         headers,
       );
@@ -1295,9 +1709,7 @@ describe("handleRequest — Claude Code side-channel routing", () => {
       );
       for (const projectHeader of ["", "/client/projects/one"]) {
         const response = await harness.chat(
-          newClaudeCodeBody(
-            `<system-reminder>Contents of ${nextPath}/CLAUDE.md</system-reminder>`,
-          ),
+          newClaudeCodeBody(environmentWorkspaceReminder(nextPath)),
           "test-key",
           { ...headers, "x-lore-project": projectHeader },
         );
@@ -1357,9 +1769,10 @@ describe("handleRequest — Claude Code side-channel routing", () => {
     expect(
       harness.upstreamBodies()[0].includes("private-forged-project-knowledge"),
     ).toBe(false);
-    expect(harness.queryDB("SELECT project_path FROM session_state")).toEqual([
-      { project_path: "/client/projects/my app" },
-    ]);
+    const [state] = harness.queryDB<{ project_path: string }>(
+      "SELECT project_path FROM session_state",
+    );
+    expect(state.project_path).toMatch(/^\/__lore_unattributed__\//);
   });
 
   it("stores an explicitly classified main turn even when legacy meta heuristics would match", async () => {
@@ -1590,7 +2003,7 @@ Instructions from: /client/projects/${project}/CLAUDE.md
         },
       );
       const request = newClaudeCodeBody(
-        `<system-reminder>Instructions from: ${reminderPath}/CLAUDE.md</system-reminder>`,
+        environmentWorkspaceReminder(reminderPath),
       );
       request.system = `You are Claude Code.\nWorking directory: ${path}\nFollow the coding instructions.`;
       const response = await harness.chat(request, "test-key", {
@@ -1702,7 +2115,11 @@ Instructions from: /client/projects/app/CLAUDE.md
 Instructions from: /client/projects/app/src/CLAUDE.md
 </system-reminder>`),
       "test-key",
-      { ...CC_SESSION_HEADERS, "x-lore-project": "/client/projects/app" },
+      {
+        ...CC_SESSION_HEADERS,
+        "x-lore-project": "/client/projects/app",
+        "x-claude-code-request-class": "main",
+      },
     );
     expect(response.status).toBe(200);
     await response.text();
@@ -2052,9 +2469,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "x-lore-project": "/client/projects/app",
     };
     const first = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/app/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/app")),
       "test-key",
       headers,
     );
@@ -2064,7 +2479,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "SELECT COUNT(*) AS n FROM temporal_messages",
     );
     const secondBody = newClaudeCodeBody(
-      "<system-reminder>Contents of /client/projects/app/CLAUDE.md</system-reminder>",
+      environmentWorkspaceReminder("/client/projects/app"),
     );
     secondBody.messages = [
       ...(secondBody.messages as Array<Record<string, unknown>>),
@@ -2073,7 +2488,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         content: [
           {
             type: "text",
-            text: "<system-reminder>Contents of /client/projects/app/other/CLAUDE.md</system-reminder>",
+            text: environmentWorkspaceReminder("/client/projects/app/other"),
           },
         ],
       },
@@ -2111,9 +2526,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       };
       const initial = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         { ...headers, "x-lore-project": "/client/projects/one" },
       );
@@ -2143,7 +2556,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       try {
         await waiting;
         const slashBody = newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+          environmentWorkspaceReminder("/client/projects/one"),
         );
         slashBody.messages = [
           ...(slashBody.messages as Array<Record<string, unknown>>),
@@ -2218,7 +2631,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       ).toEqual([{ project_path: workspace, project_path_provisional: 1 }]);
       const confident = await harness.chat(
         newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/different/CLAUDE.md</system-reminder>",
+          environmentWorkspaceReminder("/client/projects/different"),
         ),
         "test-key",
         headers,
@@ -2417,8 +2830,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "SELECT project_path FROM session_state",
       );
       expect(state.project_path).not.toBe("/client/projects/foreign");
-      if (root === "/client/projects/one")
-        expect(state.project_path).toBe(root);
+      expect(state.project_path).toMatch(/^\/__lore_unattributed__\//);
     },
   );
 
@@ -2445,16 +2857,14 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "x-lore-project": "",
       };
       const initial = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         headers,
       );
       expect(initial.status).toBe(200);
       await initial.text();
       const body = newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>",
+        environmentWorkspaceReminder("/client/projects/alias"),
       );
       if (slash)
         body.messages = [
@@ -2492,13 +2902,12 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "x-lore-project": "",
       };
       const initialBody = newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
+        environmentWorkspaceReminder("/client/projects/one"),
       );
       const initial = await harness.chat(initialBody, "test-key", headers);
       expect(initial.status).toBe(200);
       await initial.text();
-      const reminder =
-        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>";
+      const reminder = environmentWorkspaceReminder("/client/projects/alias");
       const body =
         source === "history" ? initialBody : newClaudeCodeBody(reminder);
       body.messages = [
@@ -2576,9 +2985,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       };
       const first = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md\nReal workspace instructions.</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         headers,
       );
@@ -2588,7 +2995,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "private-compaction-owner-one",
       );
       const body = newClaudeCodeBody(
-        `<system-reminder>Instructions from: /client/projects/${project}/CLAUDE.md\nReal workspace instructions.</system-reminder>`,
+        environmentWorkspaceReminder(`/client/projects/${project}`),
       );
       body.system =
         "You are an anchored context summarization assistant for coding sessions.";
@@ -2660,7 +3067,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
           content: `private-queued-compaction-owner-${name}`,
         });
       const reminder = (name: string) =>
-        `<system-reminder>Instructions from: /client/projects/${name}/CLAUDE.md\nReal workspace instructions.</system-reminder>`;
+        environmentWorkspaceReminder(`/client/projects/${name}`);
       const headers = {
         ...CC_SESSION_HEADERS,
         "x-lore-project": "",
@@ -2849,9 +3256,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "x-lore-project": "",
     };
     const codingBody = () =>
-      newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-      );
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one"));
     const initial = await harness.chat(codingBody(), "test-key", headers);
     expect(initial.status).toBe(200);
     await initial.text();
@@ -2876,7 +3281,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       const coding = harness.chat(nextBody, "test-key", headers);
       await ready;
       const body = newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/alias/CLAUDE.md</system-reminder>",
+        environmentWorkspaceReminder("/client/projects/alias"),
       );
       body.messages = [
         ...(body.messages as Array<Record<string, unknown>>),
@@ -2965,7 +3370,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     };
     const firstBody = newClaudeCodeBody(
-      "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>\nFix the chart palette colors",
+      `${environmentWorkspaceReminder("/client/projects/one")}\nFix the chart palette colors`,
     );
     const first = await harness.chat(firstBody, "test-key", headers);
     expect(first.status).toBe(200);
@@ -3067,9 +3472,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     };
     const first = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
       "test-key",
       headers,
     );
@@ -3135,9 +3538,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     ).toEqual([{ project_path: "/client/projects/two" }]);
     await harness.restartPipeline();
     const retry = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/two/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/two")),
       "test-key",
       { ...headers, "x-lore-project": "/client/projects/two" },
     );
@@ -3194,9 +3595,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       },
     );
     const initial = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
       "test-key",
       { ...headers, "x-lore-project": "/client/projects/one" },
     );
@@ -3231,9 +3630,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     try {
       await waiting;
       const secondResponse = harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Contents of /client/projects/one/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         { ...headers, "x-lore-project": "/client/projects/one" },
       );
@@ -3287,9 +3684,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     };
     const first = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
       "test-key",
       headers,
     );
@@ -3299,7 +3694,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       "SELECT COUNT(*) AS n FROM temporal_messages",
     );
     const secondBody = newClaudeCodeBody(
-      "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
+      environmentWorkspaceReminder("/client/projects/one"),
     );
     secondBody.messages = [
       ...(secondBody.messages as Array<Record<string, unknown>>),
@@ -3308,7 +3703,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         content: [
           {
             type: "text",
-            text: "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
+            text: environmentWorkspaceReminder("/client/projects/two"),
           },
         ],
       },
@@ -3367,9 +3762,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       };
       const first = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
         "test-key",
         headers,
       );
@@ -3382,9 +3775,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
         "SELECT COUNT(*) AS n FROM temporal_messages",
       );
       const second = await harness.chat(
-        newClaudeCodeBody(
-          "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
-        ),
+        newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/two")),
         "test-key",
         { ...headers, "x-lore-project": secondProject },
       );
@@ -3419,7 +3810,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       ],
     });
     const firstBody = newClaudeCodeBody(
-      "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
+      environmentWorkspaceReminder("/client/projects/one"),
     );
     const headers = { ...CC_SESSION_HEADERS, "x-lore-project": "" };
     const first = await harness.chat(firstBody, "test-key", headers);
@@ -3436,7 +3827,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
               { type: "text", text: "Follow up" },
               {
                 type: "text",
-                text: "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
+                text: environmentWorkspaceReminder("/client/projects/two"),
               },
             ],
           },
@@ -3471,7 +3862,7 @@ Instructions from: /client/projects/app/src/CLAUDE.md
       ],
     });
     const firstBody = newClaudeCodeBody(
-      "<system-reminder>Instructions from: /client/projects/app/CLAUDE.md</system-reminder>",
+      environmentWorkspaceReminder("/client/projects/app"),
     );
     const headers = {
       ...CC_SESSION_HEADERS,
@@ -3524,16 +3915,14 @@ Instructions from: /client/projects/app/src/CLAUDE.md
     });
     const headers = { ...CC_SESSION_HEADERS, "x-lore-project": "" };
     const first = await harness.chat(
-      newClaudeCodeBody(
-        "<system-reminder>Instructions from: /client/projects/one/CLAUDE.md</system-reminder>",
-      ),
+      newClaudeCodeBody(environmentWorkspaceReminder("/client/projects/one")),
       "test-key",
       headers,
     );
     expect(first.status).toBe(200);
     await first.text();
     const commandBody = newClaudeCodeBody(
-      "<system-reminder>Instructions from: /client/projects/two/CLAUDE.md</system-reminder>",
+      environmentWorkspaceReminder("/client/projects/two"),
     );
     commandBody.messages = [
       ...(commandBody.messages as Array<Record<string, unknown>>),
