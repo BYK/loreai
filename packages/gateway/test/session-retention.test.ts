@@ -34,6 +34,8 @@ import { startIdleScheduler } from "../src/idle";
 import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const HOUR = 3_600_000;
+// Keep retention timing independent of the checkout's unrelated instruction memory.
+const RETENTION_PROJECT = "/test/session-retention";
 const config = () => ({
   ...loadConfig(),
   remoteGateway: false,
@@ -63,7 +65,7 @@ function request(header = "retention-session"): GatewayRequest {
       authorization: "Bearer retention-test-key",
       "x-lore-agent": "coder",
       "x-lore-session-id": header,
-      "x-lore-project": process.cwd(),
+      "x-lore-project": RETENTION_PROJECT,
       "x-lore-provider": "openai",
       "x-lore-upstream-url": "https://api.openai.com/v1",
     },
@@ -111,14 +113,15 @@ function toolResponse() {
   );
 }
 async function startSession() {
-  expect(await (await handleRequest(request(), config())).text()).toContain(
-    "call_retention",
-  );
+  const response = await handleRequest(request(), config());
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain("call_retention");
   await vi.waitFor(() => expect(streamingPostResponsePendingForTest()).toBe(0));
   const state = [...getActiveSessions().values()].find(
     (s) => s.headerSessionId === "retention-session",
   );
   expect(state).toBeDefined();
+  expect(state!.projectPath).toBe(RETENTION_PROJECT);
   expect(state!.lastStopReason).toBe("tool_use");
   return state!;
 }

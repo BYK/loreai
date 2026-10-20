@@ -831,148 +831,184 @@ describe("temporal re-chunk backfill CPU throttle", () => {
     }
   });
 
-  it("admits another project's healthy history past a full failed project", async () => {
-    for (let i = 0; i < 512; i++) {
-      const id = `a-rejected-${String(i).padStart(5, "0")}`;
-      insertMsg(id, pid);
-      enqueueTemporalEmbedding(
-        id,
-        `temporal message ${id} with more than enough content to embed`,
-        "backfill",
-      );
-    }
-    embed.mockImplementation(async (texts: string[]) => {
-      if (texts.some((text) => text.includes("a-rejected-"))) {
-        throw new Error("provider refuses this project's historical content");
+  it.each([0, 1_100])(
+    "admits another project's healthy history past a full failed project (drain clock step %i ms)",
+    async (clockStep) => {
+      for (let i = 0; i < 512; i++) {
+        const id = `a-rejected-${String(i).padStart(5, "0")}`;
+        insertMsg(id, pid);
+        enqueueTemporalEmbedding(
+          id,
+          `temporal message ${id} with more than enough content to embed`,
+          "backfill",
+        );
       }
-      return texts.map(() => {
-        const result = new Float32Array(config().search.embeddings.dimensions);
-        result[0] = 1;
-        return result;
+      embed.mockImplementation(async (texts: string[]) => {
+        if (texts.some((text) => text.includes("a-rejected-"))) {
+          throw new Error("provider refuses this project's historical content");
+        }
+        return texts.map(() => {
+          const result = new Float32Array(
+            config().search.embeddings.dimensions,
+          );
+          result[0] = 1;
+          return result;
+        });
       });
-    });
-    for (let drain = 0; drain < 64; drain++) {
-      await expect(drainTemporalEmbeddingQueueOnce()).rejects.toThrow();
-    }
-    expect(
-      db()
-        .query(
-          "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE priority = 0 AND failures > 0",
-        )
-        .get(),
-    ).toEqual({ n: 512 });
+      let seedTime = Date.now();
+      const seedClock = vi
+        .spyOn(Date, "now")
+        .mockImplementation(() => seedTime);
+      const freshRows = db().query(
+        "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE project_id = ? AND failures = 0",
+      );
+      try {
+        // Due retries also consume drain turns. Establish the failed-owner state
+        // with a bounded walk rather than assuming every turn handles fresh rows.
+        for (let drain = 0; drain < 128; drain++) {
+          if ((freshRows.get(pid) as { n: number }).n === 0) break;
+          seedTime += clockStep;
+          await expect(drainTemporalEmbeddingQueueOnce()).rejects.toThrow();
+        }
+      } finally {
+        seedClock.mockRestore();
+      }
+      expect(
+        db()
+          .query(
+            "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE priority = 0 AND failures > 0",
+          )
+          .get(),
+      ).toEqual({ n: 512 });
 
-    // The healthy owner lies beyond the bounded first page of projects.
-    for (const index of Array.from({ length: 20 }, (_, i) => i)) {
-      ensureProject(`/test/another-history-owner-${index}`);
-    }
-    const otherProject = (
-      db()
-        .query("SELECT id FROM projects WHERE id != ? ORDER BY id DESC LIMIT 1")
-        .get(pid) as { id: string }
-    ).id;
-    insertMsg("z-healthy-other-project", otherProject);
-    insertMsg("z-healthy-other-project-2", otherProject);
-    const walk = backfillTemporalEmbeddings({
-      shouldPause: () => {
-        throw new Error("host idle predicate unavailable");
-      },
-    });
-    const drainHealthy = async (messageId: string): Promise<void> => {
-      // A due retry earns its own historical turn; it may fail before the
-      // freshly admitted row gets a turn.
-      for (const _attempt of [0, 1, 2, 3]) {
-        if (
+      if (clockStep > 0) {
+        expect(
+          (
+            db()
+              .query(
+                "SELECT MAX(failures) AS n FROM temporal_embedding_queue WHERE project_id = ?",
+              )
+              .get(pid) as { n: number }
+          ).n,
+        ).toBeGreaterThan(1);
+      }
+
+      // The healthy owner lies beyond the bounded first page of projects.
+      for (const index of Array.from({ length: 20 }, (_, i) => i)) {
+        ensureProject(`/test/another-history-owner-${index}`);
+      }
+      const otherProject = (
+        db()
+          .query(
+            "SELECT id FROM projects WHERE id != ? ORDER BY id DESC LIMIT 1",
+          )
+          .get(pid) as { id: string }
+      ).id;
+      insertMsg("z-healthy-other-project", otherProject);
+      insertMsg("z-healthy-other-project-2", otherProject);
+      const walk = backfillTemporalEmbeddings({
+        shouldPause: () => {
+          throw new Error("host idle predicate unavailable");
+        },
+      });
+      const drainHealthy = async (messageId: string): Promise<void> => {
+        // A due retry earns its own historical turn; it may fail before the
+        // freshly admitted row gets a turn.
+        for (const _attempt of [0, 1, 2, 3]) {
+          if (
+            db()
+              .query(
+                "SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?",
+              )
+              .get(messageId) === null
+          )
+            break;
+          await drainTemporalEmbeddingQueueOnce().catch(() => 0);
+        }
+        expect(
           db()
             .query(
               "SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?",
             )
-            .get(messageId) === null
-        )
-          break;
-        await drainTemporalEmbeddingQueueOnce().catch(() => 0);
-      }
-      expect(
-        db()
-          .query("SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?")
-          .get(messageId),
-      ).toBeNull();
-    };
-    try {
-      await vi.waitFor(
-        () => {
-          expect(
-            db()
-              .query(
-                "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'z-healthy-other-project'",
-              )
-              .get(),
-          ).not.toBeNull();
-        },
-        { timeout: 8_000 },
-      );
-      await drainHealthy("z-healthy-other-project");
-      expect(
-        db()
-          .query(
-            "SELECT 1 FROM temporal_vec WHERE chunk_id = 'z-healthy-other-project#0'",
-          )
-          .get(),
-      ).not.toBeNull();
-      expect(
-        db()
-          .query(
-            "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE failures > 0",
-          )
-          .get(),
-      ).toEqual({ n: 512 });
-      await vi.waitFor(
-        () => {
-          expect(
-            db()
-              .query(
-                "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'z-healthy-other-project-2'",
-              )
-              .get(),
-          ).not.toBeNull();
-        },
-        { timeout: 8_000 },
-      );
-      await drainHealthy("z-healthy-other-project-2");
-      expect(
-        db()
-          .query(
-            "SELECT 1 FROM temporal_vec WHERE chunk_id = 'z-healthy-other-project-2#0'",
-          )
-          .get(),
-      ).not.toBeNull();
-      expect(
-        db()
-          .query(
-            "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE failures > 0",
-          )
-          .get(),
-      ).toEqual({ n: 512 });
-      expect(getKV("lore:temporal_rechunk.done")).not.toBe("1");
+            .get(messageId),
+        ).toBeNull();
+      };
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              db()
+                .query(
+                  "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'z-healthy-other-project'",
+                )
+                .get(),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000 },
+        );
+        await drainHealthy("z-healthy-other-project");
+        expect(
+          db()
+            .query(
+              "SELECT 1 FROM temporal_vec WHERE chunk_id = 'z-healthy-other-project#0'",
+            )
+            .get(),
+        ).not.toBeNull();
+        expect(
+          db()
+            .query(
+              "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE failures > 0",
+            )
+            .get(),
+        ).toEqual({ n: 512 });
+        await vi.waitFor(
+          () => {
+            expect(
+              db()
+                .query(
+                  "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'z-healthy-other-project-2'",
+                )
+                .get(),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000 },
+        );
+        await drainHealthy("z-healthy-other-project-2");
+        expect(
+          db()
+            .query(
+              "SELECT 1 FROM temporal_vec WHERE chunk_id = 'z-healthy-other-project-2#0'",
+            )
+            .get(),
+        ).not.toBeNull();
+        expect(
+          db()
+            .query(
+              "SELECT COUNT(*) AS n FROM temporal_embedding_queue WHERE failures > 0",
+            )
+            .get(),
+        ).toEqual({ n: 512 });
+        expect(getKV("lore:temporal_rechunk.done")).not.toBe("1");
 
-      // Once the failed owner leaves the corpus, the primary cursor catches up
-      // without repeating the fair-ahead rows that were already embedded.
-      db().query("DELETE FROM temporal_embedding_queue").run();
-      db()
-        .query("DELETE FROM temporal_messages WHERE id LIKE 'a-rejected-%'")
-        .run();
-      await expect(walk).resolves.toBe(2);
-      expect(getKV("lore:temporal_rechunk.done")).toBe("1");
-      expect(
-        embed.mock.calls
-          .flatMap(([texts]) => texts as string[])
-          .filter((text) => text.includes("z-healthy-other-project")),
-      ).toHaveLength(2);
-    } finally {
-      resetTemporalRechunkProgress();
-      await walk;
-    }
-  });
+        // Once the failed owner leaves the corpus, the primary cursor catches up
+        // without repeating the fair-ahead rows that were already embedded.
+        db().query("DELETE FROM temporal_embedding_queue").run();
+        db()
+          .query("DELETE FROM temporal_messages WHERE id LIKE 'a-rejected-%'")
+          .run();
+        await expect(walk).resolves.toBe(2);
+        expect(getKV("lore:temporal_rechunk.done")).toBe("1");
+        expect(
+          embed.mock.calls
+            .flatMap(([texts]) => texts as string[])
+            .filter((text) => text.includes("z-healthy-other-project")),
+        ).toHaveLength(2);
+      } finally {
+        resetTemporalRechunkProgress();
+        await walk;
+      }
+    },
+  );
 
   it("admits the next owner's history when it sorts before the failed queue owner", async () => {
     for (const index of Array.from({ length: 512 }, (_, i) => i)) {

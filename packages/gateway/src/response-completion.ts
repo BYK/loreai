@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /** Separate body consumption from the downstream HTTP response's finish event. */
 export interface ResponseCompletionCallbacks {
   /** The response body reached EOF; the HTTP response may still be flushing. */
@@ -5,6 +7,18 @@ export interface ResponseCompletionCallbacks {
   onDiscard?: () => void;
   /** Node confirmed the downstream HTTP response finished successfully. */
   onResponseFinished?: () => void;
+}
+
+const nodeResponseFinishLifecycle = new AsyncLocalStorage<boolean>();
+
+/** Mark work invoked by the node:http bridge, which can observe `finish`. */
+export function withNodeResponseFinishLifecycle<T>(operation: () => T): T {
+  return nodeResponseFinishLifecycle.run(true, operation);
+}
+
+/** Direct pipeline callers have no socket-level finish event to wait for. */
+export function hasNodeResponseFinishLifecycle(): boolean {
+  return nodeResponseFinishLifecycle.getStore() === true;
 }
 
 export const responseCompletionCallbacks = new WeakMap<

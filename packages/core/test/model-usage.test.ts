@@ -318,29 +318,33 @@ describe("buildDailyModelUsage", () => {
     { timeout: 60_000 },
     async () => {
       // Seed MAX_DAILY_CELLS + 1 distinct (day, model) cells in one
-      // transaction: ~549 days x 365 models, all valid.
+      // atomic statement: ~549 days x 365 models, all valid.
       const base = Date.UTC(2024, 0, 1);
+      // One atomic statement retains the real schema/triggers and oversized
+      // boundary without spending the assertion's deadline on 200k JS calls.
       db()
         .query(
-          `WITH RECURSIVE generated(i) AS (
-             SELECT 0
-             UNION ALL
-             SELECT i + 1 FROM generated WHERE i < ?
-           )
-           INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
-           SELECT
-             'cap-' || i,
-             ?,
-             'cap-s' || (i % 64),
-             'assistant',
-             'c',
-             1,
-             0,
-             ? + (i / 365) * 86400000 + (i % 365) * 60000,
-             '{"providerID":"p","modelID":"m' || (i % 365) || '"}'
-           FROM generated`,
+          `WITH RECURSIVE cells(i) AS (
+           VALUES (0)
+           UNION ALL SELECT i + 1 FROM cells WHERE i < ?
+         )
+         INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         SELECT 'cap-' || i, ?, 'cap-s' || (i % 64), 'assistant', 'c', 1, 0,
+                ? + (i / 365) * 86400000 + (i % 365) * 60000,
+                json_object('providerID', 'p', 'modelID', 'm' || (i % 365))
+         FROM cells`,
         )
         .run(MAX_DAILY_CELLS, pid, base);
+      expect(
+        db()
+          .query(
+            `SELECT COUNT(*) AS row_count,
+                  COUNT(DISTINCT date(created_at / 1000, 'unixepoch') || char(31) ||
+                    json_extract(metadata, '$.modelID')) AS cells
+           FROM temporal_messages WHERE project_id = ?`,
+          )
+          .get(pid),
+      ).toEqual({ row_count: MAX_DAILY_CELLS + 1, cells: MAX_DAILY_CELLS + 1 });
       await expect(buildDailyModelUsage()).rejects.toThrow(
         ModelUsageLimitError,
       );

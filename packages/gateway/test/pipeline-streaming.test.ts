@@ -120,7 +120,12 @@ import {
 import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
 import { translateAnthropicStreamToResponses } from "../src/stream/openai-responses";
 import { translateAnthropicStreamToGemini } from "../src/stream/gemini";
-import { buildRecallMarker, recallStoreKey } from "../src/recall";
+import {
+  buildRecallMarker,
+  cleanupRecallStore,
+  expandRecallMarkers,
+  recallStoreKey,
+} from "../src/recall";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import {
   makeConversationFixtures,
@@ -2479,6 +2484,7 @@ describe("foreground subscription pacing", () => {
       });
       const response = await pending;
       expect(response.status).toBe(200);
+      expect(releaseQuotaCapture).toBeUndefined();
       upstreamResponse.value?.headers.set(
         "x-ratelimit-remaining-requests",
         "0",
@@ -2490,15 +2496,20 @@ describe("foreground subscription pacing", () => {
       const firstChunk = await reader.read();
       expect(firstChunk.done).toBe(false);
       expect(quotaPersistence).not.toHaveBeenCalled();
+      expect(releaseQuotaCapture).toBeUndefined();
+      let chunk = await reader.read();
+      while (!chunk.done) chunk = await reader.read();
+      await vi.waitFor(() =>
+        expect(releaseQuotaCapture).toBeTypeOf("function"),
+      );
+      // Quota capture is only scheduled after the complete client body settles.
+      expect(quotaPersistence).not.toHaveBeenCalled();
       releaseQuotaCapture?.();
       releaseQuotaCapture = undefined;
       await _waitForProviderQuotaCapturesForTest();
-      expect(quotaPersistence).toHaveBeenCalled();
       expect(quotaPersistence).toHaveBeenCalledWith(
         expect.objectContaining({ remaining: 59 }),
       );
-      let chunk = await reader.read();
-      while (!chunk.done) chunk = await reader.read();
     } finally {
       caller.abort(new DOMException("test finished", "AbortError"));
       const response = await pending?.catch(() => undefined);
@@ -3634,8 +3645,29 @@ describe("Pipeline — streaming responses", () => {
     } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
+      // Retire this fixture's large committed corpus before later tests share
+      // the file-level DB; resetting sessions alone does not retire knowledge.
+      const removeFixtureKnowledge = db().query(
+        "DELETE FROM knowledge WHERE project_id = ?",
+      );
+      for (const path of [projectPath, otherPath]) {
+        const id = core.projectId(path);
+        if (id) removeFixtureKnowledge.run(id);
+      }
       core.embedding._restoreProvider(savedProvider);
     }
+    // This large corpus belongs to one fixture, not to later session/latency cases.
+    const fixtureProject = core.projectId(projectPath);
+    const foreignFixtureProject = core.projectId(otherPath);
+    if (!fixtureProject || !foreignFixtureProject)
+      throw new Error("Fixture projects were not created");
+    expect(
+      db()
+        .query(
+          "SELECT COUNT(*) AS count FROM knowledge WHERE project_id IN (?, ?)",
+        )
+        .get(fixtureProject, foreignFixtureProject),
+    ).toEqual({ count: 0 });
   });
 
   it("does not reassign an earlier full bullet to a later selected entry", async () => {
@@ -7292,6 +7324,168 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it.each(["distinct", "same", "canonical-alias", "rollback"] as const)(
+    "retires live recall after provisional header migration without restarting (%s)",
+    async (transition) => {
+      const alias = `live-recall-migration-alias-${transition}`;
+      const canonical = `live-recall-migration-canonical-${transition}`;
+      const projectA = `/test/provisional-live-recall/${transition}/project-a`;
+      const projectB =
+        transition === "same"
+          ? projectA
+          : `/test/provisional-live-recall/${transition}/project-b`;
+      const secret = "private-provisional-live-recall-knowledge";
+      const query =
+        "one two three four five six seven eight nine migration terms";
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(projectA);
+      const bodies: unknown[] = [];
+      let restoreStorage = (): void => {};
+      if (transition === "canonical-alias") {
+        const first = core.ensureProject(projectA);
+        core.mergeProjectInternal(core.ensureProject(projectB), first);
+        expect(core.projectId(projectB)).toBe(first);
+      }
+      ltm.create({
+        projectPath: projectA,
+        category: "gotcha",
+        title: "Private provisional recall migration terms",
+        content: `${query} ${secret}`,
+        scope: "project",
+        crossProject: false,
+      });
+      setUpstreamInterceptor(async (body) => {
+        bodies.push(body);
+        return new Response(
+          bodies.length === 1
+            ? recallResponsesSSE("resp_live_recall_migration", query)
+            : validResponsesSSE(
+                `resp_live_recall_migration_${bodies.length}`,
+                "answer",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      try {
+        const initial = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias, "x-lore-project": "" },
+        });
+        const originalMessages = structuredClone(initial.messages);
+        const first = await handleRequest(initial, loadLocalConfig());
+        expect(first.status).toBe(200);
+        const wire = await first.text();
+        await vi.waitFor(() => {
+          const state = [...getActiveSessions().values()].find(
+            (candidate) => candidate.headerSessionId === alias,
+          );
+          expect(state?.recallStore.size).toBe(1);
+        });
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === alias,
+        )!;
+        expect(state.projectPath).toBe(projectA);
+        expect(state.projectPathProvisional).toBe(true);
+        expect(JSON.stringify([...state.recallStore.values()])).toContain(
+          secret,
+        );
+        // Responses emits the recall marker and final answer as separate native
+        // text parts. Preserve those boundaries when rebuilding client history.
+        const textParts = new Map<string, string>();
+        for (const line of wire.split("\n")) {
+          if (!line.startsWith("data: {")) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type !== "response.output_text.delta") continue;
+          const key = `${event.item_id}:${event.content_index}`;
+          textParts.set(key, (textParts.get(key) ?? "") + event.delta);
+        }
+        const assistantContent = [...textParts.values()].map((text) => ({
+          type: "text" as const,
+          text,
+        }));
+        expect(JSON.stringify(assistantContent)).toContain("<!-- lore-recall:");
+        const history: GatewayRequest["messages"] = [
+          ...originalMessages,
+          { role: "assistant", content: assistantContent },
+          {
+            role: "user",
+            content: [{ type: "text", text: "continue after migration" }],
+          },
+        ];
+        // Prove this client-visible anchor and its real transcript prefix can
+        // replay A's recall, rather than passing through orphan-anchor cleanup.
+        const control = makeResponsesRequest({
+          sessionHeaders: {},
+          messages: structuredClone(history),
+        });
+        const controlStore = new Map(state.recallStore);
+        cleanupRecallStore(control, controlStore);
+        expect(controlStore.size).toBe(1);
+        expandRecallMarkers(control, controlStore);
+        expect(JSON.stringify(control.messages)).toContain(secret);
+
+        if (transition === "rollback") {
+          const fault = vi.spyOn(temporal, "store").mockImplementation(() => {
+            throw new Error("synthetic provisional commit failure");
+          });
+          restoreStorage = () => {
+            fault.mockRestore();
+          };
+        }
+        const migrated = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: {
+              "x-session-affinity": alias,
+              "x-lore-session-id": canonical,
+              "x-lore-project": projectB,
+            },
+          }),
+          loadLocalConfig(),
+        );
+        expect(migrated.status).toBe(200);
+        expect(await migrated.text()).toContain("event: response.completed");
+        await new Promise<void>((resolve) => {
+          scheduleStreamingPostResponseForTest(
+            state.sessionID,
+            resolve,
+            resolve,
+          );
+        });
+        restoreStorage();
+        restoreStorage = (): void => {};
+        const rolledBack = transition === "rollback";
+        expect(state.headerSessionId).toBe(rolledBack ? alias : canonical);
+        expect(state.projectPath).toBe(rolledBack ? projectA : projectB);
+        expect(loadSessionTracking(state.sessionID)?.projectPath).toBe(
+          rolledBack ? projectA : projectB,
+        );
+        if (rolledBack) expect(state.recallStore.size).toBe(1);
+        expect(getActiveSessions().get(state.sessionID)).toBe(state);
+        const continued = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: rolledBack
+              ? { "x-session-affinity": alias, "x-lore-project": projectA }
+              : { "x-lore-session-id": canonical, "x-lore-project": projectB },
+            messages: history,
+          }),
+          loadLocalConfig(),
+        );
+        expect(continued.status).toBe(200);
+        expect(await continued.text()).toContain("event: response.completed");
+        if (transition === "distinct") {
+          expect(JSON.stringify(bodies.at(-1))).not.toContain(secret);
+          expect(state.recallStore.size).toBe(0);
+        } else {
+          expect(JSON.stringify(bodies.at(-1))).toContain(secret);
+          expect(state.recallStore.size).toBe(1);
+        }
+      } finally {
+        restoreStorage();
+        cwd.mockRestore();
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
   it("accounts a successful provisional canonical migration exactly once", async () => {
     const alias = "accounted-migration-alias";
     const canonical = "accounted-migration-canonical";
@@ -9313,6 +9507,8 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("does not learn Tier-2 header evidence from failed requests", async () => {
+    // Header evidence must not depend on importing the checkout's project memory.
+    const projectPath = "/test/tier2-failed-header-evidence";
     const candidateHeader = "x-candidate-session";
     const globalHeader = "x-global-session";
     const candidateValue = "candidate-session-a";
@@ -9350,11 +9546,12 @@ describe("Pipeline — streaming responses", () => {
     ): Promise<void> => {
       const response = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders,
+          sessionHeaders: { ...sessionHeaders, "x-lore-project": projectPath },
           messages: messages(seed, number),
         }),
         loadLocalConfig(),
       );
+      if (succeeds) expect(response.status).toBe(200);
       const body = await response.text();
       expect(body).toContain(
         succeeds ? "event: response.completed" : "Gateway request failed",
@@ -9448,6 +9645,8 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("keeps failed Tier-2 promotion retries provisional until success", async () => {
+    // Keep the real preparation path, with a project owned only by this fixture.
+    const projectPath = "/test/tier2-provisional-promotion-retry";
     const headerName = "x-retry-session";
     const targetValue = "retry-session-target";
     const distinctValue = "retry-session-other";
@@ -9482,11 +9681,15 @@ describe("Pipeline — streaming responses", () => {
     ): Promise<void> => {
       const response = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: headerValue },
+          sessionHeaders: {
+            [headerName]: headerValue,
+            "x-lore-project": projectPath,
+          },
           messages: messages(seed, number),
         }),
         loadLocalConfig(),
       );
+      if (succeeds) expect(response.status).toBe(200);
       const body = await response.text();
       expect(body).toContain(
         succeeds ? "event: response.completed" : "Gateway request failed",
@@ -9528,7 +9731,10 @@ describe("Pipeline — streaming responses", () => {
       expect(store).not.toHaveBeenCalled();
 
       const slash = makeResponsesRequest({
-        sessionHeaders: { [headerName]: targetValue },
+        sessionHeaders: {
+          [headerName]: targetValue,
+          "x-lore-project": projectPath,
+        },
         messages: [
           {
             role: "user",
@@ -9546,12 +9752,16 @@ describe("Pipeline — streaming responses", () => {
       // consumes EOF and the post-response finalizer commits the turn.
       const validation = await handleRequest(
         makeResponsesRequest({
-          sessionHeaders: { [headerName]: targetValue },
+          sessionHeaders: {
+            [headerName]: targetValue,
+            "x-lore-project": projectPath,
+          },
           messages: messages("target session", 3),
         }),
         loadLocalConfig(),
       );
       expect(target?.headerSessionId).toBeUndefined();
+      expect(validation.status).toBe(200);
       expect(await validation.text()).toContain("event: response.completed");
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -10196,6 +10406,12 @@ describe("Pipeline — streaming responses", () => {
     async (route) => {
       const oldAffinity = `queued-revoked-${route}-old`;
       const newAffinity = `queued-revoked-${route}-new`;
+      // Exercise real ownership/preparation without the checkout's ambient memory.
+      const projectPath = `/test/queued-revoked-${route}`;
+      const oldHeaders = {
+        "x-session-affinity": oldAffinity,
+        "x-lore-project": projectPath,
+      };
       const history: GatewayRequest["messages"] = Array.from(
         { length: 12 },
         (_, index) => ({
@@ -10233,18 +10449,22 @@ describe("Pipeline — streaming responses", () => {
 
       try {
         const seed = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
+          sessionHeaders: oldHeaders,
           messages: [history[0]],
         });
-        await (await handleRequest(seed, loadLocalConfig())).text();
+        const seedResponse = await handleRequest(seed, loadLocalConfig());
+        expect(seedResponse.status).toBe(200);
+        await seedResponse.text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
         const setup = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
+          sessionHeaders: oldHeaders,
           messages: history,
         });
-        await (await handleRequest(setup, loadLocalConfig())).text();
+        const setupResponse = await handleRequest(setup, loadLocalConfig());
+        expect(setupResponse.status).toBe(200);
+        await setupResponse.text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
@@ -10253,7 +10473,7 @@ describe("Pipeline — streaming responses", () => {
           rotationWaitingResolve,
         );
         const rotation = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": newAffinity },
+          sessionHeaders: { ...oldHeaders, "x-session-affinity": newAffinity },
           messages: [
             ...history,
             {
@@ -10275,20 +10495,20 @@ describe("Pipeline — streaming responses", () => {
         const headers = {
           authorization: "Bearer test-key",
           "content-type": "application/json",
-          "x-lore-project": process.cwd(),
+          "x-lore-project": projectPath,
           "x-lore-provider": "openai",
           "x-lore-upstream-url": "https://api.openai.com/v1",
           "x-session-affinity": oldAffinity,
         };
         if (route === "regular") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
           });
           request.stream = false;
           queued = handleRequest(request, loadLocalConfig());
         } else if (route === "structural") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
             messages: [
               {
                 role: "user",
@@ -10306,7 +10526,7 @@ describe("Pipeline — streaming responses", () => {
           queued = handleRequest(request, loadLocalConfig());
         } else if (route === "slash") {
           const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
+            sessionHeaders: oldHeaders,
             messages: [
               {
                 role: "user",
@@ -10321,7 +10541,7 @@ describe("Pipeline — streaming responses", () => {
             new Request("http://gateway.test/v1/compact", {
               method: "POST",
               headers,
-              body: JSON.stringify({ project_path: process.cwd() }),
+              body: JSON.stringify({ project_path: projectPath }),
             }),
             loadLocalConfig(),
           );

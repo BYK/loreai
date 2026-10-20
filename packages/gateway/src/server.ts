@@ -46,6 +46,7 @@ import {
   discardResponseCompletion,
   notifyResponseCompletion,
   notifyResponseFinished,
+  withNodeResponseFinishLifecycle,
 } from "./response-completion";
 import { responseAgainstAbort } from "./abort-race";
 import {
@@ -676,13 +677,15 @@ export async function handleNodeRequest(
 
     const response = await responseAgainstAbort(
       () =>
-        Promise.resolve(
-          fetch(
-            req,
-            peerAddressForRequest
-              ? peerAddressForRequest(nodeReq)
-              : nodeReq.socket.remoteAddress,
-            nodeReq.rawHeaders,
+        withNodeResponseFinishLifecycle(() =>
+          Promise.resolve(
+            fetch(
+              req,
+              peerAddressForRequest
+                ? peerAddressForRequest(nodeReq)
+                : nodeReq.socket.remoteAddress,
+              nodeReq.rawHeaders,
+            ),
           ),
         ),
       ingressAbort.signal,

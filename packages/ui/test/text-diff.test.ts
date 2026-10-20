@@ -3,6 +3,17 @@ import fc from "fast-check";
 
 import { diffText } from "~/lib/text-diff";
 
+function diffWithFixedClock(before: string, after: string) {
+  // Reconstruction properties exercise the real diff independently of CPU
+  // scheduling. Advancing-clock controls below verify the production deadline.
+  const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+  try {
+    return diffText(before, after);
+  } finally {
+    clock.mockRestore();
+  }
+}
+
 describe("diffText", () => {
   it("marks replacements without losing whitespace or punctuation", () => {
     expect(
@@ -78,13 +89,16 @@ describe("diffText", () => {
     }
   });
 
-  it("falls back when the time budget expires", () => {
+  it.each([
+    ["old", "new"],
+    ["\t", "_🧑🏽‍💻<"],
+  ])("falls back when the time budget expires (%j → %j)", (before, after) => {
     const clock = vi
       .spyOn(Date, "now")
       .mockReturnValueOnce(0)
       .mockReturnValue(26);
     try {
-      expect(diffText("old", "new")).toBeNull();
+      expect(diffText(before, after)).toBeNull();
     } finally {
       clock.mockRestore();
     }
@@ -96,7 +110,7 @@ describe("diffText", () => {
         fc.string({ maxLength: 80 }),
         fc.string({ maxLength: 80 }),
         (before, after) => {
-          const changes = diffText(before, after)!;
+          const changes = diffWithFixedClock(before, after)!;
           expect(
             changes
               .filter((part) => part.kind !== "added")
@@ -136,7 +150,7 @@ describe("diffText", () => {
       .map((parts) => parts.join(""));
     fc.assert(
       fc.property(text, text, (before, after) => {
-        const changes = diffText(before, after)!;
+        const changes = diffWithFixedClock(before, after)!;
         expect(
           changes
             .filter((part) => part.kind !== "added")
@@ -150,7 +164,7 @@ describe("diffText", () => {
             .join(""),
         ).toBe(after);
       }),
-      { numRuns: 200 },
+      { numRuns: 200, examples: [["\t", "_🧑🏽‍💻<"]] },
     );
   });
 });
