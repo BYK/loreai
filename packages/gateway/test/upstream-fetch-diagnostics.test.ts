@@ -1,4 +1,4 @@
-import { log } from "@loreai/core";
+import { log, projectId } from "@loreai/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config";
 import {
@@ -11,6 +11,8 @@ import { upstreamFetch } from "../src/fetch";
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
 const mockUpstreamFetch = vi.mocked(upstreamFetch);
+// Transport diagnostics must reach upstream without checkout instruction memory.
+const DIAGNOSTICS_PROJECT = "/test/upstream-fetch-diagnostics";
 const silentSink = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -115,6 +117,7 @@ describe("upstream fetch diagnostics", () => {
         metadata: {},
         rawHeaders: {
           "x-lore-agent": "coder",
+          "x-lore-project": DIAGNOSTICS_PROJECT,
           "x-lore-provider": "openai",
           authorization: `Bearer ${credential}`,
         },
@@ -123,6 +126,8 @@ describe("upstream fetch diagnostics", () => {
     );
 
     expect(response.status).toBe(502);
+    expect(mockUpstreamFetch).toHaveBeenCalled();
+    expect(projectId(DIAGNOSTICS_PROJECT)).toBeDefined();
     const diagnostic = messages.find((message) =>
       message.startsWith("upstream fetch failed"),
     );

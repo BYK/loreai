@@ -1,11 +1,12 @@
 /**
  * Gateway configuration — loaded from environment variables with sensible
- * defaults. No Zod, no file-based config — minimal @loreai/core dependency
- * (only `normalizeRemoteUrl` for git URL canonicalization).
+ * defaults, workspace attribution, and tenant-scoped project identity checks.
  */
 
 import {
   normalizeRemoteUrl,
+  projectId,
+  canonicalProjectId,
   discoverWorkspaceRoot,
   GATEWAY_AUTH_HEADER,
   UNATTRIBUTED_PROJECT_PREFIX,
@@ -1189,7 +1190,9 @@ export const PROJECT_PATH_PATTERNS: RegExp[] = [
   /["']?cwd["']?\s*[:=]\s*["']?(\/[^\s"',}]+)/,
   // Working directory: /path/to/project
   // Accepts any absolute path — the "Working directory" prefix is unambiguous.
-  /[Ww]orking\s+directory[:=]\s*(\/[^\s"',]+)/,
+  // A workspace may contain spaces; the next line, not its first space, ends
+  // this structural value. Truncation would manufacture a conflicting owner.
+  /[Ww]orking[ \t]+directory[:=][ \t]*(\/[^\r\n\u2028\u2029]+)/,
   // CLAUDE.md / AGENTS.md / .lore.md file path → take the directory.
   // Accepts any absolute path — the known filename suffix is unambiguous.
   /(\/[^\s"',]+)\/(?:CLAUDE|AGENTS|\.lore)\.md/,
@@ -1215,9 +1218,9 @@ export type InferredProjectPath = { path: string; authoritative: boolean };
 /**
  * Try to extract a project path from the system prompt content.
  *
- * Claude Code includes absolute paths in its system prompt (CLAUDE.md
- * content, tool definitions, working directory references). Returns the
- * extracted path or `null` if nothing looks like a project directory.
+ * Older Claude Code prompts include absolute paths (CLAUDE.md content, tool
+ * definitions, working directory references). Returns the extracted path or
+ * `null` if nothing looks like a project directory.
  */
 export function inferProjectPathDetailed(
   systemPrompt: string,
@@ -1226,7 +1229,7 @@ export function inferProjectPathDetailed(
     const match = PROJECT_PATH_PATTERNS[i].exec(systemPrompt);
     if (match?.[1]) {
       // Strip trailing slashes for consistency
-      const path = match[1].replace(/\/+$/, "");
+      const path = match[1].trimEnd().replace(/\/+$/, "");
       if (!path) return null;
       return { path, authoritative: i < AUTHORITATIVE_PATTERN_COUNT };
     }
@@ -1238,6 +1241,174 @@ export function inferProjectPath(systemPrompt: string): string | null {
   return inferProjectPathDetailed(systemPrompt)?.path ?? null;
 }
 
+/** A client reminder does not establish which of several projects is active. */
+export class ProjectPathConflictError extends Error {
+  constructor() {
+    super("Conflicting project paths");
+    this.name = "ProjectPathConflictError";
+  }
+}
+
+/** Compare only already-established project identities in the current tenant. */
+export function sameLogicalProjectPath(
+  previous: string,
+  next: string,
+): boolean {
+  if (previous === next) return true;
+  const previousID = projectId(previous);
+  const nextID = projectId(next);
+  // A path prefix or two missing identities must never authorize a switch.
+  // Request provenance and post-wait session guards must use the same proof.
+  const owner = previousID ? canonicalProjectId(previousID) : undefined;
+  return !!owner && !!nextID && owner === canonicalProjectId(nextID);
+}
+
+function hasProjectPathControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
+function reminderHeaderEnd(value: string, end = value.length): number {
+  while (end > 0 && (value[end - 1] === " " || value[end - 1] === "\t")) end--;
+  return end;
+}
+
+/**
+ * Only the opening client Environment record can supply a working directory.
+ * Instruction files may be inherited from any ancestor, so even their first
+ * header cannot identify the active workspace. Their bodies remain opaque.
+ */
+export function inferClaudeCodeReminderProjectPath(
+  reminder: string,
+): InferredProjectPath | null {
+  const lines = reminder.split(/\r?\n/);
+  const firstLine = lines.findIndex((part) => part.trim());
+  const line = lines[firstLine];
+  if (!line) return null;
+  if (line === "# Environment") {
+    let seenDirectory = false;
+    let directory: string | undefined;
+    let metadataLength = line.length;
+    for (const field of lines.slice(firstLine + 1)) {
+      if (field.trim() && !field.startsWith("- ")) break;
+      metadataLength += field.length + 1;
+      if (metadataLength > MAX_PROJECT_PATH_LENGTH + 4096) {
+        throw new ProjectPathConflictError();
+      }
+      if (!field.trim()) continue;
+      // Only fields in the opening metadata list can supply a directory; the
+      // boundary above keeps subsequent prose and file contents opaque.
+      const marker = /^- Primary working directory:[ \t]*/.exec(field);
+      if (!marker) continue;
+      if (seenDirectory) throw new ProjectPathConflictError();
+      seenDirectory = true;
+      const rawDirectory = field.slice(marker[0].length);
+      const drive = /^[A-Za-z]:[\\/]/.test(rawDirectory);
+      const unc = /^\\\\[^\\/]+[\\/][^\\/]+[\\/]/.test(rawDirectory);
+      const normalized =
+        drive || unc ? rawDirectory.replaceAll("\\", "/") : rawDirectory;
+      const path = normalized.trimEnd().replace(/\/+$/, "");
+      if (
+        !path ||
+        (!path.startsWith("/") && !drive) ||
+        path.length > MAX_PROJECT_PATH_LENGTH ||
+        hasProjectPathControlCharacter(rawDirectory) ||
+        /[\u2028\u2029]/.test(rawDirectory) ||
+        (unc ? path.slice(2) : path).includes("//") ||
+        path.split("/").some((part) => part === "." || part === "..") ||
+        isUnattributedPath(path)
+      )
+        throw new ProjectPathConflictError();
+      // Windows syntax is valid client metadata, not a POSIX gateway identity.
+      if (!drive && !unc) directory = path;
+    }
+    return directory ? { path: directory, authoritative: true } : null;
+  }
+  // The client-generated first header bounds the file body. Never scan that
+  // body for more provenance, even for unfenced examples or ordinary prose.
+  const record = /^ {0,3}(?:Instructions from:|Contents of)[ \t]+/.exec(line);
+  if (!record) return null;
+  // Bound the complete metadata header, including padding and annotations,
+  // before parsing it. Overlapping whitespace regexes can block the event loop
+  // before a path-only length check ever runs.
+  if (line.length > MAX_PROJECT_PATH_LENGTH + 4096) {
+    throw new ProjectPathConflictError();
+  }
+  const rawValue = line.slice(record[0].length);
+  const windowsDrive = /^[A-Za-z]:[\\/]/.test(rawValue);
+  const windowsUNC = /^\\\\[^\\/]+[\\/][^\\/]+[\\/]/.test(rawValue);
+  const windowsPath = windowsDrive || windowsUNC;
+  // Normalize only for validation. Windows client paths are not POSIX gateway
+  // project identities; accepting their syntax must not invent an owner.
+  const value = windowsPath ? rawValue.replaceAll("\\", "/") : rawValue;
+  if (
+    (!value.startsWith("/") && !windowsDrive) ||
+    /[\r\n\u2028\u2029]/.test(value)
+  ) {
+    throw new ProjectPathConflictError();
+  }
+  let end = reminderHeaderEnd(value);
+  if (value[end - 1] === ":") end = reminderHeaderEnd(value, end - 1);
+  // References inside trailing metadata annotations are not instruction files.
+  // Consume balanced suffixes backwards in linear time, after the header cap;
+  // parentheses within an actual directory name remain part of the path.
+  while (value[end - 1] === ")") {
+    let depth = 0;
+    let opening = end - 1;
+    for (; opening >= 0; opening--) {
+      if (value[opening] === ")") depth++;
+      else if (value[opening] === "(" && --depth === 0) break;
+    }
+    if (
+      opening < 1 ||
+      (value[opening - 1] !== " " && value[opening - 1] !== "\t")
+    )
+      break;
+    end = reminderHeaderEnd(value, opening);
+  }
+  const files = /\/(?:CLAUDE|AGENTS|\.lore)\.md(?=[ \t(:]|$)/g;
+  const terminalSeparator = value.lastIndexOf("/", end - 1);
+  let pathEnd: number | undefined;
+  let recognizedFile = false;
+  for (const file of value.slice(0, end).matchAll(files)) {
+    // A known-looking directory is not a malformed terminal instruction file:
+    // /CLAUDE.md archive/docs/README.md must retain independent attribution.
+    if (file.index !== terminalSeparator) continue;
+    recognizedFile = true;
+    let suffix = file.index + file[0].length;
+    while (suffix < end && (value[suffix] === " " || value[suffix] === "\t"))
+      suffix++;
+    if (suffix !== end && !(value[suffix] === "(" && value[end - 1] === ")"))
+      continue;
+    // A filename inside an annotation must not create a competing path claim.
+    // Reject ambiguous headers instead of choosing a different workspace.
+    if (pathEnd !== undefined) throw new ProjectPathConflictError();
+    pathEnd = file.index;
+  }
+  // Unknown instruction files are context, not workspace provenance. Still
+  // validate their header, and do not hide a malformed recognized root file.
+  if (pathEnd === undefined && recognizedFile)
+    throw new ProjectPathConflictError();
+  const path = value.slice(0, pathEnd ?? end).replace(/\/+$/, "");
+  if (
+    !path ||
+    path.length > MAX_PROJECT_PATH_LENGTH ||
+    hasProjectPathControlCharacter(path) ||
+    (windowsUNC ? path.slice(2) : path).includes("//") ||
+    path.split("/").some((part) => part === "." || part === "..") ||
+    isUnattributedPath(path)
+  ) {
+    throw new ProjectPathConflictError();
+  }
+  // Root files, rules, global files and imports may all be shared by siblings.
+  // File location never establishes cwd, including a known root basename;
+  // preserve independent headers/system metadata or the unattributed fallback.
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // getProjectPath
 // ---------------------------------------------------------------------------
@@ -1247,6 +1418,8 @@ export type ProjectPathSource = "header" | "inferred" | "cwd";
 export type ProjectPathResult = {
   path: string;
   source: ProjectPathSource;
+  /** A qualifying opening reminder was present on this request. */
+  openingReminderProjectPath?: string;
   /** Normalized git remote URL from `X-Lore-Git-Remote` header, if provided. */
   gitRemote?: string;
   /**
@@ -1284,9 +1457,10 @@ export const isUnattributedPath = isUnattributedProjectPath;
 
 /**
  * Resolve the project path for a request. Checks in order:
- *  1. `X-Lore-Project` header (explicit override)
- *  2. `inferProjectPath(systemPrompt)` (zero-config extraction)
- *  3. `process.cwd()` (last resort fallback)
+ *  1. Authoritative system-prompt inference (overrides a stale header)
+ *  2. An explicit header, if absent or consistent with the opening reminder
+ *  3. Unambiguous Claude Code opening-reminder inference, when provided
+ *  4. `process.cwd()` (last resort fallback)
  *
  * Returns a `{ path, source }` tuple so callers can distinguish a
  * successful resolution from a cwd fallback and take corrective action
@@ -1299,6 +1473,7 @@ export const isUnattributedPath = isUnattributedProjectPath;
 export function getProjectPath(
   systemPrompt: string,
   headers: Record<string, string>,
+  openingReminder?: string | null,
 ): ProjectPathResult {
   // Extract git remote from header (independent of path resolution).
   const gitRemote = extractGitRemoteHeader(headers);
@@ -1315,6 +1490,22 @@ export function getProjectPath(
   // override a header and fall through to the cwd fallback, which never merges).
   const inferred = inferProjectPathDetailed(systemPrompt);
 
+  // A reminder never outranks an authoritative system path, but disagreement
+  // means the request's project identity is inconsistent. Validate it even when
+  // system inference would otherwise return early.
+  const reminderPath = openingReminder
+    ? inferClaudeCodeReminderProjectPath(openingReminder)
+    : null;
+  if (
+    reminderPath &&
+    (inferred?.authoritative
+      ? !sameLogicalProjectPath(inferred.path, reminderPath.path)
+      : headerPath !== undefined &&
+        !sameLogicalProjectPath(headerPath, reminderPath.path))
+  ) {
+    throw new ProjectPathConflictError();
+  }
+
   // 1. Authoritative per-request inference is the STRONGEST signal — it
   //    describes the agent's actual workspace for THIS exact request. A header
   //    is a per-client/per-environment constant that can go stale (e.g. a fixed
@@ -1328,18 +1519,45 @@ export function getProjectPath(
         source: "inferred",
         gitRemote,
         overrodeHeaderPath: headerPath,
+        ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
       };
     }
     // Header agrees with the inference, or no header was sent.
-    return { path: inferred.path, source: "inferred", gitRemote };
+    return {
+      path: inferred.path,
+      source: "inferred",
+      gitRemote,
+      ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
+    };
   }
 
-  // 2. No authoritative inference — an explicit header wins if present. This
-  //    protects legitimate clients (OpenCode/Pi plugins) that send a correct
-  //    header alongside a system prompt with no inferable working directory.
-  if (headerPath) return { path: headerPath, source: "header", gitRemote };
+  // Claude Code 2.1.289 moved the workspace marker from `system` into the
+  // opening user reminder. The reminder cannot override an explicit header,
+  // but a disagreement is unsafe: a static header could join distinct
+  // projects. Reject the request instead of trusting either lower-priority
+  // signal or rebinding the session.
+  // 2. Explicit project headers remain the preferred source for clients
+  // without a conflicting reminder (including OpenCode and Pi).
+  if (headerPath) {
+    return {
+      path: headerPath,
+      source: "header",
+      gitRemote,
+      ...(reminderPath && { openingReminderProjectPath: reminderPath.path }),
+    };
+  }
 
-  // 3. Fall back to gateway's own cwd (with workspace root discovery)
+  // 3. The reminder can identify a project only when no other signal exists.
+  if (reminderPath) {
+    return {
+      path: reminderPath.path,
+      source: "inferred",
+      gitRemote,
+      openingReminderProjectPath: reminderPath.path,
+    };
+  }
+
+  // 4. Fall back to gateway's own cwd (with workspace root discovery)
   return {
     path: discoverWorkspaceRoot(process.cwd()),
     source: "cwd",

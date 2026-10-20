@@ -2,6 +2,7 @@ import { log } from "@loreai/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config";
 import {
+  getActiveSessions,
   handleRequest,
   resetPipelineState,
   setUpstreamInterceptor,
@@ -15,6 +16,9 @@ const silentSink = {
   error: vi.fn(),
   captureException: vi.fn(),
 };
+
+// Routing-log assertions do not depend on the checkout's instruction memory.
+const ROUTING_PROJECT = "/test/routing-log-redaction";
 
 afterEach(async () => {
   setUpstreamInterceptor(undefined);
@@ -111,7 +115,7 @@ describe("routing log credential redaction", () => {
         metadata: {},
         rawHeaders: {
           "x-lore-agent": "coder",
-          "x-lore-project": process.cwd(),
+          "x-lore-project": ROUTING_PROJECT,
         },
       },
       config,
@@ -119,6 +123,11 @@ describe("routing log credential redaction", () => {
 
     expect(response.status).toBe(200);
     const output = messages.join("\n");
+    expect(
+      [...getActiveSessions().values()].some(
+        (state) => state.projectPath === ROUTING_PROJECT,
+      ),
+    ).toBe(true);
     expect(output).toContain("https://example.com/custom");
     expect(output).not.toContain("LOCAL_LOG_SECRET");
     expect(output).not.toContain("QUERY_LOG_SECRET");
@@ -470,7 +479,7 @@ describe("routing log credential redaction", () => {
         metadata: {},
         rawHeaders: {
           "x-lore-agent": "coder",
-          "x-lore-project": process.cwd(),
+          "x-lore-project": ROUTING_PROJECT,
         },
       },
       config,
