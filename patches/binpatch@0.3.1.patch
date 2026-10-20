@@ -1,0 +1,466 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 6ce49eae6edac7b9917d2c82faf1fde68d14fb32..75f1d7fae231d4a5014f1f5e1898ebc91f0a49a2 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -144,6 +144,8 @@ declare function applyPatch(oldPath: string, patchData: Uint8Array, destPath: st
+ type PatchStepMeta = {
+     fromVersion: string;
+     toVersion: string;
++    sourceSha256?: string;
++    targetSha256?: string;
+     size: number;
+ };
+ /** Chain metadata stored alongside patch files */
+@@ -151,6 +153,8 @@ type ChainMeta = {
+     fromVersion: string;
+     toVersion: string;
+     expectedSha256: string;
++    /** SHA-256 of the exact uncompressed base used to generate the chain. */
++    sourceSha256?: string;
+     cachedAt: number;
+     patches: PatchStepMeta[];
+ };
+@@ -171,9 +175,13 @@ type PatchCache = {
+             size: number;
+         }[];
+         expectedSha256: string;
++        /** SHA-256 of the exact uncompressed base used to generate the chain. */
++        sourceSha256?: string;
+     }, steps: {
+         fromVersion: string;
+         toVersion: string;
++        sourceSha256?: string;
++        targetSha256?: string;
+     }[]): Promise<void>;
+     /** Try to assemble a complete cached chain from current -> target. */
+     load(currentVersion: string, targetVersion: string): Promise<{
+@@ -183,6 +191,8 @@ type PatchCache = {
+         }[];
+         totalSize: number;
+         expectedSha256: string;
++        /** SHA-256 of the exact uncompressed base used to generate the chain. */
++        sourceSha256?: string;
+     } | null>;
+     /** Remove entries older than the TTL. Fire-and-forget. */
+     cleanup(): Promise<void>;
+@@ -222,6 +232,8 @@ type PatchLink = {
+ type ChainStep = {
+     fromVersion: string;
+     toVersion: string;
++    sourceSha256?: string;
++    targetSha256?: string;
+ };
+ /**
+  * A resolved chain of patches from a current version to a target version,
+@@ -232,6 +244,8 @@ type PatchChain = {
+     patches: PatchLink[];
+     totalSize: number;
+     expectedSha256: string;
++    /** SHA-256 of the exact uncompressed base used to generate the chain. */
++    sourceSha256?: string;
+     steps?: ChainStep[];
+ };
+ /** Result of a successfully applied delta chain. */
+@@ -350,7 +364,7 @@ type DeltaSource = "cache" | "network" | "offline_miss";
+  * - `over_budget` — the cumulative patch size exceeds the size-ratio gate.
+  * - `network` — a transient network failure prevented resolution.
+  */
+-type DeltaUnavailableReason = "no_patches" | "malformed_chain" | "too_long" | "over_budget" | "network";
++type DeltaUnavailableReason = "no_patches" | "malformed_chain" | "too_long" | "over_budget" | "network" | "source_unverified" | "source_mismatch";
+ /** Callback a source uses to classify a `null` (no-chain) result. */
+ type UnavailableReporter = (reason: DeltaUnavailableReason) => void;
+ /** Optional telemetry callback invoked as facts become known. */
+@@ -504,7 +518,7 @@ declare function validateChainStep(manifest: OciManifest, opts: {
+ }): ChainStepResult;
+ /** A validation failure, classified for telemetry. */
+ type NightlyChainFailure = {
+-    failure: "malformed_chain" | "over_budget";
++    failure: "malformed_chain" | "over_budget" | "source_unverified";
+ };
+ /** Configuration for {@link ghcrSource}. */
+ type GhcrSourceConfig = OciClientConfig & {
+@@ -575,6 +589,8 @@ type StableChainInfo = {
+     steps: {
+         fromVersion: string;
+         toVersion: string;
++        sourceSha256?: string;
++        targetSha256?: string;
+     }[];
+ };
+ /**
+diff --git a/dist/index.js b/dist/index.js
+index 681f1335947a9e6fdb66df7bbf818562a621a764..adedf393d5a57f3b1d751be865808b4f70b2d09e 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,8 +1,8 @@
+ import { createHash } from 'crypto';
+-import { copyFileSync, constants, createWriteStream } from 'fs';
+-import { open, unlink, readFile, readdir, mkdir, writeFile } from 'fs/promises';
++import { copyFileSync, constants, createWriteStream, lstatSync, realpathSync } from 'fs';
++import { open, unlink, readFile, readdir, mkdir, writeFile, mkdtemp, rmdir } from 'fs/promises';
+ import { tmpdir } from 'os';
+-import { join } from 'path';
++import { join, dirname } from 'path';
+ import { Readable } from 'stream';
+ import { zstdDecompressSync, createZstdDecompress } from 'zlib';
+ 
+@@ -131,6 +131,7 @@ var MemoryOldReader = class {
+   constructor(data) {
+     this.data = data;
+   }
++  get size() { return this.data.byteLength; }
+   read(pos, len) {
+     const out = new Uint8Array(len);
+     const start = Math.max(pos, 0);
+@@ -228,15 +229,34 @@ var FileOldReader = class {
+     }
+     await unlink(this.tempPath).catch(() => {
+     });
++    await rmdir(dirname(this.tempPath)).catch(() => {});
+   }
+ };
+-var loadCounter = 0;
++function trustedTemporaryRoot() {
++  const root = realpathSync(tmpdir());
++  // POSIX ownership/mode checks do not describe Windows ACLs.
++  if (process.platform === "win32") return root;
++  const uid = process.getuid();
++  for (let path = root; ; path = dirname(path)) {
++    const stat = lstatSync(path);
++    const trustedOwner = stat.uid === uid || stat.uid === 0;
++    const rootSticky = stat.uid === 0 && (stat.mode & 0o1000) !== 0;
++    if (!stat.isDirectory() || !trustedOwner || ((stat.mode & 0o022) !== 0 && !rootSticky)) {
++      throw new Error("Untrusted temporary directory ancestry");
++    }
++    if (dirname(path) === path) return root;
++  }
++}
+ async function loadOldBinary(oldPath) {
+-  loadCounter += 1;
+-  const tempCopy = join(tmpdir(), `binpatch-old-${process.pid}-${loadCounter}`);
++  // A private directory prevents other users planting a symlink at a
++  // predictable temporary filename before the clone is created/opened.
++  let tempDir;
++  let tempCopy;
+   let handle;
+   try {
+-    copyFileSync(oldPath, tempCopy, constants.COPYFILE_FICLONE);
++    tempDir = await mkdtemp(join(trustedTemporaryRoot(), "binpatch-old-"));
++    tempCopy = join(tempDir, "base");
++    copyFileSync(oldPath, tempCopy, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
+     handle = await open(tempCopy, "r");
+     const { size } = await handle.stat();
+     return new FileOldReader(handle, size, tempCopy);
+@@ -245,8 +265,8 @@ async function loadOldBinary(oldPath) {
+       await handle.close().catch(() => {
+       });
+     }
+-    await unlink(tempCopy).catch(() => {
+-    });
++    if (tempCopy) await unlink(tempCopy).catch(() => {});
++    if (tempDir) await rmdir(tempDir).catch(() => {});
+     return new MemoryOldReader(await readFile(oldPath));
+   }
+ }
+@@ -366,12 +386,25 @@ async function applyReaderToMemory(oldReader, patchData, onBytes) {
+ function applyPatchToMemory(oldFile, patchData) {
+   return applyReaderToMemory(new MemoryOldReader(oldFile), patchData);
+ }
+-async function applyPatchChainInMemory(oldPath, patches, destPath, onBytes) {
++async function applyPatchChainInMemory(oldPath, patches, destPath, onBytes, sourceSha256) {
+   if (patches.length === 0) {
+     throw new Error("Cannot apply an empty patch chain");
+   }
+   let reader = await loadOldBinary(oldPath);
+   try {
++    // Hash the same private snapshot the patch reader will consume. Never
++    // reopen the install path between verifying its identity and applying.
++    if (sourceSha256 !== undefined) {
++      const hasher = createHash("sha256");
++      for (let offset = 0; offset < reader.size; offset += 1024 * 1024) {
++        hasher.update(await reader.read(offset, Math.min(1024 * 1024, reader.size - offset)));
++      }
++      if (hasher.digest("hex") !== sourceSha256) {
++        const error = new Error("Delta source checksum mismatch");
++        error.code = "BINPATCH_SOURCE_MISMATCH";
++        throw error;
++      }
++    }
+     for (let i = 0; i < patches.length - 1; i++) {
+       const patch = patches[i];
+       if (!patch) {
+@@ -428,11 +461,14 @@ async function savePatchesToCache(cacheDir, chain, steps) {
+         fromVersion: firstStep.fromVersion,
+         toVersion: lastStep.toVersion,
+         expectedSha256: chain.expectedSha256,
++        sourceSha256: chain.sourceSha256,
+         cachedAt: Date.now(),
+         patches: steps.map((s, i) => ({
+           fromVersion: s.fromVersion,
+           toVersion: s.toVersion,
+-          size: chain.patches[i]?.size ?? 0
++          size: chain.patches[i]?.size ?? 0,
++          sourceSha256: s.sourceSha256 ?? (i === 0 ? chain.sourceSha256 : undefined),
++          targetSha256: s.targetSha256 ?? (i === steps.length - 1 ? chain.expectedSha256 : undefined)
+         }))
+       };
+       const metaPath = join(
+@@ -467,44 +503,53 @@ async function loadAllChainMetas(cacheDir) {
+   );
+   return results.filter((m) => m !== null);
+ }
+-function buildStepMap(chainMetas) {
+-  const stepMap = /* @__PURE__ */ new Map();
+-  for (const meta of chainMetas) {
+-    for (const step of meta.patches) {
+-      stepMap.set(step.fromVersion, {
+-        toVersion: step.toVersion,
+-        size: step.size
+-      });
++// Compose only byte-compatible edges. Version labels alone cannot establish
++// continuity when two builds share a version. The queue also supports suffixes
++// of previously prefetched multi-hop chains.
++function walkVerifiedCacheSteps(chainMetas, currentVersion, targetVersion) {
++  const edges = chainMetas.flatMap((meta) => Array.isArray(meta.patches) ? meta.patches : []);
++  const queue = [{ version: currentVersion, targetSha256: undefined, steps: [] }];
++  const seen = new Set();
++  for (let index = 0; index < queue.length; index++) {
++    const state = queue[index];
++    if (state.version === targetVersion && state.steps.length) return state.steps;
++    if (state.steps.length >= MAX_CHAIN_WALK_DEPTH) continue;
++    for (const edge of edges) {
++      if (edge?.fromVersion !== state.version || typeof edge.toVersion !== "string" ||
++          !/^[0-9a-f]{64}$/.test(edge.sourceSha256 ?? "") || !/^[0-9a-f]{64}$/.test(edge.targetSha256 ?? "") ||
++          (state.targetSha256 !== undefined && edge.sourceSha256 !== state.targetSha256)) continue;
++      const key = `${edge.toVersion}:${edge.targetSha256}`;
++      if (seen.has(key)) continue;
++      seen.add(key);
++      queue.push({ version: edge.toVersion, targetSha256: edge.targetSha256, steps: [...state.steps, edge] });
+     }
+   }
+-  return stepMap;
+-}
+-function walkChainSteps(stepMap, currentVersion, targetVersion) {
+-  const steps = [];
+-  let version = currentVersion;
+-  while (version !== targetVersion) {
+-    const next = stepMap.get(version);
+-    if (!next) return null;
+-    steps.push({ fromVersion: version, toVersion: next.toVersion });
+-    version = next.toVersion;
+-    if (steps.length > MAX_CHAIN_WALK_DEPTH) return null;
+-  }
+-  return steps.length > 0 ? steps : null;
++  return null;
+ }
+ async function loadCachedChain(cacheDir, currentVersion, targetVersion) {
+   const chainMetas = await loadAllChainMetas(cacheDir);
+   if (chainMetas.length === 0) return null;
+-  const stepMap = buildStepMap(chainMetas);
+-  const steps = walkChainSteps(stepMap, currentVersion, targetVersion);
+-  if (!steps) return null;
+-  let expectedSha256 = "";
+-  for (const meta of chainMetas) {
+-    if (meta.toVersion === targetVersion && meta.expectedSha256) {
+-      expectedSha256 = meta.expectedSha256;
+-      break;
++  const meta = chainMetas.find((m) => m.fromVersion === currentVersion && m.toVersion === targetVersion);
++  let steps;
++  let expectedSha256;
++  let sourceSha256;
++  if (meta && Array.isArray(meta.patches)) {
++    steps = meta.patches;
++    let previous = currentVersion;
++    for (const step of steps) {
++      if (step?.fromVersion !== previous) return null;
++      previous = step.toVersion;
+     }
+-  }
+-  if (!expectedSha256) return null;
++    if (!steps.length || previous !== targetVersion) return null;
++    expectedSha256 = meta.expectedSha256;
++    sourceSha256 = meta.sourceSha256;
++  } else {
++    steps = walkVerifiedCacheSteps(chainMetas, currentVersion, targetVersion);
++    if (!steps) return null;
++    sourceSha256 = steps[0].sourceSha256;
++    expectedSha256 = steps.at(-1).targetSha256;
++  }
++  if (!/^[0-9a-f]{64}$/.test(expectedSha256 ?? "")) return null;
+   const loadResults = await Promise.all(
+     steps.map(async (step) => {
+       const filePath = join(
+@@ -527,7 +572,7 @@ async function loadCachedChain(cacheDir, currentVersion, targetVersion) {
+     patches.push(result);
+     totalSize += result.size;
+   }
+-  return { patches, totalSize, expectedSha256 };
++  return { patches, totalSize, expectedSha256, sourceSha256 };
+ }
+ async function removeExpiredEntries(cacheDir, files, now) {
+   const expiredMetas = [];
+@@ -663,7 +708,7 @@ async function resolveAndApply(opts) {
+     );
+     if (cached) {
+       telemetry?.onResolved?.({ source: "cache", chain: cached });
+-      return applyChain(cached, oldPath, destPath, progress);
++      return applyVerifiedChain(cached, oldPath, destPath, progress, telemetry);
+     }
+   }
+   if (offline) {
+@@ -690,7 +735,7 @@ async function resolveAndApply(opts) {
+     });
+   }
+   telemetry?.onResolved?.({ source: "network", chain });
+-  return applyChain(chain, oldPath, destPath, progress);
++  return applyVerifiedChain(chain, oldPath, destPath, progress, telemetry);
+ }
+ async function tryLoadCachedChain(cache, currentVersion, targetVersion) {
+   try {
+@@ -699,6 +744,19 @@ async function tryLoadCachedChain(cache, currentVersion, targetVersion) {
+     return null;
+   }
+ }
++async function applyVerifiedChain(chain, oldPath, destPath, progress, telemetry) {
++  if (!/^[0-9a-f]{64}$/.test(chain.sourceSha256 ?? "")) {
++    telemetry?.onUnavailable?.("source_unverified");
++    return null;
++  }
++  try {
++    return await applyChain(chain, oldPath, destPath, progress);
++  } catch (error) {
++    if (error?.code !== "BINPATCH_SOURCE_MISMATCH") throw error;
++    telemetry?.onUnavailable?.("source_mismatch");
++    return null;
++  }
++}
+ async function applyChain(chain, oldPath, destPath, progress) {
+   let total = 0;
+   try {
+@@ -717,7 +775,8 @@ async function applyChain(chain, oldPath, destPath, progress) {
+     (bytes) => {
+       written += bytes;
+       progress({ type: "bytes", phase: "apply", written, total });
+-    }
++    },
++    chain.sourceSha256
+   );
+   progress({ type: "done", phase: "apply" });
+   progress({ type: "phase", phase: "verify" });
+@@ -998,6 +1057,7 @@ function validateNightlyChain(opts) {
+   const digests = [];
+   let totalSize = 0;
+   let prevVersion = currentVersion;
++  let previousSha256;
+   for (let i = 0; i < manifests.length; i++) {
+     const manifest = manifests[i];
+     const tag = chainTags[i];
+@@ -1013,6 +1073,11 @@ function validateNightlyChain(opts) {
+         failure: result.reason === "over_budget" ? "over_budget" : "malformed_chain"
+       };
+     }
++    const source = manifest.annotations?.[`source-sha256-${binaryName}`];
++    const target = getPatchTargetSha256(manifest, binaryName);
++    if (!/^[0-9a-f]{64}$/.test(source ?? "") || !/^[0-9a-f]{64}$/.test(target ?? "")) return { failure: "source_unverified" };
++    if (previousSha256 !== undefined && source !== previousSha256) return { failure: "malformed_chain" };
++    previousSha256 = target;
+     digests.push(result.digest);
+     totalSize += result.size;
+     prevVersion = tag.slice(PATCH_TAG_PREFIX.length);
+@@ -1087,6 +1152,11 @@ function ghcrSource(config) {
+       binaryName,
+       fullGzSize
+     });
++    const sourceSha256 = manifests[0]?.annotations?.[`source-sha256-${binaryName}`];
++    if (!/^[0-9a-f]{64}$/.test(sourceSha256 ?? "")) {
++      report?.("source_unverified");
++      return null;
++    }
+     if (isChainFailure(validation)) {
+       report?.(validation.failure);
+       return null;
+@@ -1107,15 +1177,18 @@ function ghcrSource(config) {
+     }
+     const steps = [];
+     let prevVersion = currentVersion;
+-    for (const tag of chainTags) {
++    for (const [index, tag] of chainTags.entries()) {
+       const toVersion = tag.slice(PATCH_TAG_PREFIX.length);
+-      steps.push({ fromVersion: prevVersion, toVersion });
++      steps.push({ fromVersion: prevVersion, toVersion,
++        sourceSha256: manifests[index].annotations[`source-sha256-${binaryName}`],
++        targetSha256: getPatchTargetSha256(manifests[index], binaryName) });
+       prevVersion = toVersion;
+     }
+     return {
+       patches,
+       totalSize: downloadedSize,
+       expectedSha256: validation.expectedSha256,
++      sourceSha256,
+       steps
+     };
+   }
+@@ -1271,6 +1344,51 @@ function githubReleaseSource(config) {
+         report?.("malformed_chain");
+         return null;
+       }
++      const targetIdx = releases.findIndex((r) => r.tag_name === targetVersion);
++      const currentIdx = releases.findIndex((r) => r.tag_name === currentVersion);
++      if (targetIdx < 0 || currentIdx <= targetIdx || currentIdx - targetIdx > MAX_STABLE_CHAIN_DEPTH) {
++        report?.("no_patches");
++        return null;
++      }
++      const chainReleases = releases.slice(targetIdx, currentIdx).reverse();
++      let previous = currentVersion;
++      let sourceSha256;
++      let previousSha256;
++      const metadataByVersion = new Map();
++      for (const release of chainReleases) {
++        const asset = release.assets.find((a) => a.name === `${binaryName}.patch.json`);
++        if (!asset || asset.size > 4096 || !/^[0-9a-f]{64}$/.test(extractSha256(asset) ?? "")) {
++          report?.("source_unverified");
++          return null;
++        }
++        const bytes = await downloadPatch(asset.browser_download_url, signal);
++        if (!bytes || bytes.byteLength > 4096 || createHash("sha256").update(bytes).digest("hex") !== extractSha256(asset)) {
++          report?.("source_unverified");
++          return null;
++        }
++        let metadata;
++        try { metadata = JSON.parse(new TextDecoder().decode(bytes)); } catch { metadata = null; }
++        if (!metadata || metadata.fromVersion !== previous || !/^[0-9a-f]{64}$/.test(metadata.sourceSha256 ?? "") || !/^[0-9a-f]{64}$/.test(metadata.targetSha256 ?? "")) {
++          report?.("source_unverified");
++          return null;
++        }
++        if (previousSha256 !== undefined && metadata.sourceSha256 !== previousSha256) {
++          report?.("malformed_chain");
++          return null;
++        }
++        previousSha256 = metadata.targetSha256;
++        metadataByVersion.set(release.tag_name, metadata);
++        sourceSha256 ??= metadata.sourceSha256;
++        const publishedTargetSha256 = getStableTargetSha256(release, binaryName);
++        if (publishedTargetSha256 && publishedTargetSha256 !== metadata.targetSha256) {
++          report?.("malformed_chain");
++          return null;
++        }
++        // extractStableChain expects the raw binary's digest. Releases ship
++        // compressed binaries, so use generation-time metadata for raw bytes.
++        release.assets = [...release.assets.filter((a) => a.name !== binaryName), { name: binaryName, digest: `sha256:${metadata.targetSha256}`, size: 0, browser_download_url: "" }];
++        previous = release.tag_name;
++      }
+       const chainInfo = extractStableChain({
+         releases,
+         currentVersion,
+@@ -1299,7 +1417,10 @@ function githubReleaseSource(config) {
+         patches,
+         totalSize,
+         expectedSha256: chainInfo.expectedSha256,
+-        steps: chainInfo.steps
++        sourceSha256,
++        steps: chainInfo.steps.map((step) => ({ ...step,
++          sourceSha256: metadataByVersion.get(step.toVersion).sourceSha256,
++          targetSha256: metadataByVersion.get(step.toVersion).targetSha256 }))
+       };
+     }
+   };

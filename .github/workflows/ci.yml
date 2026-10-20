@@ -500,6 +500,7 @@ jobs:
       - name: Build npm bundle (CJS)
         run: pnpm --filter @loreai/gateway run bundle
         env:
+          LORE_OFFICIAL_BUILD: ${{ startsWith(github.ref, 'refs/heads/release/') && '1' || '' }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
       - name: Smoke-test npm bundle under Node.js
@@ -625,6 +626,7 @@ jobs:
           pnpm --filter @loreai/gateway run build:binary:sea \
             --platforms darwin-arm64 --prepare-only
         env:
+          LORE_OFFICIAL_BUILD: '1'
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
@@ -643,6 +645,8 @@ jobs:
       - name: Build all packages
         if: startsWith(github.ref, 'refs/heads/release/')
         run: pnpm run build
+        env:
+          LORE_OFFICIAL_BUILD: '1'
 
       # Pack each workspace package into its own tarball. Craft's npm target
       # with `workspaces: true` discovers all four and publishes them in
@@ -723,6 +727,7 @@ jobs:
           echo "--- Release binaries: ---"
           ls -la packages/gateway/dist-bin/
         env:
+          LORE_OFFICIAL_BUILD: '1'
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
@@ -1100,6 +1105,7 @@ jobs:
           echo "--- Nightly binaries: ---"
           ls -la packages/gateway/dist-bin/
         env:
+          LORE_OFFICIAL_BUILD: '1'
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
@@ -1171,6 +1177,7 @@ jobs:
           echo "--- Darwin binary: ---"
           ls -la packages/gateway/dist-bin/
         env:
+          LORE_OFFICIAL_BUILD: '1'
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
       - name: Smoke-test
@@ -1286,7 +1293,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nightly-patches
-          path: .delta-patches/*.patch
+          path: |
+            .delta-patches/*.patch
+            .delta-patches/*.patch.json
           # .delta-patches is a dotted dir; upload-artifact skips hidden paths
           # by default, so opt in explicitly.
           include-hidden-files: true
