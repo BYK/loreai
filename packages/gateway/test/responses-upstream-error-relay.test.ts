@@ -15,6 +15,9 @@ import {
   setUpstreamInterceptor,
 } from "../src/pipeline";
 
+// Error-relay and provenance assertions must not depend on checkout memory.
+const RELAY_PROJECT = "/test/responses-upstream-error-relay";
+
 function localConfig() {
   const config = loadConfig();
   config.remoteGateway = false;
@@ -36,7 +39,7 @@ function request(): GatewayRequest {
       authorization: "Bearer test-key",
       "x-lore-session-id": "responses-upstream-error-relay",
       "x-lore-agent": "coder",
-      "x-lore-project": process.cwd(),
+      "x-lore-project": RELAY_PROJECT,
       "x-lore-provider": "openai",
       "x-lore-upstream-url": "https://api.openai.com/v1",
     },
@@ -149,6 +152,9 @@ describe("Responses upstream error relay", () => {
     await accepted.text();
 
     const internalSessionID = activeSessionID(sessionID);
+    expect(getActiveSessions().get(internalSessionID)?.projectPath).toBe(
+      RELAY_PROJECT,
+    );
     expect(
       loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
     ).toBe(0);

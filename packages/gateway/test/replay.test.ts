@@ -18,6 +18,9 @@ import {
 } from "./helpers/fixtures";
 import { parseMarker } from "../src/session";
 
+// Protocol fixtures must not import the checkout's unrelated instruction memory.
+const REPLAY_PROJECT = "/test/gateway-replay";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -49,6 +52,7 @@ describe("Basic pipeline", () => {
 
   it("first response contains no session marker in content", async () => {
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
       ]),
@@ -74,6 +78,7 @@ describe("Basic pipeline", () => {
   it("second turn reuses session via fingerprint — no marker needed", async () => {
     // 2 fixtures: one for each upstream call (first turn + second turn)
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
         { userMessage: "What is 3+3?", assistantText: "Six." },
@@ -83,13 +88,25 @@ describe("Basic pipeline", () => {
     // First turn
     const resp1 = await harness.chat(makeBody("What is 2+2?"));
     expect(resp1.status).toBe(200);
+    const body1 = (await resp1.json()) as Record<string, unknown>;
+    expect(Array.isArray(body1.content)).toBe(true);
+    expect(
+      harness.queryDB("SELECT COUNT(*) AS n FROM projects WHERE path = ?", [
+        REPLAY_PROJECT,
+      ]),
+    ).toEqual([{ n: 1 }]);
+    const sessionQuery =
+      "SELECT session_id FROM session_state ORDER BY session_id";
+    const firstSessions = harness.queryDB<{ session_id: string }>(sessionQuery);
+    expect(firstSessions).toHaveLength(1);
 
-    // Second turn — same first user message means same fingerprint → same session
+    // Preserve the original user prefix and actual reply: changing the first
+    // user message changes the fingerprint and silently tests a new session.
     const resp2 = await harness.chat(
-      makeBody("What is 3+3?", [
+      makeBody("What is 2+2?", [
         {
           role: "assistant",
-          content: [{ type: "text", text: "Four." }],
+          content: body1.content,
         },
         { role: "user", content: "What is 3+3?" },
       ]),
@@ -107,10 +124,18 @@ describe("Basic pipeline", () => {
         expect(parseMarker(block.text as string)).toBeNull();
       }
     }
+    expect(harness.queryDB(sessionQuery)).toEqual(firstSessions);
+    expect(
+      harness.queryDB(
+        "SELECT DISTINCT session_id FROM temporal_messages ORDER BY session_id",
+      ),
+    ).toEqual(firstSessions);
+    expect(harness.upstreamBodies()).toHaveLength(2);
   });
 
   it("response includes stop_reason and content", async () => {
     harness = await createHarness({
+      projectPath: REPLAY_PROJECT,
       fixtures: makeConversationFixtures([
         { userMessage: "What is 2+2?", assistantText: "Four." },
       ]),

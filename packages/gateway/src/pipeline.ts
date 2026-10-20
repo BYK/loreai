@@ -76,6 +76,7 @@ import {
   countMatchingTemporalIds,
   getGitRemote,
   projectId,
+  canonicalProjectId,
   resolveProjectByRemoteOrPath,
   projectGitRemote,
   mergeProjectInternal,
@@ -109,6 +110,7 @@ import {
   recordCacheUsage,
   exportDedupDecisions,
   importDedupDecisions,
+  evictSession,
   calibrate,
   getLastTransformedCount,
   onIdleResume,
@@ -191,6 +193,8 @@ import {
   isCallerUpstreamAllowed,
   normalizeUpstreamBase,
   unattributedBucketPath,
+  ProjectPathConflictError,
+  sameLogicalProjectPath,
   type ProjectPathResult,
 } from "./config";
 import {
@@ -397,7 +401,11 @@ import {
   resignBody,
 } from "./cch";
 import { isClaudeCodeClient, isRotationEligible } from "./session";
-import { isClaudeCodeSideChannel } from "./side-channel";
+import {
+  getClaudeCodeRequestClass,
+  getRequestProjectPath,
+  isClaudeCodeSideChannel,
+} from "./side-channel";
 import {
   analyzeCacheTurn,
   categorizeBust,
@@ -1811,14 +1819,27 @@ function conflictsWithConfidentSessionProject(
   }
   const live = sessions.get(sessionID);
   if (live?.projectPath && live.projectPathProvisional === false) {
-    return live.projectPath !== pathResult.path;
+    return !sameLogicalProjectPath(live.projectPath, pathResult.path);
   }
   const persisted = loadSessionTracking(sessionID);
   return (
     !!persisted?.projectPath &&
     persisted.projectPathProvisional === false &&
-    persisted.projectPath !== pathResult.path
+    !sameLogicalProjectPath(persisted.projectPath, pathResult.path)
   );
+}
+
+/** Reject a project switch before any session-scoped prompt data or controls run. */
+function assertBoundSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): void {
+  // Only a reminder-derived claim needs this early guard. Explicit project
+  // headers and system workspace markers retain their existing, separately
+  // checked session-adoption and clone-migration paths.
+  if (!pathResult.openingReminderProjectPath) return;
+  if (!conflictsWithConfidentSessionProject(sessionID, pathResult)) return;
+  throw new ProjectPathConflictError();
 }
 
 function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
@@ -1831,6 +1852,18 @@ function isConfidentlyBoundToProject(
 ): boolean {
   return (
     state.projectPathProvisional !== true && state.projectPath === projectPath
+  );
+}
+
+function isConfidentlyBoundToLogicalProject(
+  state: SessionState,
+  projectPath: string,
+): boolean {
+  // Claims and finalizers can change binding flags across an await. Read them
+  // here afresh rather than relying on the caller's pre-wait narrowing.
+  return (
+    state.projectPathProvisional !== true &&
+    sameLogicalProjectPath(state.projectPath, projectPath)
   );
 }
 
@@ -2790,6 +2823,16 @@ export function idleResumeReshuffled(
   return lastTurnWasIdle && !cacheWarm;
 }
 
+function projectOwnedPromptDeltas(sessionID: string, projectID: string) {
+  const owner = projectID ? canonicalProjectId(projectID) : undefined;
+  if (!owner) return [];
+  // Ownership must be checked before any mutation/surfaced-state reconstruction:
+  // filtering only at replay lets compression launder foreign text into this owner.
+  return listSessionPromptDeltas(sessionID).filter(
+    (block) => canonicalProjectId(block.projectID) === owner,
+  );
+}
+
 /**
  * Re-anchor the existing durable delta blocks (same content) to a fresh, tool-
  * pair-safe near-tail index in the current (post-reshuffle) message array, so a
@@ -2814,13 +2857,15 @@ export function reanchorExistingDelta(
   projectPath: string,
   messages: GatewayMessage[],
 ): number | null {
-  const blocks = listSessionPromptDeltas(sessionID);
+  const blocks = projectOwnedPromptDeltas(
+    sessionID,
+    ensureProject(projectPath),
+  );
   if (!blocks.length) return null;
   const reInsertAt = safeDeltaInsertIndex(
     messages,
     Math.max(0, messages.length - 1),
   );
-  const projectID = ensureProject(projectPath);
   // Rewrite each block's insertAt while preserving content + mutation signature
   // + chronological (seq) order. Snapshot before mutating the table.
   const preserved = blocks.map((b) => {
@@ -2831,7 +2876,11 @@ export function reanchorExistingDelta(
       selectorObj = { target: "messages" };
     }
     selectorObj.insertAt = reInsertAt;
-    return { content: b.content, selector: JSON.stringify(selectorObj) };
+    return {
+      projectID: b.projectID,
+      content: b.content,
+      selector: JSON.stringify(selectorObj),
+    };
   });
   // Atomic delete + re-append so a crash mid-rewrite can never leave the
   // session with a partial block set (which would drop surfaced-set history and
@@ -2843,7 +2892,7 @@ export function reanchorExistingDelta(
     for (const p of preserved) {
       appendSessionPromptDelta({
         sessionID,
-        projectID,
+        projectID: p.projectID,
         selector: p.selector,
         content: p.content,
       });
@@ -3129,9 +3178,19 @@ function isReasoningBlock(block: GatewayContentBlock): boolean {
 export function applySessionPromptDeltas(
   messages: GatewayMessage[],
   sessionID: string,
+  expectedProjectID?: string,
 ): GatewayMessage[] {
   const deltas = listSessionPromptDeltas(sessionID);
   if (!deltas.length) return messages;
+
+  const boundPath =
+    expectedProjectID === undefined
+      ? loadSessionTracking(sessionID)?.projectPath
+      : undefined;
+  const ownerID =
+    expectedProjectID ?? (boundPath ? projectId(boundPath) : undefined);
+  const owner = ownerID ? canonicalProjectId(ownerID) : undefined;
+  const projectBound = expectedProjectID !== undefined || !!boundPath;
 
   const out = messages.slice();
   // We carry the raw selector JSON alongside the validated `insertAt` so the
@@ -3148,6 +3207,15 @@ export function applySessionPromptDeltas(
     messages: GatewayMessage[];
   }> = [];
   for (const delta of deltas) {
+    // Durable rows can predate binding cleanup or survive an interrupted older
+    // gateway. Verify ownership independently before parsing or re-anchoring.
+    // Request-bound callers always supply a project ID, including an unresolved
+    // empty ID (which fails closed); unbound positional transforms have no owner.
+    if (
+      projectBound &&
+      (!owner || canonicalProjectId(delta.projectID) !== owner)
+    )
+      continue;
     const selector = parseMessageInsertSelector(delta.selector);
     // NB: name this `blockMessages`, NOT `messages` — the function parameter
     // `messages` (the conversation array) must stay in scope below for
@@ -3687,8 +3755,7 @@ export function deliveredContextEntries(
   }
   const delivered = new Map<string, ltm.KnowledgeEntry>();
   const resolved = new Map<string, string>();
-  for (const block of listSessionPromptDeltas(sessionID)) {
-    if (block.projectID !== projectID) continue;
+  for (const block of projectOwnedPromptDeltas(sessionID, projectID)) {
     if (!parseMessageInsertSelector(block.selector)) continue;
     const messages = parseDeltaMessages(block.content);
     const payload =
@@ -3872,7 +3939,7 @@ export function appendKnowledgePromptDelta(input: {
   // `entries` supplies content for SYNTHETIC context-source ids (see
   // syntheticEntries below); knowledge-row content is re-derived from the DB.
   const projectID = ensureProject(input.projectPath);
-  const blocks = listSessionPromptDeltas(input.sessionID);
+  const blocks = projectOwnedPromptDeltas(input.sessionID, projectID);
   // Selection snapshots can outlive a versioned edit. Rank ordinary entries
   // by tenant-scoped logical identity, never by a superseded physical ID.
   // Synthetic sources retain their own separate identity namespace.
@@ -4452,7 +4519,7 @@ function acceptedKnowledgeCandidate(
   if (!pin?.entryKeys?.length) return undefined;
   const projectID = ensureProject(projectPath);
   const deltaDigest = acceptedKnowledgeDeltaDigest(
-    listSessionPromptDeltas(sessionID),
+    projectOwnedPromptDeltas(sessionID, projectID),
     projectID,
     pin.entryKeys,
   );
@@ -5667,6 +5734,40 @@ export function resolveSessionProjectPath(
       return previous;
     }
 
+    if (previous && previous !== projectPath) {
+      const previousID = projectId(previous);
+      const nextID = projectId(projectPath);
+      const sameProject =
+        previousID &&
+        nextID &&
+        canonicalProjectId(previousID) === canonicalProjectId(nextID);
+      if (!sameProject) {
+        // Every distinct-project rebind is a prompt-ownership boundary,
+        // including provisional -> confident. Publish the new binding and
+        // retire durable prompt state in ONE transaction: interrupted knowledge
+        // preparation must never hydrate a new owner with the old owner's LTM.
+        withSavepoint("rebind_session_prompt", () => {
+          saveSessionTracking(sessionState.sessionID, {
+            projectPath,
+            projectPathProvisional: false,
+            ltmCacheText: null,
+            ltmCacheTokens: null,
+            ltmCacheRevision: null,
+            ltmPinText: null,
+            ltmPinTokens: null,
+            ltmPinKeys: null,
+            stableLtmText: null,
+            stableLtmTokens: null,
+            recallStore: null,
+            dedupDecisions: null,
+          });
+          deleteSessionPromptDelta(sessionState.sessionID);
+        });
+        evictPipelineSessionState(sessionState.sessionID);
+        evictSession(sessionState.sessionID);
+        sessionState.recallStore = new Map();
+      }
+    }
     sessionState.projectPath = projectPath;
     sessionState.projectPathProvisional = false;
 
@@ -17821,7 +17922,7 @@ async function handleCompactionInner(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   const credential = extractAuth(req.rawHeaders);
   if (!credential) {
     return errorResponse(401, "A provider credential is required");
@@ -17842,7 +17943,7 @@ async function handleCompactionInner(
   if (
     sessionState.projectPathProvisional === true ||
     (pathResult.source !== "cwd" &&
-      sessionState.projectPath !== pathResult.path)
+      !sameLogicalProjectPath(sessionState.projectPath, pathResult.path))
   ) {
     return errorResponse(
       403,
@@ -17860,7 +17961,11 @@ async function handleCompactionInner(
   if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
     return errorResponse(404, "No authenticated session found");
   }
-  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
+  // Waiting may publish an established alias of the authorized workspace.
+  // Recheck its logical owner, never a prefix or an unresolved project name.
+  if (
+    !isConfidentlyBoundToLogicalProject(sessionState, authorizedProjectPath)
+  ) {
     return errorResponse(
       403,
       "Project path does not match the authenticated session",
@@ -18318,7 +18423,9 @@ async function handleCompactEndpointInner(
     );
   }
 
-  if (!isConfidentlyBoundToProject(state, projectPath)) {
+  // A registered alias names the same tenant-scoped owner; authorization must
+  // only inspect existing identities, never create a project to accept a path.
+  if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",
@@ -18349,10 +18456,9 @@ async function handleCompactEndpointInner(
       { status: 404, headers: { "content-type": "application/json" } },
     );
   }
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== projectPath
-  ) {
+  // Recheck the live logical owner after waiting: a turn may change either the
+  // binding flags or its spelling without changing the authenticated identity.
+  if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",
@@ -20154,6 +20260,12 @@ async function handleProvisionalConversationTurn(
       credentialFingerprint,
       config,
     );
+    // Project resolution above retires a transaction-local projection, not an
+    // existing live session. Clear its recall only after commit and before
+    // publishing the new identity/owner; rollback and canonical aliases retain it.
+    if (!sameLogicalProjectPath(state.projectPath, projectPath)) {
+      state.recallStore = new Map();
+    }
     if (upstreamUpdate.changed) {
       if (upstreamState.lastUpstream) {
         state.lastUpstream = upstreamState.lastUpstream;
@@ -20717,7 +20829,7 @@ async function handleConversationTurnPrepared(
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
@@ -20740,6 +20852,7 @@ async function handleConversationTurnPrepared(
   const { identified } = admitted;
   preparation.assertActive();
   const { sessionID, isNew, tier } = identified;
+  if (!isNew) assertBoundSessionProject(sessionID, pathResult);
   try {
     onSessionIdentified?.(sessionID);
   } catch (error) {
@@ -20797,6 +20910,9 @@ async function handleConversationTurnPrepared(
     sessionID,
     preparation.signal,
   );
+  // Another turn may have changed this binding while we waited for its claim
+  // or preparation lock. Recheck before reading session-scoped prompt state.
+  if (!isNew) assertBoundSessionProject(sessionID, pathResult);
   const legacyGlobalProvider = cred
     ? captureLegacyGlobalAuth(req, config, cred)
     : undefined;
@@ -20809,7 +20925,6 @@ async function handleConversationTurnPrepared(
     config,
   );
   await beforeUpstreamCaptureForTest?.(req, sessionState);
-  const sessionSignal = sessionLifecycleSignal(sessionID);
   const suppressTemporalStorage =
     sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
   const preUpstreamPause = pipelinePreUpstreamPauseForTest;
@@ -20819,6 +20934,8 @@ async function handleConversationTurnPrepared(
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+  // Project re-attribution may retire the previous session lifecycle signal.
+  const sessionSignal = sessionLifecycleSignal(sessionID);
 
   // Routing and policy are request intent, not a property of a successful
   // response. Capture now so a failed policy-tightening request still governs
@@ -21693,8 +21810,11 @@ async function handleConversationTurnPrepared(
           // is late; otherwise the shared deadline fails closed with 503.
           const acceptedPin = ltmPinnedText.get(sessionID);
           const acceptedProof = acceptedKnowledgePins.get(sessionID);
-          const existingDeltas = listSessionPromptDeltas(sessionID);
           const currentProjectID = ensureProject(projectPath);
+          const existingDeltas = projectOwnedPromptDeltas(
+            sessionID,
+            currentProjectID,
+          );
           const deltaDigest = acceptedPin?.entryKeys
             ? acceptedKnowledgeDeltaDigest(
                 existingDeltas,
@@ -22842,6 +22962,7 @@ async function handleConversationTurnPrepared(
   modifiedReq.messages = applySessionPromptDeltas(
     modifiedReq.messages,
     sessionID,
+    projectId(projectPath) ?? "",
   );
   if (contextEffectOwner.projectID && contextEffectCandidates.size) {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -25022,10 +25143,11 @@ async function handleLoreSlashCommand(
     );
   }
 
+  const pathResult = getRequestProjectPath(req);
+
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
   if (!state && indexedSessionID) {
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
     state = getOrCreateSession(
       indexedSessionID,
       pathResult.path,
@@ -25036,7 +25158,11 @@ async function handleLoreSlashCommand(
   }
   const sessionID = indexedSessionID ?? state?.sessionID;
   if (sessionID) {
+    assertBoundSessionProject(sessionID, pathResult);
     await claimSession(sessionID);
+    // A queued command belongs to the project it claimed, even if the same
+    // authenticated session was corrected to another project while it waited.
+    assertBoundSessionProject(sessionID, pathResult);
     if (
       indexedSessionID &&
       !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
@@ -25049,6 +25175,7 @@ async function handleLoreSlashCommand(
     }
     await awaitStreamingPostResponse(sessionID, req.signal);
     req.signal?.throwIfAborted();
+    assertBoundSessionProject(sessionID, pathResult);
     if (
       indexedSessionID &&
       !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
@@ -25262,7 +25389,7 @@ async function handleCurateSlashCommand(
   if (text.toLowerCase() !== "/lore:curate") return null;
 
   const indexedSessionID = findIndexedSessionID(req, config);
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  const pathResult = getRequestProjectPath(req);
   let state = findLiveSessionState(req, config, allSessions);
   let sessionID = state?.sessionID;
 
@@ -25309,6 +25436,9 @@ async function handleCurateSlashCommand(
     );
   }
 
+  // Curation has its own asynchronous waits; authorize the current binding
+  // again immediately before it can resolve and persist a project change.
+  assertBoundSessionProject(sessionID, pathResult);
   const projectPath = resolveSessionProjectPath(pathResult, state, config);
   saveSessionTracking(sessionID, {
     projectPath: state.projectPath || null,
@@ -25563,6 +25693,16 @@ async function handleRequestInner(
       );
     }
 
+    const claudeCodeRequestClass = getClaudeCodeRequestClass(req);
+    // Auxiliary payloads can quote slash commands from a conversation. Bypass
+    // before even looking up a session so those records cannot mutate it.
+    if (claudeCodeRequestClass === "auxiliary") {
+      log.info(
+        "claude-code side-channel: passthrough (explicit auxiliary class)",
+      );
+      return await handlePassthrough(req, config);
+    }
+
     // Preserve the process-global legacy credential only for a local,
     // header-less request to the exact configured provider base.
     const earlyAuth = extractAuth(req.rawHeaders);
@@ -25652,7 +25792,13 @@ async function handleRequestInner(
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req, requestSourceMessageCount(req))) {
+    // A recognized Claude Code class has already established routing intent.
+    // Do not let generic short-prompt/few-tools heuristics reclassify a main
+    // turn after the explicit auxiliary bypass above has accepted it.
+    if (
+      claudeCodeRequestClass === undefined &&
+      isMetaRequest(req, requestSourceMessageCount(req))
+    ) {
       log.info(
         `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
           ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
@@ -25672,6 +25818,13 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof ProjectPathConflictError) {
+      return errorResponse(
+        400,
+        "Conflicting project paths",
+        "invalid_request_error",
+      );
+    }
     if (err instanceof InvalidCrossProviderRequestError) {
       return errorResponse(
         400,
