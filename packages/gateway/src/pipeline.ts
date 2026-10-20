@@ -55,6 +55,7 @@ export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { knowledgeRecallToken } from "./knowledge-recall-token";
 import { isDeepStrictEqual } from "node:util";
+import { createCopilotItemIdentityNormalizer } from "./stream/copilot-item-identity";
 import type {
   ContextBoundaryProtocol,
   LoreMessageWithParts,
@@ -273,6 +274,10 @@ import {
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
 import { InvalidCrossProviderRequestError } from "./translate/errors";
+import {
+  responsesValidationCheck,
+  upstreamRejectionDiagnostic,
+} from "./provider-failure-diagnostics";
 import { projectNativeUserProvenance } from "./native-user-provenance";
 import {
   accumulateResponsesSSEStream,
@@ -8000,6 +8005,7 @@ function logUpstreamResponseFailure(
   const requestId = safeUpstreamRequestId(headers);
   if (requestId) details.push(`requestId=${requestId}`);
   if (requestShape) details.push(formatUpstreamRequestShape(requestShape));
+  details.push(upstreamRejectionDiagnostic(errorBody));
   log.error(`upstream error: ${status} (${details.join(" ")})`);
 }
 
@@ -8119,6 +8125,15 @@ function resolveRequestUpstreamRoute(
       : null;
   const nativeIngressAnthropicOverride =
     providerHeader != null && providerRouteUsable?.protocol === "anthropic";
+  // Copilot serves native Messages as well as Chat/Responses; explicit destinations still win.
+  const nativeCopilotAnthropic =
+    req.protocol === "anthropic" &&
+    providerID === "github-copilot" &&
+    isGitHubCopilotUpstreamBase(
+      headerUpstream ?? providerRouteUsable?.url ?? "",
+    ) &&
+    (headerUpstreamPath === undefined ||
+      headerUpstreamPath.split("?")[0] === "/v1/messages");
   const effectiveProtocol: EffectiveUpstreamProtocol =
     req.protocol === "openai-responses"
       ? nativeIngressAnthropicOverride
@@ -8128,9 +8143,11 @@ function resolveRequestUpstreamRoute(
         ? nativeIngressAnthropicOverride
           ? "anthropic"
           : "gemini"
-        : (providerRouteUsable?.protocol ??
-          modelRoute?.protocol ??
-          req.protocol);
+        : nativeCopilotAnthropic
+          ? "anthropic"
+          : (providerRouteUsable?.protocol ??
+            modelRoute?.protocol ??
+            req.protocol);
   const bedrockMantle = isBedrockMantleDispatch(
     providerRouteUsable,
     effectiveProtocol,
@@ -10240,6 +10257,8 @@ export function streamResponsesRecallAware(
     validation?: "public" | "codex";
     /** Canonicalize a provider that rotates response.id across lifecycle events. */
     pinResponseId?: boolean;
+    /** Canonical Copilot Responses only: pin message/reasoning aliases by output_index. */
+    pinOutputItemIds?: boolean;
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
     /** Absolute request deadline inherited from the foreground abort scope. */
@@ -10325,6 +10344,22 @@ export function streamResponsesRecallAware(
   const syntheticIdentities = new Set<string>();
   const referenceIdentities = new Set<string>();
   const outputIdentities = new Set<string>();
+  const pinOutputItemIdentity = createCopilotItemIdentityNormalizer(
+    maxSparseIndex,
+    (_acc, id) =>
+      outputIdentities.has(id) ||
+      referenceIdentities.has(id) ||
+      syntheticIdentities.has(id),
+    (_acc, id) => {
+      outputIdentities.add(id);
+    },
+  );
+  const normalizeOutputItemIds = (
+    acc: ResponsesAccState,
+    event: string,
+    parsed: Record<string, unknown>,
+  ) =>
+    opts.pinOutputItemIds ? pinOutputItemIdentity(acc, event, parsed) : false;
   const responseLifecycles = new WeakMap<
     ResponsesAccState,
     { created: boolean; terminal: boolean }
@@ -11034,7 +11069,65 @@ export function streamResponsesRecallAware(
     throw new Error(`unsupported reviewed Responses reasoning event ${event}`);
   };
 
-  const outputIndexForEvent = (
+  let outputValidationStructure: string | undefined;
+  const describeOutputValidation = (
+    event: string,
+    parsed: Record<string, unknown>,
+    state: ResponsesAccState,
+  ): void => {
+    // Retain only bounded shape labels and allowlisted fields, never raw values.
+    const shape = (value: unknown): string =>
+      value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    const record = (value: unknown): Record<string, unknown> =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+    const incoming = record(parsed.item);
+    const established = state.rawItems.get(parsed.output_index as number);
+    const part = record(parsed.part);
+    const lifecycle = lifecyclesFor(state).get(parsed.output_index as number);
+    const textLifecycle =
+      lifecycle?.content.get(parsed.content_index as number) ??
+      lifecycle?.reasoning.get(parsed.summary_index as number);
+    const changedFields = [
+      "id",
+      "type",
+      "role",
+      "call_id",
+      "name",
+      "phase",
+    ].filter(
+      (key) =>
+        established &&
+        Object.hasOwn(incoming, key) &&
+        Object.hasOwn(established, key) &&
+        established[key] !== incoming[key],
+    );
+    const label = (value: unknown, allowed: string[]): string =>
+      typeof value === "string" && allowed.includes(value)
+        ? value
+        : shape(value);
+    const eventLabel = label(event, [
+      "response.output_item.added",
+      "response.output_item.done",
+      "response.content_part.added",
+      "response.content_part.done",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      ...reviewedReasoningEvents,
+    ]);
+    outputValidationStructure = `event=${eventLabel} item=${shape(parsed.item)} item_type=${label(incoming.type, ["message", "reasoning", "function_call"])} declared=${shape(established)} id_match=${incoming.id === established?.id} event_id_match=${parsed.item_id === established?.id} changed=${changedFields.join(",") || "none"} part=${shape(parsed.part)} part_type=${label(part.type, ["output_text", "refusal", "reasoning_text", "summary_text"])} text=${shape(part.text)} refusal=${shape(part.refusal)} reasoning_extra=${Object.keys(part).some((key) => key !== "type" && key !== "text")} content=${shape(incoming.content)} summary=${shape(incoming.summary)} encrypted=${shape(incoming.encrypted_content)} status=${label(incoming.status, ["in_progress", "completed", "incomplete", "failed"])} tracked=${!!lifecycle} part_added=${!!textLifecycle?.partAdded} delta_seen=${!!textLifecycle?.deltaSeen} value_done=${!!textLifecycle?.valueDone} part_done=${!!textLifecycle?.partDone}`;
+  };
+  const describeArgumentValidation = (
+    parsed: Record<string, unknown>,
+    acc: ResponsesAccState,
+  ): string => {
+    const lifecycle = lifecyclesFor(acc).get(parsed.output_index as number);
+    const shape = (value: unknown): string =>
+      value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    return `item_id=${shape(parsed.item_id)} delta=${shape(parsed.delta)} arguments=${shape(parsed.arguments)} arguments_done=${!!lifecycle?.argumentsDone} argument_delta_seen=${!!lifecycle?.argumentDeltaSeen} arguments_match=${parsed.arguments === lifecycle?.argumentDeltas}`;
+  };
+  const validateOutputIndexForEvent = (
     event: string,
     parsed: Record<string, unknown>,
     state: ResponsesAccState,
@@ -11258,8 +11351,24 @@ export function streamResponsesRecallAware(
           !isValidResponsesReasoningEncryptedContent(item) ||
           !responsesDoneItemMatchesAdded(item, declared))
       ) {
+        const check =
+          !item || !declared
+            ? "missing item"
+            : item.id !== declared.id
+              ? "changed item identity"
+              : item.type !== declared.type
+                ? "changed item type"
+                : !isValidResponsesReasoningEncryptedContent(item)
+                  ? "invalid encrypted content"
+                  : !isValidResponsesOutputItemStatus(
+                        item.type,
+                        item.status,
+                        "done",
+                      )
+                    ? "invalid status"
+                    : "changed item envelope";
         throw new Error(
-          `Responses output_item.done changed item identity for index ${outputIndex}`,
+          `Responses output_item.done ${check} for index ${outputIndex}`,
         );
       }
       let finalFunctionIdentity: { callId: string; name: string } | undefined;
@@ -11811,6 +11920,18 @@ export function streamResponsesRecallAware(
       }
     }
     return outputIndex;
+  };
+  const outputIndexForEvent: typeof validateOutputIndexForEvent = (...args) => {
+    outputValidationStructure = undefined;
+    try {
+      return validateOutputIndexForEvent(...args);
+    } catch (error) {
+      describeOutputValidation(args[0], args[1], args[2]);
+      if (args[0].startsWith("response.function_call_arguments.")) {
+        outputValidationStructure = `${(outputValidationStructure as string | undefined) ?? ""} ${describeArgumentValidation(args[1], args[2])}`;
+      }
+      throw error;
+    }
   };
   const seedImplicitCodexItem = (
     acc: ResponsesAccState,
@@ -13894,9 +14015,16 @@ export function streamResponsesRecallAware(
             ) {
               recallDetected = true;
             }
-            const normalizedData =
+            const itemIdsNormalized = normalizeOutputItemIds(
+              state,
+              event,
+              parsed,
+            );
+            const responseIdNormalized =
               opts.pinResponseId &&
-              pinResponsesLifecycleIdentity(state, event, parsed)
+              pinResponsesLifecycleIdentity(state, event, parsed);
+            const normalizedData =
+              itemIdsNormalized || responseIdNormalized
                 ? JSON.stringify(parsed)
                 : data;
             principalPhase = "validate_response";
@@ -14610,13 +14738,18 @@ export function streamResponsesRecallAware(
                               `Responses payload type does not match ${ce}`,
                             );
                           }
-                          const normalizedContinuationData =
+                          const continuationItemIdsNormalized =
+                            normalizeOutputItemIds(contState, ce, cparsed);
+                          const continuationResponseIdNormalized =
                             opts.pinResponseId &&
                             pinResponsesLifecycleIdentity(
                               contState,
                               ce,
                               cparsed,
-                            )
+                            );
+                          const normalizedContinuationData =
+                            continuationItemIdsNormalized ||
+                            continuationResponseIdNormalized
                               ? JSON.stringify(cparsed)
                               : cd;
                           validateResponseLifecycle(contState, ce, cparsed);
@@ -15574,6 +15707,18 @@ export function streamResponsesRecallAware(
                 ? principalProtocolReason(err)
                 : undefined;
             if (protocolReason !== undefined) {
+              reportRecallDiagnostic(
+                `responses-validation check=${responsesValidationCheck(err)}`,
+              );
+              if (
+                (principalPhase as PrincipalProtocolFailureSample["phase"]) ===
+                  "validate_output" &&
+                outputValidationStructure
+              ) {
+                reportRecallDiagnostic(
+                  `responses-structure ${outputValidationStructure}`,
+                );
+              }
               reportPrincipalProtocolFailure({
                 phase: principalPhase,
                 event: principalEventKind,
@@ -24507,6 +24652,7 @@ async function handleConversationTurnPrepared(
             streamResponsesRecallAware(upstreamResponse, {
               validation: req.codex ? "codex" : "public",
               pinResponseId,
+              pinOutputItemIds: pinResponseId,
               onComplete: (response, successful) => {
                 if (successful) finishStreaming(response);
                 else finishUnsuccessfulStreaming(response);
