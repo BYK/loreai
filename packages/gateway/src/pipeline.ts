@@ -314,6 +314,7 @@ import {
   buildSSEMarkerMessage,
   formatSSEEvent,
   AnthropicSSEValidator,
+  AnthropicSSEProviderError,
   cancelAndReleaseReader,
   readStreamChunk,
   SSEStreamLimitError,
@@ -450,6 +451,7 @@ import {
 } from "./recall-budget";
 import {
   RecallContinuationFailure,
+  RECALL_CONTINUATION_FAILURE_CATEGORIES,
   reportRecallContinuationFailure,
   type RecallContinuationFailureCategory,
 } from "./recall-continuation-failure";
@@ -9765,15 +9767,29 @@ export function buildStreamingResponse(
         } catch (err) {
           recallPersistence?.rollback();
           recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
-          const failureCategory: RecallContinuationFailureCategory =
-            err instanceof RecallContinuationFailure
-              ? err.category
+          let isRecallFailure = false;
+          let isAbort = false;
+          let failureCategory: RecallContinuationFailureCategory = "unexpected";
+          try {
+            isRecallFailure = err instanceof RecallContinuationFailure;
+            isAbort =
+              err instanceof DOMException &&
+              readErrorField(err, "name") === "AbortError";
+            const errorCategory = isRecallFailure
+              ? readErrorField(err, "category")
+              : undefined;
+            failureCategory = isRecallFailure
+              ? (RECALL_CONTINUATION_FAILURE_CATEGORIES.find(
+                  (category) => category === errorCategory,
+                ) ?? "unexpected")
               : err instanceof SSEStreamLimitError
                 ? "resource_limit"
                 : streamPhase === "follow_up_stream"
                   ? err instanceof SSEStreamTransportError
                     ? "follow_up_transport"
-                    : "follow_up_protocol"
+                    : err instanceof AnthropicSSEProviderError
+                      ? "follow_up_failed"
+                      : "follow_up_protocol"
                   : streamPhase === "recall_execution"
                     ? "recall_execution"
                     : streamPhase === "follow_up_setup"
@@ -9782,9 +9798,13 @@ export function buildStreamingResponse(
                           streamPhase === "follow_up_delivery"
                         ? "delivery"
                         : "unexpected";
+          } catch {
+            // Exception classification is advisory; even prototype inspection
+            // can throw, and must never prevent the failed response settling.
+          }
           if (
             !streamSignal.aborted &&
-            (err instanceof RecallContinuationFailure || recallFailureResponse)
+            (isRecallFailure || recallFailureResponse)
           )
             reportRecallContinuationFailure(failureCategory);
           if (recallFailureResponse) {
@@ -9806,8 +9826,6 @@ export function buildStreamingResponse(
           }
           // Client disconnect / abort is benign — downgrade from error to info
           // to avoid Sentry noise from normal connection lifecycle events.
-          const isAbort =
-            err instanceof DOMException && err.name === "AbortError";
           if (isAbort) {
             reportRecallDiagnostic(
               "streaming pipeline aborted (client disconnect)",
@@ -9821,29 +9839,31 @@ export function buildStreamingResponse(
           } else {
             // Never log the original exception, message, stack, or arbitrary
             // cause fields: provider errors may contain credentials or text.
-            const causeCodes = [
-              ...new Set(
-                errorCauseChain(err)
-                  .map((error) => readErrorField(error, "code"))
-                  .filter(
-                    (code): code is string =>
-                      typeof code === "string" &&
-                      SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
-                  ),
-              ),
-            ];
-            reportRecallDiagnostic(
-              `streaming pipeline error ${JSON.stringify({
+            reportRecallDiagnostic(() => {
+              const kind = readErrorField(err, "kind");
+              const transportKind =
+                kind === "read" || kind === "inactivity" ? kind : undefined;
+              const causeCodes = [
+                ...new Set(
+                  errorCauseChain(err)
+                    .map((error) => readErrorField(error, "code"))
+                    .filter(
+                      (code): code is string =>
+                        typeof code === "string" &&
+                        SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
+                    ),
+                ),
+              ];
+              return `streaming pipeline error ${JSON.stringify({
                 phase: streamPhase,
                 category: failureCategory,
-                ...(err instanceof SSEStreamTransportError
-                  ? { transportKind: err.kind }
+                ...(err instanceof SSEStreamTransportError && transportKind
+                  ? { transportKind }
                   : {}),
                 causeCodes,
                 ...recallFailureBudget?.(),
-              })}`,
-              "error",
-            );
+              })}`;
+            }, "error");
           }
           try {
             controller.error(err);
