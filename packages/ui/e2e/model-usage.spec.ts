@@ -13,7 +13,9 @@ function modelCells(page: Page) {
 }
 
 test.describe("model usage page", () => {
-  test("nav, chart, totals table, sorting and export", async ({ page }) => {
+  test("nav, chart, totals table, sorting and export", async ({
+    page,
+  }, testInfo) => {
     await page.goto(PAGE);
     await expect(page.getByTestId("rail-model-usage")).toHaveAttribute(
       "aria-current",
@@ -34,6 +36,14 @@ test.describe("model usage page", () => {
     await expect(
       page.locator("table tbody tr").nth(0).locator("td").nth(2),
     ).toHaveText("4");
+
+    await page
+      .getByRole("heading", { name: "Totals", exact: true })
+      .scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: testInfo.outputPath("model-usage-spacing.png"),
+      fullPage: true,
+    });
 
     // Click the Model header: Model becomes primary sort, ascending.
     await page.getByRole("button", { name: "Sort by Model" }).click();

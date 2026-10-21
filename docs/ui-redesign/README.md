@@ -7,3 +7,7 @@ controls.
 
 Regenerate the captures with the `workspace-shell` and `folk-status` Playwright
 specs after building the gateway bundle.
+
+The model-usage desktop and mobile captures show the padded sort caption and
+responsive Totals filter. Regenerate them with the `model-usage.spec.ts`
+Playwright spec.

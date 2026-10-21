@@ -469,9 +469,9 @@ export const ModelUsagePage: Component = () => {
                 />
 
                 <section class="mt-6">
-                  <div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+                  <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h2 class="text-lg font-semibold">Totals</h2>
-                    <TextField class="w-64">
+                    <TextField class="w-full sm:w-64">
                       <TextFieldInput
                         aria-label="Filter models"
                         placeholder="Filter models"
@@ -486,7 +486,7 @@ export const ModelUsagePage: Component = () => {
                   </div>
                   <div class="overflow-x-auto rounded-lg border border-line">
                     <table class="w-full min-w-[640px] text-left text-xs">
-                      <caption class="mb-2 text-left text-[11px] text-muted">
+                      <caption class="border-b border-line px-3 py-2.5 text-left text-[11px] leading-5 text-muted">
                         Sorted by {sortCaption()}
                       </caption>
                       <thead class="bg-soft text-muted">

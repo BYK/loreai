@@ -234,7 +234,7 @@ export const WarmingPage: Component = () => {
             </Show>
 
             <section class="mb-7">
-              <div class="mb-3 flex items-end justify-between gap-3">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 class="text-lg font-semibold">Live sessions</h2>
                   <p class="text-xs text-muted">

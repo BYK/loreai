@@ -312,7 +312,7 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
             }}
             class="w-full table-fixed text-left text-xs"
           >
-            <caption class="mb-2 text-left text-[11px] text-muted">
+            <caption class="px-2 pb-3 pt-1 text-left text-[11px] leading-5 text-muted">
               Sorted by {sortCaption()} · page of up to 50
               {rows().some((row) => row.match === "fuzzy")
                 ? " · approximate matches shown below exact hits"
