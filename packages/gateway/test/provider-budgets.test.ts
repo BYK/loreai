@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import * as core from "@loreai/core";
 import {
   db,
+  MAX_PROVIDER_QUOTA_ROWS,
   MAX_PROVIDER_PACING_GENERATIONS,
   listProviderQuotas,
   upsertProviderQuota,
@@ -15,17 +16,21 @@ import {
   capturePacingGeneration,
   _resetPacingTrackerForTest,
   _pacingTrackerSizesForTest,
+  _providerQuotaRowsSnapshotForTest,
+  _providerQuotaRowsSnapshotSizeForTest,
   computePacingDelayMs,
   evaluatePacingWindow,
   evaluateProviderPacing,
   integrateHeldDelayMs,
   getPacingSettings,
+  initializeProviderPacingState,
   isCurationPacingPaused,
   isPacingGenerationCurrent,
   isPacingEnabled,
   pacingDelayMs,
   parsePacingSetting,
   recordForegroundRequest,
+  recordProviderQuotaSnapshot,
   recordQuotaObservation,
   sessionBudgetMatch,
   setPacingEnabled,
@@ -54,6 +59,7 @@ function clear(): void {
   db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_pacing");
   _resetPacingTrackerForTest();
   _resetCostAttributionForTest();
+  initializeProviderPacingState();
 }
 
 beforeEach(clear);
@@ -1412,5 +1418,133 @@ describe("pacing settings", () => {
     ).toBe(false);
     expect(isPacingEnabled("anthropic", "generation-0")).toBe(false);
     expect(isPacingEnabled("anthropic", "new-opt-out")).toBe(true);
+  });
+
+  test("quota row snapshot stays synchronized across stale-row eviction cycles", () => {
+    let batch = 0;
+    const fillToCapacity = (recordSnapshot: boolean) => {
+      const observedAt = Date.now() - 2 * 60_000;
+      const existingCount = listProviderQuotas().length;
+      const rows = Array.from(
+        { length: MAX_PROVIDER_QUOTA_ROWS - existingCount },
+        (_, index): ProviderQuotaRow => ({
+          provider: "snapshot-fill-provider",
+          authKind: "api_key",
+          account: `snapshot-account-${batch}-${index}`,
+          window: "stale-window",
+          label: null,
+          windowMinutes: 1,
+          usedPercent: 50,
+          remaining: null,
+          limit: null,
+          resetsAt: null,
+          source: "synthetic-stale-window",
+          observedAt,
+        }),
+      );
+      const insert = db().query(
+        `INSERT INTO provider_quotas (
+           provider, auth_kind, account, window, label, window_minutes,
+           used_percent, remaining, "limit", resets_at, source, observed_at)
+         VALUES (?, ?, ?, ?, NULL, 1, 50, NULL, NULL, NULL, ?, ?)`,
+      );
+      db().exec("BEGIN");
+      try {
+        for (const row of rows) {
+          insert.run(
+            row.provider,
+            row.authKind,
+            row.account,
+            row.window,
+            row.source,
+            row.observedAt,
+          );
+        }
+        db().exec("COMMIT");
+      } catch (error) {
+        db().exec("ROLLBACK");
+        throw error;
+      }
+      if (recordSnapshot) {
+        for (const row of rows) recordProviderQuotaSnapshot(row);
+      } else {
+        initializeProviderPacingState();
+      }
+      batch++;
+    };
+
+    fillToCapacity(false);
+    const headers = new Headers({
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "50",
+    });
+    for (let cycle = 0; cycle < 3; cycle++) {
+      expect(
+        observeProviderQuotaHeaders(
+          headers,
+          {
+            provider: "snapshot-churn-provider",
+            authKind: "api_key",
+            account: `new-account-${cycle}`,
+          },
+          Date.now() + cycle,
+          Date.now(),
+        ),
+      ).toBe(true);
+      expect(_providerQuotaRowsSnapshotSizeForTest()).toBe(
+        listProviderQuotas().length,
+      );
+      expect(_providerQuotaRowsSnapshotForTest()).toEqual(listProviderQuotas());
+      expect(_providerQuotaRowsSnapshotSizeForTest()).toBeLessThanOrEqual(
+        MAX_PROVIDER_QUOTA_ROWS,
+      );
+
+      if (cycle < 2) {
+        fillToCapacity(true);
+      }
+    }
+  });
+
+  test("refreshes an over-cap snapshot when an existing quota row is updated", () => {
+    const now = Date.now();
+    db().exec(`
+      WITH RECURSIVE quota_rows(n) AS (
+        SELECT 1
+        UNION ALL
+        SELECT n + 1 FROM quota_rows WHERE n <= ${MAX_PROVIDER_QUOTA_ROWS + 1}
+      )
+      INSERT INTO provider_quotas (
+        provider, auth_kind, account, window, label, window_minutes,
+        used_percent, remaining, "limit", resets_at, source, observed_at
+      )
+      SELECT
+        'snapshot-over-cap-provider', 'api_key',
+        'snapshot-over-cap-' || n, '5h', NULL, 300, 50, NULL, NULL,
+        CASE WHEN n = 1 THEN ${now - 1} ELSE ${now + 60 * 60_000} END,
+        'snapshot-over-cap-test', ${now}
+      FROM quota_rows;
+    `);
+
+    initializeProviderPacingState();
+    expect(_providerQuotaRowsSnapshotSizeForTest()).toBe(
+      MAX_PROVIDER_QUOTA_ROWS + 2,
+    );
+
+    const updated = quotaRow({
+      provider: "snapshot-over-cap-provider",
+      authKind: "api_key",
+      account: "snapshot-over-cap-2",
+      usedPercent: 25,
+      resetsAt: now + 60 * 60_000,
+      observedAt: now + 1,
+      source: "snapshot-over-cap-updated",
+    });
+    expect(upsertProviderQuota(updated)).toBe(true);
+    recordProviderQuotaSnapshot(updated);
+
+    expect(_providerQuotaRowsSnapshotForTest()).toEqual(listProviderQuotas());
+    expect(_providerQuotaRowsSnapshotSizeForTest()).toBe(
+      MAX_PROVIDER_QUOTA_ROWS + 1,
+    );
   });
 });

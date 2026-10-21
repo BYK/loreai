@@ -375,15 +375,16 @@ export function resolveCostAttribution(input: {
   const authKind: ProviderAuthKind =
     anthropicSubscription || openAISubscription ? "subscription" : "api_key";
 
+  // Attribute this observation to its own trusted organization header; a newer
+  // cached response must not relabel an older in-flight response.
   // OpenAI has no trusted stable account ID here; token fingerprints split
   // subscription state on credential rotation, and forwarded account hints are
   // not identity proof, so subscriptions share the stable default bucket.
   const account =
     authKind === "subscription" && provider === "anthropic"
-      ? (cachedAnthropicAccountForKeys(credential, sessionID) ??
-        (responseAnthropicOrganizationID
-          ? sha256(responseAnthropicOrganizationID).slice(0, 12)
-          : "default"))
+      ? responseAnthropicOrganizationID
+        ? sha256(responseAnthropicOrganizationID).slice(0, 12)
+        : (cachedAnthropicAccountForKeys(credential, sessionID) ?? "default")
       : authKind === "api_key" && credential?.value
         ? authFingerprint(credential).slice(0, 12)
         : "default";

@@ -209,6 +209,7 @@ export {
   type DailyCostBucket,
   addProviderCost,
   getProviderCostTotals,
+  MAX_PROVIDER_QUOTA_ROWS,
   isProviderQuotaStale,
   QUOTA_STALE_FALLBACK_MS,
   getProviderDayUsage,

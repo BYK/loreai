@@ -23,6 +23,7 @@ import {
   setKV,
   isProviderQuotaStale,
   listProviderQuotas,
+  MAX_PROVIDER_QUOTA_ROWS,
   MAX_PROVIDER_PACING_SETTINGS,
   MAX_PROVIDER_PACING_GENERATIONS,
   type ProviderAuthKind,
@@ -297,8 +298,29 @@ export function recordProviderQuotaSnapshot(row: ProviderQuotaRow): void {
       existing.account === row.account &&
       existing.window === row.window,
   );
-  if (index === -1) rows.push(row);
-  else rows[index] = row;
+  if (rows.length > MAX_PROVIDER_QUOTA_ROWS) {
+    refreshProviderQuotaRowsSnapshot();
+    return;
+  }
+  if (index !== -1) {
+    rows[index] = row;
+    return;
+  }
+  if (rows.length >= MAX_PROVIDER_QUOTA_ROWS) {
+    // The durable upsert may have evicted stale rows at its cap. Re-read its
+    // bounded result instead of retaining rows that no longer exist in SQLite.
+    refreshProviderQuotaRowsSnapshot();
+    return;
+  }
+  rows.push(row);
+}
+
+export function _providerQuotaRowsSnapshotSizeForTest(): number {
+  return providerQuotaRowsSnapshot?.length ?? 0;
+}
+
+export function _providerQuotaRowsSnapshotForTest(): ProviderQuotaRow[] {
+  return (providerQuotaRowsSnapshot ?? []).map((row) => ({ ...row }));
 }
 
 /** Stored switches; invalid or duplicate state disables pacing. Never throws. */

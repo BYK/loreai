@@ -52,6 +52,7 @@ import {
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
+  _resolveWorkerRequestAuthForTest,
   workerModelReasons,
   modelRejectsTemperatureByData,
   _resetTemperatureUnsupportedModels,
@@ -5335,6 +5336,97 @@ describe("worker temperature capability", () => {
     expect(bodyOf(2)).not.toHaveProperty("temperature");
   });
 
+  test("worker retry verifies and attributes quota to the credential sent on the successful attempt", async () => {
+    db().exec("DELETE FROM provider_quotas");
+    _resetCostAttributionForTest();
+
+    const staleCredential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-worker-stale",
+    };
+    const refreshedCredential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-worker-refreshed",
+    };
+    const sessionID = "sess-worker-auth-refresh-attribution";
+    let authCalls = 0;
+    let fetchCalls = 0;
+    const headers = new Headers({
+      "content-type": "application/json",
+      "anthropic-organization-id": "org-worker-refreshed",
+      "anthropic-ratelimit-unified-status": "allowed",
+      "anthropic-ratelimit-unified-5h-utilization": "0.25",
+      "anthropic-ratelimit-unified-5h-reset": String(
+        (Date.now() + 60 * 60_000) / 1000,
+      ),
+    });
+    mockFetch.mockImplementation(async () => {
+      fetchCalls++;
+      if (fetchCalls === 1)
+        return new Response("unauthorized", { status: 401 });
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          model: "claude-test",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers },
+      );
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => (authCalls++ === 0 ? staleCredential : refreshedCredential),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    try {
+      await expect(
+        client.prompt("system", "user", {
+          sessionID,
+          workerID: "lore-distill",
+          protocol: "anthropic",
+          upstreamProviderID: "anthropic",
+        }),
+      ).resolves.toBe("recovered");
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const successfulHeaders = new Headers(
+        mockFetch.mock.calls[1]?.[1]?.headers,
+      );
+      expect(successfulHeaders.get("authorization")).toBe(
+        `Bearer ${refreshedCredential.value}`,
+      );
+
+      const staleAttribution = resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: "https://api.anthropic.com",
+        credential: staleCredential,
+      });
+      const refreshedAttribution = resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: "https://api.anthropic.com",
+        credential: refreshedCredential,
+      });
+      expect(staleAttribution.authKind).toBe("api_key");
+      expect(refreshedAttribution.authKind).toBe("subscription");
+      expect(listProviderQuotas()).toEqual([
+        expect.objectContaining({
+          provider: "anthropic",
+          authKind: "subscription",
+          account: refreshedAttribution.account,
+          window: "5h",
+          usedPercent: 25,
+        }),
+      ]);
+    } finally {
+      db().exec("DELETE FROM provider_quotas");
+      _resetCostAttributionForTest();
+    }
+  });
+
   test("strips temperature on the OpenAI Chat Completions worker path too", async () => {
     let call = 0;
     mockFetch.mockImplementation(async () => {
@@ -5441,6 +5533,81 @@ describe("worker temperature capability", () => {
     expect(betaOf(1)).not.toContain("context-1m");
     expect(betaOf(1)).toContain("oauth-2025-04-20");
     expect(bodyOf(1)).not.toHaveProperty("temperature");
+  });
+});
+
+describe("worker credential header resolution", () => {
+  const selectedCredential = { scheme: "bearer" as const, value: "selected" };
+
+  test.each([
+    [
+      "case-variant Authorization headers",
+      {
+        Authorization: "Bearer selected",
+        authorization: "Bearer attacker",
+      },
+    ],
+    [
+      "multiple API-key header names",
+      { "x-api-key": "selected", "x-goog-api-key": "attacker" },
+    ],
+    [
+      "different credential mechanisms",
+      { Authorization: "Bearer selected", "x-api-key": "attacker" },
+    ],
+    ["missing credential headers", {}],
+    ["malformed bearer credentials", { Authorization: "Basic selected" }],
+    ["empty API keys", { "x-api-key": "  " }],
+  ])("rejects %s", (_description, headers) => {
+    expect(
+      _resolveWorkerRequestAuthForTest(
+        headers,
+        selectedCredential,
+        "anthropic",
+      ),
+    ).toBeNull();
+  });
+
+  test("keeps the authentication scheme from the header that will be sent", () => {
+    expect(
+      _resolveWorkerRequestAuthForTest(
+        { Authorization: "Bearer selected" },
+        { scheme: "api-key", value: "selected" },
+        "anthropic",
+      ),
+    ).toEqual({
+      headers: { Authorization: "Bearer selected" },
+      credential: { scheme: "bearer", value: "selected" },
+    });
+  });
+
+  test("dispatches the canonical credential header used for attribution", () => {
+    expect(
+      _resolveWorkerRequestAuthForTest(
+        { "content-type": "application/json", authorization: "bearer rotated" },
+        { scheme: "bearer", value: "selected" },
+        "anthropic",
+      ),
+    ).toEqual({
+      headers: {
+        "content-type": "application/json",
+        Authorization: "Bearer rotated",
+      },
+      credential: { scheme: "bearer", value: "rotated" },
+    });
+  });
+
+  test("does not attribute a Vertex ADC bearer token to the session", () => {
+    expect(
+      _resolveWorkerRequestAuthForTest(
+        { authorization: "bearer vertex-token" },
+        selectedCredential,
+        "vertex",
+      ),
+    ).toEqual({
+      headers: { Authorization: "Bearer vertex-token" },
+      credential: null,
+    });
   });
 });
 

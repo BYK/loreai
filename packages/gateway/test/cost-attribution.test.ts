@@ -849,6 +849,65 @@ describe("resolveCostAttribution", () => {
     _resetForTest();
   });
 
+  test("out-of-order successful responses use their own organization for quota attribution", () => {
+    _resetForTest();
+    const sessionID = "anthropic-out-of-order-org-session";
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-out-of-order-org",
+    };
+    trustAnthropicCredential(credential);
+    const response = (organizationID: string) =>
+      new Headers({ "anthropic-organization-id": organizationID });
+    const accountFor = (organizationID: string) =>
+      createHash("sha256").update(organizationID).digest("hex").slice(0, 12);
+
+    const newerHeaders = response("org-newer");
+    cacheAnthropicOrganizationFromResponse({
+      provider: "anthropic",
+      credential,
+      sessionID,
+      observedAt: 200,
+      responseHeaders: newerHeaders,
+      ...TRUSTED_ANTHROPIC_RESPONSE,
+    });
+    const newerAttribution = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      credential,
+      responseHeaders: newerHeaders,
+      ...TRUSTED_ANTHROPIC_RESPONSE,
+    });
+
+    const olderHeaders = response("org-older");
+    const olderAttribution = resolveCostAttribution({
+      sessionID,
+      providerID: "anthropic",
+      credential,
+      responseHeaders: olderHeaders,
+      ...TRUSTED_ANTHROPIC_RESPONSE,
+    });
+    cacheAnthropicOrganizationFromResponse({
+      provider: olderAttribution.provider,
+      credential,
+      sessionID,
+      observedAt: 100,
+      responseHeaders: olderHeaders,
+      ...TRUSTED_ANTHROPIC_RESPONSE,
+    });
+
+    expect(newerAttribution.account).toBe(accountFor("org-newer"));
+    expect(olderAttribution.account).toBe(accountFor("org-older"));
+    expect(
+      resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: ANTHROPIC_URL,
+        credential,
+      }).account,
+    ).toBe(accountFor("org-newer"));
+  });
+
   test("Anthropic session attribution stays bound to its credential", () => {
     _resetForTest();
     const sessionID = "anthropic-switched-credential-session";

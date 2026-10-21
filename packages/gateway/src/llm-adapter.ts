@@ -2971,6 +2971,80 @@ async function buildWorkerRequest(
   }
 }
 
+type ResolvedWorkerRequestAuth = {
+  headers: Record<string, string>;
+  credential: AuthCredential | null;
+};
+
+/** Resolve and canonicalize the single auth header sent by a worker attempt. */
+function resolveWorkerRequestAuth(
+  headers: Record<string, string>,
+  selectedCredential: AuthCredential,
+  protocol: WorkerProtocol,
+): ResolvedWorkerRequestAuth | null {
+  const credentialHeaderNames = new Set([
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ]);
+  const credentialHeaders = Object.entries(headers).filter(([name]) =>
+    credentialHeaderNames.has(name.toLowerCase()),
+  );
+  // Count entries, not distinct lowercase names: fetch may combine case-variant
+  // duplicates differently from the attribution code.
+  if (credentialHeaders.length !== 1) return null;
+
+  const credentialHeader = credentialHeaders[0];
+  if (!credentialHeader) return null;
+  const [wireName, rawValue] = credentialHeader;
+  const normalizedName = wireName.toLowerCase();
+  let scheme: AuthCredential["scheme"];
+  let value: string;
+  let canonicalName: string;
+  let canonicalValue: string;
+  if (normalizedName === "authorization") {
+    const bearer = /^Bearer\s+(\S+)$/i.exec(rawValue.trim());
+    if (!bearer?.[1]) return null;
+    scheme = "bearer";
+    value = bearer[1];
+    canonicalName = "Authorization";
+    canonicalValue = `Bearer ${value}`;
+  } else {
+    value = rawValue.trim();
+    if (!value || /\s/.test(value)) return null;
+    scheme = "api-key";
+    canonicalName = normalizedName;
+    canonicalValue = value;
+  }
+
+  const canonicalHeaders: Record<string, string> = {};
+  for (const [name, headerValue] of Object.entries(headers)) {
+    if (!credentialHeaderNames.has(name.toLowerCase())) {
+      canonicalHeaders[name] = headerValue;
+    }
+  }
+  canonicalHeaders[canonicalName] = canonicalValue;
+
+  // Vertex's ADC token is not the session credential used for quota
+  // attribution. Elsewhere, preserve the scheme actually sent on the wire.
+  const credential =
+    protocol === "vertex"
+      ? null
+      : selectedCredential.scheme === scheme &&
+          selectedCredential.value === value
+        ? selectedCredential
+        : { scheme, value };
+  return { headers: canonicalHeaders, credential };
+}
+
+export function _resolveWorkerRequestAuthForTest(
+  headers: Record<string, string>,
+  selectedCredential: AuthCredential,
+  protocol: WorkerProtocol,
+): ResolvedWorkerRequestAuth | null {
+  return resolveWorkerRequestAuth(headers, selectedCredential, protocol);
+}
+
 /** Dispatch to the correct worker response parser for a resolved target. */
 function parseWorkerResponse(
   protocol: WorkerProtocol,
@@ -3952,26 +4026,42 @@ export function createGatewayLLMClient(
             for (let attempt = 0; ; attempt++) {
               const quotaObservationStartedAt =
                 providerQuotaObservationStartedAt();
+              // Bind attribution and trust decisions to this exact built request;
+              // auth refreshes may replace the initial credential between attempts.
+              const requestAuth = resolveWorkerRequestAuth(
+                req.headers,
+                activeCred,
+                target.protocol,
+              );
+              if (!requestAuth) {
+                throw new Error(
+                  "worker request rejected because authentication headers are invalid",
+                );
+              }
+              // Bind dispatch and attribution to the exact same canonicalized
+              // single-credential header set; never send ambiguous auth.
+              req = { ...req, headers: requestAuth.headers };
+              const attemptCredential = requestAuth.credential;
               const quotaPacingEpoch = (() => {
                 try {
                   const quotaAttribution = resolveCostAttribution({
                     sessionID: opts?.sessionID,
                     providerID: credentialProviderID ?? model.providerID,
                     upstreamURL: target.url,
-                    credential: cred,
+                    credential: attemptCredential,
                     requestHeaders: req.headers,
                   });
                   const potentialChatGPTSubscription =
                     isPotentialChatGPTSubscription({
                       providerID: credentialProviderID ?? model.providerID,
                       upstreamURL: target.url,
-                      credential: cred,
+                      credential: attemptCredential,
                     });
                   const potentialAnthropicOAuthCredential =
                     isPotentialAnthropicOAuthCredential({
                       providerID: credentialProviderID ?? model.providerID,
                       upstreamURL: target.url,
-                      credential: cred,
+                      credential: attemptCredential,
                     });
                   return capturePacingEpoch({
                     provider: quotaAttribution.provider,
@@ -4033,14 +4123,14 @@ export function createGatewayLLMClient(
               finalStatus = response.status;
               try {
                 recordSuccessfulAnthropicOAuthAuth({
-                  credential: cred,
+                  credential: attemptCredential,
                   upstreamURL: target.url,
                   responseURL: response.url,
                   responseStatus: response.status,
                   directUpstreamResponse: true,
                 });
                 recordSuccessfulChatGPTAuth({
-                  credential: cred,
+                  credential: attemptCredential,
                   upstreamURL: target.url,
                   responseURL: response.url,
                   responseStatus: response.status,
@@ -4424,7 +4514,7 @@ export function createGatewayLLMClient(
                     sessionID: opts?.sessionID,
                     providerID: credentialProviderID ?? model.providerID,
                     upstreamURL: target.url,
-                    credential: cred,
+                    credential: attemptCredential,
                     responseHeaders: response.headers,
                     responseURL: response.url,
                     responseStatus: response.status,
@@ -4454,7 +4544,7 @@ export function createGatewayLLMClient(
                   if (acceptedQuota) {
                     cacheAnthropicOrganizationFromResponse({
                       provider: attribution.provider,
-                      credential: cred,
+                      credential: attemptCredential,
                       sessionID: opts?.sessionID,
                       observedAt: quotaObservationStartedAt,
                       responseStatus: response.status,
