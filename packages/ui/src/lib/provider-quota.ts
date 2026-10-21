@@ -52,6 +52,25 @@ export function quotaStale(row: QuotaRow, now: number): boolean {
 export type PacingRow = CostsSnapshot["provider_pacing"][number];
 export type PacingWindowRow = PacingRow["windows"][number];
 
+/** Re-evaluate cached pacing against the live clock while a page stays open. */
+export function effectivePacingState(
+  pacing: PacingRow,
+  now: number,
+): Pick<PacingRow, "throttling" | "recommended_extra_gap_ms"> {
+  const activeThrottlingWindows = pacing.windows.filter(
+    (window) => window.resets_at > now && window.throttling,
+  );
+  return {
+    throttling: pacing.enabled && activeThrottlingWindows.length > 0,
+    recommended_extra_gap_ms: pacing.enabled
+      ? activeThrottlingWindows.reduce(
+          (max, window) => Math.max(max, window.recommended_extra_gap_ms),
+          0,
+        )
+      : 0,
+  };
+}
+
 export type ProviderCardModel = {
   key: string;
   provider: string;

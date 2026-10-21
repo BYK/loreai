@@ -294,6 +294,46 @@ describe("ProviderCards pacing", () => {
     ).not.toBeNull();
   });
 
+  it("expires the curation pause when its quota window resets", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const result = render(() => (
+      <ProviderCards
+        providers={[providerRow()]}
+        quotas={[quotaRow()]}
+        pacing={[
+          pacingRow({
+            throttling: true,
+            recommended_extra_gap_ms: 12_400,
+            windows: [
+              pacingWindow({
+                resets_at: NOW + 30_000,
+                throttling: true,
+                recommended_extra_gap_ms: 12_400,
+              }),
+            ],
+          }),
+        ]}
+        money={money}
+      />
+    ));
+
+    try {
+      expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+        "active",
+      );
+      vi.setSystemTime(NOW + 30_000);
+      vi.advanceTimersByTime(30_000);
+      expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+        "inactive",
+      );
+      expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("none");
+    } finally {
+      result.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("hides pacing for a stale window", () => {
     renderCards(
       [providerRow()],

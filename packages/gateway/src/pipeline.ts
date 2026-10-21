@@ -21,6 +21,7 @@ import {
   recordSuccessfulAnthropicOAuthAuth,
   recordSuccessfulChatGPTAuth,
   resolveCostAttribution,
+  type CostAttribution,
 } from "./cost-attribution";
 import {
   isSessionCurationPacingPaused,
@@ -32,9 +33,7 @@ import {
   providerQuotaObservationStartedAt,
 } from "./provider-quota-headers";
 import {
-  discardResponseCompletion,
   hasNodeResponseFinishLifecycle,
-  notifyResponseCompletion,
   responseCompletionCallbacks,
   transferResponseCompletionCallback,
 } from "./response-completion";
@@ -1160,7 +1159,7 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
-const pendingProviderQuotaCaptures = new Set<Promise<void>>();
+const pendingProviderQuotaCaptures = new Set<Promise<boolean>>();
 // This enumerable symbol must survive GatewayRequest object spreads through
 // translation so every quota capture remains bound to the final HTTP response.
 const providerQuotaResponseCompletion = Symbol(
@@ -1213,10 +1212,7 @@ function quotaResponseCompletionFor(req: GatewayRequest): Promise<boolean> {
   return (
     (req as RequestWithQuotaResponseCompletion)[
       providerQuotaResponseCompletion
-    ] ??
-    // If a path has no owning response lifecycle, skip this optional capture
-    // rather than risk synchronous SQLite work during foreground delivery.
-    Promise.resolve(false)
+    ] ?? Promise.resolve(false)
   );
 }
 
@@ -1233,19 +1229,19 @@ function bindQuotaResponseCompletion(
   });
   if (!response.body) {
     setImmediate(() => {
-      if (responseCompletionCallbacks.has(response)) {
-        notifyResponseCompletion(response);
-      }
+      lifecycle.bodyComplete();
     });
     return;
   }
   void downstreamSettled.then(
     () => {
-      if (!responseCompletionCallbacks.has(response)) return;
-      if (didComplete()) notifyResponseCompletion(response);
-      else discardResponseCompletion(response);
+      // Response wrappers transfer callbacks to their clone. Settle the
+      // request-owned lifecycle directly so direct Hono callers do not depend
+      // on which Response object retained the callback.
+      if (didComplete()) lifecycle.bodyComplete();
+      else lifecycle.discard();
     },
-    () => discardResponseCompletion(response),
+    () => lifecycle.discard(),
   );
 }
 
@@ -8391,6 +8387,11 @@ type UpstreamResult = {
     | "openai-responses"
     | "vertex"
     | "gemini";
+  /** Credential and trusted account identity for the request actually sent. */
+  credential: AuthCredential | null;
+  costAttribution?: CostAttribution;
+  /** Settles after response EOF (direct Hono) or HTTP finish (Node bridge). */
+  quotaCaptureCompletion?: Promise<boolean>;
 };
 
 /**
@@ -8686,6 +8687,8 @@ async function forwardToUpstream(
   // Attribution follows the credential that will actually leave this process,
   // not the ingress credential that configured-header overlays may replace.
   const upstreamAuth = extractAuth(headers);
+  let responseCostAttribution: CostAttribution | undefined;
+  let responseQuotaCaptureCompletion: Promise<boolean> | undefined;
 
   // JSON.stringify escapes lone UTF-16 surrogates as e.g. "\\ud83d", which
   // upstream JSON parsers reject. Sanitize values and property names on the
@@ -8875,6 +8878,7 @@ async function forwardToUpstream(
         directUpstreamResponse,
         requestHeaders: req.rawHeaders,
       });
+      responseCostAttribution = attribution;
       const quotaObservedAt =
         responseTiming?.observedAt ??
         quotaObservationStartedAt ??
@@ -8887,9 +8891,9 @@ async function forwardToUpstream(
         quotaPacingEpoch,
       );
       const quotaResponseHeaders = new Headers(response.headers);
-      scheduleProviderQuotaCapture(() => {
+      responseQuotaCaptureCompletion = scheduleProviderQuotaCapture(() => {
         try {
-          const accepted = observeProviderQuotaHeaders(
+          observeProviderQuotaHeaders(
             quotaResponseHeaders,
             attribution,
             quotaObservedAt,
@@ -8897,19 +8901,19 @@ async function forwardToUpstream(
             quotaPacingEpoch,
             pacingObservation,
           );
-          if (accepted) {
-            cacheAnthropicOrganizationFromResponse({
-              provider: attribution.provider,
-              credential: upstreamAuth,
-              sessionID,
-              observedAt: quotaObservedAt,
-              responseStatus: response.status,
-              responseHeaders: quotaResponseHeaders,
-              upstreamURL: effectiveUpstreamBase,
-              responseURL: response.url,
-              directUpstreamResponse,
-            });
-          }
+          // Organization ownership is response evidence, not a side effect of
+          // whether this response happened to contain parseable quota headers.
+          cacheAnthropicOrganizationFromResponse({
+            provider: attribution.provider,
+            credential: upstreamAuth,
+            sessionID,
+            observedAt: quotaObservedAt,
+            responseStatus: response.status,
+            responseHeaders: quotaResponseHeaders,
+            upstreamURL: effectiveUpstreamBase,
+            responseURL: response.url,
+            directUpstreamResponse,
+          });
         } catch {
           // Deferred quota capture is best-effort and cannot affect dispatch.
         }
@@ -8927,6 +8931,13 @@ async function forwardToUpstream(
     retry: dispatch,
     serializedBody,
     effectiveProtocol,
+    credential: upstreamAuth,
+    get costAttribution() {
+      return responseCostAttribution;
+    },
+    get quotaCaptureCompletion() {
+      return responseQuotaCaptureCompletion;
+    },
     pinResponseId: shouldPinGithubCopilotResponseId(route, url),
     ...(response.status === 400
       ? {
@@ -17243,6 +17254,12 @@ export function recordCacheTurnUsage(
 type CostAttributionUpstream = {
   providerID?: string;
   url?: string;
+  /** Credential actually sent upstream after configured auth-header overlays. */
+  credential?: AuthCredential | null;
+  /** Trusted attribution captured from the exact response to this turn. */
+  attribution?: CostAttribution;
+  /** Response lifecycle that fences non-urgent curation against stale quota. */
+  quotaCaptureCompletion?: Promise<boolean>;
   /**
    * Provider identity for temporal attribution (#2026). Unlike `providerID`
    * (explicit route selection only), this falls back to the wire protocol so
@@ -17281,11 +17298,22 @@ function temporalProviderIDForRoute(
  */
 function routeAttributionUpstream(
   route: ResolvedRequestUpstreamRoute,
+  upstream?: Pick<
+    UpstreamResult,
+    "credential" | "costAttribution" | "quotaCaptureCompletion"
+  >,
 ): CostAttributionUpstream {
   return {
     providerID: route.providerID,
     url: route.effectiveUpstreamBase,
     temporalProviderID: temporalProviderIDForRoute(route),
+    ...(upstream
+      ? {
+          credential: upstream.credential,
+          attribution: upstream.costAttribution,
+          quotaCaptureCompletion: upstream.quotaCaptureCompletion,
+        }
+      : {}),
   };
 }
 
@@ -17316,15 +17344,19 @@ function accountConversationUsage(
     sessionID,
     providerID: source?.providerID,
     upstreamURL: source?.url,
-    credential: resolveAuth(sessionID, source?.providerID),
+    credential:
+      upstream?.credential !== undefined
+        ? upstream.credential
+        : resolveAuth(sessionID, source?.providerID),
     requestHeaders,
   });
+  const resolvedAttribution = upstream?.attribution ?? attribution;
   recordConversationCost(
     sessionID,
     model,
     usageForSentry,
     resolvedConversationTTL,
-    attribution,
+    resolvedAttribution,
   );
   return usageForSentry;
 }
@@ -17638,7 +17670,11 @@ function postResponseForTenant(
       sessionState.candidateHeaders = result.updatedCandidates;
     }
     if (!noStore) {
-      scheduleBackgroundWork(sessionState, config);
+      scheduleBackgroundWork(
+        sessionState,
+        config,
+        upstream?.quotaCaptureCompletion,
+      );
     }
     return true;
   } catch (e) {
@@ -17750,7 +17786,7 @@ function trackBackground(p: Promise<unknown>, state?: SessionState): void {
 function scheduleProviderQuotaCapture(
   capture: () => void,
   responseCompletion: Promise<boolean>,
-): void {
+): Promise<boolean> {
   const schedule =
     providerQuotaCaptureSchedulerForTest ??
     ((callback: () => void) => {
@@ -17758,9 +17794,9 @@ function scheduleProviderQuotaCapture(
     });
   const pending = responseCompletion.then(
     (completed) =>
-      new Promise<void>((resolve) => {
+      new Promise<boolean>((resolve) => {
         if (!completed) {
-          resolve();
+          resolve(false);
           return;
         }
         try {
@@ -17770,14 +17806,14 @@ function scheduleProviderQuotaCapture(
             } catch {
               // Deferred quota capture is best-effort.
             } finally {
-              resolve();
+              resolve(true);
             }
           });
         } catch {
-          resolve();
+          resolve(false);
         }
       }),
-    () => {},
+    () => false,
   );
   pendingProviderQuotaCaptures.add(pending);
   trackBackground(pending);
@@ -17785,11 +17821,13 @@ function scheduleProviderQuotaCapture(
     () => pendingProviderQuotaCaptures.delete(pending),
     () => pendingProviderQuotaCaptures.delete(pending),
   );
+  return pending;
 }
 
 function scheduleBackgroundWorkForTenant(
   sessionState: SessionState,
   config: GatewayConfig,
+  options: { deferCuration?: boolean; curationOnly?: boolean } = {},
 ): void {
   const { sessionID, projectPath } = sessionState;
   const signal = AbortSignal.any([
@@ -17872,7 +17910,7 @@ function scheduleBackgroundWorkForTenant(
     sessionState.compactionAnomalyPending = false;
     saveSessionTracking(sessionID, { compactionAnomalyPending: false });
   }
-  if (urgentFromGradient || urgentFromCompaction) {
+  if (!options.curationOnly && (urgentFromGradient || urgentFromCompaction)) {
     trackBackground(
       withTenant(sessionState.storageTenantId ?? "", () =>
         distillation
@@ -17898,6 +17936,7 @@ function scheduleBackgroundWorkForTenant(
       sessionState,
     );
   } else if (
+    !options.curationOnly &&
     !isBackgroundPaused(workerProviderID) &&
     !quotaPaused &&
     !workerThrottled
@@ -17952,6 +17991,8 @@ function scheduleBackgroundWorkForTenant(
       }
     }
   }
+
+  if (options.deferCuration) return;
 
   // Curation: run periodically when the knowledge system is enabled.
   // Cost-aware frequency: on expensive models, curate less often to reduce
@@ -18070,9 +18111,34 @@ function scheduleBackgroundWorkForTenant(
 export function scheduleBackgroundWork(
   sessionState: SessionState,
   config: GatewayConfig,
+  quotaCaptureCompletion?: Promise<boolean>,
 ): void {
-  withTenant(sessionState.storageTenantId ?? "", () =>
-    scheduleBackgroundWorkForTenant(sessionState, config),
+  const schedule = (options?: {
+    deferCuration?: boolean;
+    curationOnly?: boolean;
+  }): void =>
+    withTenant(sessionState.storageTenantId ?? "", () =>
+      scheduleBackgroundWorkForTenant(sessionState, config, options),
+    );
+
+  if (!quotaCaptureCompletion) {
+    schedule();
+    return;
+  }
+
+  // Distillation/cache warming can proceed immediately. Curation's quota
+  // decision waits for this request's response-bound quota snapshot update.
+  schedule({ deferCuration: true });
+  trackBackground(
+    quotaCaptureCompletion
+      .then((completed) => {
+        if (completed) schedule({ curationOnly: true });
+      })
+      .catch(() => {
+        // Quota capture is optional; keep provider and callback diagnostics private.
+        log.error("quota capture completion handling failed");
+      }),
+    sessionState,
   );
 }
 
@@ -20357,7 +20423,7 @@ async function handleProvisionalConversationTurn(
             const state = sessions.get(identified.sessionID);
             if (state) state._dirty = true;
           },
-          routeAttributionUpstream(requestUpstream.route),
+          routeAttributionUpstream(requestUpstream.route, forwarded),
           req.rawHeaders,
         );
       },
@@ -20633,7 +20699,7 @@ async function handleProvisionalConversationTurn(
           undefined,
           () => {},
           undefined,
-          routeAttributionUpstream(requestUpstream.route),
+          routeAttributionUpstream(requestUpstream.route, forwarded),
           req.rawHeaders,
         );
         return;
@@ -20654,7 +20720,7 @@ async function handleProvisionalConversationTurn(
         accumulated.model,
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
-        routeAttributionUpstream(requestUpstream.route),
+        routeAttributionUpstream(requestUpstream.route, forwarded),
         req.rawHeaders,
       );
       const state = sessions.get(identified.sessionID);
@@ -23649,7 +23715,7 @@ async function handleConversationTurnPrepared(
           genAiSpan,
           suppressTemporalStorage,
           endGenAiSpan,
-          routeAttributionUpstream(requestUpstreamRoute),
+          routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
         );
         if (persisted) {
           persistAcceptedProvenanceLayer();
@@ -24174,7 +24240,7 @@ async function handleConversationTurnPrepared(
             () => {
               sessionState._dirty = true;
             },
-            routeAttributionUpstream(requestUpstreamRoute),
+            routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
             req.rawHeaders,
           );
           return;
@@ -24196,7 +24262,10 @@ async function handleConversationTurnPrepared(
                   genAiSpan,
                   suppressTemporalStorage,
                   endGenAiSpan,
-                  routeAttributionUpstream(requestUpstreamRoute),
+                  routeAttributionUpstream(
+                    requestUpstreamRoute,
+                    upstreamResult,
+                  ),
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
@@ -24247,7 +24316,7 @@ async function handleConversationTurnPrepared(
           () => {
             sessionState._dirty = true;
           },
-          routeAttributionUpstream(requestUpstreamRoute),
+          routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
           req.rawHeaders,
         );
       },

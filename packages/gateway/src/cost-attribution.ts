@@ -392,7 +392,7 @@ export function resolveCostAttribution(input: {
   return { provider, authKind, account };
 }
 
-/** Cache a provider organization only after its quota observation persists. */
+/** Cache a trusted organization from a completed response, even without quota rows. */
 export function cacheAnthropicOrganizationFromResponse(input: {
   provider: string;
   credential?: AuthCredential | null;

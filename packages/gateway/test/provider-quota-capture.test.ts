@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as core from "@loreai/core";
 import { createHarness, type Harness } from "./helpers/harness";
@@ -19,6 +20,8 @@ import {
 import { setUpstreamFetchOverrideForTest } from "../src/fetch";
 import { authFingerprint } from "../src/auth";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
+import { createGatewayApp } from "../src/app";
+import { loadConfig } from "../src/config";
 import {
   _resetCostAttributionForTest,
   recordSuccessfulAnthropicOAuthAuth,
@@ -181,6 +184,7 @@ it("captures quota on the first successful Anthropic OAuth response", async () =
 
 it("attributes quota to the credential that configured headers actually send", async () => {
   db().exec("DELETE FROM provider_quotas");
+  db().exec("DELETE FROM provider_costs");
   const oauthCredential = {
     scheme: "bearer" as const,
     value: "sk-ant-oat01-replaced-before-dispatch",
@@ -256,6 +260,14 @@ it("attributes quota to the credential that configured headers actually send", a
         row.account === authFingerprint(replacementCredential).slice(0, 12),
     ),
   ).toBe(true);
+  const costRows = db()
+    .query("SELECT auth_kind, account FROM provider_costs")
+    .all() as Array<{ auth_kind: string; account: string }>;
+  expect(costRows).toHaveLength(1);
+  expect(costRows[0]).toEqual({
+    auth_kind: "api_key",
+    account: authFingerprint(replacementCredential).slice(0, 12),
+  });
 });
 
 it("waits for the downstream HTTP response to finish before quota persistence", async () => {
@@ -356,6 +368,139 @@ it("waits for the downstream HTTP response to finish before quota persistence", 
     quotaPersistence.mockRestore();
     setUpstreamInterceptor(undefined);
   }
+});
+
+it("settles quota capture after direct Hono response cloning", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Direct Hono request" }],
+    responseText: "Direct Hono response",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  setUpstreamInterceptor(async (...args) => {
+    const response = await replay(...args);
+    for (const [name, value] of Object.entries(quotaHeaders)) {
+      response.headers.set(name, value);
+    }
+    return response;
+  });
+
+  const token = TEST_ANTHROPIC_OAUTH_CREDENTIAL.value;
+  const rawHeaders = [
+    "content-type",
+    "application/json",
+    "anthropic-version",
+    "2023-06-01",
+    "x-api-key",
+    token,
+  ];
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  const app = createGatewayApp(config);
+  const response = await app.fetch(
+    new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": token,
+      },
+      body: JSON.stringify({
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Direct Hono request" }],
+      }),
+    }),
+    { peerAddress: "127.0.0.1", rawHeaders },
+  );
+
+  expect(response.status).toBe(200);
+  await response.arrayBuffer();
+  await _waitForProviderQuotaCapturesForTest();
+  expect(
+    listProviderQuotas().some(
+      (row) => row.provider === "anthropic" && row.window === "5h",
+    ),
+  ).toBe(true);
+});
+
+it("caches a trusted Anthropic organization without quota rows", async () => {
+  db().exec("DELETE FROM provider_costs");
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const messages = ["Organization identity", "Cached organization identity"];
+  const fixtures = messages.map((message, seq) =>
+    makeFixtureEntry({
+      seq,
+      requestMessages: [{ role: "user", content: message }],
+      responseText: "Recorded",
+    }),
+  );
+  harness = await createHarness({ fixtures });
+  let responseCount = 0;
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const fixture = fixtures[responseCount++];
+    if (!fixture) throw new Error("unexpected upstream request");
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...(responseCount === 1
+          ? { "anthropic-organization-id": "org-test-id" }
+          : {}),
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor((_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    for (const message of messages) {
+      const response = await harness.chat(
+        {
+          model: DEFAULT_MODEL,
+          max_tokens: 1024,
+          stream: false,
+          system: DEFAULT_SYSTEM,
+          tools: STANDARD_TOOLS,
+          messages: [{ role: "user", content: message }],
+        },
+        null,
+        {
+          authorization: "Bearer sk-ant-oat01-test-token",
+          "x-lore-session-id": "organization-cache-session",
+        },
+      );
+      expect(response.status).toBe(200);
+      await consumeResponseAndQuotaCapture(response);
+    }
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+
+  expect(listProviderQuotas()).toHaveLength(0);
+  const accounts = db()
+    .query("SELECT account, requests FROM provider_costs")
+    .all() as Array<{ account: string; requests: number }>;
+  const expectedAccount = createHash("sha256")
+    .update("org-test-id")
+    .digest("hex")
+    .slice(0, 12);
+  expect(responseCount).toBe(2);
+  expect(accounts).toEqual([{ account: expectedAccount, requests: 2 }]);
 });
 
 it("does not read quota rows synchronously from the post-response curation gate", async () => {

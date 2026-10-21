@@ -1,3 +1,5 @@
+import { discardResponseCompletion } from "./response-completion";
+
 /**
  * Settle a Response-producing operation against an AbortSignal even when the
  * underlying implementation ignores that signal. Late responses are drained
@@ -65,6 +67,7 @@ export function responseAgainstAbort(
   signal?: AbortSignal,
 ): Promise<Response> {
   return promiseAgainstAbort(start, signal, (response) => {
+    discardResponseCompletion(response);
     try {
       void response.body?.cancel(signal?.reason).catch(() => {});
     } catch {

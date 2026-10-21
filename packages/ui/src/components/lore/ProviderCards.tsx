@@ -7,6 +7,7 @@ import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
 import {
   displayProvider,
+  effectivePacingState,
   formatExtraGap,
   formatDuration,
   formatRate,
@@ -150,10 +151,12 @@ function showError(error: unknown): string {
 const PacingControl: Component<{
   card: ProviderCardModel;
   pacing: PacingRow;
+  now: () => number;
   onSetPacing?: (setting: ProviderPacingInput) => Promise<void>;
 }> = (props) => {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  const effectivePacing = () => effectivePacingState(props.pacing, props.now());
   const toggle = async () => {
     const onSet = props.onSetPacing;
     if (!onSet) return;
@@ -199,20 +202,20 @@ const PacingControl: Component<{
       <Row label="Estimated extra request gap (informational)">
         <span data-testid="pacing-extra-gap">
           {props.pacing.enabled
-            ? formatExtraGap(props.pacing.recommended_extra_gap_ms)
+            ? formatExtraGap(effectivePacing().recommended_extra_gap_ms)
             : "off"}
         </span>
       </Row>
       <Row label="Quota-based curation pause">
         <span
           class={
-            props.pacing.enabled && props.pacing.throttling
+            props.pacing.enabled && effectivePacing().throttling
               ? "text-danger"
               : "text-muted"
           }
           data-testid="pacing-curation-state"
         >
-          {props.pacing.enabled && props.pacing.throttling
+          {props.pacing.enabled && effectivePacing().throttling
             ? "active"
             : "inactive"}
         </span>
@@ -319,6 +322,7 @@ const ProviderCard: Component<{
           <PacingControl
             card={props.card}
             pacing={pacing()}
+            now={props.now}
             onSetPacing={props.onSetPacing}
           />
         )}

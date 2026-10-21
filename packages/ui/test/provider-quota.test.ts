@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   displayProvider,
+  effectivePacingState,
   formatExtraGap,
   formatRate,
   pacingForCard,
@@ -193,6 +194,50 @@ describe("pacing helpers", () => {
     expect(pacingForCard([row], card)).toBe(row);
     expect(pacingForCard([row], { ...card, account: "a2" })).toBeNull();
     expect(pacingForCard([row], { ...card, auth_kind: "api_key" })).toBeNull();
+  });
+
+  it("expires cached curation throttling when its quota window resets", () => {
+    const pacing = {
+      provider: "anthropic",
+      account: "a1",
+      enabled: true,
+      throttling: true,
+      recommended_extra_gap_ms: 3_000,
+      request_gap_ms: 60_000,
+      windows: [
+        {
+          window: "5h",
+          used: 85,
+          resets_at: 10_000,
+          sustainable_rate: 20,
+          current_rate: 40,
+          rate_source: "observed" as const,
+          ratio: 2,
+          throttling: true,
+          recommended_extra_gap_ms: 3_000,
+        },
+        {
+          window: "7d",
+          used: 40,
+          resets_at: 50_000,
+          sustainable_rate: 20,
+          current_rate: 8,
+          rate_source: "observed" as const,
+          ratio: 0.4,
+          throttling: false,
+          recommended_extra_gap_ms: 0,
+        },
+      ],
+    };
+
+    expect(effectivePacingState(pacing, 9_999)).toEqual({
+      throttling: true,
+      recommended_extra_gap_ms: 3_000,
+    });
+    expect(effectivePacingState(pacing, 10_000)).toEqual({
+      throttling: false,
+      recommended_extra_gap_ms: 0,
+    });
   });
 
   it("formats rates and estimated extra gaps", () => {
