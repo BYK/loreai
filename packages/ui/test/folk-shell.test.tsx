@@ -631,7 +631,11 @@ describe("rail account menu", () => {
     fireEvent.click(trigger);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     expect(screen.getByTestId("theme-toggle")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const profile = screen.getByRole("button", { name: "Sign in to Lore" });
+    await waitFor(() => expect(profile).toHaveTextContent("Anonymous"));
+    expect(profile).toHaveAttribute("aria-haspopup", "dialog");
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    fireEvent.click(profile);
     const dialog = await screen.findByRole("dialog", {
       name: "Sign in to Lore",
     });
@@ -655,6 +659,8 @@ describe("rail account menu", () => {
     fireEvent.click(screen.getByTestId("folk-status"));
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     expect(screen.getByTestId("theme-toggle")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Lore" }),
+    ).toBeNull();
   });
 });

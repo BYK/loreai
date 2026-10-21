@@ -109,6 +109,38 @@ export const FolkStatus: Component = () => {
       syncError: folk.sync.error(),
     }),
   );
+  const ProfileIdentity: Component<{ interactive?: boolean }> = (props) => (
+    <>
+      <Show
+        when={user()}
+        fallback={
+          <span class="flex size-10 shrink-0 items-center justify-center rounded-full bg-soft text-muted">
+            <Icon name="user" />
+          </span>
+        }
+      >
+        <Avatar label={initials()} class="size-10 shrink-0 rounded-full" />
+      </Show>
+      <span class="min-w-0 flex-1">
+        <span
+          data-testid={user() ? "folk-account" : undefined}
+          class="block truncate font-semibold text-heading"
+        >
+          {name()}
+        </span>
+        <span class="block text-xs font-normal text-muted">
+          {props.interactive ? "Sign in to Lore" : summary().label}
+        </span>
+        <Show when={user() && folk.account.data()?.provider}>
+          {(provider) => (
+            <span class="block text-xs font-normal text-muted">
+              via {provider()}
+            </span>
+          )}
+        </Show>
+      </span>
+    </>
+  );
   return (
     <>
       <PopoverPrimitive.Root
@@ -178,49 +210,31 @@ export const FolkStatus: Component = () => {
             <PopoverPrimitive.Title class="sr-only">
               Account & preferences
             </PopoverPrimitive.Title>
-            <div class="flex items-center gap-3 px-1 py-2">
-              <Show
-                when={user()}
-                fallback={
-                  <span class="flex size-10 items-center justify-center rounded-full bg-soft text-muted">
-                    <Icon name="user" />
-                  </span>
-                }
-              >
-                <Avatar label={initials()} class="size-10 rounded-full" />
-              </Show>
-              <div class="min-w-0">
-                <div
-                  data-testid={user() ? "folk-account" : undefined}
-                  class="truncate font-semibold text-heading"
-                >
-                  {name()}
-                </div>
-                <div class="text-xs text-muted">{summary().label}</div>
-                <Show when={user() && folk.account.data()?.provider}>
-                  {(provider) => (
-                    <div class="text-xs text-muted">via {provider()}</div>
-                  )}
-                </Show>
-              </div>
-            </div>
-            <div class="my-2 border-t border-line" />
             <Show
               when={
                 !user() &&
                 (!folk.account.loading() ||
                   folk.account.data()?.state === "anonymous")
               }
+              fallback={
+                <div class="flex items-center gap-3 px-2 py-2">
+                  <ProfileIdentity />
+                </div>
+              }
             >
               <Button
                 variant="ghost"
-                class="h-9 w-full justify-start px-2"
+                class="h-auto min-h-16 w-full justify-start gap-3 px-2 py-2 text-left"
+                aria-label="Sign in to Lore"
+                aria-haspopup="dialog"
+                data-testid="account-profile-sign-in"
                 onClick={showSignIn}
               >
-                <Icon name="user" />
-                Sign in
+                <ProfileIdentity interactive />
+                <Icon name="chevron" class="ml-auto shrink-0 text-muted" />
               </Button>
             </Show>
+            <div class="my-2 border-t border-line" />
             <section
               class="flex items-center justify-between gap-3 px-2 py-2"
               aria-label="Appearance"

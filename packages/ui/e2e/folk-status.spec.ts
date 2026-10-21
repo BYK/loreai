@@ -147,7 +147,16 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
   expect(menuBox.x).toBeGreaterThanOrEqual(0);
   expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(320);
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(480);
-  await panel.getByRole("button", { name: "Sign in", exact: true }).click();
+  const profile = panel.getByRole("button", {
+    name: "Sign in to Lore",
+    exact: true,
+  });
+  await expect(profile).toContainText("Anonymous");
+  await expect(
+    panel.getByRole("button", { name: "Sign in", exact: true }),
+  ).toHaveCount(0);
+  await profile.focus();
+  await page.keyboard.press("Enter");
   const login = page.getByRole("dialog", {
     name: "Sign in to Lore",
     exact: true,
@@ -194,7 +203,7 @@ test("signed-in avatar menu keeps preferences without a sign-in action", async (
   const panel = page.getByTestId("folk-status-panel");
   await expect(panel.getByTestId("folk-account")).toHaveText("Ada Lovelace");
   await expect(
-    panel.getByRole("button", { name: "Sign in", exact: true }),
+    panel.getByRole("button", { name: "Sign in to Lore", exact: true }),
   ).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: "Settings", exact: true }),
