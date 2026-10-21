@@ -140,7 +140,7 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
   const panel = page.getByTestId("folk-status-panel");
   await expect(
     panel.getByRole("button", { name: "Settings", exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(panel.getByTestId("theme-toggle")).toBeVisible();
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   const menuBox = (await panel.boundingBox())!;
@@ -162,10 +162,7 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
   await expect(login).toHaveCount(0);
   await expect(avatar).toBeFocused();
   await avatar.click();
-  await panel.getByRole("button", { name: "Settings", exact: true }).click();
-  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
-  await expect(settings.getByTestId("theme-dark")).toBeVisible();
-  await settings.getByTestId("theme-dark").click();
+  await panel.getByTestId("theme-dark").click();
   await expect(page.locator("html")).toHaveClass(/dark/);
   await page.keyboard.press("Escape");
   await expect(avatar).toBeFocused();
@@ -201,6 +198,6 @@ test("signed-in avatar menu keeps preferences without a sign-in action", async (
   ).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: "Settings", exact: true }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(panel.getByTestId("theme-toggle")).toBeVisible();
 });

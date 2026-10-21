@@ -1790,7 +1790,6 @@ describe("shell: search entry, theme and fixture", () => {
   it("defaults to the system theme and lets the user force light or dark", async () => {
     mount("/", fakeClient());
     fireEvent.click(screen.getByTestId("folk-status"));
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     const group = screen.getByTestId("theme-toggle");
     expect(group).toHaveAttribute("data-theme-choice", "system");
     expect(screen.getByTestId("theme-system")).toHaveAttribute(
@@ -1834,7 +1833,6 @@ describe("shell: search entry, theme and fixture", () => {
     resetThemeStoreForTests();
     mount("/", fakeClient());
     fireEvent.click(screen.getByTestId("folk-status"));
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(document.documentElement).not.toHaveClass("dark");
 
     systemDark = true;
@@ -1872,7 +1870,6 @@ describe("shell: search entry, theme and fixture", () => {
     // The wordmark stays a real link target for assistive tech.
     expect(screen.getByRole("link", { name: /Lore\.AI — home/ })).toBeVisible();
     fireEvent.click(screen.getByTestId("folk-status"));
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByTestId("theme-dark"));
     await waitFor(() =>
       expect(logo).toHaveAttribute("data-logo-theme", "dark"),

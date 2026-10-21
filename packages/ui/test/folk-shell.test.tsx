@@ -93,7 +93,7 @@ describe("Folk shell status", () => {
     clearGatewayAuthToken();
   });
 
-  it("shows anonymous status and lazily loads teams when opened", async () => {
+  it("keeps anonymous status compact without empty team or sync sections", async () => {
     mount(client());
 
     const badge = await screen.findByTestId("folk-status");
@@ -108,9 +108,9 @@ describe("Folk shell status", () => {
     expect(screen.getByTestId("folk-status-detail")).toHaveTextContent(
       "lore login",
     );
-    expect(
-      await screen.findByText("No team memberships are known on this device."),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId("folk-teams")).toBeNull();
+    expect(screen.queryByText("Teams", { exact: true })).toBeNull();
+    expect(screen.queryByTestId("sync-now")).toBeNull();
   });
 
   it("shows account identity, provider and team membership", async () => {
@@ -408,7 +408,7 @@ describe("Folk shell status", () => {
         expect(badge).toHaveAttribute("data-folk-state", state),
       );
       fireEvent.click(badge);
-      expect(await screen.findByText("Teams unavailable.")).toBeInTheDocument();
+      expect(screen.queryByText("Teams unavailable.")).toBeNull();
       expect(screen.queryByText("Loading teams…")).not.toBeInTheDocument();
       expect(getTeams).not.toHaveBeenCalled();
     },
@@ -458,9 +458,9 @@ describe("Folk shell status", () => {
     await waitFor(() =>
       expect(screen.queryByText("Ada team")).not.toBeInTheDocument(),
     );
-    expect(
-      await screen.findByText("No team memberships are known on this device."),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId("folk-teams")).toBeNull();
+    expect(screen.queryByText("Teams", { exact: true })).toBeNull();
+    expect(screen.queryByTestId("sync-now")).toBeNull();
   });
 
   it("cancels an old account's team request and ignores its late response", async () => {
@@ -629,7 +629,7 @@ describe("rail account menu", () => {
       document.querySelector('header [data-testid="folk-status"]'),
     ).toBeNull();
     fireEvent.click(trigger);
-    expect(screen.getByRole("button", { name: "Settings" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     expect(screen.getByTestId("theme-toggle")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     const dialog = await screen.findByRole("dialog", {
@@ -653,9 +653,7 @@ describe("rail account menu", () => {
     expect(avatar).toHaveTextContent("AL");
     expect(avatar.closest('[data-testid="folk-status"]')).not.toBeNull();
     fireEvent.click(screen.getByTestId("folk-status"));
-    expect(
-      await screen.findByRole("button", { name: "Settings" }),
-    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     expect(screen.getByTestId("theme-toggle")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
   });
