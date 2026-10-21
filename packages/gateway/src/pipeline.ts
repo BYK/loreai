@@ -26,6 +26,7 @@ import {
 import {
   isSessionCurationPacingPaused,
   capturePacingEpoch,
+  type BudgetMatch,
 } from "./provider-budgets";
 import {
   observeProviderQuotaHeaders,
@@ -329,6 +330,7 @@ import {
   buildSSEMarkerMessage,
   formatSSEEvent,
   AnthropicSSEValidator,
+  AnthropicSSEProviderError,
   cancelAndReleaseReader,
   readStreamChunk,
   SSEStreamLimitError,
@@ -465,6 +467,7 @@ import {
 } from "./recall-budget";
 import {
   RecallContinuationFailure,
+  RECALL_CONTINUATION_FAILURE_CATEGORIES,
   reportRecallContinuationFailure,
   type RecallContinuationFailureCategory,
 } from "./recall-continuation-failure";
@@ -9267,6 +9270,20 @@ export function buildStreamingResponse(
         keepaliveTimer = null;
       };
       let recallFailureResponse: (() => GatewayResponse) | undefined;
+      // A downstream reader can wrap any local failure in SSEStreamTransportError.
+      // Record the actual failing phase here, before that boundary hides it.
+      let streamPhase:
+        | "principal_stream"
+        | "recall_execution"
+        | "recall_marker"
+        | "follow_up_setup"
+        | "follow_up_stream"
+        | "follow_up_validation"
+        | "follow_up_delivery"
+        | "completion" = "principal_stream";
+      let recallFailureBudget:
+        | (() => Record<string, number | string | boolean>)
+        | undefined;
       void (async () => {
         try {
           // Parse and forward upstream SSE events
@@ -9392,6 +9409,7 @@ export function buildStreamingResponse(
             let currentBlockOffset = warningOffset; // accumulates across iterations
             let currentModifiedReq = recallContext.modifiedReq;
             let recallDepth = 0;
+            let continuationUsageComplete = false;
             let cumulativeUsage = { ...(currentResp.usage ?? ZERO_USAGE) };
             const recallBudget = new RecallChainBudget({
               maxExecutions: loreConfig().search.recall.chainMaxExecutions,
@@ -9407,6 +9425,24 @@ export function buildStreamingResponse(
               },
               currentResp.usageComplete === true,
             );
+            if (!recallContext.noStore) {
+              recallFailureBudget = () => {
+                const usage = recallBudget.snapshot();
+                return {
+                  round: recallDepth,
+                  budgetTokens: recallBudget.maxTokens,
+                  spentTokens:
+                    usage.inputTokens +
+                    usage.outputTokens +
+                    usage.cacheReadInputTokens +
+                    usage.cacheCreationInputTokens,
+                  budgetStop: usage.stopReason ?? "none",
+                  expandedBudget:
+                    recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS,
+                  continuationUsageComplete,
+                };
+              };
+            }
             const logRecallBudgetStop = (reason: RecallStopReason): void => {
               reportRecallDiagnostic(
                 `recall final continuation: budget exhausted reason=${reason}`,
@@ -9434,6 +9470,7 @@ export function buildStreamingResponse(
 
             // eslint-disable-next-line no-constant-condition
             while (true) {
+              streamPhase = "recall_execution";
               const recallBlock = findRecallToolUse(currentResp);
               if (!recallBlock) break;
 
@@ -9487,6 +9524,7 @@ export function buildStreamingResponse(
               const finalRecallRound = recallBudget.mustFinalizeNext();
               const followUpResult = recallBudgetGuidance(result, stopReason);
               const scope = input.scope ?? "all";
+              streamPhase = "recall_marker";
 
               // Store recall result for marker round-trip expansion
               const anchorId = crypto.randomUUID();
@@ -9666,8 +9704,9 @@ export function buildStreamingResponse(
                 );
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
-                recallDiagnostics.finish("completed");
+                streamPhase = "completion";
                 complete(markerResp);
+                recallDiagnostics.finish("completed");
                 safeClose();
                 return;
               }
@@ -9710,6 +9749,8 @@ export function buildStreamingResponse(
               let streamingFollowUp: Awaited<
                 ReturnType<typeof runRecallFollowUpStreaming>
               >;
+              streamPhase = "follow_up_setup";
+              continuationUsageComplete = false;
               try {
                 streamingFollowUp = await runRecallFollowUpStreaming(
                   streamingRecallCtx,
@@ -9746,6 +9787,7 @@ export function buildStreamingResponse(
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
                 recallDiagnostics.finish("failed");
+                streamPhase = "completion";
                 complete(markerResp);
                 safeClose();
                 return;
@@ -9786,6 +9828,7 @@ export function buildStreamingResponse(
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
                 recallDiagnostics.finish("failed");
+                streamPhase = "completion";
                 complete(markerResp);
                 safeClose();
                 return;
@@ -9829,6 +9872,7 @@ export function buildStreamingResponse(
               // expanded-budget continuation text must not reach the client.
               const heldContinuation = { events: [] as string[], bytes: 0 };
               const continuationValidator = new AnthropicSSEValidator();
+              streamPhase = "follow_up_stream";
               try {
                 for await (const {
                   event: contEvent,
@@ -9887,7 +9931,10 @@ export function buildStreamingResponse(
                 `recall follow-up stream complete (depth=${recallDepth}): ` +
                   `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
+              streamPhase = "follow_up_validation";
               const continuationResp = contAccum.getResponse();
+              continuationUsageComplete =
+                continuationResp.usageComplete === true;
               cumulativeUsage = mergeRecallUsage(
                 cumulativeUsage,
                 continuationResp.usage ?? ZERO_USAGE,
@@ -9906,7 +9953,9 @@ export function buildStreamingResponse(
                 throw new RecallContinuationFailure("follow_up_failed");
               }
               if (recallBudget.exceedsTokenCeiling())
-                throw new RecallContinuationFailure("follow_up_failed");
+                throw new RecallContinuationFailure(
+                  "follow_up_budget_exceeded",
+                );
               if (!recallBudget.canRecover())
                 throw new RecallContinuationFailure("follow_up_failed");
               if (finalRecallRound || continuationStopReason) {
@@ -9916,6 +9965,7 @@ export function buildStreamingResponse(
                   throw new RecallContinuationFailure("follow_up_failed");
               }
 
+              streamPhase = "follow_up_delivery";
               for (const forwarded of heldContinuation.events) {
                 if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
               }
@@ -9961,8 +10011,9 @@ export function buildStreamingResponse(
               if (finalRecallRound || continuationStopReason)
                 reportRecallDiagnostic("recall final continuation: completed");
               clearKeepalive();
-              recallDiagnostics.finish("completed");
+              streamPhase = "completion";
               complete(continuationResp);
+              recallDiagnostics.finish("completed");
               safeClose();
               return;
             }
@@ -9971,13 +10022,52 @@ export function buildStreamingResponse(
           // No recall — normal path
           clearKeepalive();
           const response = accumulator.getResponse();
+          streamPhase = "completion";
           complete(response);
           safeClose();
         } catch (err) {
           recallPersistence?.rollback();
           recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
-          if (err instanceof RecallContinuationFailure)
-            reportRecallContinuationFailure(err.category);
+          let isRecallFailure = false;
+          let isAbort = false;
+          let failureCategory: RecallContinuationFailureCategory = "unexpected";
+          try {
+            isRecallFailure = err instanceof RecallContinuationFailure;
+            isAbort =
+              err instanceof DOMException &&
+              readErrorField(err, "name") === "AbortError";
+            const errorCategory = isRecallFailure
+              ? readErrorField(err, "category")
+              : undefined;
+            failureCategory = isRecallFailure
+              ? (RECALL_CONTINUATION_FAILURE_CATEGORIES.find(
+                  (category) => category === errorCategory,
+                ) ?? "unexpected")
+              : err instanceof SSEStreamLimitError
+                ? "resource_limit"
+                : streamPhase === "follow_up_stream"
+                  ? err instanceof SSEStreamTransportError
+                    ? "follow_up_transport"
+                    : err instanceof AnthropicSSEProviderError
+                      ? "follow_up_failed"
+                      : "follow_up_protocol"
+                  : streamPhase === "recall_execution"
+                    ? "recall_execution"
+                    : streamPhase === "follow_up_setup"
+                      ? "follow_up_setup"
+                      : streamPhase === "recall_marker" ||
+                          streamPhase === "follow_up_delivery"
+                        ? "delivery"
+                        : "unexpected";
+          } catch {
+            // Exception classification is advisory; even prototype inspection
+            // can throw, and must never prevent the failed response settling.
+          }
+          if (
+            !streamSignal.aborted &&
+            (isRecallFailure || recallFailureResponse)
+          )
+            reportRecallContinuationFailure(failureCategory);
           if (recallFailureResponse) {
             try {
               recallContext?.onFailure?.(recallFailureResponse());
@@ -9997,8 +10087,6 @@ export function buildStreamingResponse(
           }
           // Client disconnect / abort is benign — downgrade from error to info
           // to avoid Sentry noise from normal connection lifecycle events.
-          const isAbort =
-            err instanceof DOMException && err.name === "AbortError";
           if (isAbort) {
             reportRecallDiagnostic(
               "streaming pipeline aborted (client disconnect)",
@@ -10010,7 +10098,33 @@ export function buildStreamingResponse(
               sessionID,
             });
           } else {
-            reportRecallDiagnostic("streaming pipeline error", "error");
+            // Never log the original exception, message, stack, or arbitrary
+            // cause fields: provider errors may contain credentials or text.
+            reportRecallDiagnostic(() => {
+              const kind = readErrorField(err, "kind");
+              const transportKind =
+                kind === "read" || kind === "inactivity" ? kind : undefined;
+              const causeCodes = [
+                ...new Set(
+                  errorCauseChain(err)
+                    .map((error) => readErrorField(error, "code"))
+                    .filter(
+                      (code): code is string =>
+                        typeof code === "string" &&
+                        SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
+                    ),
+                ),
+              ];
+              return `streaming pipeline error ${JSON.stringify({
+                phase: streamPhase,
+                category: failureCategory,
+                ...(err instanceof SSEStreamTransportError && transportKind
+                  ? { transportKind }
+                  : {}),
+                causeCodes,
+                ...recallFailureBudget?.(),
+              })}`;
+            }, "error");
           }
           try {
             controller.error(err);
@@ -17674,6 +17788,15 @@ function postResponseForTenant(
         sessionState,
         config,
         upstream?.quotaCaptureCompletion,
+        upstream
+          ? upstream.attribution
+            ? {
+                provider: upstream.attribution.provider,
+                auth_kind: upstream.attribution.authKind,
+                account: upstream.attribution.account,
+              }
+            : null
+          : undefined,
       );
     }
     return true;
@@ -17827,7 +17950,11 @@ function scheduleProviderQuotaCapture(
 function scheduleBackgroundWorkForTenant(
   sessionState: SessionState,
   config: GatewayConfig,
-  options: { deferCuration?: boolean; curationOnly?: boolean } = {},
+  options: {
+    deferCuration?: boolean;
+    curationOnly?: boolean;
+    curationBudgetMatch?: BudgetMatch | null;
+  } = {},
 ): void {
   const { sessionID, projectPath } = sessionState;
   const signal = AbortSignal.any([
@@ -18006,7 +18133,13 @@ function scheduleBackgroundWorkForTenant(
     isBackgroundPaused(workerProviderID) ||
     quotaPaused ||
     workerThrottled ||
-    isSessionCurationPacingPaused(sessionID, sessionState.lastUpstream)
+    // Quota capture can settle after a later turn replaces lastUpstream, so
+    // prefer the request's captured attribution (including an explicit miss).
+    isSessionCurationPacingPaused(
+      sessionID,
+      sessionState.lastUpstream,
+      options.curationBudgetMatch,
+    )
   )
     return;
 
@@ -18112,13 +18245,18 @@ export function scheduleBackgroundWork(
   sessionState: SessionState,
   config: GatewayConfig,
   quotaCaptureCompletion?: Promise<boolean>,
+  curationBudgetMatch?: BudgetMatch | null,
 ): void {
   const schedule = (options?: {
     deferCuration?: boolean;
     curationOnly?: boolean;
+    curationBudgetMatch?: BudgetMatch | null;
   }): void =>
     withTenant(sessionState.storageTenantId ?? "", () =>
-      scheduleBackgroundWorkForTenant(sessionState, config, options),
+      scheduleBackgroundWorkForTenant(sessionState, config, {
+        ...options,
+        curationBudgetMatch,
+      }),
     );
 
   if (!quotaCaptureCompletion) {

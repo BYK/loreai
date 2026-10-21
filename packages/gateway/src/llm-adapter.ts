@@ -4530,7 +4530,7 @@ export function createGatewayLLMClient(
                     undefined,
                     attribution,
                   );
-                  const acceptedQuota = observeProviderQuotaHeaders(
+                  observeProviderQuotaHeaders(
                     response.headers,
                     attribution,
                     quotaObservationStartedAt,
@@ -4541,7 +4541,9 @@ export function createGatewayLLMClient(
                       quotaPacingEpoch,
                     ),
                   );
-                  if (acceptedQuota) {
+                  // A verified organization is response identity evidence even
+                  // when the provider omitted quota fields for this response.
+                  try {
                     cacheAnthropicOrganizationFromResponse({
                       provider: attribution.provider,
                       credential: attemptCredential,
@@ -4553,6 +4555,8 @@ export function createGatewayLLMClient(
                       responseURL: response.url,
                       directUpstreamResponse: true,
                     });
+                  } catch {
+                    // Identity caching is optional and cannot invalidate worker output.
                   }
                 }
 

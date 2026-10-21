@@ -2402,6 +2402,9 @@ describe("foreground subscription pacing", () => {
     const upstreamResponse: { value: Response | null } = { value: null };
     let releaseQuotaCapture: (() => void) | undefined;
     const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
+    const curationPacingGate = vi
+      .spyOn(providerBudgets, "isSessionCurationPacingPaused")
+      .mockReturnValue(false);
     try {
       core
         .db()
@@ -2504,9 +2507,38 @@ describe("foreground subscription pacing", () => {
       );
       // Quota capture is only scheduled after the complete client body settles.
       expect(quotaPersistence).not.toHaveBeenCalled();
+      const sessionState = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionID,
+      );
+      if (!sessionState) throw new Error("expected active session state");
+      // A later turn can replace the shared session route before this turn's
+      // response-bound quota callback schedules its curation check.
+      const originalUpstream = sessionState.lastUpstream;
+      if (!originalUpstream) throw new Error("expected resolved upstream");
+      sessionState.lastUpstream = {
+        ...originalUpstream,
+        url: "https://api.openai.com/v1",
+      };
       releaseQuotaCapture?.();
       releaseQuotaCapture = undefined;
       await _waitForProviderQuotaCapturesForTest();
+      const capturedBudgetMatch = {
+        provider: "openai",
+        auth_kind: "subscription",
+        account: "default",
+      } satisfies BudgetMatch;
+      await vi.waitFor(() =>
+        expect(curationPacingGate).toHaveBeenCalledWith(
+          sessionState.sessionID,
+          sessionState.lastUpstream,
+          capturedBudgetMatch,
+        ),
+      );
+      expect(curationPacingGate).toHaveBeenLastCalledWith(
+        sessionState.sessionID,
+        sessionState.lastUpstream,
+        capturedBudgetMatch,
+      );
       expect(quotaPersistence).toHaveBeenCalledWith(
         expect.objectContaining({ remaining: 59 }),
       );
@@ -2520,6 +2552,7 @@ describe("foreground subscription pacing", () => {
       await _waitForProviderQuotaCapturesForTest();
       setProviderQuotaCaptureSchedulerForTest(undefined);
       quotaPersistence.mockRestore();
+      curationPacingGate.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState({ fast: true });
       core

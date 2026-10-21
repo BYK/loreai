@@ -5427,6 +5427,72 @@ describe("worker temperature capability", () => {
     }
   });
 
+  test("caches a trusted worker organization when the response has no quota rows", async () => {
+    db().exec("DELETE FROM provider_quotas");
+    _resetCostAttributionForTest();
+
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-worker-no-quota",
+    };
+    const sessionID = "sess-worker-organization-without-quota";
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "worker result" }],
+          model: "claude-test",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "anthropic-organization-id": "org-worker-no-quota",
+          },
+        },
+      ),
+    );
+
+    const client = createGatewayLLMClient(UPSTREAMS, () => credential, {
+      providerID: "anthropic",
+      modelID: "claude-test",
+    });
+
+    try {
+      await expect(
+        client.prompt("system", "user", {
+          sessionID,
+          workerID: "lore-distill",
+          protocol: "anthropic",
+          upstreamProviderID: "anthropic",
+        }),
+      ).resolves.toBe("worker result");
+
+      expect(listProviderQuotas()).toEqual([]);
+      // Without this explicit no-quota organization evidence, the follow-up
+      // headerless attribution would remain in the default subscription bucket.
+      const noHeaderAttribution = resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: "https://api.anthropic.com",
+        credential,
+        responseStatus: 200,
+        directUpstreamResponse: true,
+      });
+      expect(noHeaderAttribution.account).not.toBe("default");
+      const cachedAttribution = resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: "https://api.anthropic.com",
+        credential,
+      });
+      expect(cachedAttribution).toEqual(noHeaderAttribution);
+    } finally {
+      db().exec("DELETE FROM provider_quotas");
+      _resetCostAttributionForTest();
+    }
+  });
+
   test("strips temperature on the OpenAI Chat Completions worker path too", async () => {
     let call = 0;
     mockFetch.mockImplementation(async () => {

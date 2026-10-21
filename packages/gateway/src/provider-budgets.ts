@@ -976,9 +976,15 @@ export function sessionBudgetMatch(
 export function isSessionCurationPacingPaused(
   sessionID: string,
   upstream?: { providerID?: string; url?: string },
+  capturedMatch?: BudgetMatch | null,
 ): boolean {
   try {
-    const match = sessionBudgetMatch(sessionID, upstream);
+    // A deferred caller can outlive the session's current upstream/auth state;
+    // an explicit captured miss must not fall back to mutable session data.
+    const match =
+      capturedMatch === undefined
+        ? sessionBudgetMatch(sessionID, upstream)
+        : capturedMatch;
     if (!match || match.auth_kind !== "subscription") return false;
     if (!isPacingEnabled(match.provider, match.account)) return false;
     return statusFor(
