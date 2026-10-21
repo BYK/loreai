@@ -355,8 +355,10 @@ test("rail tooltips label every destination on hover and keyboard focus", async 
   await avatar.press("Escape");
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   await avatar.press("Enter");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("Appearance");
+  await page
+    .getByRole("button", { name: "Sign in to Lore", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText("lore login");
   await page.keyboard.press("Escape");
   await expect(avatar).toBeFocused();
 });

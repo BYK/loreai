@@ -15,25 +15,20 @@ export async function openProjectPicker(page: Page) {
   return picker;
 }
 
-export async function openWorkspaceSettings(page: Page) {
-  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
-  if (!(await settings.isVisible())) {
-    const option = page.getByRole("button", { name: "Settings", exact: true });
-    if (!(await option.isVisible()))
-      await page.getByTestId("folk-status").click();
-    await option.click();
-  }
-  await expect(settings).toBeVisible();
-  return settings;
+export async function openAccountMenu(page: Page) {
+  const menu = page.getByTestId("folk-status-panel");
+  if (!(await menu.isVisible())) await page.getByTestId("folk-status").click();
+  await expect(menu).toBeVisible();
+  return menu;
 }
 
 export async function setWorkspaceTheme(
   page: Page,
   theme: "light" | "dark" | "system",
 ) {
-  const settings = await openWorkspaceSettings(page);
-  await settings.getByTestId(`theme-${theme}`).click();
-  await settings.getByRole("button", { name: /^(Close|Dismiss)$/ }).click();
-  await expect(settings).toHaveCount(0);
+  const menu = await openAccountMenu(page);
+  await menu.getByTestId(`theme-${theme}`).click();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
   await expect(page.getByTestId("folk-status")).toBeFocused();
 }

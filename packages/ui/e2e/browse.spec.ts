@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { openProjectPicker, openWorkspaceSettings } from "./workspace-helpers";
+import { openProjectPicker, openAccountMenu } from "./workspace-helpers";
 
 const FUTURE_ACTIONS = [
   "Save note",
@@ -121,7 +121,7 @@ test.describe("real data browsing", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await openWorkspaceSettings(page);
+    await openAccountMenu(page);
     const html = page.locator("html");
     await expect(page.getByTestId("theme-toggle")).toHaveAttribute(
       "data-theme-choice",
@@ -132,7 +132,7 @@ test.describe("real data browsing", () => {
     await expect(html).toHaveClass(/dark/);
     await page.reload();
     await expect(html).toHaveClass(/dark/);
-    await openWorkspaceSettings(page);
+    await openAccountMenu(page);
     await expect(page.getByTestId("theme-dark")).toHaveAttribute(
       "aria-pressed",
       "true",

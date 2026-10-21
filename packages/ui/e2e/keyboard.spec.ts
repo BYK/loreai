@@ -1,4 +1,4 @@
-import { openWorkspaceSettings, setWorkspaceTheme } from "./workspace-helpers";
+import { openAccountMenu, setWorkspaceTheme } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 function focusName(page: import("@playwright/test").Page) {
@@ -208,10 +208,10 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         (item: { name: string }) => item.name === "lore",
       );
       await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
-      await openWorkspaceSettings(page);
+      await openAccountMenu(page);
       await page.getByTestId(`theme-${choice}`).click();
       await page.getByTestId(`theme-${choice}`).focus();
-      await page.keyboard.press("Tab");
+      await page.keyboard.press("Shift+Tab");
       await expect
         .poll(() =>
           page.evaluate(() => {
@@ -223,9 +223,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         )
         .not.toBe("none/none");
       await page.keyboard.press("Escape");
-      await expect(
-        page.getByRole("dialog", { name: "Settings", exact: true }),
-      ).toHaveCount(0);
+      await expect(page.getByTestId("folk-status-panel")).toHaveCount(0);
       await expect(page.getByTestId("folk-status")).toBeFocused();
       // Establish keyboard modality before choosing a row: Tab may scroll the
       // reader and unmount the virtualized row that was previously visible.
