@@ -899,6 +899,7 @@ describe("rate tracker", () => {
         credential,
         sessionID: "session-established",
         observedAt: NOW,
+        responseStatus: 200,
         responseHeaders: acceptedHeaders,
         directUpstreamResponse: true,
       });
@@ -931,6 +932,7 @@ describe("rate tracker", () => {
         credential,
         sessionID: "session-established",
         observedAt: NOW - 1,
+        responseStatus: 200,
         responseHeaders: staleHeaders,
         directUpstreamResponse: true,
       });
@@ -967,6 +969,7 @@ describe("rate tracker", () => {
       credential,
       sessionID,
       observedAt: NOW,
+      responseStatus: 200,
       responseHeaders: establishedHeaders,
       directUpstreamResponse: true,
     });
@@ -987,6 +990,7 @@ describe("rate tracker", () => {
         },
         sessionID: `caller-session-${index}`,
         observedAt: NOW + index,
+        responseStatus: 200,
         responseHeaders: new Headers({
           "anthropic-organization-id": `org-caller-${index}`,
         }),

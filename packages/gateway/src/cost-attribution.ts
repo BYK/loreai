@@ -397,13 +397,18 @@ export function cacheAnthropicOrganizationFromResponse(input: {
   credential?: AuthCredential | null;
   sessionID?: string;
   observedAt: number;
+  responseStatus: number;
   responseHeaders?: Headers | null;
   upstreamURL?: string;
   responseURL?: string;
   directUpstreamResponse: boolean;
 }): void {
   if (input.provider !== "anthropic") return;
+  // Failed quota responses can report limits but cannot establish account ownership.
   if (
+    !Number.isInteger(input.responseStatus) ||
+    input.responseStatus < 200 ||
+    input.responseStatus >= 300 ||
     !input.directUpstreamResponse ||
     !isCanonicalAnthropicBackend(input.upstreamURL) ||
     !isCanonicalDirectAnthropicResponse(input.responseURL, input.upstreamURL) ||

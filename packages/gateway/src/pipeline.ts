@@ -8903,6 +8903,7 @@ async function forwardToUpstream(
               credential: upstreamAuth,
               sessionID,
               observedAt: quotaObservedAt,
+              responseStatus: response.status,
               responseHeaders: quotaResponseHeaders,
               upstreamURL: effectiveUpstreamBase,
               responseURL: response.url,

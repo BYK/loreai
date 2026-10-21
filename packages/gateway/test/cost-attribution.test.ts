@@ -681,6 +681,7 @@ describe("resolveCostAttribution", () => {
       credential: OAUTH_CREDENTIAL,
       sessionID,
       observedAt: 1,
+      responseStatus: 200,
       responseHeaders,
       upstreamURL: ANTHROPIC_URL,
       responseURL: "",
@@ -798,6 +799,53 @@ describe("resolveCostAttribution", () => {
     );
     expect(withoutKnownOrganization.account).toBe("default");
     expect(sessionOnly.account).toBe("default");
+    _resetForTest();
+  });
+
+  test("failed Anthropic responses cannot replace a verified organization", () => {
+    _resetForTest();
+    const sessionID = "anthropic-failed-org-session";
+    const credential = {
+      scheme: "bearer" as const,
+      value: "sk-ant-oat01-failed-org",
+    };
+    trustAnthropicCredential(credential);
+    const cacheOrganization = (
+      organizationID: string,
+      observedAt: number,
+      responseStatus: number,
+    ) => {
+      const response = {
+        ...TRUSTED_ANTHROPIC_RESPONSE,
+        responseStatus,
+      };
+      cacheAnthropicOrganizationFromResponse({
+        provider: "anthropic",
+        credential,
+        sessionID,
+        observedAt,
+        responseHeaders: new Headers({
+          "anthropic-organization-id": organizationID,
+        }),
+        ...response,
+      });
+    };
+
+    cacheOrganization("org-verified", 1, 200);
+    cacheOrganization("org-from-rate-limit", 2, 429);
+
+    const expectedAccount = createHash("sha256")
+      .update("org-verified")
+      .digest("hex")
+      .slice(0, 12);
+    expect(
+      resolveCostAttribution({
+        sessionID,
+        providerID: "anthropic",
+        upstreamURL: ANTHROPIC_URL,
+        credential,
+      }).account,
+    ).toBe(expectedAccount);
     _resetForTest();
   });
 

@@ -4457,6 +4457,7 @@ export function createGatewayLLMClient(
                       credential: cred,
                       sessionID: opts?.sessionID,
                       observedAt: quotaObservationStartedAt,
+                      responseStatus: response.status,
                       responseHeaders: response.headers,
                       upstreamURL: target.url,
                       responseURL: response.url,

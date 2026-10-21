@@ -17,6 +17,7 @@
  * uploaded to Sentry and then deleted (they shouldn't ship to users).
  */
 import * as esbuild from "esbuild";
+import { buildVersion } from "./build-version";
 import {
   copyFileSync,
   rmSync,
@@ -44,6 +45,7 @@ const distDir = join(packageDir, "dist");
 const pkg = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 ) as { version: string };
+const cliVersion = buildVersion(pkg.version);
 
 const jsPath = join(distDir, "index.cjs");
 const mapPath = join(distDir, "index.cjs.map");
@@ -125,7 +127,7 @@ await esbuild.build({
   // Build-time constants
   define: {
     "import.meta.url": "import_meta_url",
-    LORE_CLI_VERSION: JSON.stringify(pkg.version),
+    LORE_CLI_VERSION: JSON.stringify(cliVersion),
     __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
   },
 });
@@ -183,7 +185,7 @@ await esbuild.build({
   legalComments: "none",
   plugins: [sentryNodePlugin, jsoncParserEsmPlugin(packageDir)],
   define: {
-    LORE_CLI_VERSION: JSON.stringify(pkg.version),
+    LORE_CLI_VERSION: JSON.stringify(cliVersion),
     __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
   },
 });
@@ -369,7 +371,7 @@ if (debugId) {
 let uploaded = false;
 
 if (process.env.SENTRY_AUTH_TOKEN) {
-  console.log(`  Uploading sourcemaps to Sentry (release: ${pkg.version})...`);
+  console.log(`  Uploading sourcemaps to Sentry (release: ${cliVersion})...`);
   try {
     execSync(
       [
@@ -379,7 +381,7 @@ if (process.env.SENTRY_AUTH_TOKEN) {
         "upload",
         "dist/",
         "--release",
-        pkg.version,
+        cliVersion,
         "--org",
         "byk",
         "--project",
@@ -535,7 +537,7 @@ export declare function _cli(): Promise<void>;
 
 writeFileSync(join(distDir, "index.d.cts"), typeDeclarations);
 
-console.log(`\n✓ @loreai/gateway npm bundle complete (v${pkg.version})`);
+console.log(`\n✓ @loreai/gateway npm bundle complete (v${cliVersion})`);
 console.log(`  dist/index.cjs            — CJS bundle (Node.js, node:sqlite)`);
 console.log(`  dist/index.bun.js         — ESM bundle (Bun, bun:sqlite)`);
 console.log(`  dist/embedding-worker.cjs — embedding worker CJS (Node.js)`);

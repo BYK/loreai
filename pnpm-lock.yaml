@@ -39,6 +39,9 @@ patchedDependencies:
   ai-tokenizer@1.0.6:
     hash: e0860e593b5124ece79ec1e194f73fb9c5adaa18e8fc8dd10cabc0c06fc6411f
     path: patches/ai-tokenizer@1.0.6.patch
+  binpatch@0.3.1:
+    hash: 51f44bc6396f8ab3dccd368582b32703771e01a09ea0e0fa3ea10f4826e609fc
+    path: patches/binpatch@0.3.1.patch
 
 importers:
 
@@ -61,7 +64,7 @@ importers:
         version: 4.1.11(vitest@4.1.11)
       binpatch:
         specifier: ^0.3.1
-        version: 0.3.1
+        version: 0.3.1(patch_hash=51f44bc6396f8ab3dccd368582b32703771e01a09ea0e0fa3ea10f4826e609fc)
       esbuild:
         specifier: '>=0.28.1'
         version: 0.28.1
@@ -223,7 +226,7 @@ importers:
         version: 1.0.6(patch_hash=e0860e593b5124ece79ec1e194f73fb9c5adaa18e8fc8dd10cabc0c06fc6411f)
       binpatch:
         specifier: ^0.3.1
-        version: 0.3.1
+        version: 0.3.1(patch_hash=51f44bc6396f8ab3dccd368582b32703771e01a09ea0e0fa3ea10f4826e609fc)
       fossilize:
         specifier: 0.11.0
         version: 0.11.0
@@ -9168,7 +9171,7 @@ snapshots:
 
   bignumber.js@9.3.1: {}
 
-  binpatch@0.3.1: {}
+  binpatch@0.3.1(patch_hash=51f44bc6396f8ab3dccd368582b32703771e01a09ea0e0fa3ea10f4826e609fc): {}
 
   binpunch@1.0.0: {}
 
