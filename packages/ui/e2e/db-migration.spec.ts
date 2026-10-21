@@ -1,3 +1,4 @@
+import { openProjectPicker } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 const STORES = [
@@ -102,7 +103,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await page.goto("/ui");
     await createV1(page);
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expect(page.getByTestId("connection-status")).toBeAttached();
     await expectDatabaseVersion(page, 4);
     const info = await openInfo(page);
     expect(info.version).toBe(4);
@@ -235,7 +236,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         }),
     );
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expect(page.getByTestId("connection-status")).toBeAttached();
     await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).stores.sort()).toEqual([...STORES].sort());
   });
@@ -259,7 +260,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         }),
     );
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expect(page.getByTestId("connection-status")).toBeAttached();
     await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).version).toBe(4);
   });
@@ -268,7 +269,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toBeVisible();
+    await expect(page.getByTestId("connection-status")).toBeAttached();
     await page.evaluate(async () => {
       const req = indexedDB.deleteDatabase("lore-ui");
       await new Promise<void>((resolve, reject) => {
@@ -276,21 +277,16 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         req.onerror = () => reject(req.error);
       });
     });
-    const navProject = page
+    const picker = await openProjectPicker(page);
+    await picker
+      .getByRole("searchbox", { name: "Filter projects" })
+      .fill("lore");
+    await picker
       .getByTestId("nav-project")
-      .filter({ hasText: "lore" });
-    if (await navProject.isVisible()) {
-      await navProject.click();
-    } else {
-      await page.getByTestId("open-nav").click();
-      await page
-        .getByTestId("nav-drawer")
-        .getByTestId("nav-project")
-        .filter({
-          hasText: "lore",
-        })
-        .click();
-    }
+      .filter({
+        has: page.locator("[data-project-label]", { hasText: /^lore$/ }),
+      })
+      .click();
     await expect(page.getByTestId("health")).toContainText("knowledge");
     await expect(
       page.getByText(/Project not found or inaccessible|Something went wrong/),

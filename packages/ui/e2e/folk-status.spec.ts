@@ -19,22 +19,23 @@ test.describe("Folk status surfaces", () => {
   test("shows anonymous status and supports keyboard popover controls", async ({
     page,
   }, testInfo) => {
-    await page.goto("/ui");
+    await page.goto("/ui/knowledge");
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "anonymous");
     await expect(badge).toHaveAttribute("aria-label", /Not signed in/);
     await expect(page.getByText("You", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("account-avatar")).toHaveCount(0);
-    if (testInfo.project.name.startsWith("mobile")) {
-      await expect(badge.getByText("Not signed in")).toBeHidden();
-    } else {
-      await expect(badge.getByText("Not signed in")).toBeVisible();
-    }
+    await expect(page.getByTestId("anonymous-avatar")).toBeVisible();
 
     await badge.focus();
     await page.keyboard.press("Enter");
     const panel = page.getByTestId("folk-status-panel");
     await expect(panel).toBeVisible();
+    await expect(panel.getByText("Anonymous", { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("account-menu.png"),
+      fullPage: true,
+    });
     await expect(page.getByTestId("folk-status-detail")).toContainText(
       "lore login",
     );
@@ -72,7 +73,7 @@ test.describe("Folk status surfaces", () => {
 
   test("a signed-in local account displays its own initials", async ({
     page,
-  }, testInfo) => {
+  }) => {
     await page.route("**/api/v1/account", (route) =>
       route.fulfill({
         json: {
@@ -91,9 +92,7 @@ test.describe("Folk status surfaces", () => {
       "aria-label",
       "Signed in as Ada Lovelace",
     );
-    if (testInfo.project.name.startsWith("mobile"))
-      await expect(avatar).toBeHidden();
-    else await expect(avatar).toBeVisible();
+    await expect(avatar).toBeVisible();
     await expect(page.getByText("You", { exact: true })).toHaveCount(0);
   });
 
@@ -125,4 +124,83 @@ test.describe("Folk status surfaces", () => {
     );
     await expectNoTokenText(page);
   });
+});
+
+test("guest avatar keeps preferences and sign-in guidance available at narrow widths", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 480 });
+  await page.goto("/ui");
+  const avatar = page.getByTestId("folk-status");
+  await expect(page.getByTestId("anonymous-avatar")).toBeVisible();
+  const box = (await avatar.boundingBox())!;
+  expect(box.x).toBeLessThan(52);
+  expect(box.y + box.height).toBeGreaterThan(430);
+  await avatar.click();
+  const panel = page.getByTestId("folk-status-panel");
+  await expect(
+    panel.getByRole("button", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await expect(panel.getByTestId("theme-toggle")).toBeVisible();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  const menuBox = (await panel.boundingBox())!;
+  expect(menuBox.x).toBeGreaterThanOrEqual(0);
+  expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(320);
+  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(480);
+  await panel.getByRole("button", { name: "Sign in", exact: true }).click();
+  const login = page.getByRole("dialog", {
+    name: "Sign in to Lore",
+    exact: true,
+  });
+  await expect(login).toBeVisible();
+  await expect(login).toContainText("lore login");
+  await expect(
+    login.getByRole("button", { name: "Copy command" }),
+  ).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(login).toHaveCount(0);
+  await expect(avatar).toBeFocused();
+  await avatar.click();
+  await panel.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await expect(settings.getByTestId("theme-dark")).toBeVisible();
+  await settings.getByTestId("theme-dark").click();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await page.keyboard.press("Escape");
+  await expect(avatar).toBeFocused();
+  await avatar.click();
+  await expect(panel.getByTestId("theme-dark")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+test("signed-in avatar menu keeps preferences without a sign-in action", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/account", (route) =>
+    route.fulfill({
+      json: {
+        signed_in: true,
+        user: { id: "ada", display_name: "Ada Lovelace", email: null },
+        provider: "github",
+        expires_at: null,
+        state: "signed_in",
+      },
+    }),
+  );
+  await page.goto("/ui");
+  const avatar = page.getByTestId("folk-status");
+  await expect(avatar.getByTestId("account-avatar")).toHaveText("AL");
+  await avatar.click();
+  const panel = page.getByTestId("folk-status-panel");
+  await expect(panel.getByTestId("folk-account")).toHaveText("Ada Lovelace");
+  await expect(
+    panel.getByRole("button", { name: "Sign in", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await expect(panel.getByTestId("theme-toggle")).toBeVisible();
 });

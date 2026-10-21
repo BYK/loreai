@@ -13,7 +13,30 @@ const gatewayOrigin = process.env.LORE_UI_GATEWAY ?? "http://127.0.0.1:3207";
 
 export default defineConfig({
   base: "/ui/",
-  plugins: [solid(), tailwindcss()],
+  plugins: [
+    {
+      name: "lore-ui-base-redirect",
+      configureServer(server) {
+        // The router's home href is /ui; Vite requires the trailing slash on a
+        // direct request. Preserve chooser/search queries when refreshing it.
+        server.middlewares.use((request, response, next) => {
+          const url = request.url ?? "";
+          if (
+            (request.method === "GET" || request.method === "HEAD") &&
+            (url === "/ui" || url.startsWith("/ui?"))
+          ) {
+            response.statusCode = 307;
+            response.setHeader("Location", `/ui/${url.slice(3)}`);
+            response.end();
+            return;
+          }
+          next();
+        });
+      },
+    },
+    solid(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: { "~": srcDir },
   },

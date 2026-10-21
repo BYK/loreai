@@ -7,7 +7,7 @@ import { MemoryRouter, Route } from "@solidjs/router";
 import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Nav } from "~/components/shell/Nav";
+import { ProjectPicker } from "~/components/shell/ProjectPicker";
 import { byRecency, sectionProjects } from "~/components/shell/nav-projects";
 import type { ProjectSummary } from "~/contracts";
 import { closeLoreDb, resetCache } from "~/db";
@@ -41,31 +41,35 @@ function renderNav(
   projects: ProjectSummary[],
   activeProjectId: string | null = null,
 ) {
-  return render(() => (
+  const result = render(() => (
     <MemoryRouter>
       <Route
         path="*"
         component={() => (
           <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
+            <ProjectPicker
               projects={projects}
               loading={false}
               error={undefined}
               activeProjectId={activeProjectId}
-              totalKnowledge={null}
             />
           </ConnectionContext.Provider>
         )}
       />
     </MemoryRouter>
   ));
+  fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
+  return result;
 }
 
 /** Labels of all project rows under a given data-section. */
 function sectionLabels(section: string): string[] {
   return [
     ...document.querySelectorAll<HTMLElement>(`[data-section="${section}"]`),
-  ].map((el) => el.textContent ?? "");
+  ].map(
+    (el) =>
+      `${el.querySelector("[data-project-label]")?.textContent ?? ""}${el.querySelector("[data-project-count]")?.textContent ?? ""}`,
+  );
 }
 
 beforeEach(async () => {
@@ -209,7 +213,7 @@ describe("Nav project sections", () => {
 
     expect(screen.queryByRole("heading", { name: "Matches" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Pinned" })).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
   });
 
   it("keeps the active project visible while All projects is collapsed", async () => {
@@ -224,10 +228,10 @@ describe("Nav project sections", () => {
     );
   });
 
-  it("no filter box and no All button with ≤5 projects and no pins", async () => {
+  it("keeps picker search available with a small project list and no All button", async () => {
     renderNav(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
     expect(screen.queryByTestId("nav-all-projects")).toBeNull();
     expect(sectionLabels("recent")).toEqual(["alpha0", "bravo0", "delta0"]);
   });

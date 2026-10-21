@@ -233,8 +233,11 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     </Select>
   );
   return (
-    <div class="p-4 sm:p-6">
-      <div class="mb-4 flex flex-wrap items-end gap-2" role="search">
+    <div class="p-4 sm:p-5">
+      <div
+        class="sticky top-0 z-10 -mx-4 -mt-4 mb-4 flex flex-wrap items-end gap-2 border-b border-line bg-surface px-4 py-3 sm:-mx-5 sm:-mt-5 sm:px-5"
+        role="search"
+      >
         <form
           class="flex min-w-[220px] flex-1 gap-2"
           onSubmit={(event) => {

@@ -1,11 +1,10 @@
 import type { Component } from "solid-js";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
-import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
+import { useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type {
   AllKnowledgeQuery,
   KnowledgeVersion,
-  ProjectSummary,
   RecallScope,
 } from "~/contracts";
 import {
@@ -23,7 +22,9 @@ import {
   workspaceSearchHref,
 } from "~/lib/href";
 import { isApiError } from "~/lib/api";
-import { formatWhen, pluralize, previewOf } from "~/lib/format";
+import { formatWhen, previewOf } from "~/lib/format";
+import { ProjectDirectory } from "~/components/lore/ProjectDirectory";
+import { KnowledgeListToolbar } from "~/components/lore/KnowledgeListToolbar";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
@@ -31,16 +32,14 @@ import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
 import { RestoreKnowledgeAction } from "~/components/lore/RestoreKnowledgeAction";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
-import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { WorkspaceSearch } from "~/components/lore/WorkspaceSearch";
 import { SessionList } from "~/components/lore/SessionList";
 import { ImportHistoryPage } from "~/components/lore/ImportHistoryPage";
 import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { errorStateFor } from "~/components/lore/ErrorState";
-import { ListRow, PaneHead } from "~/components/lore/Panes";
+import { ListRow } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
-import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
 import { createLoader } from "~/lib/loader";
@@ -60,55 +59,6 @@ function decodeParam(segment: string | undefined) {
     return segment;
   }
 }
-
-const WelcomeDetail: Component<{
-  projects: readonly ProjectSummary[] | undefined;
-}> = (props) => (
-  <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
-    <div class="eyebrow mb-2">Memory browser</div>
-    <h1 class="mb-3 text-[25px] font-semibold">Choose a project</h1>
-    <p class="mb-6 max-w-prose text-sm text-muted">
-      Lore keeps what your agents learned about each project. Pick a project on
-      the left to browse its knowledge.
-    </p>
-    <Show
-      when={props.projects}
-      fallback={<StateCard kind="loading" title="Loading projects" />}
-    >
-      {(projects) => (
-        <Show
-          when={projects().length > 0}
-          fallback={
-            <StateCard kind="empty" title="No projects yet">
-              Run <code>lore run</code> in a project to start.
-            </StateCard>
-          }
-        >
-          <ul class="grid list-none gap-2 p-0 sm:grid-cols-2">
-            <For each={projects()}>
-              {(project) => (
-                <li>
-                  <A
-                    href={projectHref(project.id)}
-                    class="block rounded-lg border border-line px-4 py-3 text-sm hover:bg-soft"
-                  >
-                    <div class="font-semibold">
-                      {project.name || project.path}
-                    </div>
-                    <div class="mt-1 text-xs text-muted">
-                      {pluralize(project.knowledge_count, "entry")} ·{" "}
-                      {pluralize(project.session_count, "session")}
-                    </div>
-                  </A>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
-      )}
-    </Show>
-  </div>
-);
 
 export const Browse: Component<{
   view:
@@ -237,50 +187,26 @@ export const Browse: Component<{
     }
     return <StateCard kind="error" title="Project not found or inaccessible" />;
   };
-  const nav = () => (
-    <Nav
-      projects={ws.projects.data()}
-      loading={ws.projects.loading()}
-      error={ws.projects.error()}
-      activeProjectId={projectId() ?? null}
-      totalKnowledge={
-        ws.projects.data()?.reduce((n, p) => n + p.knowledge_count, 0) ?? null
-      }
-      onRetry={ws.projects.reload}
-      stale={ws.state.projects.status()}
-      footer={
-        props.view === "welcome" ? (
-          <div class="border-t border-line px-3 pt-4">
-            <MergeProjectsAction />
-          </div>
-        ) : undefined
-      }
-    />
-  );
+
   const list = () => {
+    // Select controls have reactive effects even in unattached JSX. Construct
+    // the reader toolbar only for the route that actually displays it.
+    if (props.view !== "entry") return undefined;
     const id = activeProjectId();
     if (!id) return undefined;
     const items = () => knowledgePage.loader.data()?.items;
     return (
       <div data-testid="knowledge-list">
-        <PaneHead
-          title={
-            <>
-              {`Knowledge · ${label()}`}
-              <Show when={items()}>
-                {(rows) =>
-                  ` · ${rows().length} ${rows().length === 1 ? "entry" : "entries"}`
-                }
-              </Show>
-            </>
-          }
-          trailing={
-            <A
-              class="text-xs text-accent underline"
-              href={knowledgeListHref(id, query())}
-            >
-              Open as table
-            </A>
+        <KnowledgeListToolbar
+          query={query()}
+          count={items()?.length}
+          tableHref={knowledgeListHref(id, query())}
+          onChange={(next) =>
+            navigate(
+              knowledgeId()
+                ? knowledgeHref(id, knowledgeId()!, next)
+                : knowledgeListHref(id, next),
+            )
           }
         />
         <Show when={knowledgePage.loader.stale()}>
@@ -304,7 +230,14 @@ export const Browse: Component<{
             <StateCard kind="loading" title="Loading knowledge" />
           </Match>
           <Match when={items()?.length === 0}>
-            <StateCard kind="empty" title="No knowledge extracted yet" />
+            <StateCard
+              kind="empty"
+              title={
+                query().q || query().category || query().scope
+                  ? "No knowledge matches these filters"
+                  : "No knowledge extracted yet"
+              }
+            />
           </Match>
           <Match when={items()}>
             <For each={items()}>
@@ -371,7 +304,12 @@ export const Browse: Component<{
     const id = projectId();
     switch (props.view) {
       case "welcome":
-        return <WelcomeDetail projects={ws.projects.data()} />;
+        return (
+          <ProjectDirectory
+            projects={ws.projects.data()}
+            sessionsMode={searchParams.section === "sessions"}
+          />
+        );
       case "project":
         if (!id) return projectFallback();
         return (
@@ -569,7 +507,6 @@ export const Browse: Component<{
   };
   return (
     <Shell
-      nav={nav}
       list={props.view === "entry" ? listView() : undefined}
       detail={detailView()}
       mobilePane={mobilePane()}

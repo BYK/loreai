@@ -17,7 +17,9 @@ import {
 } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
-import { Nav } from "~/components/shell/Nav";
+import { resetSidebarForTests } from "~/state/sidebar";
+import { Rail } from "~/components/shell/Rail";
+import { Shell } from "~/components/shell/Shell";
 import { knowledgeHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
@@ -290,22 +292,31 @@ function mount(
   return { ...utils, history };
 }
 
+async function projectRows() {
+  if (!screen.queryByRole("searchbox", { name: "Filter projects" })) {
+    fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
+  }
+  return screen.findAllByTestId("nav-project");
+}
+
+function projectRowSummary(row: HTMLElement) {
+  return `${row.querySelector("[data-project-label]")?.textContent ?? ""}${row.querySelector("[data-project-count]")?.textContent ?? ""}`;
+}
+
 function mountBaseNav(path: string, activeProjectId: string | null = null) {
   const history = createMemoryHistory();
   history.set({ value: path });
   const utils = render(() => (
-    <MemoryRouter base="/ui" history={history}>
+    <MemoryRouter
+      base="/ui"
+      history={history}
+      root={createAppRoot(fakeClient())}
+    >
       <Route
         path="*"
         component={() => (
           <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
-              projects={PROJECTS}
-              loading={false}
-              error={null}
-              activeProjectId={activeProjectId}
-              totalKnowledge={4}
-            />
+            <Rail projectId={activeProjectId ?? undefined} />
           </ConnectionContext.Provider>
         )}
       />
@@ -361,6 +372,7 @@ function pane(name: "nav" | "list" | "detail"): HTMLElement {
 }
 
 beforeEach(() => {
+  resetSidebarForTests();
   localStorage.clear();
   document.documentElement.classList.remove("dark");
   resetThemeStoreForTests();
@@ -374,21 +386,21 @@ afterEach(() => {
 describe("shell: project navigation and real-data path", () => {
   it("highlights workspace links relative to the router base", async () => {
     const { history } = mount("/ui", fakeClient(), undefined, "/ui");
-    await screen.findByTestId("nav-projects");
+    await screen.findByTestId("rail-projects");
 
     await waitFor(() =>
-      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-accent-soft"),
+      expect(screen.getByTestId("rail-projects")).toHaveClass("bg-accent-soft"),
     );
-    expect(screen.getByTestId("nav-all-knowledge")).not.toHaveClass(
+    expect(screen.getByTestId("rail-knowledge")).not.toHaveClass(
       "bg-accent-soft",
     );
 
     history.set({ value: "/ui/knowledge" });
     await waitFor(() => {
-      expect(screen.getByTestId("nav-all-knowledge")).toHaveClass(
+      expect(screen.getByTestId("rail-knowledge")).toHaveClass(
         "bg-accent-soft",
       );
-      expect(screen.getByTestId("nav-projects")).not.toHaveClass(
+      expect(screen.getByTestId("rail-projects")).not.toHaveClass(
         "bg-accent-soft",
       );
     });
@@ -397,17 +409,17 @@ describe("shell: project navigation and real-data path", () => {
   it("matches nav descendants under the /ui router base", async () => {
     const { history } = mountBaseNav("/ui");
     const navIds = [
-      "nav-entities",
-      "nav-contradictions",
-      "nav-warming",
-      "nav-costs",
+      "rail-entities",
+      "rail-contradictions",
+      "rail-warming",
+      "rail-costs",
     ] as const;
     const activeRoutes = [
-      ["/ui/entities", "nav-entities"],
-      ["/ui/entities/entity-1", "nav-entities"],
-      ["/ui/contradictions", "nav-contradictions"],
-      ["/ui/warming", "nav-warming"],
-      ["/ui/costs", "nav-costs"],
+      ["/ui/entities", "rail-entities"],
+      ["/ui/entities/entity-1", "rail-entities"],
+      ["/ui/contradictions", "rail-contradictions"],
+      ["/ui/warming", "rail-warming"],
+      ["/ui/costs", "rail-costs"],
     ] as const;
 
     for (const [path, activeId] of activeRoutes) {
@@ -417,7 +429,10 @@ describe("shell: project navigation and real-data path", () => {
       );
       for (const id of navIds) {
         if (id !== activeId) {
-          expect(screen.getByTestId(id)).not.toHaveClass("bg-accent-soft");
+          expect(
+            screen.queryByTestId(id)?.classList.contains("bg-accent-soft") ??
+              false,
+          ).toBe(false);
         }
       }
     }
@@ -428,7 +443,7 @@ describe("shell: project navigation and real-data path", () => {
     if (!project) throw new Error("A navigation project fixture is required");
     const duplicatesPath = `/ui/projects/${project.id}/duplicates`;
     const { history, unmount } = mountBaseNav(duplicatesPath, project.id);
-    const duplicates = screen.getByTestId("nav-duplicates");
+    const duplicates = screen.getByTestId("rail-duplicates");
 
     expect(duplicates).toHaveAttribute("href", duplicatesPath);
     await waitFor(() => {
@@ -444,15 +459,15 @@ describe("shell: project navigation and real-data path", () => {
     unmount();
 
     mountBaseNav("/ui");
-    expect(screen.getByText("choose a project")).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
+    expect(screen.getByTestId("rail-projects")).toBeInTheDocument();
+    expect(screen.queryByTestId("rail-duplicates")).not.toBeInTheDocument();
   });
 
   it("loads projects into the nav and shows the welcome document", async () => {
     const client = fakeClient();
     mount("/", client);
-    const rows = await screen.findAllByTestId("nav-project");
-    expect(rows.map((r) => r.textContent)).toEqual([
+    const rows = await projectRows();
+    expect(rows.map(projectRowSummary)).toEqual([
       "lore2",
       "/home/me/empty0", // nameless project falls back to its path
     ]);
@@ -472,46 +487,27 @@ describe("shell: project navigation and real-data path", () => {
     );
   });
 
-  it("returns focus to the navigation opener when the drawer closes", async () => {
-    const client = fakeClient();
-    mount("/", client);
-    const opener = await screen.findByTestId("open-nav");
-    opener.focus();
+  it("closes narrow context with Escape and returns focus to the toolbar", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+    const opener = await screen.findByTestId("context-toggle");
     fireEvent.click(opener);
-    await screen.findByTestId("nav-drawer");
-
-    fireEvent.keyDown(document, { key: "Escape" });
-
-    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+    const link = (await screen.findAllByTestId("knowledge-row"))[0]!;
+    link.focus();
+    fireEvent.keyDown(link, { key: "Escape" });
     await waitFor(() => expect(opener).toHaveFocus());
-  });
-
-  it("focuses a replacement opener after the original is removed", async () => {
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-      setTimeout(() => callback(0), 0);
-      return 1;
-    });
-    const client = fakeClient();
-    mount("/", client);
-    const opener = await screen.findByTestId("open-nav");
-    opener.focus();
-    fireEvent.click(opener);
-    await screen.findByTestId("nav-drawer");
-
-    opener.remove();
-    fireEvent.keyDown(document, { key: "Escape" });
-    const replacement = document.createElement("button");
-    replacement.dataset.testid = "open-nav";
-    replacement.tabIndex = 0;
-    document.body.append(replacement);
-
-    await waitFor(() => expect(replacement).toHaveFocus());
+    expect(screen.getByTestId("context-pane")).not.toBeVisible();
+    expect(screen.getByTestId("icon-rail")).toBeVisible();
   });
 
   it("navigates project → knowledge list → entry document with stable ids in the URL", async () => {
     const client = fakeClient();
     const { history } = mount("/", client);
-    const [lore] = await screen.findAllByTestId("nav-project");
+    const [lore] = await projectRows();
     fireEvent.click(lore!);
 
     await waitFor(() => expect(history.get()).toBe("/projects/p-lore"));
@@ -590,7 +586,7 @@ describe("shell: project navigation and real-data path", () => {
     ).toHaveLength(2);
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows[0]).toHaveAttribute("aria-current", "page");
-    const [lore] = await screen.findAllByTestId("nav-project");
+    const [lore] = await projectRows();
     expect(lore).toHaveAttribute("aria-current", "page");
   });
 
@@ -600,7 +596,7 @@ describe("shell: project navigation and real-data path", () => {
     await screen.findByTestId("knowledge-document");
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows).toHaveLength(2);
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
+    expect(pane("list")).toHaveTextContent("Knowledge");
     expect(client.calls).toEqual([
       "projects",
       "entry:k-wal",
@@ -668,7 +664,7 @@ describe("shell: project navigation and real-data path", () => {
         sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
+    expect(pane("list")).toHaveTextContent("Knowledge");
     const [row] = await screen.findAllByTestId("knowledge-row");
     expect(row).toHaveAttribute("aria-current", "page");
   });
@@ -838,12 +834,8 @@ describe("shell: project navigation and real-data path", () => {
 
     const list = await screen.findByTestId("knowledge-list");
     await within(list).findByText(target.title);
-    const projectCount = () => {
-      const link = screen
-        .getAllByTestId("nav-project")
-        .find((item) => item.firstElementChild?.textContent === "lore");
-      return link?.lastElementChild?.textContent;
-    };
+    const projectCount = () =>
+      screen.getByTestId("active-project-count").textContent;
     await waitFor(() => expect(projectCount()).toBe("2"));
 
     let pageCalls = listProjectKnowledgePage.mock.calls.length;
@@ -1018,17 +1010,18 @@ describe("shell: workspace knowledge and search", () => {
     expect(within(table).getByText("/home/me/empty")).toBeInTheDocument();
     expect(within(table).getByText("No project")).toBeInTheDocument();
 
-    const nav = screen.getByRole("navigation", { name: "Workspace" });
-    const allKnowledge = within(nav).getByTestId("nav-all-knowledge");
-    const projects = within(nav).getByTestId("nav-projects");
+    const nav = screen.getByRole("navigation", { name: "Primary navigation" });
+    const allKnowledge = within(nav).getByTestId("rail-knowledge");
+    const projects = within(nav).getByTestId("rail-projects");
     expect(allKnowledge).toHaveAttribute("aria-current", "page");
     expect(projects).not.toHaveAttribute("aria-current");
     const navLinks = [...nav.querySelectorAll("a[data-testid]")];
-    expect(navLinks.indexOf(allKnowledge)).toBeLessThan(
-      navLinks.findIndex(
-        (link) => link.getAttribute("data-testid") === "nav-project",
-      ),
+    expect(navLinks.indexOf(projects)).toBeLessThan(
+      navLinks.indexOf(allKnowledge),
     );
+    expect(
+      screen.getByRole("button", { name: /switch project/i }),
+    ).toBeInTheDocument();
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
     if (!firstRow) throw new Error("Missing all-knowledge table row");
@@ -1038,17 +1031,17 @@ describe("shell: workspace knowledge and search", () => {
 
   it("activates Projects only on the workspace home", async () => {
     const { history } = mount("/", fakeClient());
-    const nav = screen.getByRole("navigation", { name: "Workspace" });
-    const projects = within(nav).getByTestId("nav-projects");
-    const allKnowledge = within(nav).getByTestId("nav-all-knowledge");
+    const nav = screen.getByRole("navigation", { name: "Primary navigation" });
+    const projects = within(nav).getByTestId("rail-projects");
+    const allKnowledge = within(nav).getByTestId("rail-knowledge");
     expect(projects).toHaveAttribute("aria-current", "page");
     fireEvent.click(allKnowledge);
     await waitFor(() => expect(history.get()).toBe("/knowledge"));
     await waitFor(() => {
-      expect(screen.getByTestId("nav-projects")).not.toHaveAttribute(
+      expect(screen.getByTestId("rail-projects")).not.toHaveAttribute(
         "aria-current",
       );
-      expect(screen.getByTestId("nav-all-knowledge")).toHaveAttribute(
+      expect(screen.getByTestId("rail-knowledge")).toHaveAttribute(
         "aria-current",
         "page",
       );
@@ -1622,7 +1615,8 @@ describe("shell: empty, error, not-found and locked states", () => {
         },
       }),
     );
-    // Both the nav and the welcome document explain the empty state.
+    // Both the picker and the welcome document explain the empty state.
+    fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
     expect(await screen.findAllByText("No projects yet")).toHaveLength(2);
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
@@ -1641,7 +1635,7 @@ describe("shell: empty, error, not-found and locked states", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client);
-    await screen.findAllByTestId("nav-project");
+    await projectRows();
     await waitFor(() => expect(attempts).toBe(1));
     const status = screen.getByTestId("connection-status");
     expect(status).toHaveAttribute("data-connection", "reachable");
@@ -1665,10 +1659,20 @@ describe("shell: empty, error, not-found and locked states", () => {
       expect(status).toHaveAttribute("data-connection", "unreachable"),
     );
     expect(status).toHaveTextContent("Gateway unreachable");
-    expect(screen.getByText("Projects unavailable")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
+    expect(
+      await within(
+        screen.getByRole("dialog", { name: "Switch project" }),
+      ).findByText("Projects unavailable"),
+    ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findAllByTestId("nav-project");
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Switch project" })).getByRole(
+        "button",
+        { name: "Retry" },
+      ),
+    );
+    await projectRows();
     expect(status).toHaveAttribute("data-connection", "reachable");
   });
 
@@ -1785,6 +1789,8 @@ describe("shell: search entry, theme and fixture", () => {
 
   it("defaults to the system theme and lets the user force light or dark", async () => {
     mount("/", fakeClient());
+    fireEvent.click(screen.getByTestId("folk-status"));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     const group = screen.getByTestId("theme-toggle");
     expect(group).toHaveAttribute("data-theme-choice", "system");
     expect(screen.getByTestId("theme-system")).toHaveAttribute(
@@ -1819,14 +1825,16 @@ describe("shell: search entry, theme and fixture", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       media: query,
       get matches() {
-        return systemDark;
+        return query === "(prefers-color-scheme: dark)" ? systemDark : true;
       },
       addEventListener: (_: string, cb: (e: { matches: boolean }) => void) => {
-        onChange = cb;
+        if (query === "(prefers-color-scheme: dark)") onChange = cb;
       },
     }));
     resetThemeStoreForTests();
     mount("/", fakeClient());
+    fireEvent.click(screen.getByTestId("folk-status"));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(document.documentElement).not.toHaveClass("dark");
 
     systemDark = true;
@@ -1851,18 +1859,20 @@ describe("shell: search entry, theme and fixture", () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
   });
 
-  it("swaps the header logo between the light and dark website marks", async () => {
+  it("swaps the sidebar logo between the light and dark website marks", async () => {
     mount("/", fakeClient());
     const logo = screen.getByTestId("logo");
     const img = logo.querySelector("img");
     const wordmark = logo.querySelector(".font-serif");
     expect(img).not.toBeNull();
     expect(logo).toBeVisible();
-    expect(wordmark).toHaveClass("hidden", "sm:inline");
+    expect(wordmark).toHaveClass("sr-only");
     expect(logo).toHaveAttribute("data-logo-theme", "light");
     expect(img?.getAttribute("src")).toMatch(/loreai\.svg/);
     // The wordmark stays a real link target for assistive tech.
     expect(screen.getByRole("link", { name: /Lore\.AI — home/ })).toBeVisible();
+    fireEvent.click(screen.getByTestId("folk-status"));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByTestId("theme-dark"));
     await waitFor(() =>
       expect(logo).toHaveAttribute("data-logo-theme", "dark"),
@@ -2058,8 +2068,8 @@ describe("shell: IndexedDB cache behavior", () => {
       },
     });
     mount("/projects/p-lore", client, Promise.resolve(db));
-    const rows = await screen.findAllByTestId("nav-project");
-    expect(rows.map((r) => r.textContent)).toContain("lore2");
+    const rows = await projectRows();
+    expect(rows.map(projectRowSummary)).toContain("lore2");
     const badges = await screen.findAllByTestId("stale-indicator");
     expect(badges.map((b) => b.textContent)).toContain(
       "Cached · gateway unavailable",
@@ -2068,4 +2078,330 @@ describe("shell: IndexedDB cache behavior", () => {
       expect(screen.queryByText("Projects unavailable")).toBeNull(),
     );
   });
+});
+
+describe("Knowledge reader toolbar", () => {
+  it("filters the list without dropping the selected entry, scope or sort", async () => {
+    const client = fakeClient();
+    const { history } = mount(
+      "/projects/p-lore/knowledge/k-sqlite?category=decision&scope=project&sort=confidence:desc&cursor=older",
+      client,
+    );
+    await screen.findByTestId("knowledge-document");
+    const search = screen.getByRole("textbox", {
+      name: "Filter knowledge list",
+    });
+    fireEvent.input(search, { target: { value: "SQLite" } });
+    fireEvent.submit(search.closest("form")!);
+    await waitFor(() => {
+      const current = new URL(history.get(), "http://local");
+      expect(current.pathname).toBe("/projects/p-lore/knowledge/k-sqlite");
+      expect(current.searchParams.get("q")).toBe("SQLite");
+      expect(current.searchParams.get("category")).toBe("decision");
+      expect(current.searchParams.get("scope")).toBe("project");
+      expect(current.searchParams.get("sort")).toBe("confidence:desc");
+      expect(current.searchParams.has("cursor")).toBe(false);
+    });
+    expect(screen.getByTestId("knowledge-document")).toHaveTextContent(
+      "Keep SQLite",
+    );
+  });
+});
+
+it("keeps the toolbar project picker available when context is hidden", async () => {
+  const { history } = mount("/projects/p-lore", fakeClient());
+  expect(screen.queryByTestId("context-toggle")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
+  await screen.findByRole("searchbox", { name: "Filter projects" });
+  const target = (await screen.findAllByTestId("nav-project")).find(
+    (row) => row.getAttribute("href") === "/projects/p-empty",
+  );
+  fireEvent.click(target!);
+  await waitFor(() => expect(history.get()).toBe("/projects/p-empty"));
+  expect(screen.getByTestId("icon-rail")).toBeVisible();
+});
+
+it("resizes the knowledge pane with the keyboard and remembers its width", async () => {
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  const handle = await screen.findByRole("separator", {
+    name: "Resize knowledge list",
+  });
+  fireEvent.keyDown(handle, { key: "ArrowRight" });
+  expect(handle).toHaveAttribute("aria-valuenow", "336");
+  expect(localStorage.getItem("lore.ui.listWidth")).toBe("336");
+  fireEvent.keyDown(handle, { key: "End" });
+  expect(handle).toHaveAttribute("aria-valuenow", "480");
+  fireEvent.doubleClick(handle);
+  expect(handle).toHaveAttribute("aria-valuenow", "320");
+});
+
+it("focuses the reader without remounting the selected document", async () => {
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  const doc = await screen.findByTestId("knowledge-document");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Collapse context pane" }),
+  );
+  expect(pane("list")).not.toBeVisible();
+  expect(screen.getByTestId("knowledge-document")).toBe(doc);
+  fireEvent.click(screen.getByRole("button", { name: "Expand context pane" }));
+  expect(pane("list")).toBeVisible();
+});
+
+it("clears reader filters while preserving the selected entry and sort", async () => {
+  const { history } = mount(
+    "/projects/p-lore/knowledge/k-sqlite?q=SQLite&category=decision&scope=shared&sort=confidence%3Adesc&cursor=old",
+    fakeClient(),
+  );
+  await screen.findByTestId("knowledge-document");
+  fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+  await waitFor(() =>
+    expect(history.get()).toBe(
+      "/projects/p-lore/knowledge/k-sqlite?sort=confidence%3Adesc",
+    ),
+  );
+});
+
+it("filters project cards and can recover from an empty result", async () => {
+  mount("/", fakeClient());
+  await screen.findAllByTestId("project-card");
+  const filter = screen.getByRole("textbox", { name: "Filter project cards" });
+  fireEvent.input(filter, { target: { value: "not-a-project" } });
+  expect(screen.getByText("No projects match")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Clear project filter" }));
+  expect(screen.getAllByTestId("project-card")).toHaveLength(2);
+});
+
+it("restores context focus at narrow breakpoints without stealing reader input focus", async () => {
+  const listeners = new Set<(event: { matches: boolean }) => void>();
+  const media = {
+    matches: true,
+    addEventListener: (_: string, fn: (event: { matches: boolean }) => void) =>
+      listeners.add(fn),
+    removeEventListener: (
+      _: string,
+      fn: (event: { matches: boolean }) => void,
+    ) => listeners.delete(fn),
+  };
+  vi.stubGlobal("matchMedia", () => media);
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  const row = (await screen.findAllByTestId("knowledge-row"))[0]!;
+  row.focus();
+  media.matches = false;
+  for (const listener of listeners) listener({ matches: false });
+  await waitFor(() =>
+    expect(screen.getByTestId("context-toggle")).toHaveFocus(),
+  );
+  const search = screen.getByRole("textbox", { name: "Search" });
+  search.focus();
+  media.matches = true;
+  for (const listener of listeners) listener({ matches: true });
+  expect(search).toHaveFocus();
+});
+
+it("keeps scoped recall searches on their route without mounting hidden reader filters", async () => {
+  const { history } = mount(
+    "/projects/p-lore/search?q=SQLite&scope=all",
+    fakeClient(),
+  );
+  await screen.findByRole("textbox", { name: "Search query" });
+  history.set({ value: "/projects/p-lore/search?q=SQLite&scope=knowledge" });
+  // Let Select's queued selection effects settle after the route change.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(history.get()).toBe(
+    "/projects/p-lore/search?q=SQLite&scope=knowledge",
+  );
+  expect(
+    screen.queryByRole("textbox", { name: "Filter knowledge list" }),
+  ).toBeNull();
+  expect(
+    screen.getByRole("textbox", { name: "Search query" }),
+  ).toBeInTheDocument();
+});
+
+it("keeps primary navigation and the project picker available with context collapsed", async () => {
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  const document = await screen.findByTestId("knowledge-document");
+  const rail = screen.getByRole("navigation", { name: "Primary navigation" });
+  expect(within(rail).getByRole("link", { name: "Projects" })).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Collapse context pane" }),
+  );
+  expect(screen.getByTestId("context-pane")).not.toBeVisible();
+  expect(rail).toBeVisible();
+  expect(screen.getByRole("button", { name: /switch project/i })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Expand context pane" }));
+  expect(screen.getByTestId("context-pane")).toBeVisible();
+  expect(screen.getByTestId("knowledge-document")).toBe(document);
+});
+
+it("keeps narrow context open after reader filter submissions", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  const { history } = mount(
+    "/projects/p-lore/knowledge/k-sqlite",
+    fakeClient(),
+  );
+  await screen.findByTestId("knowledge-document");
+  fireEvent.click(screen.getByRole("button", { name: "Expand context pane" }));
+  const input = screen.getByRole("textbox", { name: "Filter knowledge list" });
+  fireEvent.input(input, { target: { value: "SQLite" } });
+  fireEvent.submit(input.closest("form")!);
+  await waitFor(() => expect(history.get()).toContain("q=SQLite"));
+  expect(screen.getByTestId("context-pane")).toBeVisible();
+  expect(screen.getByTestId("icon-rail")).toBeVisible();
+});
+
+it("updates picker destinations when changing chooser sections", async () => {
+  const { history } = mount("/", fakeClient());
+  await projectRows();
+  history.set({ value: "/?section=sessions" });
+  await waitFor(() =>
+    expect(screen.getAllByTestId("nav-project")[0]).toHaveAttribute(
+      "href",
+      "/projects/p-lore/sessions",
+    ),
+  );
+  history.set({ value: "/" });
+  await waitFor(() =>
+    expect(screen.getAllByTestId("nav-project")[0]).toHaveAttribute(
+      "href",
+      "/projects/p-lore",
+    ),
+  );
+});
+
+it("switches projects within the current knowledge section", async () => {
+  const { history } = mount(
+    "/projects/p-lore/knowledge/k-sqlite",
+    fakeClient(),
+  );
+  await screen.findByTestId("knowledge-document");
+  await projectRows();
+  const target = screen
+    .getAllByTestId("nav-project")
+    .find((row) => row.getAttribute("href")?.includes("p-empty"));
+  fireEvent.click(target!);
+  await waitFor(() =>
+    expect(history.get()).toBe("/projects/p-empty/knowledge"),
+  );
+});
+
+it("uses rail destinations consistently and exposes workspace tools directly", async () => {
+  const { history } = mount(
+    "/projects/p-lore/knowledge/k-sqlite",
+    fakeClient(),
+  );
+  await screen.findByTestId("knowledge-document");
+  const rail = within(
+    screen.getByRole("navigation", { name: "Primary navigation" }),
+  );
+  expect(rail.getByRole("link", { name: "Search" })).toHaveAttribute(
+    "href",
+    "/projects/p-lore/search?scope=all",
+  );
+  for (const name of [
+    "Entities",
+    "Contradictions",
+    "Promotions",
+    "Team",
+    "Conflicts",
+    "Cache warming",
+    "Cost intelligence",
+    "Model usage",
+  ])
+    expect(rail.getByRole("link", { name })).toBeInTheDocument();
+  fireEvent.click(rail.getByRole("link", { name: "Knowledge" }));
+  await waitFor(() => expect(history.get()).toBe("/projects/p-lore/knowledge"));
+});
+
+it("marks exactly one rail destination current across chooser queries and reader routes", async () => {
+  const { history } = mount("/", fakeClient());
+  const current = () =>
+    [
+      ...screen
+        .getByTestId("icon-rail")
+        .querySelectorAll('[aria-current="page"]'),
+    ].map((node) => node.getAttribute("data-testid"));
+  expect(current()).toEqual(["rail-projects"]);
+  history.set({ value: "/?section=sessions" });
+  await waitFor(() => expect(current()).toEqual(["rail-sessions"]));
+  history.set({ value: "/projects/p-lore/knowledge/k-sqlite" });
+  await screen.findByTestId("knowledge-document");
+  expect(current()).toEqual(["rail-knowledge"]);
+  await projectRows();
+  expect(
+    screen
+      .getAllByTestId("nav-project")
+      .find((row) => row.textContent?.includes("lore")),
+  ).toHaveAttribute("aria-current", "page");
+});
+
+it("marks the rail parent current without duplicate tabs on detail routes", async () => {
+  const history = createMemoryHistory();
+  history.set({ value: "/entities/entity-1" });
+  render(() => (
+    <MemoryRouter history={history} root={createAppRoot(fakeClient())}>
+      <Route
+        path="*"
+        component={() => (
+          <Shell
+            nav={() => null}
+            detail={<div>Entity detail</div>}
+            mobilePane="detail"
+          />
+        )}
+      />
+    </MemoryRouter>
+  ));
+  expect(
+    screen.queryByRole("navigation", { name: "Related pages" }),
+  ).toBeNull();
+  expect(await screen.findByTestId("rail-entities")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+});
+
+it.each([
+  "/",
+  "/knowledge",
+  "/projects/p-lore",
+  "/projects/p-lore/knowledge",
+  "/projects/p-lore/sessions",
+  "/projects/p-lore/imports",
+  "/projects/p-lore/duplicates",
+  "/search",
+])("uses the rail without redundant context on %s", async (path) => {
+  mount(path, fakeClient());
+  await screen.findByTestId("icon-rail");
+  expect(screen.queryByTestId("context-toggle")).toBeNull();
+  expect(
+    screen.queryByRole("navigation", { name: "Section navigation" }),
+  ).toBeNull();
+  expect(screen.getByTestId("context-pane")).not.toBeVisible();
+  expect(pane("detail")).toBeVisible();
+});
+
+it("restores toolbar focus when a narrow reader context opens the full table", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  const { history } = mount(
+    "/projects/p-lore/knowledge/k-sqlite",
+    fakeClient(),
+  );
+  await screen.findByTestId("knowledge-document");
+  fireEvent.click(screen.getByTestId("context-toggle"));
+  const link = screen.getByRole("link", { name: "Open as table" });
+  link.focus();
+  fireEvent.click(link);
+  await waitFor(() => expect(history.get()).toBe("/projects/p-lore/knowledge"));
+  await waitFor(() =>
+    expect(screen.getByTestId("project-picker-trigger")).toHaveFocus(),
+  );
 });

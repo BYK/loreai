@@ -1,3 +1,4 @@
+import { setWorkspaceTheme } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function fixtureIds(page: Page) {
@@ -26,7 +27,7 @@ test.describe("production route deep links", () => {
   }) => {
     const { project, entry, session, entity } = await fixtureIds(page);
     const routes = [
-      ["/ui", "Memory connected", "welcome"],
+      ["/ui", "Choose a project", "welcome"],
       [`/ui/projects/${project.id}`, project.name, "health"],
       [`/ui/projects/${project.id}/knowledge`, entry.title, "text"],
       [
@@ -53,7 +54,7 @@ test.describe("production route deep links", () => {
       await page.goto(path);
       const target =
         kind === "welcome"
-          ? page.getByTestId("connection-status")
+          ? page.getByRole("heading", { name: "Choose a project", exact: true })
           : kind === "health"
             ? page
                 .locator("main:visible")
@@ -109,7 +110,7 @@ test.describe("production route deep links", () => {
   }) => {
     const { project, entry, session, entity } = await fixtureIds(page);
     const paths = [
-      ["/ui", "connection-status"],
+      ["/ui", "project-directory"],
       [`/ui/projects/${project.id}`, "health"],
       [`/ui/projects/${project.id}/knowledge`, "knowledge-row"],
       [`/ui/projects/${project.id}/duplicates`, "duplicate-review"],
@@ -140,14 +141,14 @@ test.describe("production route deep links", () => {
               .first()
           : page.getByTestId(marker).first();
       await expect(target).toBeVisible();
-      await page.getByTestId("theme-light").click();
+      await setWorkspaceTheme(page, "light");
       const light = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
           document.querySelector("[data-pane='detail']") ?? document.body,
         ).backgroundColor,
       }));
-      await page.getByTestId("theme-dark").click();
+      await setWorkspaceTheme(page, "dark");
       const dark = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(

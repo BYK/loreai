@@ -62,12 +62,12 @@ test.describe("read-only duplicate review (MEM-01)", () => {
 
     await page.goto(`/ui/projects/${projectId}`);
     const navOpener = page.getByTestId("open-nav");
-    const navDuplicates = page.getByTestId("nav-duplicates");
+    const navDuplicates = page.getByTestId("rail-duplicates");
     if (await navOpener.isVisible()) {
       await navOpener.click();
       const drawerLink = page
         .getByTestId("nav-drawer")
-        .getByTestId("nav-duplicates");
+        .getByTestId("rail-duplicates");
       await expect(drawerLink).toHaveAttribute(
         "href",
         `/ui/projects/${projectId}/duplicates`,

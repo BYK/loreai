@@ -14,13 +14,10 @@ async function projectId(page: import("@playwright/test").Page, name: string) {
 async function openAllKnowledgeFromHome(page: import("@playwright/test").Page) {
   await page.goto("/ui");
   const opener = page.getByTestId("open-nav");
-  const allKnowledge = page.getByTestId("nav-all-knowledge");
+  const allKnowledge = page.getByTestId("rail-knowledge");
   if ((await opener.isVisible()) && !(await allKnowledge.isVisible())) {
     await opener.click();
-    await page
-      .getByTestId("nav-drawer")
-      .getByTestId("nav-all-knowledge")
-      .click();
+    await page.getByTestId("nav-drawer").getByTestId("rail-knowledge").click();
   } else {
     await allKnowledge.click();
   }
@@ -34,8 +31,8 @@ test.describe("cross-project knowledge", () => {
     test.skip(testInfo.project.name !== "desktop-chromium");
 
     await page.goto("/ui/knowledge");
-    const allKnowledge = page.getByTestId("nav-all-knowledge");
-    const projects = page.getByTestId("nav-projects");
+    const allKnowledge = page.getByTestId("rail-knowledge");
+    const projects = page.getByTestId("rail-projects");
     await expect(allKnowledge).toHaveClass(/bg-accent-soft/);
     await expect(projects).not.toHaveClass(/bg-accent-soft/);
 
@@ -58,8 +55,8 @@ test.describe("cross-project knowledge", () => {
     if (!ada) throw new Error("missing seeded Ada Lovelace entity");
 
     await page.goto("/ui/entities");
-    const entitiesLink = page.getByTestId("nav-entities");
-    const costsLink = page.getByTestId("nav-costs");
+    const entitiesLink = page.getByTestId("rail-entities");
+    const costsLink = page.getByTestId("rail-costs");
     await expect(entitiesLink).toHaveClass(/bg-accent-soft/);
     await page.goto(`/ui/entities/${ada.id}`);
     await expect(page.getByTestId("entity-page")).toBeVisible();

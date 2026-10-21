@@ -40,3 +40,14 @@ edited as follows (see `src/styles/app.css` for the token mapping):
   items use `text-muted` with `bg-soft`/`text-text` hover styles.
 
 Keep this file up to date when copying further components.
+
+## Locally authored primitives
+
+`popover.tsx` follows the owned Solid UI/shadcn component pattern and wraps
+Kobalte's accessible popover. It is locally authored and uses Lore's existing
+Tailwind 4 semantic tokens.
+
+`resizable.tsx` is a locally authored Solid UI/shadcn-style resize handle using
+native pointer and keyboard input, with no additional dependency.
+
+`tooltip.tsx` is locally authored in the Solid UI/shadcn style and wraps Kobalte's accessible tooltip, using existing semantic colors and no new dependency.

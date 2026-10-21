@@ -612,3 +612,51 @@ describe("Folk shell status", () => {
     );
   });
 });
+
+describe("rail account menu", () => {
+  it("keeps an anonymous avatar and preferences available without signing in", async () => {
+    mount(client());
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    expect(
+      screen
+        .getByTestId("anonymous-avatar")
+        .closest('[data-testid="icon-rail"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('header [data-testid="folk-status"]'),
+    ).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Settings" })).toBeVisible();
+    expect(screen.getByTestId("theme-toggle")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    expect(dialog).toHaveTextContent("lore login");
+  });
+
+  it("keeps the signed-in avatar in the rail with preferences", async () => {
+    mount(
+      client({
+        getAccount: async () => ({
+          ...ANONYMOUS,
+          signed_in: true,
+          state: "signed_in",
+          user: { id: "ada", display_name: "Ada Lovelace", email: null },
+        }),
+      }),
+    );
+    const avatar = await screen.findByTestId("account-avatar");
+    expect(avatar).toHaveTextContent("AL");
+    expect(avatar.closest('[data-testid="folk-status"]')).not.toBeNull();
+    fireEvent.click(screen.getByTestId("folk-status"));
+    expect(
+      await screen.findByRole("button", { name: "Settings" }),
+    ).toBeVisible();
+    expect(screen.getByTestId("theme-toggle")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+  });
+});

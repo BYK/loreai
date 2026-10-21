@@ -55,11 +55,131 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   };
   const recent = () => sessions.loader.data()?.items.slice(0, 5) ?? [];
   return (
-    <div class="mx-auto max-w-[940px] px-5 py-7 sm:px-7.5">
+    <div class="mx-auto max-w-[1040px] px-5 py-7 sm:px-8">
       <DocHeader
-        crumb={["Projects", props.project.name || props.project.path]}
+        compact
+        crumb={["Projects", "Overview"]}
         title={props.project.name || props.project.path}
-      />
+      >
+        <div class="mt-4 flex flex-wrap gap-2">
+          <Button as={A} href={knowledgeListHref(props.project.id)} size="sm">
+            Browse knowledge ({props.project.knowledge_count}) →
+          </Button>
+          <Button
+            as={A}
+            href={sessionsHref(props.project.id)}
+            variant="outline"
+            size="sm"
+          >
+            Session history
+          </Button>
+        </div>
+      </DocHeader>
+      <section data-testid="health" class="border-b border-line py-5">
+        <div class="mb-2 flex items-center justify-between">
+          <div class="eyebrow">Memory health</div>
+          <A
+            class="text-xs text-accent underline"
+            data-testid="review-duplicates-link"
+            href={duplicatesHref(props.project.id)}
+          >
+            Review duplicates
+          </A>
+        </div>
+        <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4 [&>span]:rounded-lg [&>span]:border [&>span]:border-line [&>span]:bg-bg [&>span]:p-4 [&>span]:font-medium [&>span]:tabular-nums">
+          <span>{props.project.knowledge_count} knowledge</span>
+          <span>{props.project.session_count} sessions</span>
+          <span>{pluralize(props.project.message_count, "message")}</span>
+          <span>{props.project.distillation_count} distillations</span>
+        </div>
+        <div class="mt-2 text-xs text-muted">
+          Hints from recorded counts:{" "}
+          <Show when={healthHint()} fallback="No recorded health warnings.">
+            {healthHint()}
+          </Show>
+        </div>
+      </section>
+      <section class="py-5">
+        <div class="mb-3 flex items-center justify-between">
+          <div class="eyebrow">Knowledge</div>
+        </div>
+        <form
+          role="search"
+          class="flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const data = new FormData(event.currentTarget);
+            const rawQ = data.get("q");
+            const q = typeof rawQ === "string" ? rawQ : "";
+            navigate(searchHref(props.project.id, q, scope()));
+          }}
+        >
+          <TextField class="min-w-0 flex-1">
+            <TextFieldInput
+              name="q"
+              aria-label="Search project memory"
+              placeholder="Search this project"
+            />
+          </TextField>
+          <Select
+            value={scope()}
+            onChange={setScope}
+            options={["all", "session", "project", "knowledge"]}
+            itemComponent={(item) => (
+              <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+            )}
+          >
+            <SelectTrigger aria-label="Search scope" class="h-10 w-28">
+              <SelectValue<string>>
+                {(state) => state.selectedOption()}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent />
+          </Select>
+          <Button type="submit" size="sm">
+            Search
+          </Button>
+        </form>
+      </section>
+      <section class="border-b border-line py-5">
+        <div class="mb-3 flex items-center justify-between">
+          <div class="eyebrow">Recent sessions</div>
+          <div class="flex items-center gap-3">
+            <A
+              class="text-xs text-accent underline"
+              href={importsHref(props.project.id)}
+            >
+              Import history →
+            </A>
+            <A
+              class="text-xs text-accent underline"
+              href={sessionsHref(props.project.id)}
+            >
+              All sessions →
+            </A>
+          </div>
+        </div>
+        <Switch>
+          <Match when={sessions.loader.loading() && !sessions.loader.data()}>
+            <StateCard kind="loading" title="Loading sessions" compact />
+          </Match>
+          <Match when={recent().length === 0}>
+            <StateCard kind="empty" title="No captured sessions" compact />
+          </Match>
+          <Match when={recent().length > 0}>
+            <For each={recent()}>
+              {(session) => (
+                <ListRow
+                  href={sessionHref(props.project.id, session.session_id)}
+                  title={session.session_id}
+                  preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
+                  footRight={formatWhen(session.last_message_at)}
+                />
+              )}
+            </For>
+          </Match>
+        </Switch>
+      </section>
       <section class="border-b border-line py-5">
         <div class="eyebrow mb-2">Identity</div>
         <div class="font-mono text-xs">{props.project.path}</div>
@@ -103,118 +223,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         </Show>
       </section>
       <ProjectActions project={props.project} />
-      <section data-testid="health" class="border-b border-line py-5">
-        <div class="mb-2 flex items-center justify-between">
-          <div class="eyebrow">Memory health</div>
-          <A
-            class="text-xs text-accent underline"
-            data-testid="review-duplicates-link"
-            href={duplicatesHref(props.project.id)}
-          >
-            Review duplicates
-          </A>
-        </div>
-        <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-          <span>{props.project.knowledge_count} knowledge</span>
-          <span>{props.project.session_count} sessions</span>
-          <span>{pluralize(props.project.message_count, "message")}</span>
-          <span>{props.project.distillation_count} distillations</span>
-        </div>
-        <div class="mt-2 text-xs text-muted">
-          Hints from recorded counts:{" "}
-          <Show when={healthHint()} fallback="No recorded health warnings.">
-            {healthHint()}
-          </Show>
-        </div>
-      </section>
       <SharingPanel projectId={props.project.id} />
-      <section class="border-b border-line py-5">
-        <div class="mb-3 flex items-center justify-between">
-          <div class="eyebrow">Recent sessions</div>
-          <div class="flex items-center gap-3">
-            <A
-              class="text-xs text-accent underline"
-              href={importsHref(props.project.id)}
-            >
-              Import history →
-            </A>
-            <A
-              class="text-xs text-accent underline"
-              href={sessionsHref(props.project.id)}
-            >
-              All sessions →
-            </A>
-          </div>
-        </div>
-        <Switch>
-          <Match when={sessions.loader.loading() && !sessions.loader.data()}>
-            <StateCard kind="loading" title="Loading sessions" compact />
-          </Match>
-          <Match when={recent().length === 0}>
-            <StateCard kind="empty" title="No captured sessions" compact />
-          </Match>
-          <Match when={recent().length > 0}>
-            <For each={recent()}>
-              {(session) => (
-                <ListRow
-                  href={sessionHref(props.project.id, session.session_id)}
-                  title={session.session_id}
-                  preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
-                  footRight={formatWhen(session.last_message_at)}
-                />
-              )}
-            </For>
-          </Match>
-        </Switch>
-      </section>
-      <section class="py-5">
-        <div class="mb-3 flex items-center justify-between">
-          <div class="eyebrow">Knowledge</div>
-          <A
-            class="text-xs text-accent underline"
-            href={knowledgeListHref(props.project.id)}
-          >
-            Browse knowledge ({props.project.knowledge_count}) →
-          </A>
-        </div>
-        <form
-          role="search"
-          class="flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const data = new FormData(event.currentTarget);
-            const rawQ = data.get("q");
-            const q = typeof rawQ === "string" ? rawQ : "";
-            navigate(searchHref(props.project.id, q, scope()));
-          }}
-        >
-          <TextField class="min-w-0 flex-1">
-            <TextFieldInput
-              name="q"
-              aria-label="Search project memory"
-              placeholder="Search this project"
-            />
-          </TextField>
-          <Select
-            value={scope()}
-            onChange={setScope}
-            options={["all", "session", "project", "knowledge"]}
-            itemComponent={(item) => (
-              <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-            )}
-          >
-            <SelectTrigger aria-label="Search scope" class="h-10 w-28">
-              <SelectValue<string>>
-                {(state) => state.selectedOption()}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent />
-          </Select>
-          <Button type="submit" size="sm">
-            Search
-          </Button>
-        </form>
-      </section>
     </div>
   );
 };

@@ -1698,7 +1698,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       }}
     >
       <div
-        class={cn("flex h-[calc(100dvh-62px)] min-h-0 flex-col", props.class)}
+        class={cn("flex h-[calc(100dvh-48px)] min-h-0 flex-col", props.class)}
         data-testid="session-view"
         onKeyDown={onKeyDown}
       >

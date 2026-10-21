@@ -15,7 +15,7 @@ function modelCells(page: Page) {
 test.describe("model usage page", () => {
   test("nav, chart, totals table, sorting and export", async ({ page }) => {
     await page.goto(PAGE);
-    await expect(page.getByTestId("nav-model-usage")).toHaveAttribute(
+    await expect(page.getByTestId("rail-model-usage")).toHaveAttribute(
       "aria-current",
       "page",
     );

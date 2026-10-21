@@ -8,9 +8,10 @@ import {
 } from "@solidjs/testing-library";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
+import { createAppRoot } from "~/app";
 import type { ModelUsageDocument } from "~/contracts";
 import { ModelUsagePage } from "~/components/lore/ModelUsagePage";
-import { Nav } from "~/components/shell/Nav";
+import { Rail } from "~/components/shell/Rail";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type { ApiClient } from "~/lib/api";
 import { ApiError } from "~/contracts";
@@ -77,7 +78,7 @@ function mountPage(
   client.listProjects = async () =>
     projects.map((p) => ({ knowledge_count: 0, ...p })) as never;
   return render(() => (
-    <MemoryRouter history={history}>
+    <MemoryRouter history={history} root={createAppRoot(clientWith({}))}>
       <Route
         path="*"
         component={() => (
@@ -211,7 +212,7 @@ describe("ModelUsagePage", () => {
     const history = createMemoryHistory();
     history.set({ value: "/model-usage?project=proj-2" });
     render(() => (
-      <MemoryRouter history={history}>
+      <MemoryRouter history={history} root={createAppRoot(clientWith({}))}>
         <Route
           path="*"
           component={() => (
@@ -316,18 +317,12 @@ describe("ModelUsagePage", () => {
     const history = createMemoryHistory();
     history.set({ value: "/model-usage" });
     render(() => (
-      <MemoryRouter history={history}>
+      <MemoryRouter history={history} root={createAppRoot(clientWith({}))}>
         <Route
           path="*"
           component={() => (
             <ConnectionContext.Provider value={createConnectionStore()}>
-              <Nav
-                projects={[]}
-                loading={false}
-                error={undefined}
-                activeProjectId={null}
-                totalKnowledge={0}
-              />
+              <Rail />
             </ConnectionContext.Provider>
           )}
         />
@@ -335,7 +330,7 @@ describe("ModelUsagePage", () => {
     ));
     await waitFor(() =>
       expect(
-        screen.getByTestId("nav-model-usage").getAttribute("aria-current"),
+        screen.getByTestId("rail-model-usage").getAttribute("aria-current"),
       ).toBe("page"),
     );
   });
