@@ -301,6 +301,7 @@ runs:
         NEW_BIN_DIR: ${{ inputs.new-binaries-dir }}
         PATCHES_DIR: ${{ inputs.patches-dir }}
         BINARY_GLOB: ${{ inputs.binary-glob }}
+        FROM_VERSION: ${{ steps.prev-ghcr.outputs.from-version || steps.prev-release.outputs.from-version }}
       run: |
         set -euo pipefail
         shopt -s nullglob
@@ -316,6 +317,12 @@ runs:
 
           echo "Generating patch: ${name}.patch"
           bsdiff "$old_binary" "$new_binary" "${PATCHES_DIR}/${name}.patch" --use-zstd
+          # Save the exact base identity now; old-binaries is absent in publish.
+          jq -n --arg fromVersion "$FROM_VERSION" \
+            --arg sourceSha256 "$(sha256sum "$old_binary" | cut -d' ' -f1)" \
+            --arg targetSha256 "$(sha256sum "$new_binary" | cut -d' ' -f1)" \
+            '{fromVersion: $fromVersion, sourceSha256: $sourceSha256, targetSha256: $targetSha256}' \
+            > "${PATCHES_DIR}/${name}.patch.json"
 
           patch_size=$(stat --printf='%s' "${PATCHES_DIR}/${name}.patch")
           new_size=$(stat --printf='%s' "$new_binary")
@@ -353,7 +360,7 @@ runs:
 
           if [ "$ratio" -gt "${MAX_RATIO}" ]; then
             echo "::warning::Patch ${name}.patch is ${ratio}% of gzipped binary (limit: ${MAX_RATIO}%) -- removing"
-            rm "$patch_file"
+            rm "$patch_file" "${patch_file}.json"
           fi
         done
 
@@ -446,7 +453,7 @@ runs:
           shopt -s nullglob
           local -a annotations=()
           local -a patch_files=()
-          local patch_file basename_patch new_binary sha256
+          local patch_file basename_patch new_binary sha256 source_sha metadata
           for patch_file in "${PATCHES_DIR}"/*.patch; do
             basename_patch=$(basename "$patch_file" .patch)
             new_binary="${BINARIES_DIR}/${basename_patch}"
@@ -460,8 +467,13 @@ runs:
               echo "::warning::Skipping ${basename_patch}.patch -- no matching binary in ${BINARIES_DIR}/ (not a delta patch)"
               continue
             fi
-            sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
+            sha256=$(sha256sum "$new_binary" | cut -d' ' -f1) || return 1
+            metadata="${patch_file}.json"
+            source_sha=$(jq -er --arg from "$PATCH_FROM_VERSION" --arg target "$sha256" \
+              'select(.fromVersion == $from and .targetSha256 == $target) | .sourceSha256 | select(test("^[0-9a-f]{64}$"))' \
+              "$metadata") || { echo "::warning::Skipping ${basename_patch}.patch -- missing or invalid source metadata"; continue; }
             annotations+=(--annotation "sha256-${basename_patch}=${sha256}")
+            annotations+=(--annotation "source-sha256-${basename_patch}=${source_sha}")
             patch_files+=("$(basename "$patch_file")")
           done
 

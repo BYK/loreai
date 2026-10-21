@@ -45,7 +45,11 @@ export type { DeltaResult, PatchChain } from "binpatch";
  * Check whether a delta upgrade can be attempted.
  */
 export function canAttemptDelta(targetVersion: string): boolean {
-  if (VERSION === "dev" || VERSION === "0.0.0-dev") {
+  if (
+    VERSION === "dev" ||
+    VERSION === "0.0.0-dev" ||
+    VERSION.split("+")[1]?.split(".").includes("local")
+  ) {
     return false;
   }
 
