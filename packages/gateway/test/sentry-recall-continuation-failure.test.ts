@@ -43,28 +43,31 @@ describe("setupRecallContinuationFailureCapture", () => {
     setRecallContinuationFailureHook(undefined);
   });
 
-  it("captures one fixed event containing only the allowlisted category", () => {
-    setupRecallContinuationFailureCapture();
-    reportRecallContinuationFailure("follow_up_failed");
+  it.each(["follow_up_failed", "follow_up_budget_exceeded"] as const)(
+    "captures one fixed event containing only the allowlisted category %s",
+    (category) => {
+      setupRecallContinuationFailureCapture();
+      reportRecallContinuationFailure(category);
 
-    expect(Sentry.captureEvent).toHaveBeenCalledWith({
-      level: "warning",
-      message: "Recall continuation failed",
-      fingerprint: ["recall-continuation-failure", "follow_up_failed"],
-      contexts: {
-        recall_continuation_failure: {
-          category: "follow_up_failed",
+      expect(Sentry.captureEvent).toHaveBeenCalledWith({
+        level: "warning",
+        message: "Recall continuation failed",
+        fingerprint: ["recall-continuation-failure", category],
+        contexts: {
+          recall_continuation_failure: {
+            category,
+          },
         },
-      },
-      sdkProcessingMetadata: {
-        capturedSpanScope: scopeMocks.current,
-        capturedSpanIsolationScope: scopeMocks.isolation,
-      },
-    });
-    expect(scopeMocks.current.setClient).toHaveBeenCalledWith(
-      scopeMocks.client,
-    );
-  });
+        sdkProcessingMetadata: {
+          capturedSpanScope: scopeMocks.current,
+          capturedSpanIsolationScope: scopeMocks.isolation,
+        },
+      });
+      expect(scopeMocks.current.setClient).toHaveBeenCalledWith(
+        scopeMocks.client,
+      );
+    },
+  );
 
   it("does nothing when Sentry is not initialized", () => {
     vi.mocked(Sentry.isInitialized).mockReturnValue(false);
