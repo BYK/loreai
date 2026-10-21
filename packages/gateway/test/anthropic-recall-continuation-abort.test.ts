@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { log } from "@loreai/core";
 
 vi.mock("../src/recall", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/recall")>();
@@ -13,6 +14,11 @@ import {
 } from "../src/pipeline";
 import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
 import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
+import { buildSSETextResponse } from "../src/stream/anthropic";
+import {
+  setRecallContinuationFailureHook,
+  type RecallContinuationFailureCategory,
+} from "../src/recall-continuation-failure";
 import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const mockedRecall = vi.mocked(executeRecall);
@@ -188,10 +194,196 @@ function hostileContinuation(keepAlive = false): {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   setRecallPersistenceCommitObserverForTest(undefined);
+  setRecallContinuationFailureHook(undefined);
   setUpstreamInterceptor(undefined);
   mockedRecall.mockReset();
 });
+
+test("a completed proxy continuation reports its budget rejection instead of a generic stream error", async () => {
+  installProductiveRecallMock();
+  const diagnostics = vi.spyOn(log, "error").mockImplementation(() => {});
+  const progress = vi.spyOn(log, "info").mockImplementation(() => {});
+  const failures: RecallContinuationFailureCategory[] = [];
+  setRecallContinuationFailureHook((category) => failures.push(category));
+  const completed = vi.fn();
+  const failed = vi.fn();
+  const committed = vi.fn();
+  setRecallPersistenceCommitObserverForTest(committed);
+  setUpstreamInterceptor(async () => recallOnlyResponse(70_000));
+  const req = request();
+  const state = sessionState();
+  const downstream = buildStreamingResponse(
+    recallOnlyResponse(70_000),
+    completed,
+    {
+      clientMessages: req.messages,
+      modifiedReq: req,
+      config: loadLocalConfig(),
+      sessionState: state,
+      cacheOptions: { cacheConversation: false },
+      clientSpeaksAnthropic: true,
+      // Custom upstream destinations cannot borrow a canonical model's limits.
+      modelContextTokens: 128_000,
+      allowExpandedContext: false,
+      expectedPrincipalModel: req.model,
+      onFailure: failed,
+    },
+  );
+
+  await expect(downstream.text()).rejects.toThrow("SSE stream read failed");
+  expect(progress.mock.calls.map(([message]) => message).join("\n")).toContain(
+    "recall follow-up stream complete (depth=1)",
+  );
+  expect(diagnostics).toHaveBeenCalledWith(
+    expect.stringContaining(
+      'streaming pipeline error {"phase":"follow_up_validation","category":"follow_up_budget_exceeded"',
+    ),
+  );
+  const diagnostic = diagnostics.mock.calls
+    .map(([message]) => String(message))
+    .join("\n");
+  expect(diagnostic).toContain('"budgetTokens":128000');
+  expect(diagnostic).toContain('"spentTokens":140002');
+  expect(diagnostic).toContain('"budgetStop":"tokens"');
+  expect(failures).toEqual(["follow_up_budget_exceeded"]);
+  expect(completed).not.toHaveBeenCalled();
+  expect(failed).toHaveBeenCalledTimes(1);
+  expect(failed.mock.calls[0][0].usage).toMatchObject({
+    inputTokens: 140_000,
+    outputTokens: 2,
+  });
+  expect(committed).not.toHaveBeenCalled();
+  expect(state.recallStore.size).toBe(0);
+});
+
+test.each([false, true])(
+  "follow-up transport diagnostics retain only allowlisted cause codes (noStore=%s)",
+  async (noStore) => {
+    installProductiveRecallMock();
+    const diagnostics = vi.spyOn(log, "error").mockImplementation(() => {});
+    const failures: RecallContinuationFailureCategory[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    const secret = "PRIVATE_PROVIDER_BODY";
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(
+                new TypeError(secret, {
+                  cause: Object.assign(new Error(secret), {
+                    code: "UND_ERR_SOCKET",
+                    syscall: secret,
+                    cause: Object.assign(new Error(secret), { code: secret }),
+                  }),
+                }),
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const req = request();
+    const state = sessionState();
+    const completed = vi.fn();
+    const downstream = buildStreamingResponse(recallOnlyResponse(), completed, {
+      clientMessages: req.messages,
+      modifiedReq: req,
+      config: loadLocalConfig(),
+      sessionState: state,
+      cacheOptions: { cacheConversation: false },
+      clientSpeaksAnthropic: true,
+      noStore,
+    });
+
+    await expect(downstream.text()).rejects.toThrow("SSE stream read failed");
+    const diagnostic = diagnostics.mock.calls
+      .map(([message]) => String(message))
+      .join("\n");
+    expect(diagnostic).toContain('"phase":"follow_up_stream"');
+    expect(diagnostic).toContain('"category":"follow_up_transport"');
+    expect(diagnostic).toContain('"transportKind":"read"');
+    expect(diagnostic).toContain('"causeCodes":["UND_ERR_SOCKET"]');
+    expect(diagnostic).not.toContain(secret);
+    expect(diagnostic.includes('"budgetTokens"')).toBe(!noStore);
+    expect(failures).toEqual(["follow_up_transport"]);
+    expect(completed).not.toHaveBeenCalled();
+    expect(state.recallStore.size).toBe(0);
+  },
+);
+
+test.each([
+  ["usage", "follow_up_stream", "follow_up_protocol"],
+  ["protocol", "follow_up_stream", "follow_up_protocol"],
+  ["completion", "completion", "unexpected"],
+] as const)(
+  "distinguishes a %s failure from a broken upstream connection",
+  async (mode, phase, category) => {
+    installProductiveRecallMock();
+    const diagnostics = vi.spyOn(log, "error").mockImplementation(() => {});
+    const progress = vi.spyOn(log, "info").mockImplementation(() => {});
+    const failures: RecallContinuationFailureCategory[] = [];
+    setRecallContinuationFailureHook((failure) => failures.push(failure));
+    const secret = "PRIVATE_CONTINUATION_TEXT";
+    setUpstreamInterceptor(async () => {
+      let body = buildSSETextResponse("continuation", "claude-test", secret, {
+        inputTokens: 1,
+        outputTokens: 1,
+      });
+      if (mode === "usage") {
+        // A malformed usage count must be classified as a protocol failure.
+        body = body.replaceAll('"output_tokens":1', '"output_tokens":null');
+      } else if (mode === "protocol") {
+        body = event("unexpected", { detail: secret });
+      }
+      return new Response(body, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const req = request();
+    const completed = vi.fn(() => {
+      if (mode === "completion") throw new Error(secret);
+    });
+    const state = sessionState();
+    const downstream = buildStreamingResponse(
+      recallOnlyResponse(70_000),
+      completed,
+      {
+        clientMessages: req.messages,
+        modifiedReq: req,
+        config: loadLocalConfig(),
+        sessionState: state,
+        cacheOptions: { cacheConversation: false },
+        clientSpeaksAnthropic: true,
+        noStore: mode !== "completion",
+        modelContextTokens: 200_000,
+        allowExpandedContext: true,
+        expectedPrincipalModel: req.model,
+      },
+    );
+
+    await expect(downstream.text()).rejects.toThrow("SSE stream read failed");
+    const diagnostic = diagnostics.mock.calls
+      .map(([message]) => String(message))
+      .join("\n");
+    expect(diagnostic).toContain(`"phase":"${phase}"`);
+    expect(diagnostic).toContain(`"category":"${category}"`);
+    expect(diagnostic).not.toContain('"transportKind"');
+    expect(diagnostic).not.toContain(secret);
+    expect(failures).toEqual([category]);
+    expect(completed).toHaveBeenCalledTimes(mode === "completion" ? 1 : 0);
+    expect(state.recallStore.size).toBe(0);
+    if (mode === "completion") {
+      const messages = progress.mock.calls
+        .map(([message]) => String(message))
+        .join("\n");
+      expect(messages).toContain('recall-chain {"outcome":"failed"');
+      expect(messages).not.toContain('recall-chain {"outcome":"completed"');
+    }
+  },
+);
 
 describe("Anthropic recall continuation abort", () => {
   test.each([
@@ -204,6 +396,8 @@ describe("Anthropic recall continuation abort", () => {
     async (mode, round) => {
       if (mode === "deadline") vi.useFakeTimers();
       installProductiveRecallMock();
+      const failures: RecallContinuationFailureCategory[] = [];
+      setRecallContinuationFailureHook((category) => failures.push(category));
       const continuation = hostileContinuation(mode === "deadline");
       let follows = 0;
       setUpstreamInterceptor(async () =>
@@ -244,6 +438,7 @@ describe("Anthropic recall continuation abort", () => {
       expect(follows).toBe(round);
       expect(continuation.cancelled()).toBe(true);
       expect(continuation.response.body?.locked).toBe(false);
+      expect(failures).toEqual([]);
     },
   );
 });
