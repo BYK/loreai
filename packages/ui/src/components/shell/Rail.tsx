@@ -210,7 +210,7 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
       <div
         class={cn(
           "flex shrink-0 items-center gap-2 border-t border-line pt-2",
-          props.expanded ? "justify-between px-3" : "flex-col gap-1",
+          props.expanded ? "flex-col items-stretch" : "flex-col gap-1",
         )}
       >
         <Tooltip>
@@ -218,19 +218,26 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
             as="div"
             tabIndex={0}
             aria-label="Gateway connection"
-            class="flex size-8 items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class={cn(
+              "flex items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              props.expanded
+                ? "min-h-7 justify-start gap-2 px-2"
+                : "size-8 justify-center",
+            )}
           >
             <ConnectionStatus compact />
+            <Show when={props.expanded}>
+              <span class="text-[11px] text-muted">Gateway connection</span>
+            </Show>
           </TooltipTrigger>
           <TooltipContent>
             <ConnectionStatus />
           </TooltipContent>
         </Tooltip>
-        <div class="flex items-center gap-2">
+        <div
+          class={props.expanded ? "order-first w-full" : "flex items-center"}
+        >
           <FolkStatus inDrawer={props.expanded} />
-          <Show when={props.expanded}>
-            <span class="text-xs text-muted">Account &amp; preferences</span>
-          </Show>
         </div>
       </div>
     </nav>

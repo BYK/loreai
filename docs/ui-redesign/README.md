@@ -2,17 +2,17 @@
 
 Screenshots use the disposable database seeded by the UI browser tests.
 
-- Desktop keeps the icon rail and a separately collapsible context list.
-- Below 768px, the document uses the full viewport width. A logo-free toolbar
-  menu button opens labeled navigation in a sliding drawer, with account and
-  appearance controls in its footer.
-- Project overview/search fields, long titles, team forms, import tables, and
-  dialogs wrap or scroll within their own containers on narrow screens.
+`mobile-navigation.png`, `mobile-account.png`, and `mobile-account-light.png`
+show the current zinc foundation and green accents. The mobile account row is
+fully tappable, its panel aligns with the drawer, and theme controls have 44px
+touch targets. Regenerate with the mobile profile row case in
+`folk-status.spec.ts` after building the gateway bundle.
 
-Regenerate `reader-desktop.png` and `reader-mobile.png` with
-`workspace-shell.spec.ts`, `mobile-navigation.png` with
-`mobile-navigation.spec.ts`, and `overview-mobile.png` with
-`responsive-layout.spec.ts` after building the gateway bundle.
+Desktop retains the icon rail; below 768px, a logo-free toolbar button opens the
+labeled sliding drawer and the document uses the full viewport width.
 
-`account-menu.png` comes from `folk-status.spec.ts`; model-usage desktop and
-mobile captures come from `model-usage.spec.ts`.
+Earlier reader, overview, and model-usage captures predate the zinc palette.
+They document the layout work: collapsible context, full-width mobile readers,
+aligned headings, contained tables, and usable narrow-screen forms/dialogs.
+Regenerate reader captures with `workspace-shell.spec.ts`, overview captures
+with `responsive-layout.spec.ts`, and model captures with `model-usage.spec.ts`.

@@ -15,9 +15,11 @@ const THEME_OPTIONS: Record<ThemeChoice, { icon: IconName; label: string }> = {
  * Segmented System / Light / Dark control. `System` (the default) follows the
  * OS preference live; the other two force a mode and persist it.
  */
-export const ThemeToggle: Component<{ class?: string; compact?: boolean }> = (
-  props,
-) => {
+export const ThemeToggle: Component<{
+  class?: string;
+  compact?: boolean;
+  touch?: boolean;
+}> = (props) => {
   const t = theme();
   return (
     <div
@@ -39,7 +41,10 @@ export const ThemeToggle: Component<{ class?: string; compact?: boolean }> = (
             class={cn(
               "text-muted aria-pressed:text-text",
               props.compact
-                ? "size-8 px-0 aria-pressed:bg-soft"
+                ? cn(
+                    "px-0 aria-pressed:bg-soft",
+                    props.touch ? "size-11" : "size-8",
+                  )
                 : "h-7 px-2 aria-pressed:bg-surface",
             )}
             aria-label={`${THEME_OPTIONS[choice].label} theme`}

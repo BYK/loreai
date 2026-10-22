@@ -6,15 +6,9 @@
    here instead of in a tailwind.config.js (Solid UI's Tailwind 3 recipe). */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Lore design tokens. The token *names* come from design-fixture v2.2; the
-   *values* are derived from the marketing website's theme
-   (packages/website/public/theme.css, src/styles/starlight.css) so the app
-   and the site share one palette. Only the semantic tokens are copied —
-   never the website's layout CSS. The mapping (website var → UI token) is
-   documented in packages/ui/README.md; keep the two in sync.
-
-   Raw brand palette (theme.css :root --c0..--c2 cream, --g0..--g6 greens,
-   --ink/--mid). Fixed across themes, like on the website. */
+/* Neutral zinc surfaces with Lore green reserved for accents and states.
+   Semantic token names remain stable for owned Solid/shadcn components.
+   Brand colors remain available for logos, highlights, and charts. */
 :root {
   --c0: #f7f2e8;
   --c1: #ede5d0;
@@ -29,27 +23,27 @@
   --ink: #1a2e1b;
   --mid: #4a5f4c;
 
-  /* Light theme — website light semantic tokens (theme.css :root). */
-  --bg: var(--c0); /* website --bg */
-  --surface: var(--c0); /* website --surface */
-  --chrome: var(--c1); /* website --surface-alt */
-  --nav: var(--c1); /* website --bg-alt */
-  --shade: var(--c1); /* website --bg-alt */
-  --soft: var(--g6); /* website --highlight-bg */
-  --line: var(--c2); /* website --border */
-  --text: var(--ink); /* website --text */
-  --muted: var(--mid); /* website --text-muted */
-  --heading: var(--g0); /* website --heading */
+  /* Light theme — zinc surfaces and text. */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --chrome: #f4f4f5;
+  --nav: #f4f4f5;
+  --shade: #f4f4f5;
+  --soft: #f4f4f5;
+  --line: #e4e4e7;
+  --text: #27272a;
+  --muted: #52525b;
+  --heading: #18181b;
   --accent: var(--g2); /* website --link */
   --accent-hover: var(--g0); /* website --link-hover */
-  --accent-contrast: var(--c0); /* website --inverse-text */
+  --accent-contrast: #ffffff;
   --accent-soft: var(--g6); /* website --highlight-bg */
   --accent-soft-text: var(--g2); /* website --highlight-text */
-  --emphasis: var(--g1); /* website --emphasis */
-  --inverse-bg: var(--g0); /* website --inverse-bg */
-  --inverse-bg-hover: var(--g1); /* website --inverse-bg-hover */
-  --inverse-text: var(--c0); /* website --inverse-text */
-  --inverse-text-dim: var(--g5); /* website --inverse-text-dim */
+  --emphasis: #27272a;
+  --inverse-bg: #3d6644;
+  --inverse-bg-hover: #2a4d32;
+  --inverse-text: #fafafa;
+  --inverse-text-dim: #e8f2e9;
   --mark: var(--g6); /* website --highlight-bg */
   --mark-edge: var(--g3); /* website --eyebrow */
   --gold: var(--g1); /* website --emphasis */
@@ -63,33 +57,32 @@
   --avatar-agent-text: var(--c0); /* website --inverse-text */
 
   /* Elevation — the website's two card shadows (theme.css .card / .feature). */
-  --shadow-soft: 0 4px 14px rgba(26, 51, 32, 0.06);
-  --shadow-lifted: 0 16px 48px rgba(26, 51, 32, 0.08);
+  --shadow-soft: 0 4px 14px rgba(24, 24, 27, 0.06);
+  --shadow-lifted: 0 16px 48px rgba(24, 24, 27, 0.08);
 }
 
-/* Dark theme — website dark semantic tokens (theme.css [data-theme="dark"],
-   which is also what starlight.css uses for the docs). */
+/* Dark theme — zinc surfaces and text. */
 .dark {
-  --bg: #0d1913; /* website --bg */
-  --surface: #14251b; /* website --surface */
-  --chrome: #1a3124; /* website --surface-alt */
-  --nav: #101f17; /* website --bg-alt */
-  --shade: #101f17; /* website --bg-alt */
-  --soft: #172c20; /* website --highlight-bg */
-  --line: #26402f; /* website --border */
-  --text: #e8f1e6; /* website --text */
-  --muted: #9fbaa6; /* website --text-muted */
-  --heading: #f2f7ee; /* website --heading */
+  --bg: #09090b;
+  --surface: #18181b;
+  --chrome: #27272a;
+  --nav: #18181b;
+  --shade: #18181b;
+  --soft: #27272a;
+  --line: #3f3f46;
+  --text: #e4e4e7;
+  --muted: #a1a1aa;
+  --heading: #fafafa;
   --accent: #a6d6ae; /* website --link */
   --accent-hover: #dcecdd; /* website --link-hover */
-  --accent-contrast: #0d1913; /* website --bg (dark text on the light accent) */
+  --accent-contrast: #09090b;
   --accent-soft: #172c20; /* website --highlight-bg */
   --accent-soft-text: #bfe0c4; /* website --highlight-text */
-  --emphasis: #9ad3a4; /* website --emphasis */
-  --inverse-bg: #1e3a29; /* website --inverse-bg */
-  --inverse-bg-hover: #26492f; /* website --inverse-bg-hover */
-  --inverse-text: #f2f7ee; /* website --inverse-text */
-  --inverse-text-dim: #c4ddc7; /* website --inverse-text-dim */
+  --emphasis: #e4e4e7;
+  --inverse-bg: #a6d6ae;
+  --inverse-bg-hover: #bfe0c4;
+  --inverse-text: #18181b;
+  --inverse-text-dim: #27272a;
   --mark: #172c20; /* website --highlight-bg */
   --mark-edge: #79ab84; /* website --eyebrow */
   --gold: #9ad3a4; /* website --emphasis */

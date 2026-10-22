@@ -127,7 +127,8 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
       <PopoverPrimitive.Root
         open={open()}
         modal={props.inDrawer ?? false}
-        gutter={10}
+        gutter={props.inDrawer ? 8 : 10}
+        sameWidth={props.inDrawer}
         placement={props.inDrawer ? "top-start" : "right-end"}
         slide
         overflowPadding={12}
@@ -151,34 +152,66 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
             data-workspace-navigation-open={open() || dialog() ? "" : undefined}
             data-folk-state={summary().state}
             aria-label={`Account and sync: ${summary().label}${user() ? `, ${name()}` : ""}`}
-            class="rail-action relative rounded-full"
+            class={cn(
+              props.inDrawer
+                ? "flex min-h-14 w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-text outline-none hover:bg-soft focus-visible:ring-2 focus-visible:ring-ring"
+                : "rail-action relative rounded-full",
+            )}
           >
-            <Show
-              when={user()}
-              fallback={
-                <span
-                  data-testid="anonymous-avatar"
-                  class="flex size-8 items-center justify-center rounded-full bg-soft text-muted"
-                >
-                  <Icon name="user" class="size-[19px]" />
-                </span>
-              }
-            >
-              <span
-                data-testid="account-avatar"
-                role="img"
-                aria-label={`Signed in as ${name()}`}
+            <span class="relative flex shrink-0 items-center justify-center">
+              <Show
+                when={user()}
+                fallback={
+                  <span
+                    data-testid="anonymous-avatar"
+                    class={cn(
+                      "flex items-center justify-center rounded-full bg-soft text-muted",
+                      props.inDrawer ? "size-10" : "size-8",
+                    )}
+                  >
+                    <Icon name="user" class="size-[19px]" />
+                  </span>
+                }
               >
-                <Avatar label={initials()} class="size-8 rounded-full" />
+                <span
+                  data-testid="account-avatar"
+                  role="img"
+                  aria-label={`Signed in as ${name()}`}
+                >
+                  <Avatar
+                    label={initials()}
+                    class={cn(
+                      "rounded-full",
+                      props.inDrawer ? "size-10" : "size-8",
+                    )}
+                  />
+                </span>
+              </Show>
+              <span
+                aria-hidden="true"
+                class={cn(
+                  "absolute bottom-0 right-0 size-2 rounded-full border-2 border-nav",
+                  DOT[summary().tone],
+                )}
+              />
+            </span>
+            <Show when={props.inDrawer}>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-semibold text-heading">
+                  {name()}
+                </span>
+                <span class="block truncate text-xs text-muted">
+                  Account &amp; preferences
+                </span>
               </span>
+              <Icon
+                name="chevron"
+                class={cn(
+                  "size-4 text-muted",
+                  open() ? "rotate-90" : "-rotate-90",
+                )}
+              />
             </Show>
-            <span
-              aria-hidden="true"
-              class={cn(
-                "absolute bottom-0.5 right-0.5 size-2 rounded-full border-2 border-nav",
-                DOT[summary().tone],
-              )}
-            />
           </TooltipTrigger>
           <TooltipContent>
             {user() ? name() : "Account & preferences"}
@@ -191,7 +224,12 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
             onCloseAutoFocus={(event) => {
               if (dialog()) event.preventDefault();
             }}
-            class="z-50 max-h-[calc(100dvh-24px)] w-[min(288px,calc(100vw-76px))] overflow-y-auto rounded-xl border border-line bg-surface p-3 text-sm text-text shadow-xl focus-visible:outline-hidden"
+            class={cn(
+              "z-50 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-3 text-sm text-text shadow-xl focus-visible:outline-hidden",
+              props.inDrawer
+                ? "max-h-[calc(100dvh-144px)] w-[var(--kb-popper-anchor-width)] max-w-[calc(100vw-24px)]"
+                : "max-h-[calc(100dvh-24px)] w-[min(288px,calc(100vw-76px))]",
+            )}
           >
             <PopoverPrimitive.Title class="sr-only">
               Account & preferences
@@ -226,7 +264,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
               aria-label="Appearance"
             >
               <span class="text-xs text-muted">Theme</span>
-              <ThemeToggle compact />
+              <ThemeToggle compact touch={props.inDrawer} />
             </section>
             <PopoverPrimitive.Description
               class={cn(
@@ -257,7 +295,10 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
                       data-testid="sync-now"
                       disabled={syncing()}
                       onClick={() => void runSync()}
-                      class="h-auto px-2 py-1"
+                      class={cn(
+                        "h-auto px-2 py-1",
+                        props.inDrawer && "min-h-11 px-3",
+                      )}
                     >
                       {syncing() ? "Syncing…" : "Sync now"}
                     </Button>

@@ -1,4 +1,4 @@
-import { openNavigation } from "./workspace-helpers";
+import { openNavigation, setWorkspaceTheme } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectIdByName(page: Page, name: string) {
@@ -232,4 +232,139 @@ test("signed-in avatar menu keeps preferences without a sign-in action", async (
     panel.getByRole("button", { name: "Settings", exact: true }),
   ).toHaveCount(0);
   await expect(panel.getByTestId("theme-toggle")).toBeVisible();
+});
+
+test("mobile profile row and account panel stay aligned with the drawer", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium");
+  let signedIn = false;
+  await page.route("**/api/v1/account", (route) =>
+    route.fulfill({
+      json: {
+        signed_in: signedIn,
+        state: signedIn ? "signed_in" : "anonymous",
+        user: signedIn
+          ? {
+              id: "ada",
+              display_name: "Ada Lovelace with a very long display name",
+              email: null,
+            }
+          : null,
+        provider: signedIn ? "github" : null,
+        expires_at: null,
+      },
+    }),
+  );
+  await page.route("**/api/v1/teams", (route) =>
+    route.fulfill({ json: { hosted: false, teams: [] } }),
+  );
+  await page.route("**/api/v1/sync/status", (route) =>
+    route.fulfill({
+      json: { enabled: true, state: "idle", pending_changes: 2 },
+    }),
+  );
+  for (const scenario of [
+    { width: 320, theme: "light", signedIn: false },
+    { width: 390, theme: "dark", signedIn: false },
+    { width: 320, theme: "dark", signedIn: true },
+    { width: 390, theme: "light", signedIn: true },
+  ] as const) {
+    const { width, theme } = scenario;
+    signedIn = scenario.signedIn;
+    await page.setViewportSize({ width, height: 640 });
+    await page.goto("/ui");
+    await setWorkspaceTheme(page, theme);
+    await openNavigation(page);
+    const drawer = page.getByTestId("nav-drawer");
+    const profile = drawer.getByTestId("folk-status");
+    await expect(profile).toContainText(
+      signedIn ? "Ada Lovelace" : "Anonymous",
+    );
+    expect(
+      await drawer.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    ).toBe(theme === "dark" ? "rgb(24, 24, 27)" : "rgb(244, 244, 245)");
+    const contrast = await profile
+      .getByText("Account & preferences", { exact: true })
+      .evaluate((label) => {
+        const background = document.querySelector(
+          '[data-testid="mobile-navigation"]',
+        )!;
+        const luminance = (css: string) => {
+          const channels = css
+            .match(/\d+(?:\.\d+)?/g)!
+            .slice(0, 3)
+            .map(Number)
+            .map((value) => {
+              const channel = value / 255;
+              return channel <= 0.04045
+                ? channel / 12.92
+                : ((channel + 0.055) / 1.055) ** 2.4;
+            });
+          return (
+            channels[0]! * 0.2126 +
+            channels[1]! * 0.7152 +
+            channels[2]! * 0.0722
+          );
+        };
+        const foreground = luminance(getComputedStyle(label).color);
+        const base = luminance(getComputedStyle(background).backgroundColor);
+        return (
+          (Math.max(foreground, base) + 0.05) /
+          (Math.min(foreground, base) + 0.05)
+        );
+      });
+    expect(contrast).toBeGreaterThanOrEqual(4.5);
+    if (width === 390 && theme === "dark")
+      await page.screenshot({
+        path: testInfo.outputPath("mobile-drawer-dark.png"),
+      });
+    const drawerBox = (await drawer.boundingBox())!;
+    const profileBox = (await profile.boundingBox())!;
+    expect(profileBox.width).toBeGreaterThanOrEqual(drawerBox.width - 40);
+    expect(profileBox.height).toBeGreaterThanOrEqual(52);
+    await profile.click();
+    const panel = page.getByTestId("folk-status-panel");
+    await expect(panel).toBeVisible();
+    const box = (await panel.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(drawerBox.x + 8);
+    expect(box.x + box.width).toBeLessThanOrEqual(
+      drawerBox.x + drawerBox.width - 8,
+    );
+    expect(Math.abs(box.width - profileBox.width)).toBeLessThanOrEqual(1);
+    for (const control of await panel
+      .getByTestId("theme-toggle")
+      .getByRole("button")
+      .all()) {
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+    }
+    await page.screenshot({
+      path: testInfo.outputPath(
+        `mobile-account-${signedIn ? "signed-in" : "anonymous"}-${theme}-${width}.png`,
+      ),
+    });
+    if (signedIn) {
+      await expect(
+        panel.getByRole("button", { name: "Sign in to Lore", exact: true }),
+      ).toHaveCount(0);
+      expect(
+        (await panel.getByTestId("sync-now").boundingBox())!.height,
+      ).toBeGreaterThanOrEqual(44);
+      await page.keyboard.press("Escape");
+      await expect(profile).toBeFocused();
+      continue;
+    }
+    await panel
+      .getByRole("button", { name: "Sign in to Lore", exact: true })
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: "Sign in to Lore", exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(profile).toBeFocused();
+  }
 });
