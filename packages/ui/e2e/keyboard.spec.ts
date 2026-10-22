@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { setTheme } from "./helpers";
 
 function focusName(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
@@ -11,6 +12,7 @@ function focusName(page: import("@playwright/test").Page) {
       .closest("[data-testid]")
       ?.getAttribute("data-testid");
     if (closestTestId?.startsWith("theme-")) return closestTestId;
+    if (closestTestId?.startsWith("pane-")) return closestTestId;
     if (active.matches('[data-testid="nav-projects"]')) return "nav-projects";
     if (active.matches('[data-testid="nav-project"]')) return "nav-project";
     return active.getAttribute("aria-label") ?? active.tagName.toLowerCase();
@@ -22,16 +24,16 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     page,
   }) => {
     await page.goto("/ui");
+    const mobile = await page.getByTestId("open-nav").isVisible();
     const expected = [
       "logo",
+      ...(mobile ? ["pane-chip-participants"] : []),
       "search",
       "Account and sync: Not signed in",
-      "theme-system",
-      "theme-light",
-      "theme-dark",
-      (await page.getByTestId("open-nav").isVisible())
-        ? "Open navigation"
-        : "nav-projects",
+      ...(mobile
+        ? ["theme-cycle"]
+        : ["theme-system", "theme-light", "theme-dark"]),
+      mobile ? "Open navigation" : "pane-min-nav",
     ];
     const actual: string[] = [];
     for (let i = 0; i < expected.length; i++) {
@@ -68,12 +70,15 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
 
     await opener.press("Enter");
     await expect(drawer).toBeVisible();
-    await drawer
+    await drawer.getByTestId("nav-projects").click();
+    await expect(drawer).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await page
+      .locator('[data-pane="list"]')
       .getByTestId("nav-project")
       .filter({ hasText: "scratch" })
       .click();
     await expect(page).toHaveURL(`/ui/projects/${scratch.id}`);
-    await expect(page.getByTestId("open-nav")).toBeFocused();
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({
@@ -219,8 +224,11 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         (item: { name: string }) => item.name === "lore",
       );
       await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
-      await page.getByTestId(`theme-${choice}`).click();
-      await page.getByTestId(`theme-${choice}`).focus();
+      await setTheme(page, choice);
+      const themeControl = (await page.getByTestId("theme-cycle").isVisible())
+        ? page.getByTestId("theme-cycle")
+        : page.getByTestId(`theme-${choice}`);
+      await themeControl.focus();
       await page.keyboard.press("Tab");
       await expect
         .poll(() =>

@@ -88,9 +88,7 @@ test.describe("knowledge table routes", () => {
     await page.getByTestId("knowledge-row").first().click();
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
     await page.getByTestId("mobile-back").click();
-    await expect(page).toHaveURL(
-      /category=gotcha.*sort=title%3Aasc|sort=title%3Aasc.*category=gotcha/,
-    );
+    await expect(page).toHaveURL(/\/ui\/?$/);
   });
 
   test("clicking a session row navigates to the UI-06 reader route", async ({

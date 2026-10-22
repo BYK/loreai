@@ -321,13 +321,7 @@ describe("ModelUsagePage", () => {
           path="*"
           component={() => (
             <ConnectionContext.Provider value={createConnectionStore()}>
-              <Nav
-                projects={[]}
-                loading={false}
-                error={undefined}
-                activeProjectId={null}
-                totalKnowledge={0}
-              />
+              <Nav activeProjectId={null} />
             </ConnectionContext.Provider>
           )}
         />

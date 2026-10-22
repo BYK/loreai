@@ -37,6 +37,10 @@ import {
 } from "~/db";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
 import { resetThemeStoreForTests, THEME_STORAGE_KEY, theme } from "~/lib/theme";
+import {
+  DEFAULT_PANE_LAYOUT,
+  PANE_LAYOUT_STORAGE_KEY,
+} from "~/state/pane-layout";
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -299,19 +303,50 @@ function mountBaseNav(path: string, activeProjectId: string | null = null) {
         path="*"
         component={() => (
           <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
-              projects={PROJECTS}
-              loading={false}
-              error={null}
-              activeProjectId={activeProjectId}
-              totalKnowledge={4}
-            />
+            <Nav activeProjectId={activeProjectId} />
           </ConnectionContext.Provider>
         )}
       />
     </MemoryRouter>
   ));
   return { ...utils, history };
+}
+
+function stubSinglePaneViewport() {
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: false,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+}
+
+function pointerEvent(
+  type:
+    | "pointerdown"
+    | "pointermove"
+    | "pointerup"
+    | "pointercancel"
+    | "lostpointercapture",
+  pointerId: number,
+  clientX: number,
+) {
+  const event = new Event(type, { bubbles: true });
+  Object.defineProperties(event, {
+    pointerId: { value: pointerId },
+    clientX: { value: clientX },
+  });
+  return event;
+}
+
+function stubPointerCapture(element: HTMLElement, pointerId: number) {
+  const setPointerCapture = vi.fn();
+  Object.defineProperties(element, {
+    setPointerCapture: { value: setPointerCapture },
+    hasPointerCapture: { value: (id: number) => id === pointerId },
+    releasePointerCapture: { value: vi.fn() },
+  });
+  return setPointerCapture;
 }
 
 /** Seed a fake-indexeddb cache with the shared fixtures and hand it to mount. */
@@ -354,7 +389,7 @@ function isPreloadable(
   );
 }
 
-function pane(name: "nav" | "list" | "detail"): HTMLElement {
+function pane(name: "nav" | "list" | "document"): HTMLElement {
   const el = document.querySelector<HTMLElement>(`[data-pane="${name}"]`);
   if (!el) throw new Error(`no ${name} pane`);
   return el;
@@ -371,26 +406,186 @@ afterEach(() => {
   resetThemeStoreForTests();
 });
 
+describe("shell: list divider persistence", () => {
+  beforeEach(() => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  });
+
+  it("persists a pointer drag once at its final width", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+    const setPointerCapture = stubPointerCapture(divider, 7);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    fireEvent(divider, pointerEvent("pointerdown", 7, 340));
+    for (let move = 1; move <= 5; move++) {
+      fireEvent(divider, pointerEvent("pointermove", 7, 340 + move * 10));
+    }
+
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(divider).toHaveAttribute("aria-valuenow", "390");
+    expect(
+      setItem.mock.calls.filter(([key]) => key === PANE_LAYOUT_STORAGE_KEY),
+    ).toHaveLength(0);
+
+    fireEvent(divider, pointerEvent("pointerup", 7, 390));
+
+    const layoutWrites = setItem.mock.calls.filter(
+      ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+    );
+    expect(layoutWrites).toHaveLength(1);
+    const storedLayout = layoutWrites.at(0)?.[1];
+    expect(storedLayout).toBeDefined();
+    expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(390);
+  });
+
+  it("updates the live width without native pointer capture support", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+
+    fireEvent(divider, pointerEvent("pointerdown", 8, 340));
+    fireEvent(divider, pointerEvent("pointermove", 8, 360));
+
+    expect(divider).toHaveAttribute("aria-valuenow", "360");
+  });
+
+  it("persists keyboard divider resizes immediately", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByRole("separator", {
+      name: "Resize list",
+    });
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+
+    const layoutWrites = setItem.mock.calls.filter(
+      ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+    );
+    expect(layoutWrites).toHaveLength(1);
+    const storedLayout = layoutWrites.at(0)?.[1];
+    expect(storedLayout).toBeDefined();
+    expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(356);
+  });
+
+  it.each(["pointercancel", "lostpointercapture"] as const)(
+    "persists a changed drag once on %s",
+    async (finishEvent) => {
+      mount("/", fakeClient());
+      const divider = await screen.findByRole("separator", {
+        name: "Resize list",
+      });
+      stubPointerCapture(divider, 11);
+      const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+      fireEvent(divider, pointerEvent("pointerdown", 11, 340));
+      fireEvent(divider, pointerEvent("pointermove", 11, 360));
+      expect(
+        setItem.mock.calls.filter(([key]) => key === PANE_LAYOUT_STORAGE_KEY),
+      ).toHaveLength(0);
+      fireEvent(divider, pointerEvent(finishEvent, 11, 360));
+      if (finishEvent === "pointercancel") {
+        fireEvent(divider, pointerEvent("lostpointercapture", 11, 360));
+      }
+
+      const layoutWrites = setItem.mock.calls.filter(
+        ([key]) => key === PANE_LAYOUT_STORAGE_KEY,
+      );
+      expect(layoutWrites).toHaveLength(1);
+      const storedLayout = layoutWrites.at(0)?.[1];
+      expect(storedLayout).toBeDefined();
+      expect(JSON.parse(storedLayout ?? "{}").listWidth).toBe(360);
+    },
+  );
+});
+
+it("hides the left column and limits restores to visible panes in split mode", async () => {
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: media === "(min-width: 760px)",
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  localStorage.setItem(
+    PANE_LAYOUT_STORAGE_KEY,
+    JSON.stringify({
+      ...DEFAULT_PANE_LAYOUT,
+      nav: "min",
+      participants: "open",
+    }),
+  );
+
+  mount("/", fakeClient());
+  await screen.findByTestId("pane-chip-nav");
+
+  expect(pane("nav")).toHaveAttribute("aria-hidden", "true");
+  expect(pane("nav")).toHaveClass("hidden");
+  expect(screen.getByTestId("pane-chip-nav")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTestId("pane-chip-participants"));
+  expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+
+  fireEvent.click(screen.getByTestId("pane-chip-nav"));
+  expect(
+    await screen.findByRole("button", { name: "Restore" }),
+  ).toBeInTheDocument();
+});
+
+it("offers restore controls for both chips in full mode", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: true,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  localStorage.setItem(
+    PANE_LAYOUT_STORAGE_KEY,
+    JSON.stringify({
+      ...DEFAULT_PANE_LAYOUT,
+      nav: "min",
+      participants: "min",
+    }),
+  );
+
+  mount("/", fakeClient());
+  await screen.findByTestId("pane-chip-nav");
+  await screen.findByTestId("pane-chip-participants");
+
+  fireEvent.click(screen.getByTestId("pane-chip-nav"));
+  fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+  await waitFor(() => expect(screen.queryByTestId("pane-chip-nav")).toBeNull());
+
+  fireEvent.click(screen.getByTestId("pane-chip-participants"));
+  expect(
+    await screen.findByRole("button", { name: "Restore" }),
+  ).toBeInTheDocument();
+});
+
 describe("shell: project navigation and real-data path", () => {
   it("highlights workspace links relative to the router base", async () => {
     const { history } = mount("/ui", fakeClient(), undefined, "/ui");
     await screen.findByTestId("nav-projects");
 
     await waitFor(() =>
-      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-accent-soft"),
+      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-selected"),
     );
     expect(screen.getByTestId("nav-all-knowledge")).not.toHaveClass(
-      "bg-accent-soft",
+      "bg-selected",
     );
 
     history.set({ value: "/ui/knowledge" });
     await waitFor(() => {
       expect(screen.getByTestId("nav-all-knowledge")).toHaveClass(
-        "bg-accent-soft",
+        "bg-selected",
       );
-      expect(screen.getByTestId("nav-projects")).not.toHaveClass(
-        "bg-accent-soft",
-      );
+      expect(screen.getByTestId("nav-projects")).not.toHaveClass("bg-selected");
     });
   });
 
@@ -413,11 +608,11 @@ describe("shell: project navigation and real-data path", () => {
     for (const [path, activeId] of activeRoutes) {
       history.set({ value: path });
       await waitFor(() =>
-        expect(screen.getByTestId(activeId)).toHaveClass("bg-accent-soft"),
+        expect(screen.getByTestId(activeId)).toHaveClass("bg-selected"),
       );
       for (const id of navIds) {
         if (id !== activeId) {
-          expect(screen.getByTestId(id)).not.toHaveClass("bg-accent-soft");
+          expect(screen.getByTestId(id)).not.toHaveClass("bg-selected");
         }
       }
     }
@@ -433,13 +628,13 @@ describe("shell: project navigation and real-data path", () => {
     expect(duplicates).toHaveAttribute("href", duplicatesPath);
     await waitFor(() => {
       expect(duplicates).toHaveAttribute("aria-current", "page");
-      expect(duplicates).toHaveClass("bg-accent-soft");
+      expect(duplicates).toHaveClass("bg-selected");
     });
 
     history.set({ value: `/ui/projects/${project.id}` });
     await waitFor(() => {
       expect(duplicates).not.toHaveAttribute("aria-current", "page");
-      expect(duplicates).not.toHaveClass("bg-accent-soft");
+      expect(duplicates).not.toHaveClass("bg-selected");
     });
     unmount();
 
@@ -448,7 +643,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
   });
 
-  it("loads projects into the nav and shows the welcome document", async () => {
+  it("loads projects into the list and shows a concise empty document", async () => {
     const client = fakeClient();
     mount("/", client);
     const rows = await screen.findAllByTestId("nav-project");
@@ -457,22 +652,184 @@ describe("shell: project navigation and real-data path", () => {
       "/home/me/empty0", // nameless project falls back to its path
     ]);
     expect(
-      screen.getByRole("heading", { name: "Choose a project" }),
+      screen.getByRole("heading", { name: "Select an item" }),
+    ).toBeVisible();
+    const documentPane = screen.getByTestId("document-pane");
+    expect(documentPane).toHaveTextContent("Pick an item from the list.");
+    expect(documentPane.querySelector("a, ul")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Merge duplicate projects" }),
     ).toBeVisible();
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
     );
     expect(client.calls).toEqual(["projects"]);
-    // Only the nav + detail panes exist without a selected project.
-    expect(document.querySelector('[data-pane="list"]')).toBeNull();
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "nav",
-    );
+    expect(document.querySelector('[data-pane="list"]')).not.toBeNull();
+    expect(
+      screen
+        .getByRole("navigation", { name: "Workspace" })
+        .querySelector('[data-testid="nav-project"]'),
+    ).toBeNull();
+  });
+
+  it("keeps the project list node and query across project and session routes", async () => {
+    const session = {
+      session_id: "s-42",
+      message_count: 1,
+      first_message_at: 1_700_000_000_000,
+      last_message_at: 1_700_000_000_000,
+      distilled_count: 0,
+      undistilled_count: 1,
+      distillation_count: 0,
+      title: "Session s-42",
+      title_source: "id" as const,
+    };
+    const client = fakeClient({
+      async listProjectSessionsPage() {
+        return { items: [session], next_cursor: null };
+      },
+      async getSessionPage() {
+        return {
+          messages: [],
+          distillations: [],
+          next_cursor: null,
+          message_count: 1,
+          title: "s-42",
+          title_source: "id" as const,
+        };
+      },
+    });
+
+    for (const base of [undefined, "/ui"]) {
+      const prefix = base ?? "";
+      const { history, unmount } = mount(
+        `${prefix}/?list_q=lore`,
+        client,
+        undefined,
+        base,
+      );
+      const list = await screen.findByTestId("project-list-body");
+      list.dataset.listIdentity = "persistent";
+      list.scrollTop = 192;
+      const project = await screen.findByRole("link", { name: "lore" });
+      expect(project).toHaveAttribute(
+        "href",
+        `${prefix}/projects/p-lore?list_q=lore`,
+      );
+      fireEvent.click(project);
+      await waitFor(() =>
+        expect(history.get()).toBe(`${prefix}/projects/p-lore?list_q=lore`),
+      );
+      expect(screen.getByTestId("project-list-body")).toBe(list);
+      expect(list.scrollTop).toBe(192);
+
+      fireEvent.click(await screen.findByRole("link", { name: /s-42/ }));
+      await waitFor(() =>
+        expect(history.get()).toBe(
+          `${prefix}/projects/p-lore/sessions/s-42?list_q=lore`,
+        ),
+      );
+      expect(screen.getByTestId("project-list-body")).toBe(list);
+      expect(list).toHaveAttribute("data-list-identity", "persistent");
+      expect(list.scrollTop).toBe(192);
+      expect(screen.getByRole("link", { name: "lore" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      unmount();
+    }
+  });
+
+  it("keeps the project-list filter separate from content search", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/search?q=SQLite", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    expect(filter).toHaveValue("");
+    fireEvent.input(filter, { target: { value: "lore" } });
+
+    await waitFor(() => {
+      const params = new URLSearchParams(history.get().split("?")[1]);
+      expect(params.get("q")).toBe("SQLite");
+      expect(params.get("list_q")).toBe("lore");
+    });
+  });
+
+  it("keeps the inbox filter draft visible while omitting it from the URL", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/?list_q=lore", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    fireEvent.input(filter, { target: { value: "in:inbox" } });
+
+    expect(filter).toHaveValue("in:inbox");
+    await waitFor(() => expect(history.get()).toBe("/"));
+  });
+
+  it("syncs the project-list filter draft with URL history", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/?list_q=lore", fakeClient());
+    const filter = await screen.findByTestId("nav-project-filter");
+
+    expect(filter).toHaveValue("lore");
+    history.set({ value: "/" });
+    await waitFor(() => expect(filter).toHaveValue(""));
+
+    history.set({ value: "/?list_q=SQLite" });
+    await waitFor(() => expect(filter).toHaveValue("SQLite"));
+  });
+
+  it("preserves the project-list filter when following workspace navigation", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const { history } = mount("/?list_q=lore", fakeClient());
+
+    fireEvent.click(await screen.findByTestId("nav-all-knowledge"));
+
+    await waitFor(() => expect(history.get()).toBe("/knowledge?list_q=lore"));
+  });
+
+  it("resizes the list with divider keyboard controls and leaves document non-minimizable", async () => {
+    mount("/", fakeClient());
+    const divider = await screen.findByTestId("list-divider");
+    expect(divider).toHaveAttribute("aria-valuenow", "340");
+
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+    expect(divider).toHaveAttribute("aria-valuenow", "356");
+    fireEvent.keyDown(divider, { key: "ArrowRight", shiftKey: true });
+    expect(divider).toHaveAttribute("aria-valuenow", "420");
+    fireEvent.keyDown(divider, { key: "Home" });
+    expect(divider).toHaveAttribute("aria-valuenow", "280");
+    fireEvent.keyDown(divider, { key: "End" });
+    expect(divider).toHaveAttribute("aria-valuenow", "640");
+    fireEvent.keyDown(divider, { key: "Enter" });
+    expect(divider).toHaveAttribute("aria-valuenow", "340");
+    expect(screen.getByLabelText("Maximise document")).toBeInTheDocument();
+    expect(screen.queryByTestId("pane-min-document")).toBeNull();
   });
 
   it("returns focus to the navigation opener when the drawer closes", async () => {
+    stubSinglePaneViewport();
     const client = fakeClient();
     mount("/", client);
     const opener = await screen.findByTestId("open-nav");
@@ -487,6 +844,7 @@ describe("shell: project navigation and real-data path", () => {
   });
 
   it("focuses a replacement opener after the original is removed", async () => {
+    stubSinglePaneViewport();
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       setTimeout(() => callback(0), 0);
       return 1;
@@ -524,10 +882,7 @@ describe("shell: project navigation and real-data path", () => {
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows[0]).toHaveTextContent("Keep SQLite");
     expect(rows[1]).toHaveTextContent("WAL recovery");
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "detail",
-    );
+    expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
 
     fireEvent.click(rows[1]!);
     await waitFor(() =>
@@ -544,17 +899,14 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).getByText("No source session recorded."),
     ).toBeInTheDocument();
-    const selectedRows = await screen.findAllByTestId("knowledge-row");
-    expect(selectedRows[1]).toHaveAttribute("aria-current", "page");
-    expect(selectedRows[0]).not.toHaveAttribute("aria-current");
-    expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
-      "data-mobile-pane",
-      "detail",
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
+      (row) => row.getAttribute("aria-current") === "page",
     );
-    expect(screen.getByTestId("mobile-back")).toHaveAttribute(
-      "href",
-      "/projects/p-lore/knowledge",
-    );
+    expect(selectedProject).toBeDefined();
+    expect(selectedProject).toHaveAttribute("aria-current", "page");
+    expect(selectedProject).toHaveClass("bg-selected");
+    expect(document.querySelector('[data-pane="document"]')).not.toBeNull();
     expect(client.calls[0]).toBe("projects");
     expect(client.calls).toContain("entry:k-wal");
     expect(client.pageOpts).toEqual(
@@ -588,8 +940,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).getAllByText(/Portability|No remote cache/),
     ).toHaveLength(2);
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows[0]).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
     const [lore] = await screen.findAllByTestId("nav-project");
     expect(lore).toHaveAttribute("aria-current", "page");
   });
@@ -598,25 +949,14 @@ describe("shell: project navigation and real-data path", () => {
     const client = fakeClient();
     mount("/knowledge/k-wal", client);
     await screen.findByTestId("knowledge-document");
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows).toHaveLength(2);
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
-    expect(client.calls).toEqual([
-      "projects",
-      "entry:k-wal",
-      "knowledge:p-lore",
-    ]);
-    expect(client.pageOpts).toContainEqual({
-      projectId: "p-lore",
-      opts: {
-        cursor: null,
-        limit: 50,
-        q: undefined,
-        category: undefined,
-        scope: undefined,
-        sort: [{ field: "updated_at", dir: "desc" }],
-      },
-    });
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    const selectedProject = (await screen.findAllByTestId("nav-project")).find(
+      (row) => row.getAttribute("aria-current") === "page",
+    );
+    expect(selectedProject).toBeDefined();
+    expect(pane("list")).toHaveTextContent("lore");
+    expect(client.calls).toEqual(["projects", "entry:k-wal"]);
+    expect(client.pageOpts).toHaveLength(0);
   });
 
   it("decodes percent-encoded ids from the URL exactly once", async () => {
@@ -656,21 +996,14 @@ describe("shell: project navigation and real-data path", () => {
     expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
       "Keep SQLite",
     );
-    expect(client.calls).toEqual(["entry:k/1%2", "knowledge:team/lore v2"]);
-    expect(client.pageOpts).toContainEqual({
-      projectId: "team/lore v2",
-      opts: {
-        cursor: null,
-        limit: 50,
-        q: undefined,
-        category: undefined,
-        scope: undefined,
-        sort: [{ field: "updated_at", dir: "desc" }],
-      },
-    });
-    expect(pane("list")).toHaveTextContent("Knowledge · lore");
-    const [row] = await screen.findAllByTestId("knowledge-row");
-    expect(row).toHaveAttribute("aria-current", "page");
+    expect(client.calls).toEqual(["entry:k/1%2"]);
+    expect(client.pageOpts).toHaveLength(0);
+    expect(pane("list")).toHaveTextContent("lore");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(await screen.findByTestId("nav-project")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("renders the future actions disabled with the exact wording", async () => {
@@ -732,10 +1065,6 @@ describe("shell: project navigation and real-data path", () => {
           : project,
       ),
     );
-    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
-      items: liveEntries.filter((entry) => entry.project_id === projectId),
-      next_cursor: null,
-    }));
     const getKnowledge = vi.fn(async (id: string) => {
       const entry = liveEntries.find((candidate) => candidate.id === id);
       if (!entry) {
@@ -827,7 +1156,6 @@ describe("shell: project navigation and real-data path", () => {
     });
     const client = fakeClient({
       listProjects,
-      listProjectKnowledgePage,
       getKnowledge,
       listKnowledgeVersions,
       getKnowledgeEffects: async () => writeEffects(),
@@ -836,17 +1164,10 @@ describe("shell: project navigation and real-data path", () => {
     });
     mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
 
-    const list = await screen.findByTestId("knowledge-list");
-    await within(list).findByText(target.title);
-    const projectCount = () => {
-      const link = screen
-        .getAllByTestId("nav-project")
-        .find((item) => item.firstElementChild?.textContent === "lore");
-      return link?.lastElementChild?.textContent;
-    };
-    await waitFor(() => expect(projectCount()).toBe("2"));
-
-    let pageCalls = listProjectKnowledgePage.mock.calls.length;
+    const doc = await screen.findByTestId("knowledge-document");
+    expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+      target.title,
+    );
     let projectCalls = listProjects.mock.calls.length;
     const deleteButton = await screen.findByRole("button", { name: "Delete" });
     await waitFor(() => expect(deleteButton).toBeEnabled());
@@ -856,17 +1177,9 @@ describe("shell: project navigation and real-data path", () => {
       within(deleteDialog).getByRole("button", { name: "Delete entry" }),
     );
     await waitFor(() =>
-      expect(within(list).queryByText(target.title)).toBeNull(),
-    );
-    await waitFor(() => expect(projectCount()).toBe("1"));
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
-    );
-    await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
 
-    pageCalls = listProjectKnowledgePage.mock.calls.length;
     projectCalls = listProjects.mock.calls.length;
     const restoreButton = await screen.findByRole("button", {
       name: "Restore…",
@@ -876,13 +1189,6 @@ describe("shell: project navigation and real-data path", () => {
     const restoreDialog = await screen.findByRole("alertdialog");
     fireEvent.click(
       within(restoreDialog).getByRole("button", { name: "Restore version" }),
-    );
-    await waitFor(() =>
-      expect(within(list).getByText(target.title)).toBeInTheDocument(),
-    );
-    await waitFor(() => expect(projectCount()).toBe("2"));
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
     );
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
@@ -901,16 +1207,8 @@ describe("shell: project navigation and real-data path", () => {
           : project,
       ),
     );
-    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
-      items: ENTRIES.filter(
-        (entry) =>
-          entry.project_id === projectId && entry.id !== currentEntry.id,
-      ).concat(currentEntry.project_id === projectId ? [currentEntry] : []),
-      next_cursor: null,
-    }));
     const client = fakeClient({
       listProjects,
-      listProjectKnowledgePage,
       async getKnowledge(id: string) {
         if (id !== currentEntry.id) throw new Error(`unexpected entry ${id}`);
         return currentEntry;
@@ -973,10 +1271,11 @@ describe("shell: project navigation and real-data path", () => {
     });
     mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
 
-    const list = await screen.findByTestId("knowledge-list");
-    await within(list).findByText(currentEntry.title);
+    const doc = await screen.findByTestId("knowledge-document");
+    expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+      currentEntry.title,
+    );
     const originalTitle = currentEntry.title;
-    const pageCalls = listProjectKnowledgePage.mock.calls.length;
     const projectCalls = listProjects.mock.calls.length;
     const editButton = await screen.findByRole("button", { name: "Edit" });
     await waitFor(() => expect(editButton).toBeEnabled());
@@ -991,14 +1290,11 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() =>
-      expect(
-        within(list).getByText("Retitled knowledge entry"),
-      ).toBeInTheDocument(),
+      expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+        "Retitled knowledge entry",
+      ),
     );
-    expect(within(list).queryByText(originalTitle)).toBeNull();
-    await waitFor(() =>
-      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
-    );
+    expect(within(doc).queryByText(originalTitle)).toBeNull();
     await waitFor(() =>
       expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
@@ -1023,12 +1319,11 @@ describe("shell: workspace knowledge and search", () => {
     const projects = within(nav).getByTestId("nav-projects");
     expect(allKnowledge).toHaveAttribute("aria-current", "page");
     expect(projects).not.toHaveAttribute("aria-current");
-    const navLinks = [...nav.querySelectorAll("a[data-testid]")];
-    expect(navLinks.indexOf(allKnowledge)).toBeLessThan(
-      navLinks.findIndex(
-        (link) => link.getAttribute("data-testid") === "nav-project",
-      ),
-    );
+    expect(nav.querySelector('[data-testid="nav-project"]')).toBeNull();
+    expect(
+      within(pane("list")).getByRole("searchbox", { name: "Search list" }),
+    ).toHaveValue("");
+    expect(within(pane("list")).getAllByTestId("nav-project")).toHaveLength(2);
 
     const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
     if (!firstRow) throw new Error("Missing all-knowledge table row");
@@ -1100,16 +1395,17 @@ describe("shell: workspace knowledge and search", () => {
     await waitFor(() => expect(project).toHaveTextContent("p-unknown"));
   });
 
-  it("returns entry-only deep links to All knowledge", async () => {
+  it("returns narrow entry-only deep links to the workspace list", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      media,
+      matches: false,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
     mount("/knowledge/k-global", fakeClient());
     await screen.findByTestId("knowledge-document");
-    expect(screen.getByTestId("mobile-back")).toHaveAttribute(
-      "href",
-      "/knowledge",
-    );
-    expect(screen.getByTestId("mobile-back")).toHaveTextContent(
-      "All knowledge",
-    );
+    expect(screen.getByTestId("mobile-back")).toHaveAttribute("href", "/");
+    expect(screen.getByTestId("mobile-back")).toHaveTextContent("Back to list");
   });
 
   it("shows ranked search results and links to the complete table", async () => {
@@ -1292,7 +1588,7 @@ describe("shell: workspace knowledge and search", () => {
     });
     mount("/search?q=Hostile", client);
     expect(await screen.findByText(title)).toBeInTheDocument();
-    expect(pane("detail").querySelector("img")).toBeNull();
+    expect(pane("document").querySelector("img")).toBeNull();
     expect((window as Window & { __pwned?: number }).__pwned).toBeUndefined();
   });
 });
@@ -1334,6 +1630,32 @@ describe("shell: empty, error, not-found and locked states", () => {
     mount("/projects/p-lore/sessions?cursor=abc", client);
     expect(await screen.findByText("No captured sessions")).toBeInTheDocument();
     expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("does not load knowledge pages while viewing a knowledge entry", async () => {
+    let knowledgePageCalls = 0;
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        knowledgePageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount(`/projects/p-lore/knowledge/${entryAt(0).id}`, client);
+
+    expect(
+      await screen.findByRole("heading", { name: entryAt(0).title }),
+    ).toBeInTheDocument();
+    expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("keeps merge-projects available from navigation on narrow layouts", async () => {
+    stubSinglePaneViewport();
+    mount("/", fakeClient());
+
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+
+    const drawer = await screen.findByTestId("nav-drawer");
+    expect(within(drawer).getByTestId("merge-projects")).toBeVisible();
   });
 
   it("does not load session pages while browsing knowledge", async () => {
@@ -1622,8 +1944,10 @@ describe("shell: empty, error, not-found and locked states", () => {
         },
       }),
     );
-    // Both the nav and the welcome document explain the empty state.
-    expect(await screen.findAllByText("No projects yet")).toHaveLength(2);
+    expect(await screen.findAllByText("No projects yet")).toHaveLength(1);
+    expect(screen.getByTestId("document-pane")).not.toHaveTextContent(
+      "No projects yet",
+    );
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
@@ -1805,6 +2129,7 @@ describe("shell: search entry, theme and fixture", () => {
       "aria-pressed",
       "false",
     );
+    expect(screen.getByTestId("theme-system")).toHaveClass("text-text");
 
     fireEvent.click(screen.getByTestId("theme-light"));
     await waitFor(() =>
@@ -1878,8 +2203,16 @@ describe("shell: search entry, theme and fixture", () => {
   });
 
   it("mounts the fixture and compatibility smoke in dev only, never in production builds", async () => {
-    const paths = (defs: typeof routes) =>
-      defs.flatMap((r) => (Array.isArray(r.path) ? r.path : [r.path]));
+    const paths = (defs: typeof routes): (string | undefined)[] =>
+      defs.flatMap((route) => {
+        const own = Array.isArray(route.path) ? route.path : [route.path];
+        const children = route.children
+          ? paths(
+              Array.isArray(route.children) ? route.children : [route.children],
+            )
+          : [];
+        return [...own, ...children];
+      });
     expect(import.meta.env.DEV).toBe(true);
     expect(paths(routes)).toEqual(
       expect.arrayContaining(["/fixture", "/_compat"]),

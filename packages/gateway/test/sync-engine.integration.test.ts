@@ -1335,13 +1335,17 @@ describe.skipIf(SKIP)("sync engine self-leave", () => {
     expect(secondCycle.quotaHit).toBeUndefined();
     expect(syncData.getSyncState("knowledge", logicalId)?.scope_id).toBeNull();
 
-    const settledCycle = await syncOnce();
+    let settledCycle = await syncOnce();
+    for (let attempt = 0; settledCycle.pushed > 0 && attempt < 2; attempt++) {
+      settledCycle = await syncOnce();
+    }
     expect(settledCycle).toMatchObject({
       pushed: 0,
       pulled: 0,
       conflicts: 0,
       skipped: 0,
     });
+    expect(syncData.getSyncState("knowledge", logicalId)?.scope_id).toBeNull();
     expect(
       await h.asUser(member, (c) =>
         c

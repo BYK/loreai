@@ -23,7 +23,6 @@ test.describe("Folk status surfaces", () => {
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "anonymous");
     await expect(badge).toHaveAttribute("aria-label", /Not signed in/);
-    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("account-avatar")).toHaveCount(0);
     if (testInfo.project.name.startsWith("mobile")) {
       await expect(badge.getByText("Not signed in")).toBeHidden();
@@ -62,7 +61,6 @@ test.describe("Folk status surfaces", () => {
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "hosted");
     await expect(page.getByTestId("account-avatar")).toHaveCount(0);
-    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
     await badge.click();
     await expect(page.getByTestId("folk-status-detail")).toContainText(
       "lore start --local",
@@ -72,7 +70,7 @@ test.describe("Folk status surfaces", () => {
 
   test("a signed-in local account displays its own initials", async ({
     page,
-  }, testInfo) => {
+  }) => {
     await page.route("**/api/v1/account", (route) =>
       route.fulfill({
         json: {
@@ -91,10 +89,7 @@ test.describe("Folk status surfaces", () => {
       "aria-label",
       "Signed in as Ada Lovelace",
     );
-    if (testInfo.project.name.startsWith("mobile"))
-      await expect(avatar).toBeHidden();
-    else await expect(avatar).toBeVisible();
-    await expect(page.getByText("You", { exact: true })).toHaveCount(0);
+    await expect(avatar).toBeVisible();
   });
 
   test("shows not-linked and degraded project sharing details", async ({

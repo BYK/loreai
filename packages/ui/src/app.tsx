@@ -1,13 +1,13 @@
 import type { Component, ParentProps } from "solid-js";
-import { lazy, createSignal, Show } from "solid-js";
+import { createSignal, lazy, Show } from "solid-js";
 import { A, type RouteDefinition, Router } from "@solidjs/router";
 
 import { Browse } from "./routes/Browse";
-import { WorkspaceProvider } from "./routes/workspace";
+import { Workspace } from "./components/shell/Workspace";
+import { WorkspaceProvider, useWorkspace } from "./routes/workspace";
 import { setGatewayAuthToken, type ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
 import { theme } from "./lib/theme";
-import { useWorkspace } from "./routes/workspace";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
 export const ROUTER_BASE = "/ui";
@@ -74,112 +74,127 @@ const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
   : [];
 
 export const routes: RouteDefinition[] = [
-  { path: "/", component: () => <Browse view="welcome" /> },
   {
-    path: "/entities",
-    component: lazy(() =>
-      import("./routes/Entities").then((m) => ({ default: m.EntitiesList })),
-    ),
+    path: "/",
+    component: Workspace,
+    children: [
+      { path: "/", component: () => <Browse view="welcome" /> },
+      {
+        path: "/entities",
+        component: lazy(() =>
+          import("./routes/Entities").then((m) => ({
+            default: m.EntitiesList,
+          })),
+        ),
+      },
+      {
+        path: "/entities/:entityId",
+        component: lazy(() =>
+          import("./routes/Entities").then((m) => ({
+            default: m.EntityDetailRoute,
+          })),
+        ),
+      },
+      {
+        path: "/warming",
+        component: lazy(() =>
+          import("./routes/Operations").then((m) => ({
+            default: m.WarmingRoute,
+          })),
+        ),
+      },
+      {
+        path: "/costs",
+        component: lazy(() =>
+          import("./routes/Operations").then((m) => ({
+            default: m.CostsRoute,
+          })),
+        ),
+      },
+      {
+        path: "/model-usage",
+        component: lazy(() =>
+          import("./routes/Operations").then((m) => ({
+            default: m.ModelUsageRoute,
+          })),
+        ),
+      },
+      {
+        path: "/contradictions",
+        component: lazy(() =>
+          import("./routes/Contradictions").then((m) => ({
+            default: m.ContradictionsRoute,
+          })),
+        ),
+      },
+      {
+        path: "/promotions",
+        component: lazy(() =>
+          import("./routes/Promotions").then((m) => ({
+            default: m.PromotionsRoute,
+          })),
+        ),
+      },
+      {
+        path: "/team",
+        component: lazy(() =>
+          import("./routes/FolkManagement").then((m) => ({
+            default: m.TeamRoute,
+          })),
+        ),
+      },
+      {
+        path: "/conflicts",
+        component: lazy(() =>
+          import("./routes/FolkManagement").then((m) => ({
+            default: m.ConflictsRoute,
+          })),
+        ),
+      },
+      {
+        path: "/projects/:projectId/knowledge/:knowledgeId",
+        component: () => <Browse view="entry" />,
+      },
+      { path: "/knowledge", component: () => <Browse view="all-knowledge" /> },
+      {
+        path: "/knowledge/:knowledgeId",
+        component: () => <Browse view="entry" />,
+      },
+      {
+        path: "/projects/:projectId/knowledge",
+        component: () => <Browse view="knowledge-table" />,
+      },
+      {
+        path: "/projects/:projectId/duplicates",
+        component: () => <Browse view="duplicates" />,
+      },
+      {
+        path: "/projects/:projectId/sessions/:sessionId",
+        component: lazy(() =>
+          import("./routes/Session").then((m) => ({ default: m.Session })),
+        ),
+      },
+      {
+        path: "/projects/:projectId/sessions",
+        component: () => <Browse view="sessions" />,
+      },
+      {
+        path: "/projects/:projectId/imports",
+        component: () => <Browse view="imports" />,
+      },
+      { path: "/search", component: () => <Browse view="workspace-search" /> },
+      {
+        path: "/projects/:projectId/search",
+        component: () => <Browse view="search" />,
+      },
+      {
+        path: "/projects/:projectId",
+        component: () => <Browse view="project" />,
+      },
+      { path: "*", component: NotFound },
+    ],
   },
-  {
-    path: "/warming",
-    component: lazy(() =>
-      import("./routes/Operations").then((m) => ({ default: m.WarmingRoute })),
-    ),
-  },
-  {
-    path: "/costs",
-    component: lazy(() =>
-      import("./routes/Operations").then((m) => ({ default: m.CostsRoute })),
-    ),
-  },
-  {
-    path: "/model-usage",
-    component: lazy(() =>
-      import("./routes/Operations").then((m) => ({
-        default: m.ModelUsageRoute,
-      })),
-    ),
-  },
-  {
-    path: "/contradictions",
-    component: lazy(() =>
-      import("./routes/Contradictions").then((m) => ({
-        default: m.ContradictionsRoute,
-      })),
-    ),
-  },
-  {
-    path: "/promotions",
-    component: lazy(() =>
-      import("./routes/Promotions").then((m) => ({
-        default: m.PromotionsRoute,
-      })),
-    ),
-  },
-  {
-    path: "/team",
-    component: lazy(() =>
-      import("./routes/FolkManagement").then((m) => ({
-        default: m.TeamRoute,
-      })),
-    ),
-  },
-  {
-    path: "/conflicts",
-    component: lazy(() =>
-      import("./routes/FolkManagement").then((m) => ({
-        default: m.ConflictsRoute,
-      })),
-    ),
-  },
-  {
-    path: "/entities/:entityId",
-    component: lazy(() =>
-      import("./routes/Entities").then((m) => ({
-        default: m.EntityDetailRoute,
-      })),
-    ),
-  },
-  {
-    path: "/projects/:projectId/knowledge/:knowledgeId",
-    component: () => <Browse view="entry" />,
-  },
-  { path: "/knowledge", component: () => <Browse view="all-knowledge" /> },
-  { path: "/knowledge/:knowledgeId", component: () => <Browse view="entry" /> },
-  {
-    path: "/projects/:projectId/knowledge",
-    component: () => <Browse view="knowledge-table" />,
-  },
-  {
-    path: "/projects/:projectId/duplicates",
-    component: () => <Browse view="duplicates" />,
-  },
-  {
-    path: "/projects/:projectId/sessions/:sessionId",
-    component: lazy(() =>
-      import("./routes/Session").then((m) => ({ default: m.Session })),
-    ),
-  },
-  {
-    path: "/projects/:projectId/sessions",
-    component: () => <Browse view="sessions" />,
-  },
-  {
-    path: "/projects/:projectId/imports",
-    component: () => <Browse view="imports" />,
-  },
-  {
-    path: "/search",
-    component: () => <Browse view="workspace-search" />,
-  },
-  {
-    path: "/projects/:projectId/search",
-    component: () => <Browse view="search" />,
-  },
-  { path: "/projects/:projectId", component: () => <Browse view="project" /> },
   ...devOnlyRoutes,
-  { path: "*", component: NotFound },
 ];
 
 const RemoteGatewayAuthGate: Component<ParentProps> = (props) => {
@@ -238,9 +253,7 @@ const RemoteGatewayAuthGate: Component<ParentProps> = (props) => {
 };
 
 /**
- * Router root: provides the workspace (project list + connection state) to
- * every route. `client` is injected by tests; production uses the
- * same-origin client.
+ * Router root: provides the workspace data context to every route.
  */
 export function createAppRoot(
   client?: ApiClient,
@@ -254,7 +267,7 @@ export function createAppRoot(
 }
 
 export const App: Component = () => {
-  theme(); // apply the persisted/system theme before first paint
+  theme();
   return (
     <Router base={ROUTER_BASE} root={createAppRoot()}>
       {routes}

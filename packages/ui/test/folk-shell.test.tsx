@@ -101,7 +101,7 @@ describe("Folk shell status", () => {
       expect(badge).toHaveAttribute("data-folk-state", "anonymous"),
     );
     expect(badge.getAttribute("aria-label")).toContain("Not signed in");
-    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument();
     fireEvent.click(badge);
 
     expect(await screen.findByTestId("folk-status-panel")).toBeInTheDocument();
@@ -246,7 +246,6 @@ describe("Folk shell status", () => {
         "expired",
       ),
     );
-    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument();
   });
 
@@ -262,7 +261,7 @@ describe("Folk shell status", () => {
     await waitFor(() =>
       expect(badge).toHaveAttribute("data-folk-state", "hosted"),
     );
-    expect(screen.queryByText("You", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("account-avatar")).not.toBeInTheDocument();
     fireEvent.click(badge);
     expect(await screen.findByTestId("folk-status-detail")).toHaveTextContent(
       "lore start --local",

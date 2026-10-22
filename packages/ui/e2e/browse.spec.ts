@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectConnectionStatus, setTheme } from "./helpers";
 
 const FUTURE_ACTIONS = [
   "Save note",
@@ -13,14 +14,13 @@ test.describe("real data browsing", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
 
-    // `/` shows the navigation pane on every breakpoint (no list pane yet).
-    const nav = page.getByRole("navigation", { name: "Workspace" });
-    const project = nav.getByTestId("nav-project").filter({ hasText: "lore" });
+    // The workspace list stays mounted as project routes render in the document pane.
+    const project = page
+      .locator('[data-pane="list"]')
+      .getByTestId("nav-project")
+      .filter({ hasText: "lore" });
     await expect(project).toBeVisible();
     await project.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
@@ -88,10 +88,7 @@ test.describe("real data browsing", () => {
   }) => {
     await page.goto("/ui/knowledge/does-not-exist");
     await expect(page.getByText("Knowledge entry not found")).toBeVisible();
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
   });
 
   test("search entry opens workspace-wide knowledge search", async ({
@@ -123,15 +120,15 @@ test.describe("real data browsing", () => {
       "system",
     );
     await expect(html).not.toHaveClass(/dark/);
-    await page.getByTestId("theme-dark").click();
+    await setTheme(page, "dark");
     await expect(html).toHaveClass(/dark/);
     await page.reload();
     await expect(html).toHaveClass(/dark/);
-    await expect(page.getByTestId("theme-dark")).toHaveAttribute(
-      "aria-pressed",
-      "true",
+    await expect(page.getByTestId("theme-toggle")).toHaveAttribute(
+      "data-theme-choice",
+      "dark",
     );
-    await page.getByTestId("theme-system").click();
+    await setTheme(page, "system");
     await expect(html).not.toHaveClass(/dark/);
   });
 
@@ -165,9 +162,6 @@ test.describe("real data browsing", () => {
     expect(headers["content-encoding"]).toBe("br");
     expect(headers["vary"]).toMatch(/accept-encoding/i);
     // The page actually booted from the encoded script.
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
   });
 });

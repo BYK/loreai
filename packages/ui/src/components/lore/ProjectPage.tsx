@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createSignal } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useNavigate, useSearchParams } from "@solidjs/router";
 
 import type { ProjectSummary, RecallScope } from "~/contracts";
 import { formatWhen, pluralize } from "~/lib/format";
@@ -13,6 +13,7 @@ import {
   sessionHref,
   searchHref,
   duplicatesHref,
+  withWorkspaceFilter,
 } from "~/lib/href";
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
@@ -32,6 +33,12 @@ import { TextField, TextFieldInput } from "../ui/text-field";
 export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   const ws = useWorkspace();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const withQuery = (href: string) =>
+    withWorkspaceFilter(
+      href,
+      typeof searchParams.list_q === "string" ? searchParams.list_q : "",
+    );
   const [scope, setScope] = createSignal<RecallScope>("all");
   const sessions = ws.state.sessions.page(() => ({
     projectId: props.project.id,
@@ -91,7 +98,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                     <A
                       class="text-xs text-accent underline"
                       data-testid="project-alias"
-                      href={projectHref(alias.id)}
+                      href={withQuery(projectHref(alias.id))}
                     >
                       {alias.name || alias.path}
                     </A>
@@ -109,7 +116,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           <A
             class="text-xs text-accent underline"
             data-testid="review-duplicates-link"
-            href={duplicatesHref(props.project.id)}
+            href={withQuery(duplicatesHref(props.project.id))}
           >
             Review duplicates
           </A>
@@ -134,13 +141,13 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           <div class="flex items-center gap-3">
             <A
               class="text-xs text-accent underline"
-              href={importsHref(props.project.id)}
+              href={withQuery(importsHref(props.project.id))}
             >
               Import history →
             </A>
             <A
               class="text-xs text-accent underline"
-              href={sessionsHref(props.project.id)}
+              href={withQuery(sessionsHref(props.project.id))}
             >
               All sessions →
             </A>
@@ -157,7 +164,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             <For each={recent()}>
               {(session) => (
                 <ListRow
-                  href={sessionHref(props.project.id, session.session_id)}
+                  href={withQuery(
+                    sessionHref(props.project.id, session.session_id),
+                  )}
                   title={session.session_id}
                   preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
                   footRight={formatWhen(session.last_message_at)}
@@ -172,7 +181,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           <div class="eyebrow">Knowledge</div>
           <A
             class="text-xs text-accent underline"
-            href={knowledgeListHref(props.project.id)}
+            href={withQuery(knowledgeListHref(props.project.id))}
           >
             Browse knowledge ({props.project.knowledge_count}) →
           </A>
@@ -185,7 +194,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             const data = new FormData(event.currentTarget);
             const rawQ = data.get("q");
             const q = typeof rawQ === "string" ? rawQ : "";
-            navigate(searchHref(props.project.id, q, scope()));
+            navigate(withQuery(searchHref(props.project.id, q, scope())));
           }}
         >
           <TextField class="min-w-0 flex-1">

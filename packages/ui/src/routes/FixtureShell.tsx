@@ -5,7 +5,7 @@ import * as DialogPrimitive from "@kobalte/core/dialog";
 
 import { cn } from "~/lib/utils";
 
-import { AppBar } from "./AppBar";
+import { AppBar } from "~/components/shell/AppBar";
 
 export type MobilePane = "nav" | "list" | "detail";
 
@@ -33,7 +33,7 @@ const PANE_SCROLL = "min-w-0 lg:h-[calc(100dvh-62px)] lg:overflow-y-auto";
  *          navigation opens as a drawer
  *  - < md: exactly one pane (`mobilePane`), with a back link in the app bar
  */
-export const Shell: Component<ShellProps> = (props) => {
+export const FixtureShell: Component<ShellProps> = (props) => {
   const [navOpen, setNavOpen] = createSignal(false);
   let navOpener: HTMLElement | null = null;
   const setNavigationOpen = (open: boolean) => {

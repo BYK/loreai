@@ -1,14 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { expectConnectionStatus } from "./helpers";
 
 test.describe("contradiction groups (#1919)", () => {
   test("groups pairs by project with a cross-project group last", async ({
     page,
   }) => {
     await page.goto("/ui/contradictions");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectConnectionStatus(page);
 
     // Other specs dismiss seeded scratch pairs (and retries dismiss more), so
     // the open counts are derived from the API rather than hardcoded.

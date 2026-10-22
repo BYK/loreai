@@ -15,10 +15,20 @@ function modelCells(page: Page) {
 test.describe("model usage page", () => {
   test("nav, chart, totals table, sorting and export", async ({ page }) => {
     await page.goto(PAGE);
+    const openNavigation = page.getByTestId("open-nav");
+    const navigationIsDrawer = await openNavigation.isVisible();
+    if (navigationIsDrawer) {
+      await openNavigation.click();
+      await expect(page.getByTestId("nav-drawer")).toBeVisible();
+    }
     await expect(page.getByTestId("nav-model-usage")).toHaveAttribute(
       "aria-current",
       "page",
     );
+    if (navigationIsDrawer) {
+      await page.getByTestId("nav-model-usage").click();
+      await expect(page.getByTestId("nav-drawer")).not.toBeVisible();
+    }
     await expect(page.locator("svg.flow-svg")).toBeVisible();
     await expect(page.getByTestId("chart-status")).toContainText(
       "8 active session-days",

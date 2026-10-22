@@ -44,7 +44,7 @@ import {
 } from "~/components/reader/SessionBlock";
 import { StateCard } from "~/components/lore/StateCard";
 import { ConnectionStatus } from "~/components/shell/Nav";
-import { Shell } from "~/components/shell/Shell";
+import { FixtureShell } from "./FixtureShell";
 import { Badge } from "~/components/ui/badge";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import { cn } from "~/lib/utils";
@@ -539,7 +539,7 @@ export const Fixture: Component = () => {
 
   return (
     <ConnectionContext.Provider value={connection}>
-      <Shell
+      <FixtureShell
         banner={<FixtureBanner />}
         nav={() => <FixtureNav />}
         list={

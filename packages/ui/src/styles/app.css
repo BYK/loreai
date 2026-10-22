@@ -61,6 +61,16 @@
   --avatar-text: var(--g2); /* website --highlight-text */
   --avatar-agent-bg: var(--g0); /* website --inverse-bg */
   --avatar-agent-text: var(--c0); /* website --inverse-text */
+  --pastel-sage: #dcebdd;
+  --pastel-sky: #dfeaf2;
+  --pastel-sand: #f0e8d7;
+  --pastel-rose: #f1dfdc;
+  --pastel-lilac: #e8e2ef;
+  --hairline: color-mix(in srgb, var(--line) 52%, var(--surface));
+  --selected: var(--pastel-sage);
+  --selected-text: var(--g0);
+  --unread: #dfc5c2;
+  --unread-soft: color-mix(in srgb, var(--pastel-rose) 45%, var(--surface));
 
   /* Elevation — the website's two card shadows (theme.css .card / .feature). */
   --shadow-soft: 0 4px 14px rgba(26, 51, 32, 0.06);
@@ -100,6 +110,16 @@
   --avatar-text: #bfe0c4; /* website --highlight-text */
   --avatar-agent-bg: #1e3a29; /* website --inverse-bg */
   --avatar-agent-text: #f2f7ee; /* website --inverse-text */
+  --pastel-sage: #293a2d;
+  --pastel-sky: #26343d;
+  --pastel-sand: #3a3428;
+  --pastel-rose: #3d2e2d;
+  --pastel-lilac: #342e3c;
+  --hairline: color-mix(in srgb, var(--line) 48%, var(--surface));
+  --selected: var(--pastel-sage);
+  --selected-text: #dce9de;
+  --unread: #493331;
+  --unread-soft: color-mix(in srgb, var(--pastel-rose) 65%, var(--surface));
 
   --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.28);
   --shadow-lifted: 0 14px 34px rgba(0, 0, 0, 0.38); /* website .modal */
@@ -144,6 +164,16 @@
   --color-danger-soft: var(--danger-soft);
   --color-thread: var(--thread);
   --color-quote-edge: var(--quote-edge);
+  --color-pastel-sage: var(--pastel-sage);
+  --color-pastel-sky: var(--pastel-sky);
+  --color-pastel-sand: var(--pastel-sand);
+  --color-pastel-rose: var(--pastel-rose);
+  --color-pastel-lilac: var(--pastel-lilac);
+  --color-hairline: var(--hairline);
+  --color-selected: var(--selected);
+  --color-selected-text: var(--selected-text);
+  --color-unread: var(--unread);
+  --color-unread-soft: var(--unread-soft);
 
   /* Solid UI (shadcn) semantic names used by the copied components in
      src/components/ui. Mapped onto the Lore tokens above so the copied

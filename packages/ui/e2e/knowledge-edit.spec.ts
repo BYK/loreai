@@ -288,7 +288,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     });
     await page.goto(`/ui/projects/${projectId}/knowledge`);
     const tableEntry = page
-      .locator('[data-pane="detail"] [data-testid="knowledge-row"]')
+      .locator('[data-pane="document"] [data-testid="knowledge-row"]')
       .filter({ hasText: seedTitle });
     await expect(tableEntry).toBeVisible();
     await tableEntry.click();
@@ -423,7 +423,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
         .filter({ hasText: titleDraft }),
     ).toHaveCount(0);
     const projectNav = page.locator(
-      `[data-pane="nav"] [data-testid="nav-project"][href$="/projects/${projectId}"]`,
+      `[data-pane="list"] [data-testid="nav-project"][href$="/projects/${projectId}"]`,
     );
     await expect(projectNav.locator("span").last()).toHaveText(
       String(initialKnowledgeCount - 1),
