@@ -34,6 +34,33 @@ import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import { boundFallbackHistory } from "../src/fallback-history";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 
+// Shapes emitted by the Codex CLI bundled with the Desktop app.
+const CODEX_NATIVE_TOOLS = [
+  {
+    type: "custom",
+    name: "apply_patch",
+    description: "Apply a patch",
+    format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+  },
+  {
+    type: "tool_search",
+    execution: "client",
+    description: "Find available tools",
+    parameters: { type: "object", properties: { query: { type: "string" } } },
+  },
+  {
+    type: "web_search",
+    external_web_access: false,
+    search_content_types: ["text"],
+  },
+  {
+    type: "namespace",
+    name: "functions",
+    description: "Available functions",
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
+  },
+];
+
 const png =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9FeAAAAABJRU5ErkJggg==";
 const dataURL = `data:image/png;base64,${png}`;
@@ -119,7 +146,11 @@ describe("cross-provider request conformance through real forwarding", () => {
     body: Record<string, unknown>,
     shouldDispatch = true,
     beforeRequest?: () => void | Promise<void>,
-    options?: { upstreamCalls?: number; headers?: Record<string, string> },
+    options?: {
+      upstreamCalls?: number;
+      headers?: Record<string, string>;
+      omitProvider?: boolean;
+    },
   ): Promise<{
     response: Response;
     upstream: Record<string, unknown>;
@@ -157,7 +188,9 @@ describe("cross-provider request conformance through real forwarding", () => {
               ? "/v1beta/models/gemini-test:generateContent"
               : provider === "openrouter"
                 ? "/api/v1/chat/completions"
-                : "/v1/responses",
+                : path === "/v1/codex/responses"
+                  ? "/codex/responses"
+                  : "/v1/responses",
       })
       .reply((opts) => {
         if (
@@ -194,7 +227,9 @@ describe("cross-provider request conformance through real forwarding", () => {
       headers: {
         "content-type": "application/json",
         authorization: "Bearer test-key",
-        ...(provider === "gemini" ? {} : { "x-lore-provider": provider }),
+        ...(provider === "gemini" || options?.omitProvider
+          ? {}
+          : { "x-lore-provider": provider }),
         "x-lore-project": projectPath,
         "x-lore-agent": "coder",
         "x-lore-no-store": "true",
@@ -1057,6 +1092,85 @@ describe("cross-provider request conformance through real forwarding", () => {
   );
 
   it.each([false, true])(
+    "forwards Codex native tool definitions unchanged (streamed=%s)",
+    async (streamed) => {
+      const { upstream } = await forward("/v1/responses", "openai", {
+        model: "gpt-test",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [{ role: "user", content: "help with this code" }],
+        tools: CODEX_NATIVE_TOOLS,
+      });
+      expect(upstream.tools).toEqual(CODEX_NATIVE_TOOLS);
+    },
+  );
+
+  it.each(["anthropic"] as const)(
+    "rejects Codex native tools before dispatch to %s",
+    async (provider) => {
+      const { response } = await forward(
+        "/v1/responses",
+        provider,
+        {
+          model:
+            provider === "anthropic"
+              ? "claude-test"
+              : provider === "gemini"
+                ? "gemini-test"
+                : "openai/gpt-test",
+          input: [{ role: "user", content: "help with this code" }],
+          tools: CODEX_NATIVE_TOOLS,
+        },
+        false,
+      );
+      expect(response.status).toBe(400);
+    },
+  );
+
+  it.each([false, true])(
+    "replays Codex native custom-tool history before the next user turn (streamed=%s)",
+    async (streamed) => {
+      const call = {
+        type: "custom_tool_call",
+        id: "ctc_patch",
+        call_id: "patch",
+        name: "apply_patch",
+        input: "*** Begin Patch\n*** End Patch",
+      };
+      const result = {
+        type: "custom_tool_call_output",
+        call_id: "patch",
+        output: "Patch applied",
+      };
+      const { upstream } = await forward("/v1/responses", "openai", {
+        model: "gpt-test",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [
+          { role: "user", content: "apply the patch" },
+          call,
+          result,
+          { role: "user", content: "continue" },
+        ],
+        tools: [CODEX_NATIVE_TOOLS[0]],
+      });
+      expect(upstream.input).toEqual(expect.arrayContaining([call, result]));
+      const items = upstream.input as unknown[];
+      expect(
+        items.findIndex(
+          (item) => JSON.stringify(item) === JSON.stringify(call),
+        ),
+      ).toBeLessThan(
+        items.findIndex(
+          (item) => JSON.stringify(item) === JSON.stringify(result),
+        ),
+      );
+    },
+  );
+
+  it.each([false, true])(
     "preserves client parallel tool calls on native Responses (streamed=%s)",
     async (streamed) => {
       const tool = {
@@ -1580,7 +1694,7 @@ describe("cross-provider request conformance through real forwarding", () => {
           : "continue\n\n\n",
       };
       const { upstream } = await forward(
-        "/v1/responses",
+        "/v1/codex/responses",
         "openai",
         {
           model: "gpt-test",
@@ -1591,7 +1705,7 @@ describe("cross-provider request conformance through real forwarding", () => {
         },
         true,
         async () => {
-          const accepted = await harness!.request("/v1/responses", {
+          const accepted = await harness!.request("/v1/codex/responses", {
             method: "POST",
             headers: {
               "content-type": "application/json",
@@ -2470,25 +2584,26 @@ describe("cross-provider request conformance through real forwarding", () => {
     });
   });
 
-  it("rejects native Responses instructions after conversation items instead of reordering", async () => {
-    const { response } = await forward(
+  it("replays native Responses instructions after conversation items in place", async () => {
+    const input = [
+      { type: "message", role: "user", content: "A" },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "B" }],
+      },
+      { type: "message", role: "user", content: "C" },
+    ];
+    const { upstream } = await forward(
       "/v1/responses",
       "openai",
       {
         model: "gpt-test",
-        input: [
-          { type: "message", role: "user", content: "A" },
-          {
-            type: "message",
-            role: "developer",
-            content: [{ type: "input_text", text: "B" }],
-          },
-          { type: "message", role: "user", content: "C" },
-        ],
+        input,
       },
-      false,
+      true,
     );
-    expect(response.status).toBe(400);
+    expect(upstream.input).toEqual(input);
   });
 
   it("rejects native Responses developer items after a reasoning item", async () => {
@@ -3086,6 +3201,33 @@ describe("cross-provider request conformance through real forwarding", () => {
       response_format: responseFormat,
     });
     expect(upstream.response_format).toEqual(responseFormat);
+  });
+
+  it("forwards Codex output settings on the default OpenAI model route", async () => {
+    const tools = CODEX_NATIVE_TOOLS;
+    const text = { format: { type: "text" }, verbosity: "low" };
+    const instruction = {
+      type: "message",
+      id: "msg_developer",
+      role: "developer",
+      content: [{ type: "input_text", text: "Follow project instructions" }],
+    };
+    const { upstream } = await forward(
+      "/v1/responses",
+      "openai",
+      {
+        model: "gpt-test",
+        tools,
+        text,
+        input: [instruction, { role: "user", content: "Reply ok" }],
+      },
+      true,
+      undefined,
+      { omitProvider: true },
+    );
+    expect(upstream.text).toEqual(text);
+    expect(upstream.tools).toEqual(expect.arrayContaining(tools));
+    expect(upstream.input).toEqual(expect.arrayContaining([instruction]));
   });
 
   it("rejects a Responses JSON schema routed to an incompatible Chat endpoint", async () => {
@@ -4096,7 +4238,7 @@ describe("cross-provider request conformance through real forwarding", () => {
   );
 
   it.each([false, true])(
-    "rejects late Responses instructions before an amnesia slash command (streamed=%s)",
+    "rejects late Responses instructions before an amnesia slash command on another provider (streamed=%s)",
     async (streamed) => {
       const sessionID = `late-responses-slash-${streamed}`;
       const { response } = await forward(
@@ -4146,7 +4288,13 @@ describe("cross-provider request conformance through real forwarding", () => {
           );
           expect(session?.amnesia).toBe(true);
         },
-        { upstreamCalls: 2, headers: { "x-lore-session-id": sessionID } },
+        {
+          upstreamCalls: 2,
+          headers: {
+            "x-lore-session-id": sessionID,
+            "x-lore-provider": "anthropic",
+          },
+        },
       );
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({
@@ -4159,6 +4307,169 @@ describe("cross-provider request conformance through real forwarding", () => {
         (candidate) => candidate.headerSessionId === sessionID,
       );
       expect(session?.amnesia).toBe(true);
+    },
+  );
+
+  it.each([false, true])(
+    "replays late Codex developer instructions in place when Lore is enabled mid-session (streamed=%s)",
+    async (streamed) => {
+      const lateInstruction = {
+        type: "message",
+        role: "developer",
+        content: "late Codex instruction",
+      };
+      const { upstream } = await forward("/v1/codex/responses", "openai", {
+        model: "gpt-5-codex",
+        instructions: "Codex session instructions",
+        previous_response_id: "resp_before_lore",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [
+          { type: "message", role: "user", content: "earlier task" },
+          lateInstruction,
+          { type: "message", role: "assistant", content: "earlier answer" },
+          { type: "message", role: "user", content: "continue the task" },
+        ],
+      });
+
+      expect(upstream.instructions).toContain("Codex session instructions");
+      expect(upstream.instructions).not.toContain(lateInstruction.content);
+      expect(upstream.input).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: "earlier task",
+        },
+        lateInstruction,
+        {
+          type: "message",
+          role: "assistant",
+          content: "earlier answer",
+        },
+        {
+          type: "message",
+          role: "user",
+          content: "continue the task",
+        },
+      ]);
+      expect(upstream.previous_response_id).toBeUndefined();
+    },
+  );
+
+  it.each([false, true])(
+    "replays late Codex instructions before a native user item (streamed=%s)",
+    async (streamed) => {
+      const lateInstruction = {
+        type: "message",
+        role: "developer",
+        content: "late Codex instruction",
+      };
+      const nativeUser = {
+        type: "message",
+        role: "user",
+        id: "msg_after_late_instruction",
+        status: "completed",
+        content: [{ type: "input_text", text: "continue the task" }],
+      };
+      const { upstream } = await forward("/v1/codex/responses", "openai", {
+        model: "gpt-5-codex",
+        instructions: "Codex session instructions",
+        previous_response_id: "resp_before_lore",
+        ...(streamed
+          ? { padding: "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) }
+          : {}),
+        input: [
+          { type: "message", role: "user", content: "earlier task" },
+          { type: "message", role: "assistant", content: "earlier answer" },
+          lateInstruction,
+          nativeUser,
+        ],
+      });
+
+      expect(upstream.input).toEqual([
+        { type: "message", role: "user", content: "earlier task" },
+        { type: "message", role: "assistant", content: "earlier answer" },
+        lateInstruction,
+        nativeUser,
+      ]);
+      expect(upstream.previous_response_id).toBeUndefined();
+    },
+  );
+
+  it.each([1, 4] as const)(
+    "preserves late Codex developer instructions through Layer %i",
+    async (layer) => {
+      const sessionID = `late-codex-instruction-layer-${layer}`;
+      const lateInstruction = {
+        type: "message",
+        role: "developer",
+        content: "late Codex instruction",
+      };
+      const { upstream } = await forward(
+        "/v1/responses",
+        "openai",
+        {
+          model: "gpt-5-codex",
+          instructions: "Codex session instructions",
+          previous_response_id: "resp_before_lore",
+          input: [
+            { type: "message", role: "user", content: "earlier task" },
+            { type: "message", role: "assistant", content: "earlier answer" },
+            lateInstruction,
+            {
+              type: "message",
+              role: "assistant",
+              content: "answer under the late instruction",
+            },
+            { type: "message", role: "user", content: "continue the task" },
+          ],
+        },
+        true,
+        async () => {
+          const accepted = await harness!.request("/v1/responses", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: "Bearer test-key",
+              "x-lore-provider": "openai",
+              "x-lore-project": projectPath!,
+              "x-lore-agent": "coder",
+              "x-lore-session-id": sessionID,
+            },
+            body: JSON.stringify({
+              model: "gpt-test",
+              input: [{ role: "user", content: "start" }],
+            }),
+          });
+          expect(accepted.status, await accepted.text()).toBe(200);
+          const session = [...getActiveSessions().values()].find(
+            (candidate) => candidate.headerSessionId === sessionID,
+          );
+          if (!session || session.storageTenantId === undefined)
+            throw new Error("missing accepted session owner");
+          core.withTenant(session.storageTenantId, () =>
+            core.setForceMinLayer(layer, session.sessionID),
+          );
+        },
+        { upstreamCalls: 2, headers: { "x-lore-session-id": sessionID } },
+      );
+
+      const session = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionID,
+      );
+      if (!session) throw new Error("missing accepted session");
+      expect(core.getLastLayer(session.sessionID)).toBe(layer);
+      const input = upstream.input as Array<Record<string, unknown>>;
+      const instructionIndex = input.findIndex(
+        (item) => JSON.stringify(item) === JSON.stringify(lateInstruction),
+      );
+      expect(instructionIndex).toBeGreaterThanOrEqual(0);
+      expect(input[instructionIndex + 1]).toMatchObject({
+        type: "message",
+        role: "assistant",
+      });
+      expect(upstream.previous_response_id).toBeUndefined();
     },
   );
 

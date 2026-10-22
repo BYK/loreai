@@ -1,3 +1,7 @@
+import {
+  nativeResponsesCall,
+  stripUnknownNativeResponsesCallFields,
+} from "../translate/responses-tools";
 /**
  * OpenAI Responses API SSE stream accumulator.
  *
@@ -851,9 +855,17 @@ export function finalizeResponsesAcc(
   state: ResponsesAccState,
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
-  const sortedIndices = Array.from(state.items.keys()).sort((a, b) => a - b);
+  const sortedIndices = Array.from(
+    new Set([...state.items.keys(), ...state.rawItems.keys()]),
+  ).sort((a, b) => a - b);
 
   for (const index of sortedIndices) {
+    const raw = state.rawItems.get(index);
+    const native = raw ? nativeResponsesCall(raw, "response") : null;
+    if (native) {
+      content.push(native);
+      continue;
+    }
     const item = state.items.get(index);
     if (!item) continue;
     if (item.type === "text") {
@@ -926,7 +938,8 @@ export function finalizeResponsesAcc(
     rawOutputItems: Array.from(state.rawItems.entries())
       .sort(([a], [b]) => a - b)
       .map(([, item]) => item)
-      .filter((item) => item.type !== "item_reference"),
+      .filter((item) => item.type !== "item_reference")
+      .map(stripUnknownNativeResponsesCallFields),
     stopReason,
     usage: state.usage,
     usageComplete: state.usageComplete,

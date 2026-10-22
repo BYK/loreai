@@ -17,7 +17,11 @@ import {
   rememberSpeculativeSource,
   SPECULATIVE_SOURCE_MAX_MESSAGES,
 } from "./speculative-source";
-import type { GatewayMessage, GatewayRequest } from "./translate/types";
+import type {
+  GatewayMessage,
+  GatewayMessageProvenance,
+  GatewayRequest,
+} from "./translate/types";
 
 type Stage =
   | "awaiting"
@@ -220,24 +224,17 @@ export class PreparationTiming {
 export function responsesProvenanceByMessageId(
   messages: GatewayMessage[],
   loreMessages: LoreMessageWithParts[],
-): ReadonlyMap<
-  string,
-  Pick<GatewayMessage, "content" | "provenanceContent" | "provenancePositions">
-> {
-  const result = new Map<
-    string,
-    Pick<
-      GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
-    >
-  >();
+): ReadonlyMap<string, GatewayMessageProvenance> {
+  const result = new Map<string, GatewayMessageProvenance>();
   for (let i = 0; i < loreMessages.length; i++) {
     const original = messages[i];
-    if (original?.provenanceContent)
+    if (original?.provenanceContent || original?.responsesInstructions)
       result.set(loreMessages[i].info.id, {
+        role: original.role,
         content: original.content,
         provenanceContent: original.provenanceContent,
         provenancePositions: original.provenancePositions,
+        responsesInstructions: original.responsesInstructions,
       });
   }
   return result;
@@ -439,8 +436,12 @@ export async function prepareSemanticMessages(input: {
       ),
     );
   input.signal?.throwIfAborted();
+  const checkpointProtocol = input.checkpointProtocol ?? input.protocol;
+  const lastMessage = raw.at(-1);
   if (
     checkpoint &&
+    checkpointProtocol &&
+    lastMessage &&
     !input.sourcePrefix &&
     !input.noStore &&
     raw.length >= 64 &&
@@ -449,11 +450,11 @@ export async function prepareSemanticMessages(input: {
     timing.measure("speculative_cache", () =>
       rememberSpeculativeSource(input.sessionID, {
         projectPath: input.projectPath,
-        protocol: input.checkpointProtocol ?? input.protocol!,
+        protocol: checkpointProtocol,
         sourceCount,
         sourceDigest: checkpoint.digest,
         fallbackReason: checkpoint.reason,
-        lastMessageID: raw.at(-1)!.info.id,
+        lastMessageID: lastMessage.info.id,
         offset: checkpoint.offset,
         raw,
         resolvedTokens: checkpoint.capturedResolvedTokens,

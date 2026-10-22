@@ -18,6 +18,8 @@ import {
   saveGradientState,
   SourceWindowStore,
   withSavepoint,
+  isToolPart,
+  type LoreToolPart,
 } from "@loreai/core";
 import { close } from "../../core/src/db";
 import {
@@ -330,6 +332,120 @@ it("accepts a suffix against the retained Lore checkpoint", async () => {
   expect(delta.loreMessages).toHaveLength(prefix.length + 1);
 });
 
+it("pairs reused native call IDs in source order across a checkpoint suffix", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const callID = "reused-native-call";
+  const toolTurn = (
+    label: string,
+    output: string,
+    isError = false,
+  ): GatewayMessage[] => [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: callID,
+          name: "read",
+          input: { label },
+          responsesCall: {
+            type: "function_call",
+            id: `item-${label}`,
+            call_id: callID,
+            name: "read",
+            arguments: JSON.stringify({ label }),
+            status: "completed",
+          },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: callID,
+          toolName: "read",
+          ...(isError ? { isError: true } : {}),
+          content: [{ type: "text", text: output }],
+          responsesOutput: {
+            type: "function_call_output",
+            id: `output-${label}`,
+            call_id: callID,
+            status: "completed",
+          },
+        },
+      ],
+    },
+  ];
+  const completedPrefix = toolTurn("prefix", "prefix result");
+  const missingResultPrefix = toolTurn("middle", "middle result");
+  const prefix = [
+    ...semanticHistory(6).messages,
+    ...completedPrefix,
+    missingResultPrefix[0],
+  ];
+  const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
+  accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
+
+  const suffix = toolTurn("suffix", "suffix error", true);
+  suffix[1].content.push({
+    type: "tool_result",
+    toolUseId: callID,
+    toolName: "read",
+    content: [{ type: "text", text: "orphan result" }],
+    responsesOutput: {
+      type: "function_call_output",
+      id: "output-orphan",
+      call_id: callID,
+      status: "completed",
+    },
+  });
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    stream: true,
+  });
+  const delta = await prepareSemanticMessages({
+    messages: suffix,
+    projectPath,
+    sessionID,
+    noStore: false,
+    protocol: "openai-responses",
+    checkpointProtocol,
+    checkpointBoundarySafe: true,
+    sourcePrefix: {
+      sourceCount: prefix.length,
+      sourceDigest: digestChain(prefix),
+    },
+    timing,
+  });
+
+  expect(timing.observations.source_checkpoint_hit).toBe(1);
+  expect(timing.observations.source_converted_messages).toBe(suffix.length);
+  const calls = delta.loreMessages
+    .flatMap((message) => message.parts)
+    .filter(
+      (part): part is LoreToolPart =>
+        isToolPart(part) && part.tool !== "result" && part.callID === callID,
+    );
+  expect(calls).toHaveLength(3);
+  expect(
+    calls.map((part) =>
+      part.state.status === "completed"
+        ? part.state.output
+        : part.state.status === "error"
+          ? part.state.error
+          : null,
+    ),
+  ).toEqual(["prefix result", null, "suffix error"]);
+  expect(calls.map((part) => part.state.status)).toEqual([
+    "completed",
+    "pending",
+    "error",
+  ]);
+});
+
 it("refuses a suffix when its retained checkpoint is unavailable", async () => {
   const timing = new PreparationTiming({
     protocol: "openai-responses",
@@ -452,6 +568,104 @@ it.each([false, true])(
     expect(actualWire).toEqual(render(expected, full));
   },
 );
+
+it("retains late Responses instructions in a complete source checkpoint", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const source = messages.slice(0, 6);
+  const instruction = {
+    id: "msg_late_instruction",
+    type: "message" as const,
+    role: "developer" as const,
+    content: "late instruction survives checkpoint replay",
+  };
+  source[1] = { ...source[1], responsesInstructions: [instruction] };
+
+  accept((await prepare(source)).prepared);
+  const unchanged = await prepare(source);
+  expect(unchanged.timing.observations.source_checkpoint_hit).toBe(1);
+  expect([...unchanged.prepared.provenanceByMessageId.values()]).toContainEqual(
+    expect.objectContaining({ responsesInstructions: [instruction] }),
+  );
+
+  const next: GatewayMessage[] = [
+    ...source,
+    {
+      role: "user",
+      content: [{ type: "text", text: "continue" }],
+    },
+  ];
+  const appended = await prepare(next);
+  expect(appended.timing.observations.source_checkpoint_hit).toBe(1);
+  expect([...appended.prepared.provenanceByMessageId.values()]).toContainEqual(
+    expect.objectContaining({ responsesInstructions: [instruction] }),
+  );
+});
+
+it("replays late Responses instructions when compression drops their seam", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const source = messages.slice(0, 6).map((message, index) => ({
+    ...message,
+    provenanceContent: [
+      {
+        type: "opaque" as const,
+        raw: {
+          type: "message",
+          id: `source-${index}`,
+          role: message.role,
+          content: `message ${index}`,
+        },
+        responsesItem: true as const,
+      },
+    ],
+    provenancePositions: [0],
+  }));
+  const instruction = {
+    id: "msg_compressed_instruction",
+    type: "message" as const,
+    role: "developer" as const,
+    content: "late instruction survives gradient compression",
+  };
+  source[1] = { ...source[1], responsesInstructions: [instruction] };
+
+  const { prepared } = await prepare(source);
+  const instructionMessageID = prepared.loreMessages[1]?.info.id;
+  if (!instructionMessageID) throw new Error("missing instruction source ID");
+  const compressedMessages = prepared.loreMessages.filter(
+    (message) => message.info.id !== instructionMessageID,
+  );
+  const replayed = loreMessagesToGateway(
+    compressedMessages,
+    prepared.provenanceByMessageId,
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+  );
+
+  expect(
+    replayed.flatMap((message) => message.responsesInstructions ?? []),
+  ).toEqual([instruction]);
+  const instructionIndex = replayed.findIndex(
+    (message) => message.responsesInstructions?.length,
+  );
+  const previousIndex = replayed.findIndex((message) =>
+    message.content.some(
+      (block) => block.type === "text" && block.text.includes("message 0"),
+    ),
+  );
+  const nextIndex = replayed.findIndex((message) =>
+    message.content.some(
+      (block) => block.type === "text" && block.text.includes("message 2"),
+    ),
+  );
+  expect(instructionIndex).toBeGreaterThan(previousIndex);
+  expect(instructionIndex).toBeLessThan(nextIndex);
+  expect(replayed[instructionIndex]?.content).toEqual([]);
+});
 
 it("reconciles historical edits even when the old boundary is unchanged", async () => {
   accept((await prepare(messages)).prepared);

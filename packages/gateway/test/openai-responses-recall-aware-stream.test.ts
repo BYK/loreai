@@ -105,6 +105,7 @@ const recallCall = (
   args: Record<string, unknown>,
   itemId = `fc_${outputIndex}`,
   callId = `call_${outputIndex}`,
+  namespace?: string | null,
 ) =>
   sseEvent("response.output_item.added", {
     output_index: outputIndex,
@@ -113,6 +114,7 @@ const recallCall = (
       id: itemId,
       call_id: callId,
       name: "recall",
+      ...(namespace === undefined ? {} : { namespace }),
     },
   }) +
   sseEvent("response.function_call_arguments.done", {
@@ -129,6 +131,7 @@ const recallCall = (
       name: "recall",
       arguments: JSON.stringify(args),
       status: "completed",
+      ...(namespace === undefined ? {} : { namespace }),
     },
   });
 
@@ -1327,7 +1330,7 @@ describe("streamResponsesRecallAware", () => {
       streamFrom([
         created("resp_mixed", "gpt-5.6-terra"),
         // recall call at output_index 0
-        recallCall(0, { query: "what is lore" }),
+        recallCall(0, { query: "what is lore" }, undefined, undefined, null),
         // a real (non-recall) tool_call at output_index 1
         sseEvent("response.output_item.added", {
           output_index: 1,

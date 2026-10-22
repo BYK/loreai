@@ -50,6 +50,8 @@ export type GatewayToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
+  /** Native Responses envelope; partial JSON retains its original wire arguments. */
+  responsesCall?: Record<string, unknown>;
   /**
    * Provider-native tool-call part retained for response egress when it carries
    * opaque reasoning/signature metadata (for example Gemini thoughtSignature).
@@ -75,6 +77,8 @@ export type GatewayToolResultBlock = {
   content: GatewayContentBlock[];
   /** Responses output was an array, even when it contained one text part. */
   nativeResponsesOutputArray?: true;
+  /** Native output envelope, excluding its mutable output payload. */
+  responsesOutput?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -107,6 +111,14 @@ export type GatewayContentBlock =
   | GatewayToolUseBlock
   | GatewayToolResultBlock
   | GatewayOpaqueBlock;
+
+/** Validated native Responses instruction item, kept outside visible content. */
+export type GatewayResponsesInstruction = {
+  id?: string;
+  type?: "message";
+  role: "system" | "developer";
+  content: string | Array<{ type: "input_text"; text: string }>;
+};
 
 /**
  * Project a content-block array down to a plain-text representation.
@@ -209,7 +221,23 @@ export type GatewayMessage = {
   provenanceContent?: GatewayContentBlock[];
   /** Index of each visible `content` block inside `provenanceContent`. */
   provenancePositions?: number[];
+  /**
+   * Validated native Responses instructions at this source seam. These remain
+   * separate from user envelopes and opaque provenance through same-route
+   * transforms, then replay immediately before this message.
+   */
+  responsesInstructions?: GatewayResponsesInstruction[];
 };
+
+/**
+ * Persisted or test-provided provenance may predate optional request metadata.
+ * Instruction-bearing entries still require a matching role at replay time.
+ */
+export type GatewayMessageProvenance = Pick<
+  GatewayMessage,
+  "content" | "provenanceContent" | "provenancePositions"
+> &
+  Partial<Pick<GatewayMessage, "role" | "responsesInstructions">>;
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -223,7 +251,7 @@ export type GatewayTool = {
   /** Responses function schema strictness, retained for native replay. */
   strict?: boolean;
   /** Verified native Responses tool definition; never synthesize as a function. */
-  responsesBuiltin?: "web_search_preview";
+  responsesNative?: Record<string, unknown>;
   /** True only for tools injected and owned by the gateway. */
   gatewayOwned?: boolean;
 };
@@ -283,17 +311,14 @@ export type GatewayRequest = {
     previous_response_id?: string;
     /** OpenAI Responses API: reasoning configuration. */
     reasoning?: unknown;
-    /** Native instruction items retained outside the user/assistant history. */
+    /** Native Responses instructions; late items remain at their source seam. */
     nativeInstructionPrefix?: {
       originalInstructions: string;
       normalizedSystem: string;
-      /** Replaying these items before the conversation would change their order. */
+      /** A late instruction is preserved in place and cannot cross protocols. */
       hasLateItems: boolean;
-      items: Array<{
-        type?: "message";
-        role: "system" | "developer";
-        content: string | Array<{ type: "input_text"; text: string }>;
-      }>;
+      /** Leading native instruction items replayed before the conversation. */
+      items: GatewayResponsesInstruction[];
     };
     /** Chat developer content must not inherit another provider's system tier. */
     chatDeveloperInstruction?: boolean;

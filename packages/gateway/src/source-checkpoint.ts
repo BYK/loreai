@@ -8,7 +8,11 @@ import {
   type LoreMessageWithParts,
   type SourceWindow,
 } from "@loreai/core";
-import type { GatewayMessage } from "./translate/types";
+import type {
+  GatewayMessage,
+  GatewayMessageProvenance,
+  GatewayResponsesInstruction,
+} from "./translate/types";
 import type { PreparationTiming } from "./semantic-preparation";
 import {
   CHAIN_DIGEST_SEED,
@@ -33,10 +37,7 @@ function isContextCheckpointProtocol(protocol: string): boolean {
 export const SOURCE_WINDOW_MAX_MESSAGES = 2048;
 const PREFIX_COUNTS = 4096;
 const BLOOM_BYTES = 65_536;
-type Provenance = Pick<
-  GatewayMessage,
-  "content" | "provenanceContent" | "provenancePositions"
->;
+type Provenance = GatewayMessageProvenance;
 interface Payload {
   version: string;
   protocol: string;
@@ -89,6 +90,74 @@ function validPart(part: LoreMessageWithParts["parts"][number]): boolean {
   if (part.state.status === "error")
     return typeof part.state.error === "string";
   return part.state.status === "pending";
+}
+
+function validResponsesInstruction(
+  value: unknown,
+): value is GatewayResponsesInstruction {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (
+    (item.type !== undefined && item.type !== "message") ||
+    (item.id !== undefined && typeof item.id !== "string") ||
+    (item.role !== "developer" && item.role !== "system") ||
+    Object.keys(item).some(
+      (key) => !["type", "id", "role", "content"].includes(key),
+    )
+  ) {
+    return false;
+  }
+  if (typeof item.content === "string") return true;
+  return (
+    Array.isArray(item.content) &&
+    item.content.every((part) => {
+      if (!part || typeof part !== "object" || Array.isArray(part))
+        return false;
+      const block = part as Record<string, unknown>;
+      return (
+        block.type === "input_text" &&
+        typeof block.text === "string" &&
+        Object.keys(block).every((key) => key === "type" || key === "text")
+      );
+    })
+  );
+}
+
+function validProvenance(value: unknown): value is Provenance {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  const provenanceContent = entry.provenanceContent;
+  const provenancePositions = entry.provenancePositions;
+  if (
+    !Array.isArray(entry.content) ||
+    (entry.role !== undefined &&
+      entry.role !== "user" &&
+      entry.role !== "assistant") ||
+    (provenanceContent !== undefined && !Array.isArray(provenanceContent)) ||
+    (provenancePositions !== undefined &&
+      (!Array.isArray(provenancePositions) ||
+        !Array.isArray(provenanceContent) ||
+        provenancePositions.some(
+          (position) =>
+            !Number.isSafeInteger(position) ||
+            (position as number) < 0 ||
+            (position as number) >= provenanceContent.length,
+        ))) ||
+    (entry.responsesInstructions !== undefined &&
+      (!Array.isArray(entry.responsesInstructions) ||
+        entry.responsesInstructions.some(
+          (instruction) => !validResponsesInstruction(instruction),
+        )))
+  ) {
+    return false;
+  }
+  // Older checkpoints have no role field; instruction-bearing entries always do.
+  return (
+    !Array.isArray(entry.responsesInstructions) ||
+    entry.responsesInstructions.length === 0 ||
+    entry.role === "user" ||
+    entry.role === "assistant"
+  );
 }
 
 /** False positives cost a full reconciliation; a false negative must be impossible. */
@@ -174,8 +243,7 @@ function valid(value: unknown, sessionID: string): value is Payload {
         Array.isArray(e) &&
         e.length === 2 &&
         typeof e[0] === "string" &&
-        Array.isArray(e[1]?.content) &&
-        Array.isArray(e[1]?.provenanceContent),
+        validProvenance(e[1]),
     ) &&
     typeof v.toolIds === "string" &&
     Buffer.from(v.toolIds, "base64").length === BLOOM_BYTES &&

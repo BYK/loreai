@@ -1,3 +1,8 @@
+import {
+  assertNoNativeResponsesTools,
+  nativeResponsesCall,
+  stripUnknownNativeResponsesCallFields,
+} from "./translate/responses-tools";
 /**
  * Core request processing pipeline for the Lore gateway.
  *
@@ -172,6 +177,7 @@ import type {
   GatewayProtocol,
   GatewayResponse,
   GatewayMessage,
+  GatewayMessageProvenance,
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
@@ -535,6 +541,13 @@ import {
   parseResolveProjectResult,
   type ResolveProjectResult,
 } from "./synthetic-tools";
+
+function isUnnamespacedResponsesItem(
+  item: { namespace?: unknown } | null | undefined,
+): boolean {
+  // Some upstreams serialize the absent namespace explicitly as null.
+  return item?.namespace === undefined || item.namespace === null;
+}
 
 function requestSourceMessageCount(req: GatewayRequest): number {
   return (
@@ -8049,7 +8062,7 @@ function captureLegacyGlobalAuth(
  * retain the exact route intent used by forwardToUpstream.
  */
 function resolveRequestUpstreamRoute(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
@@ -8072,6 +8085,17 @@ function resolveRequestUpstreamRoute(
     // Explicit request routing is cache-only. An unknown untrusted provider
     // must fail closed without triggering side-channel network activity.
     providerRoute = lookupProviderRoute(providerID, false);
+  }
+  if (
+    !providerRoute &&
+    req.codex === true &&
+    req.rawHeaders["chatgpt-account-id"]?.trim() &&
+    extractAuth(req.rawHeaders)?.scheme === "bearer" &&
+    providerHeader === undefined &&
+    !headerUpstream
+  ) {
+    providerID = "openai-codex";
+    providerRoute = resolveProviderRoute(providerID);
   }
   if (
     !providerRoute &&
@@ -8187,6 +8211,8 @@ function assertCrossProviderRequestControls(
   effectiveProtocol: EffectiveUpstreamProtocol,
 ): void {
   const extras = req.extras;
+  if (effectiveProtocol !== "openai-responses")
+    assertNoNativeResponsesTools(req);
   if (
     ((req.protocol === "openai" && effectiveProtocol !== "openai") ||
       (req.protocol === "openai-responses" &&
@@ -8199,7 +8225,7 @@ function assertCrossProviderRequestControls(
   if (
     req.protocol === "openai-responses" &&
     effectiveProtocol !== "openai-responses" &&
-    (req.tools.some((tool) => tool.responsesBuiltin !== undefined) ||
+    (req.tools.some((tool) => tool.responsesNative !== undefined) ||
       (extras &&
         (Object.hasOwn(extras, "parallel_tool_calls") ||
           Object.hasOwn(extras, "truncation"))) ||
@@ -8364,7 +8390,7 @@ function assertCrossProviderProvenance(
 
 /** Test-only access to the pure foreground route resolver. */
 export function resolveRequestUpstreamRouteForTest(
-  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders" | "codex">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   return resolveRequestUpstreamRoute(req, config);
@@ -8439,7 +8465,8 @@ async function forwardToUpstream(
       ? req.extras?.nativeInstructionPrefix
       : undefined;
   if (
-    nativeInstructions?.hasLateItems ||
+    (nativeInstructions?.hasLateItems &&
+      effectiveProtocol !== "openai-responses") ||
     (req.protocol === "openai" &&
       req.extras?.nativeChatInstructionPrefix?.hasLateItems) ||
     (effectiveProtocol !== "openai-responses" &&
@@ -8453,8 +8480,8 @@ async function forwardToUpstream(
             item.content.some((part) => part.cache_control !== undefined),
         )))
   ) {
-    // A late instruction cannot be moved to the front, and other providers
-    // cannot carry Responses developer instructions at their original tier.
+    // Native Responses replays late instructions from request-only provenance
+    // at their source seam; other protocols cannot preserve that ordering or tier.
     throw new InvalidCrossProviderRequestError();
   }
   if (
@@ -8463,9 +8490,12 @@ async function forwardToUpstream(
     !headerUpstream &&
     effectiveProtocol === "openai-responses" &&
     ((providerRoute && providerRoute.protocol === "openai") ||
-      (!providerRoute && modelRoute?.protocol === "openai"))
+      (!providerRoute &&
+        modelRoute?.protocol === "openai" &&
+        modelRoute.url !== "https://api.openai.com"))
   ) {
-    // A Chat-only provider route cannot represent Responses output controls.
+    // OpenAI model prefixes support both Chat and Responses. Other Chat-only
+    // destinations cannot represent Responses output controls.
     throw new InvalidCrossProviderRequestError();
   }
 
@@ -9478,7 +9508,8 @@ export function buildStreamingResponse(
                 currentResp.content.filter(
                   (block) =>
                     block.type === "tool_use" &&
-                    block.name === RECALL_TOOL_NAME,
+                    block.name === RECALL_TOOL_NAME &&
+                    block.responsesCall === undefined,
                 ).length > 1
               ) {
                 throw new RecallContinuationFailure("parallel_recall");
@@ -11167,6 +11198,7 @@ export function streamResponsesRecallAware(
       if (
         item.type === "function_call" &&
         item.name === RECALL_TOOL_NAME &&
+        isUnnamespacedResponsesItem(item) &&
         item.status !== undefined &&
         item.status !== "in_progress" &&
         item.status !== "completed"
@@ -11654,6 +11686,7 @@ export function streamResponsesRecallAware(
           }
           if (
             item.name === RECALL_TOOL_NAME &&
+            isUnnamespacedResponsesItem(item) &&
             item?.status !== undefined &&
             item.status !== "completed"
           ) {
@@ -13890,7 +13923,11 @@ export function streamResponsesRecallAware(
                 event === "response.output_item.done") &&
               (parsed.item as Record<string, unknown> | undefined)?.type ===
                 "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+              (parsed.item as Record<string, unknown>).name ===
+                RECALL_TOOL_NAME &&
+              isUnnamespacedResponsesItem(
+                parsed.item as Record<string, unknown> | undefined,
+              )
             ) {
               recallDetected = true;
             }
@@ -13923,7 +13960,8 @@ export function streamResponsesRecallAware(
               (index, item) => {
                 if (
                   item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
+                  item.name !== RECALL_TOOL_NAME ||
+                  !isUnnamespacedResponsesItem(item)
                 ) {
                   return;
                 }
@@ -13960,7 +13998,9 @@ export function streamResponsesRecallAware(
             ) {
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
+                item?.type === "function_call" &&
+                item?.name === "recall" &&
+                isUnnamespacedResponsesItem(item);
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
@@ -14121,7 +14161,11 @@ export function streamResponsesRecallAware(
                     !Array.isArray(item) &&
                     (item as Record<string, unknown>).type ===
                       "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                    (item as Record<string, unknown>).name ===
+                      RECALL_TOOL_NAME &&
+                    isUnnamespacedResponsesItem(
+                      item as Record<string, unknown>,
+                    ),
                 )
               ) {
                 recallDetected = true;
@@ -14134,6 +14178,7 @@ export function streamResponsesRecallAware(
                     if (
                       item.type !== "function_call" ||
                       item.name !== RECALL_TOOL_NAME ||
+                      !isUnnamespacedResponsesItem(item) ||
                       (!recallIndices.has(outputIndex) &&
                         !unresolvedToolIndices.has(outputIndex))
                     ) {
@@ -14147,7 +14192,10 @@ export function streamResponsesRecallAware(
                   },
                   (outputIndex, item) => {
                     if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
+                    if (
+                      item.name === RECALL_TOOL_NAME &&
+                      isUnnamespacedResponsesItem(item)
+                    ) {
                       collectCompletedRecall(
                         state,
                         outputIndex,
@@ -14703,7 +14751,8 @@ export function streamResponsesRecallAware(
                               | undefined;
                             if (
                               item?.type === "function_call" &&
-                              item.name === RECALL_TOOL_NAME
+                              item.name === RECALL_TOOL_NAME &&
+                              isUnnamespacedResponsesItem(item)
                             ) {
                               contRecallIndices.add(ci);
                               resolvingRecallTool = true;
@@ -14848,7 +14897,8 @@ export function streamResponsesRecallAware(
                                 (outputIndex, item) => {
                                   if (
                                     item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
+                                    item.name !== RECALL_TOOL_NAME ||
+                                    !isUnnamespacedResponsesItem(item)
                                   ) {
                                     return;
                                   }
@@ -14859,7 +14909,10 @@ export function streamResponsesRecallAware(
                                 },
                                 (outputIndex, item) => {
                                   if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
+                                  if (
+                                    item.name === RECALL_TOOL_NAME &&
+                                    isUnnamespacedResponsesItem(item)
+                                  ) {
                                     collectCompletedRecall(
                                       contState,
                                       outputIndex,
@@ -15316,7 +15369,11 @@ export function streamResponsesRecallAware(
               const visibleResp = {
                 ...finalResp,
                 content: finalResp.content.map((block) => {
-                  if (block.type !== "tool_use" || block.name !== "recall") {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.name !== "recall" ||
+                    block.responsesCall !== undefined
+                  ) {
                     return block;
                   }
                   return {
@@ -15989,7 +16046,8 @@ export function streamResponsesRecallAware(
           failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
             (item) =>
               item.type !== "function_call" ||
-              (item.name !== RECALL_TOOL_NAME &&
+              ((item.name !== RECALL_TOOL_NAME ||
+                !isUnnamespacedResponsesItem(item)) &&
                 ![item.id, item.call_id].some(
                   (identity) =>
                     typeof identity === "string" &&
@@ -16929,6 +16987,7 @@ export function accumulateResponsesNonStreamJSON(
         throw new Error("malformed Responses response item identity");
       }
       identities.add(itemId);
+      const native = nativeResponsesCall(item, "response");
       if (item.type === "message") {
         const msgContent = item.content as
           | Array<Record<string, unknown>>
@@ -16947,6 +17006,11 @@ export function accumulateResponsesNonStreamJSON(
             }
           }
         }
+      } else if (native) {
+        if (identities.has(native.id))
+          throw new Error("malformed Responses response tool identity");
+        identities.add(native.id);
+        content.push(native);
       } else if (item.type === "function_call") {
         let input: unknown = {};
         if (typeof item.arguments === "string") {
@@ -17000,7 +17064,9 @@ export function accumulateResponsesNonStreamJSON(
     id: asString(json.id),
     model: asString(json.model),
     content,
-    rawOutputItems: replayableOutput,
+    rawOutputItems: replayableOutput?.map(
+      stripUnknownNativeResponsesCallFields,
+    ),
     stopReason,
     usageComplete:
       typeof usage?.input_tokens === "number" &&
@@ -23237,6 +23303,8 @@ async function handleConversationTurnPrepared(
       result.layer < 4,
     req.protocol === "openai-responses" &&
       requestUpstreamRoute.effectiveProtocol === "openai-responses",
+    req.protocol === "openai-responses" &&
+      requestUpstreamRoute.effectiveProtocol === "openai-responses",
   );
   removeOrphanedToolResults(transformedMessages);
 
@@ -23253,7 +23321,7 @@ async function handleConversationTurnPrepared(
   // A provider-owned built-in cannot execute recall, and a client's explicit
   // parallel-tool setting must not be replaced by our serial recall policy.
   if (
-    modifiedReq.tools.some((tool) => tool.responsesBuiltin === undefined) &&
+    modifiedReq.tools.some((tool) => tool.responsesNative === undefined) &&
     // Native Gemini built-ins are replayed as an exact tool set. Adding recall
     // here would change the set and invalidate that replay.
     !modifiedReq.metadata.geminiNativeTools &&
@@ -23898,7 +23966,9 @@ async function handleConversationTurnPrepared(
       if (
         currentResp.content.filter(
           (block) =>
-            block.type === "tool_use" && block.name === RECALL_TOOL_NAME,
+            block.type === "tool_use" &&
+            block.name === RECALL_TOOL_NAME &&
+            block.responsesCall === undefined,
         ).length > 1
       )
         return failRecall("parallel_recall");
@@ -25063,18 +25133,26 @@ export function loreMessagesToGateway(
   messages: LoreMessageWithParts[],
   provenanceByMessageId: ReadonlyMap<
     string,
-    Pick<
-      GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
-    >
+    GatewayMessageProvenance
   > = new Map(),
   allowProvenance = true,
   allowNativeUserProvenance = false,
   allowNativeChatTextProvenance = false,
   allowNativeToolOutputProvenance = false,
   nativeToolOutputRoute = false,
+  allowNativeResponsesInstructions = false,
 ): GatewayMessage[] {
   const out: GatewayMessage[] = [];
+  const outputSourceIDs: string[] = [];
+  const sourceResponsesInstructions = [
+    ...provenanceByMessageId.values(),
+  ].flatMap((candidate) => candidate.responsesInstructions ?? []);
+  if (
+    sourceResponsesInstructions.length > 0 &&
+    !allowNativeResponsesInstructions
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
 
   // tool_result blocks reconstructed from the preceding assistant message's
   // completed/error tool parts. Injected at the start of the next user message.
@@ -25113,6 +25191,8 @@ export function loreMessagesToGateway(
             tool: string;
             callID: string;
             toolName?: string;
+            responsesCall?: Record<string, unknown>;
+            responsesOutput?: Record<string, unknown>;
             state: {
               status: string;
               input?: unknown;
@@ -25128,6 +25208,9 @@ export function loreMessagesToGateway(
             content.push({
               type: "tool_result",
               toolUseId: toolPart.callID,
+              ...(toolPart.responsesOutput
+                ? { responsesOutput: toolPart.responsesOutput }
+                : {}),
               ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
               content: toolResultContent(toolPart.state),
               ...(toolPart.state.nativeResponsesOutputArray
@@ -25141,6 +25224,9 @@ export function loreMessagesToGateway(
               id: toolPart.callID,
               name: toolPart.tool,
               input: toolPart.state.input ?? {},
+              ...(toolPart.responsesCall
+                ? { responsesCall: toolPart.responsesCall }
+                : {}),
             });
             // Completed/error tool parts: queue a tool_result for the next
             // user message. This reconstructs the Anthropic API's split-
@@ -25149,6 +25235,9 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                ...(toolPart.responsesOutput
+                  ? { responsesOutput: toolPart.responsesOutput }
+                  : {}),
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
                 ...(toolPart.state.nativeResponsesOutputArray
@@ -25159,6 +25248,9 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                ...(toolPart.responsesOutput
+                  ? { responsesOutput: toolPart.responsesOutput }
+                  : {}),
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
                 ...(toolPart.state.nativeResponsesOutputArray
@@ -25194,6 +25286,12 @@ export function loreMessagesToGateway(
 
     const message: GatewayMessage = { role: msg.info.role, content };
     let candidate = provenanceByMessageId.get(msg.info.id);
+    if (candidate?.responsesInstructions && allowNativeResponsesInstructions) {
+      if (candidate.role !== message.role) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      message.responsesInstructions = [...candidate.responsesInstructions];
+    }
     const userNativeProvenance =
       allowNativeUserProvenance &&
       msg.info.role === "user" &&
@@ -25294,7 +25392,9 @@ export function loreMessagesToGateway(
           block.type === "opaque" &&
           block.responsesItem === true &&
           block.requestOnly !== true &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       );
     const provenance =
       allowProvenance ||
@@ -25345,7 +25445,9 @@ export function loreMessagesToGateway(
         (block) =>
           block.type === "opaque" &&
           block.responsesItem &&
-          block.raw.type === "function_call_output" &&
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ) &&
           (Object.keys(block.raw).some(
             (key) => !["type", "call_id", "output"].includes(key),
           ) ||
@@ -25365,12 +25467,66 @@ export function loreMessagesToGateway(
         (block) =>
           block.type === "opaque" &&
           block.responsesItem &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       )
     ) {
       throw new InvalidCrossProviderRequestError();
     }
     out.push(message);
+    outputSourceIDs.push(msg.info.id);
+  }
+
+  if (allowNativeResponsesInstructions) {
+    const sourceEntries = [...provenanceByMessageId.entries()];
+    const sourceOrderByID = new Map(
+      sourceEntries.map(([id], index) => [id, index]),
+    );
+    const outputIDs = new Set(outputSourceIDs);
+    for (const [sourceID, candidate] of sourceEntries) {
+      if (!candidate.responsesInstructions?.length || outputIDs.has(sourceID)) {
+        continue;
+      }
+      // Compression may remove the ordinary message carrying a late native
+      // instruction. Reinsert an instruction-only seam at its source position;
+      // filtering the instruction list would silently change request semantics.
+      if (candidate.role !== "user" && candidate.role !== "assistant") {
+        throw new InvalidCrossProviderRequestError();
+      }
+      const sourceOrder = sourceOrderByID.get(sourceID);
+      if (sourceOrder === undefined)
+        throw new InvalidCrossProviderRequestError();
+      const insertionIndex = outputSourceIDs.findIndex((id) => {
+        const retainedOrder = sourceOrderByID.get(id);
+        return retainedOrder !== undefined && retainedOrder > sourceOrder;
+      });
+      const placeholder: GatewayMessage = {
+        role: candidate.role,
+        content: [],
+        responsesInstructions: [...candidate.responsesInstructions],
+      };
+      if (insertionIndex < 0) {
+        out.push(placeholder);
+        outputSourceIDs.push(sourceID);
+      } else {
+        out.splice(insertionIndex, 0, placeholder);
+        outputSourceIDs.splice(insertionIndex, 0, sourceID);
+      }
+      outputIDs.add(sourceID);
+    }
+
+    const replayedResponsesInstructions = out.flatMap(
+      (message) => message.responsesInstructions ?? [],
+    );
+    // Keep the complete source-ordered instruction map or reject before
+    // dispatch; a dropped or reordered message must never yield partial replay.
+    if (
+      JSON.stringify(replayedResponsesInstructions) !==
+      JSON.stringify(sourceResponsesInstructions)
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
   }
 
   return out;
@@ -26131,9 +26287,12 @@ async function handleRequestInner(
       const route = resolveRequestUpstreamRoute(req, config);
       assertCrossProviderRequestControls(req, route.effectiveProtocol);
       assertCrossProviderProvenance(req, route.effectiveProtocol);
+      // Native Responses can replay late instructions in place. Reject before
+      // slash-command side effects only when the destination cannot do so.
       if (
         req.extras?.nativeChatInstructionPrefix?.hasLateItems ||
-        req.extras?.nativeInstructionPrefix?.hasLateItems
+        (req.extras?.nativeInstructionPrefix?.hasLateItems &&
+          route.effectiveProtocol !== "openai-responses")
       ) {
         throw new InvalidCrossProviderRequestError();
       }

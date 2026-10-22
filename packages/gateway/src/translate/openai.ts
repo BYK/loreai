@@ -1,3 +1,7 @@
+import {
+  assertNoNativeResponsesTools,
+  assertPortableResponsesResponse,
+} from "./responses-tools";
 /**
  * OpenAI ↔ Gateway translation layer.
  *
@@ -574,6 +578,7 @@ export function buildOpenAIResponse(
   resp: GatewayResponse,
   wasStreaming: boolean,
 ): Response {
+  assertPortableResponsesResponse(resp);
   if (wasStreaming) {
     return buildOpenAIStreamResponse(resp);
   }
@@ -964,6 +969,7 @@ export function buildOpenAIUpstreamRequest(
   upstreamBase: string,
   cache?: AnthropicCacheOptions,
 ): { url: string; headers: Record<string, string>; body: unknown } {
+  assertNoNativeResponsesTools(req);
   // Forward non-managed client headers first, then overlay gateway-managed.
   const headers: Record<string, string> = {
     ...forwardClientHeaders(req.rawHeaders),

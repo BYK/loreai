@@ -1,3 +1,12 @@
+import { extractProviderHeader } from "../config";
+import {
+  assertNativeResponsesCall,
+  assertNativeResponsesOutput,
+  isServerOwnedResponsesSearch,
+  nativeResponsesCall,
+  responsesCallItem,
+  responsesOutputItem,
+} from "./responses-tools";
 /**
  * OpenAI Responses API ↔ Gateway translation layer.
  *
@@ -20,6 +29,7 @@ import {
 import type {
   GatewayContentBlock,
   GatewayMessage,
+  GatewayResponsesInstruction,
   GatewayRequest,
   GatewayResponse,
   GatewayTool,
@@ -64,11 +74,9 @@ export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 type ParsedInputItems = {
   messages: GatewayMessage[];
   instructions: string[];
-  elevatedItems: Array<{
-    type?: "message";
-    role: "system" | "developer";
-    content: string | Array<{ type: "input_text"; text: string }>;
-  }>;
+  /** Leading native instructions; late items stay in message provenance. */
+  elevatedItems: GatewayResponsesInstruction[];
+  /** At least one native instruction followed conversation content. */
   hasLateItems: boolean;
   boundarySafe: boolean;
 };
@@ -106,10 +114,26 @@ function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
 // OpenAI Responses API → GatewayRequest
 // ---------------------------------------------------------------------------
 
+/** Codex sends its account header when using ChatGPT rather than an API key.
+ * Nonempty explicit routing remains authoritative, including invalid values
+ * rejected later. Empty route headers retain their existing absent semantics.
+ */
+function usesCodexChatGPT(headers: Record<string, string>): boolean {
+  if (headers["x-lore-provider"]) {
+    return extractProviderHeader(headers) === "openai-codex";
+  }
+  if (headers["x-lore-upstream-url"]) return false;
+  return (
+    Boolean(headers["chatgpt-account-id"]?.trim()) &&
+    extractAuth(headers)?.scheme === "bearer"
+  );
+}
+
 export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  if (usesCodexChatGPT(headers)) return parseOpenAICodexRequest(body, headers);
   const boundary = parseContextBoundary(headers, "openai-responses");
   const input = rawInput(body);
   const parsed = parseInputItems(input);
@@ -160,15 +184,22 @@ function parseOpenAIResponsesRequestInternal(
       throw new InvalidCrossProviderRequestError();
     }
     const tool = t as Record<string, unknown>;
-    if (tool.type === "web_search_preview") {
-      if (Object.keys(tool).some((key) => key !== "type")) {
-        throw new InvalidCrossProviderRequestError();
-      }
+    if (
+      [
+        "web_search_preview",
+        "web_search",
+        "custom",
+        "namespace",
+        "tool_search",
+      ].includes(String(tool.type))
+    ) {
+      // These definitions have provider-owned schemas (including grammars and
+      // nested namespaces). Replay them verbatim only on Responses routes.
       return {
-        name: "web_search_preview",
-        description: "",
+        name: asString(tool.name) || asString(tool.type),
+        description: asString(tool.description),
         inputSchema: {},
-        responsesBuiltin: "web_search_preview",
+        responsesNative: tool,
       };
     }
     if (
@@ -227,7 +258,7 @@ function parseOpenAIResponsesRequestInternal(
   if (raw.reasoning !== undefined) {
     extras.reasoning = raw.reasoning;
   }
-  if (parsed.elevatedItems.length > 0) {
+  if (parsed.elevatedItems.length > 0 || parsed.hasLateItems) {
     extras.nativeInstructionPrefix = {
       originalInstructions: instructions,
       normalizedSystem: system,
@@ -341,7 +372,10 @@ export function parseOpenAIResponsesRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
-  return parseStreamedRequest(chunks, responsesSpec(headers, false));
+  return parseStreamedRequest(
+    chunks,
+    responsesSpec(headers, usesCodexChatGPT(headers)),
+  );
 }
 
 /**
@@ -453,12 +487,21 @@ function createInputItemsBuilder(): {
   const messages: GatewayMessage[] = [];
   const instructions: string[] = [];
   const elevatedItems: ParsedInputItems["elevatedItems"] = [];
-  let pendingReasoning: GatewayContentBlock[] = [];
+  let pendingResponsesInstructions: GatewayResponsesInstruction[] = [];
+  let pendingProvenance: GatewayContentBlock[] = [];
   let sawItem = false;
   let sawConversationItem = false;
   let elevatedAfterConversation = false;
   let seamKind: "none" | "other" | "tool-call" | "tool-result" = "none";
   let seamHasPendingReasoning = false;
+
+  const attachPendingResponsesInstructions = (
+    message: GatewayMessage,
+  ): void => {
+    if (pendingResponsesInstructions.length === 0) return;
+    message.responsesInstructions = [...pendingResponsesInstructions];
+    pendingResponsesInstructions = [];
+  };
 
   const appendAssistant = (
     content: GatewayContentBlock[],
@@ -466,18 +509,19 @@ function createInputItemsBuilder(): {
     provenancePositions?: number[],
   ): GatewayMessage => {
     const message: GatewayMessage = { role: "assistant", content };
+    attachPendingResponsesInstructions(message);
     if (provenanceContent) {
-      message.provenanceContent = [...pendingReasoning, ...provenanceContent];
+      message.provenanceContent = [...pendingProvenance, ...provenanceContent];
       message.provenancePositions = (provenancePositions ?? []).map(
-        (position) => pendingReasoning.length + position,
+        (position) => pendingProvenance.length + position,
       );
-      pendingReasoning = [];
-    } else if (pendingReasoning.length > 0) {
-      message.provenanceContent = [...pendingReasoning, ...content];
+      pendingProvenance = [];
+    } else if (pendingProvenance.length > 0) {
+      message.provenanceContent = [...pendingProvenance, ...content];
       message.provenancePositions = content.map(
-        (_block, index) => pendingReasoning.length + index,
+        (_block, index) => pendingProvenance.length + index,
       );
-      pendingReasoning = [];
+      pendingProvenance = [];
     }
     messages.push(message);
     return message;
@@ -491,9 +535,9 @@ function createInputItemsBuilder(): {
 
     // Track only the state that can affect normalization across an item seam.
     if (itemType === "message" || (!itemType && role)) {
-      if (role === "user" && pendingReasoning.length > 0) {
-        // The pending assistant items would otherwise be appended after this
-        // user turn, changing the source item's order.
+      if (role === "user" && pendingProvenance.length > 0) {
+        // Reasoning and other pending assistant items cannot cross a user
+        // turn. Late instructions live in their own ordered field below.
         throw new InvalidCrossProviderRequestError();
       }
       if (
@@ -543,8 +587,13 @@ function createInputItemsBuilder(): {
         // have one system field, so preserve their priority there.
         if (
           Object.keys(raw).some(
-            (key) => key !== "type" && key !== "role" && key !== "content",
-          )
+            (key) =>
+              key !== "type" &&
+              key !== "role" &&
+              key !== "content" &&
+              key !== "id",
+          ) ||
+          (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id))
         ) {
           throw new InvalidCrossProviderRequestError();
         }
@@ -568,16 +617,8 @@ function createInputItemsBuilder(): {
         if (content.some((block) => block.type !== "text")) {
           throw new InvalidCrossProviderRequestError();
         }
-        if (sawConversationItem) elevatedAfterConversation = true;
-        const text = content
-          .map((block) => (block.type === "text" ? block.text : ""))
-          .join("\n");
-        if (text) {
-          instructions.push(text);
-        }
-        // Keep the original wire shape, including string content and an
-        // omitted `type`. The joined text above is only for translation.
-        elevatedItems.push({
+        const nativeItem: ParsedInputItems["elevatedItems"][number] = {
+          ...(typeof raw.id === "string" ? { id: raw.id } : {}),
           ...(raw.type === undefined ? {} : { type: "message" }),
           role: msgRole,
           content: Array.isArray(raw.content)
@@ -585,7 +626,26 @@ function createInputItemsBuilder(): {
                 (part) => ({ ...part }),
               )
             : raw.content,
-        });
+        };
+        if (sawConversationItem) {
+          elevatedAfterConversation = true;
+          // Keep late native instructions at their source seam. Prefixing them
+          // would silently change which turns the instruction governs.
+          if (pendingProvenance.length > 0) {
+            // The gateway cannot represent an instruction after pending native
+            // reasoning without changing the original Responses item order.
+            throw new InvalidCrossProviderRequestError();
+          }
+          pendingResponsesInstructions.push(nativeItem);
+        } else {
+          elevatedItems.push(nativeItem);
+        }
+        const text = content
+          .map((block) => (block.type === "text" ? block.text : ""))
+          .join("\n");
+        if (text && !sawConversationItem) {
+          instructions.push(text);
+        }
       } else if (msgRole === "assistant") {
         sawConversationItem = true;
         if (typeof raw.content !== "string" && !Array.isArray(raw.content)) {
@@ -641,21 +701,47 @@ function createInputItemsBuilder(): {
         }
         // Every input item is a separate item on the Responses wire, even
         // without an ID or status. Keep its complete envelope for replay.
-        messages.push({
+        const sourcePosition = pendingProvenance.length;
+        const message: GatewayMessage = {
           role: "user",
           content,
           provenanceContent: [
+            ...pendingProvenance,
             { type: "opaque", raw, responsesItem: true, requestOnly: true },
           ],
-          provenancePositions: content.map(() => 0),
-        });
+          provenancePositions: content.map(() => sourcePosition),
+        };
+        attachPendingResponsesInstructions(message);
+        messages.push(message);
+        pendingProvenance = [];
       }
       return;
     }
 
-    if (itemType === "function_call") {
+    if (isServerOwnedResponsesSearch(raw)) {
+      // Server-owned items remain opaque provenance, but still become durable
+      // replay data and must satisfy the same native envelope allowlists.
+      if (itemType === "tool_search_call") {
+        assertNativeResponsesCall(raw);
+      } else {
+        assertNativeResponsesOutput(raw);
+      }
       sawConversationItem = true;
-      portableResponsesFunctionCall(raw);
+      pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
+      return;
+    }
+
+    if (
+      itemType === "function_call" ||
+      itemType === "custom_tool_call" ||
+      itemType === "tool_search_call"
+    ) {
+      sawConversationItem = true;
+      const nativeCall = nativeResponsesCall(raw);
+      if (itemType === "function_call") {
+        const { namespace: _namespace, ...portable } = raw;
+        portableResponsesFunctionCall(portable);
+      }
       // Function call from assistant — maps to tool_use.
       //
       // The Responses API emits each parallel tool call as its OWN
@@ -667,7 +753,7 @@ function createInputItemsBuilder(): {
       // tool_result blocks. Coalesce consecutive function_call items into one
       // assistant message so an N-tool-call turn keeps its N tool_use blocks
       // together (and matched by the coalesced tool_result message below).
-      const toolUseBlock: GatewayContentBlock = {
+      const toolUseBlock: GatewayContentBlock = nativeCall ?? {
         type: "tool_use",
         id: asString(raw.call_id ?? raw.id),
         name: asString(raw.name),
@@ -684,35 +770,67 @@ function createInputItemsBuilder(): {
         last.role === "assistant" &&
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_use");
+      if (lastIsToolUseMessage && pendingResponsesInstructions.length > 0) {
+        // Coalescing consecutive calls into one assistant message would move
+        // an instruction between calls to before the entire message.
+        throw new InvalidCrossProviderRequestError();
+      }
       if (lastIsToolUseMessage) {
         const provenance = last.provenanceContent ?? [...last.content];
         const positions =
           last.provenancePositions ??
           last.content.map((_block, index) => index);
-        const position = provenance.length + pendingReasoning.length;
-        provenance.push(...pendingReasoning, provenanceBlock);
+        const position = provenance.length + pendingProvenance.length;
+        provenance.push(...pendingProvenance, provenanceBlock);
         positions.push(position);
         last.content.push(toolUseBlock);
         last.provenanceContent = provenance;
         last.provenancePositions = positions;
-        pendingReasoning = [];
+        pendingProvenance = [];
       } else {
         appendAssistant([toolUseBlock], [provenanceBlock], [0]);
       }
       return;
     }
 
-    if (itemType === "function_call_output") {
-      if (pendingReasoning.length > 0) {
-        // A result cannot cross a pending assistant reasoning item: the
-        // normalized tool pair cannot represent that native item order.
+    if (
+      itemType === "function_call_output" ||
+      itemType === "custom_tool_call_output" ||
+      itemType === "tool_search_output"
+    ) {
+      if (pendingProvenance.length > 0) {
+        // Tool results cannot cross pending native assistant items. Late
+        // instructions remain separate and attach to this result message below.
         throw new InvalidCrossProviderRequestError();
       }
       sawConversationItem = true;
-      assertResponsesToolOutputEnvelope(raw);
-      if (Array.isArray(raw.output)) {
-        raw.output.forEach(assertToolOutputPart);
+      if (itemType !== "function_call_output") {
+        assertNativeResponsesOutput(raw);
       }
+      const {
+        output: _output,
+        tools: _tools,
+        call_id: _callId,
+        ...envelope
+      } = raw;
+      const nativeOutput =
+        itemType !== "function_call_output" ? envelope : undefined;
+      if (itemType === "tool_search_output" && !Array.isArray(raw.tools))
+        throw new InvalidCrossProviderRequestError();
+      const output =
+        itemType === "tool_search_output"
+          ? JSON.stringify(raw.tools)
+          : raw.output;
+      assertResponsesToolOutputEnvelope(
+        itemType === "function_call_output"
+          ? raw
+          : {
+              type: "function_call_output",
+              call_id: raw.call_id,
+              output,
+            },
+      );
+      if (Array.isArray(output)) output.forEach(assertToolOutputPart);
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
       //
@@ -724,14 +842,15 @@ function createInputItemsBuilder(): {
       // flattening the whole array to "".
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
+        ...(nativeOutput ? { responsesOutput: nativeOutput } : {}),
         toolUseId: asString(raw.call_id),
-        ...(Array.isArray(raw.output)
+        ...(Array.isArray(output)
           ? { nativeResponsesOutputArray: true as const }
           : {}),
         // Cited text remains visible to memory and search; the complete
         // annotated output is retained only in request-only item provenance.
-        content: Array.isArray(raw.output)
-          ? raw.output.flatMap((part: Record<string, unknown>) =>
+        content: Array.isArray(output)
+          ? output.flatMap((part: Record<string, unknown>) =>
               part.type === "output_text" &&
               typeof part.text === "string" &&
               (part.text === "" ||
@@ -740,7 +859,7 @@ function createInputItemsBuilder(): {
                 ? [{ type: "text" as const, text: part.text }]
                 : parseMessageContent([part]),
             )
-          : parseMessageContent(raw.output),
+          : parseMessageContent(output),
       };
       const provenanceBlock: GatewayContentBlock = {
         type: "opaque",
@@ -754,29 +873,50 @@ function createInputItemsBuilder(): {
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_result");
       if (lastIsToolResultMessage) {
-        if (last.provenanceContent || raw.output !== undefined) {
+        if (pendingResponsesInstructions.length > 0) {
+          // Coalescing consecutive results would move an instruction between
+          // outputs to before the whole user message.
+          throw new InvalidCrossProviderRequestError();
+        }
+        if (
+          last.provenanceContent ||
+          raw.output !== undefined ||
+          pendingProvenance.length > 0
+        ) {
+          const provenance = last.provenanceContent ?? [...last.content];
+          const positions =
+            last.provenancePositions ??
+            last.content.map((_block, index) => index);
           last.provenanceContent = [
-            ...(last.provenanceContent ?? last.content),
+            ...provenance,
+            ...pendingProvenance,
             provenanceBlock,
           ];
-          last.provenancePositions = last.content.map((_block, index) => index);
-          last.provenancePositions.push(last.content.length);
+          last.provenancePositions = [
+            ...positions,
+            provenance.length + pendingProvenance.length,
+          ];
         }
         last.content.push(toolResultBlock);
+        pendingProvenance = [];
       } else {
-        messages.push({
+        const sourcePosition = pendingProvenance.length;
+        const message: GatewayMessage = {
           role: "user",
           content: [toolResultBlock],
-          provenanceContent: [provenanceBlock],
-          provenancePositions: [0],
-        });
+          provenanceContent: [...pendingProvenance, provenanceBlock],
+          provenancePositions: [sourcePosition],
+        };
+        attachPendingResponsesInstructions(message);
+        messages.push(message);
+        pendingProvenance = [];
       }
       return;
     }
 
     if (itemType === "reasoning") {
       sawConversationItem = true;
-      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+      pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
 
@@ -792,7 +932,7 @@ function createInputItemsBuilder(): {
     // gateway may not render an unknown item, but canonical replay must hash
     // the same full transcript on both the producing and consuming turns.
     sawConversationItem = true;
-    pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+    pendingProvenance.push({ type: "opaque", raw, responsesItem: true });
   };
 
   const finish = (): ParsedInputItems => {
@@ -805,14 +945,19 @@ function createInputItemsBuilder(): {
       !seamHasPendingReasoning &&
       seamKind !== "tool-call" &&
       seamKind !== "tool-result";
-    if (pendingReasoning.length > 0) {
+    if (pendingResponsesInstructions.length > 0) {
+      // No following message exists to carry these instructions at their
+      // source seam; reject instead of letting semantic preparation drop them.
+      throw new InvalidCrossProviderRequestError();
+    }
+    if (pendingProvenance.length > 0) {
       messages.push({
         role: "assistant",
         content: [],
-        provenanceContent: pendingReasoning,
+        provenanceContent: pendingProvenance,
         provenancePositions: [],
       });
-      pendingReasoning = [];
+      pendingProvenance = [];
     }
 
     return {
@@ -1132,9 +1277,7 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Add tools in Responses API format
   if (req.tools.length > 0) {
     body.tools = req.tools.map((t) => {
-      if (t.responsesBuiltin === "web_search_preview") {
-        return { type: "web_search_preview" };
-      }
+      if (t.responsesNative) return t.responsesNative;
       if (
         t.name !== "recall" ||
         t.gatewayOwned !== true ||
@@ -1417,6 +1560,9 @@ function buildResponsesInput(
   };
 
   for (const msg of messages) {
+    for (const instruction of msg.responsesInstructions ?? []) {
+      appendItem(instruction, true);
+    }
     for (const block of msg.provenanceContent ?? msg.content) {
       if (block.type === "text") {
         appendItem({
@@ -1430,12 +1576,9 @@ function buildResponsesInput(
           ],
         });
       } else if (block.type === "tool_use") {
-        appendItem({
-          type: "function_call",
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
-        });
+        if (block.responsesCall && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
+        appendItem(responsesCallItem(block));
       } else if (block.type === "tool_result") {
         if (block.isError) throw new InvalidCrossProviderRequestError();
         if (
@@ -1450,23 +1593,27 @@ function buildResponsesInput(
             throw new InvalidCrossProviderRequestError();
           });
           output.forEach(assertToolOutputPart);
-          appendItem({
-            type: "function_call_output",
-            call_id: block.toolUseId,
-            output,
-          });
+          appendItem(
+            responsesOutputItem(block.responsesOutput, block.toolUseId, output),
+          );
           continue;
         }
         requireTextOnlyToolResult(block);
         // Text-only results from other protocols use a string projection.
         // Native multi-part results take the array path above, even when a
         // compaction boundary deliberately drops their source provenance.
-        appendItem({
-          type: "function_call_output",
-          call_id: block.toolUseId,
-          output: blocksToText(block.content),
-        });
+        if (block.responsesOutput && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
+        appendItem(
+          responsesOutputItem(
+            block.responsesOutput,
+            block.toolUseId,
+            blocksToText(block.content),
+          ),
+        );
       } else if (block.type === "opaque") {
+        if (block.responsesItem && source !== "openai-responses")
+          throw new InvalidCrossProviderRequestError();
         if (
           (block.requestOnly && source !== "openai-responses") ||
           block.raw.type === "thinking" ||
@@ -1476,6 +1623,13 @@ function buildResponsesInput(
         }
         if (block.responsesItem) {
           if (block.raw.type === "item_reference") continue;
+          // Revalidate opaque native envelopes at replay: retained checkpoints
+          // may have been written before the current allowlist was enforced.
+          if (block.raw.type === "tool_search_call") {
+            assertNativeResponsesCall(block.raw);
+          } else if (block.raw.type === "tool_search_output") {
+            assertNativeResponsesOutput(block.raw);
+          }
           if (block.raw.type === "function_call_output") {
             assertResponsesToolOutputEnvelope(block.raw);
             if (
@@ -1581,12 +1735,9 @@ function buildOpenAIResponsesNonStreamResponse(
         textContent += block.text;
       } else if (block.type === "tool_use") {
         functionCalls.push({
-          type: "function_call",
           id: `fc_${block.id}`,
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
           status: "completed",
+          ...responsesCallItem(block),
         });
       }
     }
@@ -1988,53 +2139,15 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
             outputIndex++;
           } else if (block.type === "tool_use") {
-            const callId = block.id;
-            const itemId = `fc_${callId}`;
-            const args = JSON.stringify(block.input);
-
-            // output_item.added
-            emit("response.output_item.added", {
-              type: "response.output_item.added",
-              output_index: outputIndex,
-              item: {
-                type: "function_call",
-                id: itemId,
-                call_id: callId,
-                name: block.name,
-                arguments: "",
-                status: "in_progress",
-              },
-            });
-
-            // function_call_arguments.delta
-            emit("response.function_call_arguments.delta", {
-              type: "response.function_call_arguments.delta",
-              item_id: itemId,
-              output_index: outputIndex,
-              delta: args,
-            });
-
-            // function_call_arguments.done
-            emit("response.function_call_arguments.done", {
-              type: "response.function_call_arguments.done",
-              item_id: itemId,
-              output_index: outputIndex,
-              arguments: args,
-            });
-
-            // output_item.done
-            emit("response.output_item.done", {
-              type: "response.output_item.done",
-              output_index: outputIndex,
-              item: {
-                type: "function_call",
-                id: itemId,
-                call_id: callId,
-                name: block.name,
-                arguments: args,
+            emitRawResponsesOutputItemLifecycle(
+              emit,
+              {
+                id: `fc_${block.id}`,
                 status: "completed",
+                ...responsesCallItem(block),
               },
-            });
+              outputIndex,
+            );
 
             outputIndex++;
           }
@@ -2076,12 +2189,9 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
                 }
                 if (block.type === "tool_use") {
                   return {
-                    type: "function_call",
                     id: `fc_${block.id}`,
-                    call_id: block.id,
-                    name: block.name,
-                    arguments: JSON.stringify(block.input),
                     status: "completed",
+                    ...responsesCallItem(block),
                   };
                 }
                 return null;

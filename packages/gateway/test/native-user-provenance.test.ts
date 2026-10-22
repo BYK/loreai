@@ -15,6 +15,35 @@ function source(content: unknown) {
   ).messages[0];
 }
 
+function sourceAfterLateInstructions(content: unknown) {
+  return parseOpenAIResponsesRequest(
+    {
+      model: "gpt-test",
+      input: [
+        { role: "user", content: "previous task" },
+        {
+          type: "message",
+          role: "developer",
+          content: "late developer instruction",
+        },
+        {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: "late system instruction" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          id: "msg_source",
+          status: "completed",
+          content,
+        },
+      ],
+    },
+    {},
+  ).messages[1];
+}
+
 function normalized(content: GatewayContentBlock[]): GatewayContentBlock[] {
   return content.map((block) =>
     block.type === "text" ? { ...block, text: block.text.trim() } : block,
@@ -22,6 +51,48 @@ function normalized(content: GatewayContentBlock[]): GatewayContentBlock[] {
 }
 
 describe("native user text projection", () => {
+  it("projects edited user text after ordered late native instructions", () => {
+    const original = sourceAfterLateInstructions([
+      { type: "input_text", text: "  continue  " },
+    ]);
+    const result = projectNativeUserProvenance(
+      original,
+      normalized(original.content),
+    );
+
+    expect(result.content).toEqual([{ type: "text", text: "continue" }]);
+    expect(result.responsesInstructions).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: "late developer instruction",
+      },
+      {
+        type: "message",
+        role: "system",
+        content: [{ type: "input_text", text: "late system instruction" }],
+      },
+    ]);
+    expect(result.provenanceContent).toEqual([
+      {
+        type: "opaque",
+        raw: {
+          type: "message",
+          role: "user",
+          id: "msg_source",
+          status: "completed",
+          content: [{ type: "input_text", text: "continue" }],
+        },
+        responsesItem: true,
+        requestOnly: true,
+      },
+    ]);
+    expect(result.provenancePositions).toEqual([0]);
+    expect(original.provenanceContent?.[0]).toMatchObject({
+      raw: { content: [{ type: "input_text", text: "  continue  " }] },
+    });
+  });
+
   it("preserves envelope fields and part types for arbitrary plain text", () => {
     fc.assert(
       fc.property(

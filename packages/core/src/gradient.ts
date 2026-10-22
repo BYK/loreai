@@ -2496,7 +2496,12 @@ export function deduplicateToolOutputs(
   // First pass: scan all messages (including current turn) to build tracking maps.
   for (let i = 0; i < messages.length; i++) {
     for (const part of messages[i].parts) {
-      if (!isToolPart(part) || part.state.status !== "completed") continue;
+      if (
+        !isToolPart(part) ||
+        part.state.status !== "completed" ||
+        part.responsesOutput?.type === "tool_search_output"
+      )
+        continue;
       const output = part.state.output;
       if (!output || output.length < DEDUP_MIN_CHARS) continue;
 
@@ -2529,7 +2534,12 @@ export function deduplicateToolOutputs(
 
     let partsChanged = false;
     const parts = msg.parts.map((part) => {
-      if (!isToolPart(part) || part.state.status !== "completed") return part;
+      if (
+        !isToolPart(part) ||
+        part.state.status !== "completed" ||
+        part.responsesOutput?.type === "tool_search_output"
+      )
+        return part;
       const output = part.state.output;
       if (!output || output.length < DEDUP_MIN_CHARS) return part;
 
@@ -2665,6 +2675,9 @@ function sanitizeToolParts(messages: MessageWithParts[]): MessageWithParts[] {
 function stripToolOutputs(parts: LorePart[]): LorePart[] {
   return parts.map((part) => {
     if (!isToolPart(part)) return part;
+    // Tool discovery returns a structured registry, not replaceable prose.
+    // Keep its counted JSON payload until the complete tool pair is evicted.
+    if (part.responsesOutput?.type === "tool_search_output") return part;
     if (part.state.status === "completed") {
       // Replace native array parts with one annotation part when stripping.
       const output = toolStripAnnotation(part.tool, part.state.output);
