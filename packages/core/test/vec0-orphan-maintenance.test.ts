@@ -53,13 +53,14 @@ beforeEach(() => {
     return { rows };
   });
 });
-afterEach(() => {
+afterEach(async () => {
   stop?.();
   stop = undefined;
   vi.restoreAllMocks();
   vi.useRealTimers();
   log.registerSink({ info() {}, warn() {}, error() {}, captureException() {} });
   pool._setTestVectorWorkerFactory(null);
+  await pool.shutdownVectorPoolAsync();
   pool._resetVectorPoolForTest();
   close();
 });

@@ -77,6 +77,14 @@ export class SSEStreamTransportError extends Error {
 /** Deterministic local stream limits must never be reclassified as transport. */
 export class SSEStreamLimitError extends Error {}
 
+/** The provider explicitly reported failure through an Anthropic error event. */
+export class AnthropicSSEProviderError extends Error {
+  constructor() {
+    super("Anthropic stream error event");
+    this.name = "AnthropicSSEProviderError";
+  }
+}
+
 /** Read one stream chunk while making abort and inactivity independently fatal. */
 export async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -1853,7 +1861,7 @@ export class AnthropicSSEValidator {
     const validIndex = Number.isSafeInteger(index) && (index as number) >= 0;
     switch (event) {
       case "error":
-        throw new Error("Anthropic stream error event");
+        throw new AnthropicSSEProviderError();
       case "ping":
         break;
       case "message_start":

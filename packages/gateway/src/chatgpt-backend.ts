@@ -20,11 +20,29 @@ export function isChatGPTBackend(url: string | URL | undefined): boolean {
   }
 }
 
+/** Match only OpenAI's canonical ChatGPT host, never a caller-selected proxy. */
+export function isCanonicalChatGPTBackend(
+  url: string | URL | undefined,
+): boolean {
+  if (!url) return false;
+  try {
+    const target = typeof url === "string" ? new URL(url) : url;
+    return (
+      target.protocol === "https:" &&
+      target.hostname === "chatgpt.com" &&
+      !target.username &&
+      !target.password &&
+      !target.port &&
+      isChatGPTBackend(target)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The Codex (ChatGPT) `chatgpt-account-id` captured for a session, if any.
- * Its presence marks the session as ChatGPT-subscription-authenticated.
- * Reads through `buildCodexWorkerHeaders` so the session snapshot stays an
- * internal detail of cch.ts.
+ * The forwarded `chatgpt-account-id` hint captured for a session, if any.
+ * This snapshot is not proof of provider account identity or auth kind.
  */
 export function sessionChatGPTAccountId(
   sessionID: string | undefined,

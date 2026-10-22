@@ -85,7 +85,6 @@ import {
 } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { resolveCostAttribution } from "./cost-attribution";
-import { isBackgroundBudgetPaused } from "./provider-budgets";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
 
@@ -1392,11 +1391,6 @@ export function shouldWarm(
   // Runtime-settable (env / KV override / config default) so warming can be
   // disabled globally without a restart — see isWarmingEnabled().
   if (!warmingEnabled) return false;
-
-  // Warmer pings are non-urgent background work: skip them while the
-  // session's quota runs ahead of pace or a cap is exhausted.
-  if (isBackgroundBudgetPaused(state.sessionID, state.lastUpstream))
-    return false;
 
   // No stored body to replay — nothing to warm
   if (!state.cacheAnalytics.lastRequestBody) return false;

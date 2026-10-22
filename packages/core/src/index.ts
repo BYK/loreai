@@ -224,6 +224,7 @@ export {
   type DailyCostBucket,
   addProviderCost,
   getProviderCostTotals,
+  MAX_PROVIDER_QUOTA_ROWS,
   isProviderQuotaStale,
   QUOTA_STALE_FALLBACK_MS,
   getProviderDayUsage,
@@ -278,6 +279,8 @@ export {
   freelistBytes,
   autoVacuumMode,
   incrementalVacuum,
+  MAX_PROVIDER_PACING_SETTINGS,
+  MAX_PROVIDER_PACING_GENERATIONS,
 } from "./db";
 export {
   normalizeRemoteUrl,

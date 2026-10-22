@@ -6,26 +6,27 @@ export const MAX_RECALL_DIAGNOSTIC_ROUNDS = 64;
 
 export type RecallDiagnosticLevel = "info" | "warn" | "error";
 
-/** Diagnostics are best-effort and must never change response delivery. */
+/** Diagnostics, including lazy formatting, must never change response delivery. */
 export function reportRecallDiagnostic(
-  message: string,
+  message: string | (() => string),
   level: RecallDiagnosticLevel = "info",
   diagnostic?: Error,
 ): void {
   try {
+    const text = typeof message === "function" ? message() : message;
     switch (level) {
       case "info":
-        log.info(message);
+        log.info(text);
         return;
       case "warn":
-        log.warn(message);
+        log.warn(text);
         return;
       case "error":
-        log.error(diagnostic ?? message);
+        log.error(diagnostic ?? text);
         return;
     }
   } catch {
-    // A diagnostic sink cannot change the response path.
+    // Neither formatting nor a diagnostic sink can change the response path.
   }
 }
 

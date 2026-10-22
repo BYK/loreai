@@ -432,32 +432,24 @@ describe("api client: error classification", () => {
     expect(error.message).toBe("Not available in hosted mode");
   });
 
-  it("replaces provider budgets with PUT /costs/budgets", async () => {
+  it("switches one account's pacing with PUT /costs/pacing", async () => {
     const seen: { url?: string; method?: string; body?: string } = {};
     const client = createApiClient({
       fetch: async (url, init) => {
         seen.url = url;
         seen.method = init?.method;
         seen.body = typeof init?.body === "string" ? init.body : undefined;
-        return json({ provider_budgets: [] });
+        return json({ provider_pacing: [] });
       },
     });
-    const budgets = [
-      {
-        provider: "anthropic",
-        auth_kind: "subscription" as const,
-        account: null,
-        mode: "off" as const,
-        window: "7d" as const,
-      },
-    ];
-    await expect(client.putProviderBudgets(budgets)).resolves.toEqual({
-      provider_budgets: [],
+    const setting = { provider: "anthropic", account: "a1", enabled: false };
+    await expect(client.setProviderPacing(setting)).resolves.toEqual({
+      provider_pacing: [],
     });
     expect(seen).toEqual({
-      url: "/api/v1/costs/budgets",
+      url: "/api/v1/costs/pacing",
       method: "PUT",
-      body: JSON.stringify({ provider_budgets: budgets }),
+      body: JSON.stringify(setting),
     });
   });
 

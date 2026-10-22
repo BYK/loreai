@@ -28,6 +28,7 @@
  *   (or via the package script: `pnpm run build:binary:sea -- --platforms linux-x64`)
  */
 import * as esbuild from "esbuild";
+import { buildVersion, stagingVersion } from "./build-version";
 import {
   copyFileSync,
   existsSync,
@@ -77,6 +78,7 @@ const stagingDir = join(packageDir, ".sea-staging");
 const pkg = JSON.parse(
   readFileSync(join(packageDir, "package.json"), "utf8"),
 ) as { version: string };
+let cliVersion = buildVersion(pkg.version);
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -275,7 +277,7 @@ function sentryBunToNodePlugin(): esbuild.Plugin {
 
 function uploadSentrySourcemap(stagingDirPath: string, mapPath: string): void {
   if (process.env.SENTRY_AUTH_TOKEN) {
-    console.log(`  Uploading sourcemap to Sentry (release: ${pkg.version})...`);
+    console.log(`  Uploading sourcemap to Sentry (release: ${cliVersion})...`);
     try {
       execSync(
         [
@@ -288,7 +290,7 @@ function uploadSentrySourcemap(stagingDirPath: string, mapPath: string): void {
           // debug ID that links errors back to this map.
           `${stagingDirPath}/`,
           "--release",
-          pkg.version,
+          cliVersion,
           "--org",
           "byk",
           "--project",
@@ -428,7 +430,7 @@ async function runFossilize(
   }
 
   console.log(
-    `\n✓ Binary build complete: ${targets.map((t) => `lore-${t}`).join(", ")} (v${pkg.version})`,
+    `\n✓ Binary build complete: ${targets.map((t) => `lore-${t}`).join(", ")} (v${cliVersion})`,
   );
 }
 
@@ -470,6 +472,10 @@ async function buildBinary() {
       );
       process.exit(1);
     }
+    const identity = JSON.parse(
+      readFileSync(join(externalStaging, "build-version.json"), "utf8"),
+    ) as { version: string };
+    cliVersion = stagingVersion(identity.version, pkg.version);
     console.log(`→ Using pre-built staging: ${externalStaging}`);
     mkdirSync(distBinDir, { recursive: true });
     await runFossilize(targets, bundlePath, manifestByTarget, externalStaging);
@@ -561,7 +567,7 @@ async function buildBinary() {
     logLevel: "info",
     legalComments: "none",
     define: {
-      LORE_CLI_VERSION: JSON.stringify(pkg.version),
+      LORE_CLI_VERSION: JSON.stringify(cliVersion),
       __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
       __LORE_VENDOR_ENABLED__: JSON.stringify(!flags["no-vendor"]),
       // Comma-separated list (avoids JSON.stringify folding which
@@ -861,6 +867,11 @@ async function buildBinary() {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     manifestByTarget.set(target, manifestPath);
   }
+
+  writeFileSync(
+    join(stagingDir, "build-version.json"),
+    JSON.stringify({ version: cliVersion }),
+  );
 
   // --prepare-only: stop here. The staging dir is the output artifact
   // for transfer to another machine (e.g. macOS for native fossilize).

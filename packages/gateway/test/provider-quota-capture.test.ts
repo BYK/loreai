@@ -1,5 +1,7 @@
 import { dirname } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { afterEach, expect, it, vi } from "vitest";
+import * as core from "@loreai/core";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeReplayInterceptor } from "./helpers/replay";
 import {
@@ -10,12 +12,26 @@ import {
   STANDARD_TOOLS,
 } from "./helpers/fixtures";
 import {
+  _waitForProviderQuotaCapturesForTest,
   getActiveSessions,
   setPostResponseStartObserverForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
+import { setUpstreamFetchOverrideForTest } from "../src/fetch";
+import { authFingerprint } from "../src/auth";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
-import { db, listProviderQuotas } from "@loreai/core";
+import { createGatewayApp } from "../src/app";
+import { loadConfig } from "../src/config";
+import {
+  _resetCostAttributionForTest,
+  recordSuccessfulAnthropicOAuthAuth,
+} from "../src/cost-attribution";
+import {
+  db,
+  isProviderQuotaStale,
+  listProviderQuotas,
+  log,
+} from "@loreai/core";
 
 const quotaHeaders = {
   "anthropic-ratelimit-unified-5h-utilization": "0.23",
@@ -25,14 +41,39 @@ const quotaHeaders = {
   "anthropic-ratelimit-unified-status": "allowed",
 };
 
+const TEST_ANTHROPIC_OAUTH_CREDENTIAL = {
+  scheme: "bearer",
+  value: "sk-ant-oat01-test-token",
+} as const;
+
+function trustTestAnthropicOAuthCredential(): void {
+  recordSuccessfulAnthropicOAuthAuth({
+    credential: TEST_ANTHROPIC_OAUTH_CREDENTIAL,
+    upstreamURL: "https://api.anthropic.com/v1/messages",
+    responseURL: "https://api.anthropic.com/v1/messages",
+    responseStatus: 200,
+    directUpstreamResponse: true,
+  });
+}
+
 let harness: Harness | undefined;
 afterEach(async () => {
+  await _waitForProviderQuotaCapturesForTest();
   await harness?.teardown();
   harness = undefined;
+  _resetCostAttributionForTest();
 });
+
+async function consumeResponseAndQuotaCapture(
+  response: Response,
+): Promise<void> {
+  await response.text();
+  await _waitForProviderQuotaCapturesForTest();
+}
 
 it("persists upstream quota headers without touching the client response", async () => {
   db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
   const fixtures = [
     makeFixtureEntry({
       seq: 0,
@@ -62,7 +103,7 @@ it("persists upstream quota headers without touching the client response", async
     null,
     { authorization: "Bearer sk-ant-oat01-test-token" },
   );
-  await response.text();
+  await consumeResponseAndQuotaCapture(response);
   expect(response.status).toBe(200);
 
   const quotas = listProviderQuotas().filter(
@@ -90,8 +131,652 @@ it("persists upstream quota headers without touching the client response", async
   }
 });
 
+it("captures quota on the first successful Anthropic OAuth response", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "First OAuth request" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...quotaHeaders,
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "First OAuth request" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-first-request" },
+    );
+    await consumeResponseAndQuotaCapture(response);
+    expect(response.status).toBe(200);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+  expect(
+    listProviderQuotas().filter(
+      (quota) =>
+        quota.provider === "anthropic" && quota.authKind === "subscription",
+    ),
+  ).toHaveLength(2);
+});
+
+it("attributes quota to the credential that configured headers actually send", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  db().exec("DELETE FROM provider_costs");
+  const oauthCredential = {
+    scheme: "bearer" as const,
+    value: "sk-ant-oat01-replaced-before-dispatch",
+  };
+  recordSuccessfulAnthropicOAuthAuth({
+    credential: oauthCredential,
+    upstreamURL: "https://api.anthropic.com/v1/messages",
+    responseURL: "https://api.anthropic.com/v1/messages",
+    responseStatus: 200,
+    directUpstreamResponse: true,
+  });
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Credential override" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({
+    fixtures: [fixture],
+    configOverrides: {
+      upstreamExtraHeaders: { "x-api-key": "configured-api-key" },
+      upstreamExtraHeaderBases: ["https://api.anthropic.com"],
+    },
+  });
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...quotaHeaders,
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Credential override" }],
+      },
+      null,
+      { authorization: `Bearer ${oauthCredential.value}` },
+    );
+    await consumeResponseAndQuotaCapture(response);
+    expect(response.status).toBe(200);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+
+  const replacementCredential = {
+    scheme: "api-key" as const,
+    value: "configured-api-key",
+  };
+  const quotas = listProviderQuotas().filter(
+    (row) => row.provider === "anthropic",
+  );
+  expect(quotas.length).toBeGreaterThan(0);
+  expect(quotas.every((row) => row.authKind === "api_key")).toBe(true);
+  expect(
+    quotas.every(
+      (row) =>
+        row.account === authFingerprint(replacementCredential).slice(0, 12),
+    ),
+  ).toBe(true);
+  const costRows = db()
+    .query("SELECT auth_kind, account FROM provider_costs")
+    .all() as Array<{ auth_kind: string; account: string }>;
+  expect(costRows).toHaveLength(1);
+  expect(costRows[0]).toEqual({
+    auth_kind: "api_key",
+    account: authFingerprint(replacementCredential).slice(0, 12),
+  });
+});
+
+it("waits for the downstream HTTP response to finish before quota persistence", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Hold the stream open" }],
+    responseText: "Completed after release",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  let releaseBody: (() => void) | undefined;
+  let signalResponseHeld: (() => void) | undefined;
+  const bodyGate = new Promise<void>((resolve) => {
+    releaseBody = resolve;
+  });
+  const responseHeld = new Promise<void>((resolve) => {
+    signalResponseHeld = resolve;
+  });
+  const quotaPersistence = vi.spyOn(core, "upsertProviderQuota");
+  setUpstreamInterceptor(async (...args) => {
+    const response = await replay(...args);
+    for (const [name, value] of Object.entries(quotaHeaders)) {
+      response.headers.set(name, value);
+    }
+    if (!response.body) throw new Error("expected a streaming replay body");
+    const sourceBody = new Uint8Array(await response.arrayBuffer());
+    const firstEventEnd =
+      sourceBody.findIndex(
+        (byte, index) => byte === 10 && sourceBody[index + 1] === 10,
+      ) + 2;
+    if (firstEventEnd < 2) throw new Error("expected an SSE event boundary");
+    let stage = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (stage === 0) {
+            stage = 1;
+            controller.enqueue(sourceBody.slice(0, firstEventEnd));
+            return;
+          }
+          if (stage === 1) {
+            stage = 2;
+            signalResponseHeld?.();
+            await bodyGate;
+            const remainder = sourceBody.slice(firstEventEnd);
+            if (remainder.length > 0) controller.enqueue(remainder);
+            return;
+          }
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(body, {
+      status: response.status,
+      headers: response.headers,
+    });
+  });
+
+  let clientReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let clientDrain: Promise<void> | undefined;
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: true,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Hold the stream open" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-test-token" },
+    );
+    expect(response.status).toBe(200);
+    if (!response.body) throw new Error("expected a streaming client body");
+    const reader = response.body.getReader();
+    clientReader = reader;
+    clientDrain = (async () => {
+      let part = await reader.read();
+      while (!part.done) part = await reader.read();
+    })();
+    await responseHeld;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(quotaPersistence).not.toHaveBeenCalled();
+
+    releaseBody?.();
+    await clientDrain;
+    await _waitForProviderQuotaCapturesForTest();
+    expect(quotaPersistence).toHaveBeenCalled();
+  } finally {
+    releaseBody?.();
+    await clientReader?.cancel().catch(() => {});
+    await clientDrain?.catch(() => {});
+    await _waitForProviderQuotaCapturesForTest();
+    quotaPersistence.mockRestore();
+    setUpstreamInterceptor(undefined);
+  }
+});
+
+it("settles quota capture after direct Hono response cloning", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Direct Hono request" }],
+    responseText: "Direct Hono response",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  setUpstreamInterceptor(async (...args) => {
+    const response = await replay(...args);
+    for (const [name, value] of Object.entries(quotaHeaders)) {
+      response.headers.set(name, value);
+    }
+    return response;
+  });
+
+  const token = TEST_ANTHROPIC_OAUTH_CREDENTIAL.value;
+  const rawHeaders = [
+    "content-type",
+    "application/json",
+    "anthropic-version",
+    "2023-06-01",
+    "x-api-key",
+    token,
+  ];
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  const app = createGatewayApp(config);
+  const response = await app.fetch(
+    new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": token,
+      },
+      body: JSON.stringify({
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Direct Hono request" }],
+      }),
+    }),
+    { peerAddress: "127.0.0.1", rawHeaders },
+  );
+
+  expect(response.status).toBe(200);
+  await response.arrayBuffer();
+  await _waitForProviderQuotaCapturesForTest();
+  expect(
+    listProviderQuotas().some(
+      (row) => row.provider === "anthropic" && row.window === "5h",
+    ),
+  ).toBe(true);
+});
+
+it("caches a trusted Anthropic organization without quota rows", async () => {
+  db().exec("DELETE FROM provider_costs");
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const messages = ["Organization identity", "Cached organization identity"];
+  const fixtures = messages.map((message, seq) =>
+    makeFixtureEntry({
+      seq,
+      requestMessages: [{ role: "user", content: message }],
+      responseText: "Recorded",
+    }),
+  );
+  harness = await createHarness({ fixtures });
+  let responseCount = 0;
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const fixture = fixtures[responseCount++];
+    if (!fixture) throw new Error("unexpected upstream request");
+    const response = new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...(responseCount === 1
+          ? { "anthropic-organization-id": "org-test-id" }
+          : {}),
+      },
+    });
+    Object.defineProperty(response, "url", {
+      value: "https://api.anthropic.com/v1/messages",
+    });
+    return response;
+  });
+  setUpstreamInterceptor((_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    for (const message of messages) {
+      const response = await harness.chat(
+        {
+          model: DEFAULT_MODEL,
+          max_tokens: 1024,
+          stream: false,
+          system: DEFAULT_SYSTEM,
+          tools: STANDARD_TOOLS,
+          messages: [{ role: "user", content: message }],
+        },
+        null,
+        {
+          authorization: "Bearer sk-ant-oat01-test-token",
+          "x-lore-session-id": "organization-cache-session",
+        },
+      );
+      expect(response.status).toBe(200);
+      await consumeResponseAndQuotaCapture(response);
+    }
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    setUpstreamInterceptor(undefined);
+  }
+
+  expect(listProviderQuotas()).toHaveLength(0);
+  const accounts = db()
+    .query("SELECT account, requests FROM provider_costs")
+    .all() as Array<{ account: string; requests: number }>;
+  const expectedAccount = createHash("sha256")
+    .update("org-test-id")
+    .digest("hex")
+    .slice(0, 12);
+  expect(responseCount).toBe(2);
+  expect(accounts).toEqual([{ account: expectedAccount, requests: 2 }]);
+});
+
+it("does not read quota rows synchronously from the post-response curation gate", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Check post-response pacing" }],
+    responseText: "Recorded",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const replay = makeReplayInterceptor([fixture]);
+  let observing = false;
+  let tracedSpans = 0;
+  let quotaReads = 0;
+  const silentSink: log.LogSink = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
+  };
+  log.registerSink({
+    ...silentSink,
+    withDbSpan(sql, fn) {
+      if (observing) {
+        tracedSpans++;
+        if (/\bprovider_quotas\b/i.test(sql)) quotaReads++;
+      }
+      return fn();
+    },
+  });
+  setPostResponseStartObserverForTest(() => {
+    observing = true;
+  });
+  setUpstreamInterceptor(replay);
+
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Check post-response pacing" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-test-token" },
+    );
+    await response.text();
+    expect(tracedSpans).toBeGreaterThan(0);
+    expect(quotaReads).toBe(0);
+  } finally {
+    setPostResponseStartObserverForTest(undefined);
+    setUpstreamInterceptor(undefined);
+    log.registerSink(silentSink);
+    _resetCostAttributionForTest();
+  }
+});
+
+it("keeps a later-started quota observation when responses complete out of order", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
+  const fixtures = makeConversationFixtures([
+    { userMessage: "Older request", assistantText: "Older response" },
+    { userMessage: "Newer request", assistantText: "Newer response" },
+  ]);
+  harness = await createHarness({ fixtures });
+  const replay = makeReplayInterceptor(fixtures);
+  const entered = [deferred<void>(), deferred<void>()];
+  const release: Array<() => void> = [];
+  const utilization = ["0.10", "0.60"];
+  let callCount = 0;
+  setUpstreamInterceptor(async (...args) => {
+    const index = callCount++;
+    await new Promise<void>((resolve) => {
+      release[index] = resolve;
+      entered[index].resolve();
+    });
+    const response = await replay(...args);
+    response.headers.set(
+      "anthropic-ratelimit-unified-5h-utilization",
+      utilization[index],
+    );
+    response.headers.set("anthropic-ratelimit-unified-5h-reset", "1999999999");
+    response.headers.set("anthropic-ratelimit-unified-status", "allowed");
+    return response;
+  });
+
+  let now = Date.now();
+  const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const headers = { authorization: "Bearer sk-ant-oat01-test-token" };
+  const request = (message: string) =>
+    harness!.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: message }],
+      },
+      null,
+      headers,
+    );
+
+  try {
+    const older = request("Older request");
+    await entered[0].promise;
+    now += 1_000;
+    const newer = request("Newer request");
+    await entered[1].promise;
+
+    now += 1_000;
+    release[1]();
+    const newerResponse = await newer;
+    await consumeResponseAndQuotaCapture(newerResponse);
+
+    now += 1_000;
+    release[0]();
+    const olderResponse = await older;
+    await consumeResponseAndQuotaCapture(olderResponse);
+  } finally {
+    nowSpy.mockRestore();
+    for (const resolve of release) resolve();
+  }
+
+  const quota = listProviderQuotas().find(
+    (row) =>
+      row.provider === "anthropic" &&
+      row.authKind === "subscription" &&
+      row.window === "5h",
+  );
+  expect(quota?.usedPercent).toBe(60);
+});
+
+it.each([
+  ["direct response", false],
+  ["wrapped response", true],
+])(
+  "anchors relative quota resets to receipt time for a %s",
+  async (_label, wrap) => {
+    db().exec("DELETE FROM provider_quotas");
+    const fixtures = [
+      makeFixtureEntry({
+        seq: 0,
+        requestMessages: [{ role: "user", content: "Delayed response" }],
+        responseText: "Received",
+      }),
+    ];
+    harness = await createHarness({ fixtures });
+    const replay = makeReplayInterceptor(fixtures);
+    const startedAt = Date.now() + 60_000;
+    let now = startedAt;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    setUpstreamInterceptor(async (...args) => {
+      const response = await replay(...args);
+      now += 30_000;
+      for (const [name, value] of Object.entries({
+        "x-rate-limit-limit": "100",
+        "x-rate-limit-remaining": "90",
+        "x-rate-limit-reset": "60",
+      })) {
+        response.headers.set(name, value);
+      }
+      return wrap
+        ? new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          })
+        : response;
+    });
+
+    try {
+      const response = await harness.chat(
+        {
+          model: DEFAULT_MODEL,
+          max_tokens: 1024,
+          stream: false,
+          system: DEFAULT_SYSTEM,
+          tools: STANDARD_TOOLS,
+          messages: [{ role: "user", content: "Delayed response" }],
+        },
+        null,
+        { authorization: "Bearer sk-ant-oat01-test-token" },
+      );
+      await consumeResponseAndQuotaCapture(response);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const quota = listProviderQuotas().find(
+      (row) => row.provider === "anthropic" && row.window === "requests",
+    );
+    expect(quota).toBeDefined();
+    expect(quota?.observedAt).toBe(startedAt);
+    expect(quota?.resetsAt).toBe(startedAt + 90_000);
+    expect(isProviderQuotaStale(quota!, startedAt + 70_000)).toBe(false);
+  },
+);
+
+it("anchors wrapped quota resets to upstream header receipt, not wrapper completion", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  const fixture = makeFixtureEntry({
+    seq: 0,
+    requestMessages: [{ role: "user", content: "Delayed response" }],
+    responseText: "Received",
+  });
+  harness = await createHarness({ fixtures: [fixture] });
+  const startedAt = Date.now() + 600_000;
+  let now = startedAt;
+  const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    now = startedAt + 30_000;
+    return new Response(JSON.stringify(fixture.response), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "x-rate-limit-limit": "100",
+        "x-rate-limit-remaining": "90",
+        "x-rate-limit-reset": "60",
+      },
+    });
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) => {
+    const response = await makeRealRequest();
+    now += 15_000;
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  });
+
+  try {
+    const response = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: DEFAULT_SYSTEM,
+        tools: STANDARD_TOOLS,
+        messages: [{ role: "user", content: "Delayed response" }],
+      },
+      null,
+      { authorization: "Bearer sk-ant-oat01-test-token" },
+    );
+    await consumeResponseAndQuotaCapture(response);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
+    nowSpy.mockRestore();
+  }
+
+  const quota = listProviderQuotas().find(
+    (row) => row.provider === "anthropic" && row.window === "requests",
+  );
+  expect(quota?.observedAt).toBeGreaterThanOrEqual(startedAt);
+  expect(quota?.observedAt).toBeLessThan(startedAt + 1);
+  expect(quota?.resetsAt).toBe(startedAt + 90_000);
+});
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 it("attributes quota headers to the session credential on the provisional path", async () => {
   db().exec("DELETE FROM provider_quotas");
+  trustTestAnthropicOAuthCredential();
   const fixtures = makeConversationFixtures([
     { userMessage: "Hello", assistantText: "Hello back" },
     { userMessage: "Continue", assistantText: "Continuing" },
@@ -126,32 +811,28 @@ it("attributes quota headers to the session credential on the provisional path",
     "x-claude-code-session-id": alias,
   });
   expect(initial.status).toBe(200);
-  await initial.text();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await consumeResponseAndQuotaCapture(initial);
 
   db().exec("DELETE FROM provider_quotas");
 
-  // A new canonical session id routes the turn through the provisional
-  // verification path. Even though this request carries an api-key-shaped
-  // credential, quota capture must attribute it to the session (OAuth →
-  // subscription, same account) via the forwarded sessionID.
+  // A new canonical session ID and the old alias cannot transfer OAuth
+  // attribution to a different API-key credential.
   const response = await harness.chat(request, null, {
     authorization: "Bearer sk-ant-api03-test-token",
     "x-claude-code-session-id": alias,
     "x-lore-session-id": "claude-session-after-plugin",
   });
-  await response.text();
+  await consumeResponseAndQuotaCapture(response);
   expect(response.status).toBe(200);
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "anthropic");
   expect(quotas.length).toBeGreaterThan(0);
   for (const q of quotas) {
-    expect(q.authKind).toBe("subscription");
+    expect(q.authKind).toBe("api_key");
   }
 });
 
-it("attributes quota headers to the Codex session account on the provisional path", async () => {
+it("caller-selected Codex headers do not establish subscription quota attribution", async () => {
   db().exec("DELETE FROM provider_quotas");
   harness = await createHarness({ fixtures: [] });
   setUpstreamInterceptor(async () => {
@@ -174,6 +855,9 @@ it("attributes quota headers to the Codex session account on the provisional pat
         "x-ratelimit-limit-requests": "200",
         "x-ratelimit-remaining-requests": "150",
         "x-ratelimit-reset-requests": "30m",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "10",
+        "x-codex-primary-reset-at": "2000000000",
         "x-codex-secondary-window-minutes": "0",
       },
     });
@@ -194,11 +878,9 @@ it("attributes quota headers to the Codex session account on the provisional pat
   const headers = {
     "content-type": "application/json",
     authorization: "Bearer chatgpt-oauth-token",
-    // api.openai.com resolves provider "openai" without self-identifying as
-    // the ChatGPT subscription backend — the session's stored
-    // chatgpt-account-id (captured on the first turn) is the only
-    // subscription discriminator on the provisional forward.
-    "x-lore-upstream-url": "https://api.openai.com",
+    // The backend is caller-selected and the response is intercepted, so
+    // neither can establish authenticated subscription state.
+    "x-lore-upstream-url": "https://chatgpt.com/backend-api/codex",
     "chatgpt-account-id": "acct-xyz",
     "x-lore-project": projectPath,
     "x-session-id": "codex-before-plugin",
@@ -209,28 +891,98 @@ it("attributes quota headers to the Codex session account on the provisional pat
     body: JSON.stringify(request),
   });
   expect(initial.status).toBe(200);
-  await initial.text();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await consumeResponseAndQuotaCapture(initial);
 
   db().exec("DELETE FROM provider_quotas");
 
-  // A new canonical session id routes the turn through the provisional
-  // verification path — quota capture must resolve the ChatGPT account from
-  // the session snapshot via the forwarded sessionID.
+  // A new canonical session id and a different caller-selected header must
+  // still attribute this credential to the same bounded account key.
   const migrated = await harness.request("/v1/codex/responses", {
     method: "POST",
-    headers: { ...headers, "x-lore-session-id": "codex-after-plugin" },
+    headers: {
+      ...headers,
+      "chatgpt-account-id": "caller-selected-second-account",
+      "x-lore-session-id": "codex-after-plugin",
+    },
     body: JSON.stringify(request),
   });
-  await migrated.text();
+  await consumeResponseAndQuotaCapture(migrated);
   expect(migrated.status).toBe(200);
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "openai");
   expect(quotas.length).toBeGreaterThan(0);
+  const expectedAccount = authFingerprint({
+    scheme: "bearer",
+    value: "chatgpt-oauth-token",
+  }).slice(0, 12);
   for (const q of quotas) {
-    expect(q.authKind).toBe("subscription");
+    expect(q.authKind).toBe("api_key");
     expect(q.window).not.toBe("0m");
+    expect(q.account).toBe(expectedAccount);
+    expect(q.account).not.toBe("acct-xyz");
+    expect(q.account).not.toBe("caller-selected-second-account");
+  }
+});
+
+it("records Codex subscription auth only after direct ChatGPT success", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  harness = await createHarness({ fixtures: [] });
+  _resetCostAttributionForTest();
+  const previousFetchOverride = setUpstreamFetchOverrideForTest(async () => {
+    const upstream = buildOpenAIResponsesResponse(
+      {
+        id: "resp_authenticated_codex",
+        model: "gpt-5",
+        content: [{ type: "text", text: "Authenticated response" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 12, outputTokens: 3 },
+      },
+      true,
+    );
+    return new Response(await upstream.text(), {
+      headers: {
+        "content-type": "text/event-stream",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "23",
+        "x-codex-primary-reset-at": "2000000000",
+        "x-codex-secondary-window-minutes": "0",
+      },
+    });
+  });
+  setUpstreamInterceptor(async (_body, _model, _stream, makeRealRequest) =>
+    makeRealRequest(),
+  );
+
+  try {
+    const projectPath = dirname(harness.dbPath);
+    const response = await harness.request("/v1/codex/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer verified-codex-token",
+        "x-lore-upstream-url": "https://chatgpt.com/backend-api/codex",
+        "x-lore-project": projectPath,
+        "x-session-id": "direct-codex-auth",
+      },
+      body: JSON.stringify({
+        model: "gpt-5",
+        stream: true,
+        instructions: DEFAULT_SYSTEM + "\nWorking directory: " + projectPath,
+        input: [{ role: "user", content: "Authenticate subscription" }],
+        tools: [],
+      }),
+    });
+    await consumeResponseAndQuotaCapture(response);
+    expect(response.status).toBe(200);
+
+    const quotas = listProviderQuotas().filter(
+      (row) => row.provider === "openai",
+    );
+    expect(quotas.length).toBeGreaterThan(0);
+    expect(quotas.every((row) => row.authKind === "subscription")).toBe(true);
+    expect(quotas.every((row) => row.account === "default")).toBe(true);
+  } finally {
+    setUpstreamFetchOverrideForTest(previousFetchOverride);
   }
 });
 

@@ -1,4 +1,4 @@
-import { log, projectId } from "@loreai/core";
+import { ensureProject, log, projectId } from "@loreai/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config";
 import {
@@ -81,6 +81,7 @@ describe("upstream fetch diagnostics", () => {
   });
 
   it("logs safe diagnostics for a raw Bun socket error", async () => {
+    ensureProject(DIAGNOSTICS_PROJECT);
     const privateCauseMessage = "PRIVATE_SOCKET_ERROR_MESSAGE";
     const privateAddress = "PRIVATE_SOCKET_ADDRESS";
     const credential = "PRIVATE_UPSTREAM_CREDENTIAL";

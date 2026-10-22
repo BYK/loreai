@@ -33,8 +33,15 @@ generate/publish job graph without reshaping it.
   - `from-version=<prevVersion>` — the chain back-pointer captured while the
     patch was generated, not rediscovered during publishing.
   - `sha256-<binaryName>=<hex>` — the target integrity anchor, computed from the
-    **uncompressed** binary. This is the sole trust anchor the client verifies
-  after applying a chain.
+    **uncompressed** binary. The client verifies this after applying a chain.
+  - `source-sha256-<binaryName>=<hex>` — the exact uncompressed base used by
+    bsdiff. Clients verify this before writing delta output.
+
+Generation writes `<binaryName>.patch.json` beside each patch, containing
+`fromVersion`, `sourceSha256`, and `targetSha256`. Carry these sidecars through
+artifact upload/download with the patches; publishing refuses missing or stale
+metadata. Stable releases also upload the sidecars, authenticated by the GitHub
+asset digest. Legacy chains without source metadata fall back to a full download.
 
 When using `publish-ghcr`, serialize publishers targeting the same rolling
 nightly tag. The action compares versions before advancing that tag, and Lore's

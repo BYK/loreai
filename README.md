@@ -277,6 +277,16 @@ To use a local clone instead of the published packages:
 
 Contributors editing prompts in `packages/core/src/prompt.ts` or the user-facing system prompt injection in `packages/opencode/src/index.ts` / `packages/pi/src/index.ts` should follow the review bar in [`docs/PROMPT_CHANGES.md`](docs/PROMPT_CHANGES.md).
 
+### Local CLI build versions
+
+Local npm bundles and standalone builds append a unique `+local.<id>` to the
+package version. These builds use full downloads when upgrading, because their
+bytes can differ from the published version. Running from source reports
+`+local.source`. The `--release` build flag enables compression and retains the
+local suffix. Official publishing jobs explicitly set `LORE_OFFICIAL_BUILD=1`.
+Prepared SEA staging preserves its build identity; regenerate staging when
+switching between local and official build modes.
+
 ## Standing on the shoulders of
 
 ### Memory architecture

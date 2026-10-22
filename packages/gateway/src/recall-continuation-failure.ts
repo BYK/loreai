@@ -6,6 +6,7 @@ export const RECALL_CONTINUATION_FAILURE_CATEGORIES = [
   "follow_up_failed",
   "follow_up_missing_output",
   "follow_up_usage_missing",
+  "follow_up_budget_exceeded",
   "follow_up_incomplete_arguments",
   "parallel_recall",
   "nested_recall_incomplete",
