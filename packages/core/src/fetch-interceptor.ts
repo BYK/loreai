@@ -11,7 +11,7 @@
  */
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
-import { GATEWAY_AUTH_HEADER } from "./credential-headers";
+import { isCredentialHeaderName } from "./credential-headers";
 import {
   CONTEXT_BOUNDARY_CAPABILITY_HEADER,
   CONTEXT_BOUNDARY_CAPABILITY_VALUE,
@@ -460,12 +460,19 @@ function prepareGatewayFetchInit(
   headers: Headers,
 ): RequestInit {
   const prepared: RequestInit = { ...init, headers };
-  if (headers.has(GATEWAY_AUTH_HEADER) && prepared.redirect !== "error") {
-    // Fetch may forward non-standard headers across cross-origin redirects.
-    // Never let the remote-gateway credential escape its configured origin.
+  if (hasCredentialHeaders(headers) && prepared.redirect !== "error") {
+    // Fetch may forward non-standard auth headers across redirects. Keep both
+    // provider and gateway credentials on this single gateway hop.
     prepared.redirect = "manual";
   }
   return prepared;
+}
+
+function hasCredentialHeaders(headers: Headers): boolean {
+  for (const name of headers.keys()) {
+    if (isCredentialHeaderName(name)) return true;
+  }
+  return false;
 }
 
 function isDirectGatewayRequest(upstream: URL, gatewayBase: string): boolean {
@@ -790,16 +797,23 @@ export function installFetchInterceptor(
           ? input.toString()
           : input.url;
 
-    // Fast exit: skip URL parsing entirely for requests that can't possibly
-    // be LLM API calls. Most fetch calls (tool execution, file downloads,
-    // health checks) don't contain any LLM endpoint suffix.
-    if (
-      !url.includes("/messages") &&
-      !url.includes("/completions") &&
-      !url.includes("/responses") &&
-      !url.includes("generateContent") &&
-      !url.includes("streamGenerateContent")
-    ) {
+    const couldBeLlmRequest =
+      url.includes("/messages") ||
+      url.includes("/completions") ||
+      url.includes("/responses") ||
+      url.includes("generateContent") ||
+      url.includes("streamGenerateContent");
+    const requestHeaders = new Headers(
+      init?.headers ??
+        (typeof input !== "string" && !(input instanceof URL)
+          ? input.headers
+          : undefined),
+    );
+
+    // Credentialed direct gateway routes include management and compaction
+    // endpoints that are not LLM paths. Check those before the fast exit so a
+    // cross-origin redirect cannot forward gateway or provider credentials.
+    if (!couldBeLlmRequest && !hasCredentialHeaders(requestHeaders)) {
       return originalFetch(input, init);
     }
 
@@ -815,15 +829,14 @@ export function installFetchInterceptor(
     // their auth so in-process extensions can scope side-channel requests.
     // Parsed origin and path checks avoid treating a hostile prefix host as the gateway.
     if (isDirectGatewayRequest(upstream, gatewayBase)) {
-      const directHeaders = new Headers(
-        init?.headers ??
-          (typeof input !== "string" && !(input instanceof URL)
-            ? input.headers
-            : undefined),
+      observeRequestHeaders(requestHeaders, config);
+      return originalFetch(
+        input,
+        prepareGatewayFetchInit(init, requestHeaders),
       );
-      observeRequestHeaders(directHeaders, config);
-      return originalFetch(input, prepareGatewayFetchInit(init, directHeaders));
     }
+
+    if (!couldBeLlmRequest) return originalFetch(input, init);
 
     // Never intercept local requests (could be local LLM or gateway itself)
     const host = upstream.hostname;

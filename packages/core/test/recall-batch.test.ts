@@ -73,12 +73,12 @@ describe("recall detail batches", () => {
 
     const result = await runRecall({
       query: "",
-      ids: ["k:missing"],
+      ids: ["k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c"],
       projectPath: PROJECT,
     });
     expect(result).toContain("Outcome: unavailable");
     expect(result).toContain("No matching recall detail");
-    expect(result).not.toContain("k:missing");
+    expect(result).not.toContain("k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c");
   });
 
   test("reports bounded partial detail with an offset for the remaining range", async () => {
@@ -112,7 +112,7 @@ describe("recall detail batches", () => {
     const projectId = ensureProject(PROJECT);
     const now = Date.now();
     const ids = Array.from({ length: MAX_RECALL_BATCH_IDS }, (_, index) => {
-      const id = `batch-budget-${now}-${index}`;
+      const id = crypto.randomUUID();
       db()
         .query(
           `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)

@@ -304,5 +304,44 @@ describe("durable remote tenant storage isolation", () => {
     expect(distillationHits.map((hit) => hit.id)).toEqual([
       tenantB.distillation,
     ]);
+
+    const [localProject, otherProject] = withTenant(TENANT_A, () => [
+      ensureProject(`${path}/local`),
+      ensureProject(`${path}/other`),
+    ]);
+    const seedProjectDistillation = (
+      projectId: string,
+      sessionId: string,
+      embedding: Float32Array,
+    ) => {
+      const id = crypto.randomUUID();
+      db()
+        .query(
+          `INSERT INTO distillations
+             (id, project_id, session_id, narrative, facts, source_ids,
+              observations, generation, token_count, created_at, archived)
+           VALUES (?, ?, ?, '', '', '[]', 'private project vector', 0, 10, ?, 0)`,
+        )
+        .run(id, projectId, sessionId, Date.now());
+      storeEmbedding(db(), "distillations", id, embedding);
+      return id;
+    };
+    const localDistillation = withTenant(TENANT_A, () =>
+      seedProjectDistillation(localProject, "local-vector-session", vector(1)),
+    );
+    withTenant(TENANT_A, () =>
+      seedProjectDistillation(otherProject, "other-vector-session", vector(0)),
+    );
+    const projectDistillationHits = withTenant(TENANT_A, () =>
+      runVectorQuery(db(), mode, query, {
+        kind: "distillations",
+        tenantId: TENANT_A,
+        projectId: localProject,
+        limit: 1,
+      }),
+    );
+    expect(projectDistillationHits.map((hit) => hit.id)).toEqual([
+      localDistillation,
+    ]);
   });
 });

@@ -440,9 +440,12 @@ export type GatewayResponse = {
 
 /** Stored recall result for marker-based round-trip expansion. */
 export type StoredRecall = {
-  /** The tool_use ID to reconstruct in the upstream request. */
+  /** Persistence replaces provider-chosen IDs with a local anchor-derived ID. */
   toolUseId: string;
-  /** Original recall input, retained verbatim for tool-pair reconstruction. */
+  /**
+   * In-memory input for tool-pair reconstruction. Durable state retains only a
+   * fixed query placeholder and scope; selectors and pagination are discarded.
+   */
   input: {
     query: string;
     scope?: string;
@@ -459,7 +462,6 @@ export type StoredRecall = {
    * unique when the model repeats an identical recall. */
   anchorId?: string;
   /** Fingerprint of the transcript prefix that produced the anchor. */
-  /** Missing only on query-keyed entries persisted by pre-anchor releases. */
   anchorContextId?: string;
   /** Non-recall tool calls emitted beside this hidden recall in the original
    *  response. Used to restore only genuine mixed-tool turns; a tool called by

@@ -2508,10 +2508,11 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   SELECT 1;
   `,
   `
-  -- Version 106: recall queries are transient input and must not remain in
-  -- durable session state. Keep only anchor-keyed replay records, replacing
-  -- their input query with a fixed marker; legacy query-keyed records cannot
-  -- be replayed without the query and are discarded.
+  -- Version 106: recall queries and provider call IDs are transient and must
+  -- not remain in durable session state. Keep only anchor-keyed replay records,
+  -- replacing the query with a fixed marker, dropping selectors/detail paging,
+  -- and deriving a replay call ID from the local anchor. Legacy query-keyed
+  -- records cannot be replayed without the query and are discarded.
   UPDATE session_state
      SET recall_store = '[]'
    WHERE recall_store IS NOT NULL AND NOT json_valid(recall_store);
@@ -2519,28 +2520,65 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
      SET recall_store = COALESCE((
        SELECT json_group_array(json(entry_json))
          FROM (
-           SELECT json_array(
-                    json_extract(entry.array_value, '$[0]'),
-                    json(json_set(
-                      json_extract(entry.array_value, '$[1]'),
-                      '$.input.query',
-                      '[recall query omitted from persistent state]'
-                    ))
-                  ) AS entry_json
+            SELECT json_array(
+                     json_extract(entry.array_value, '$[0]'),
+                     json_patch(
+                       json_object(
+                         'toolUseId', 'lore-recall-' || json_extract(entry.array_value, '$[1].anchorId'),
+                         'anchorId', json_extract(entry.array_value, '$[1].anchorId'),
+                         'anchorContextId', json_extract(entry.array_value, '$[1].anchorContextId'),
+                         'input', json_object(
+                           'query', '[recall query omitted from persistent state]',
+                           'scope', json_extract(entry.array_value, '$[1].input.scope')
+                         ),
+                         'position', json_extract(entry.array_value, '$[1].position'),
+                         'result', json_extract(entry.array_value, '$[1].result')
+                       ),
+                       CASE
+                         WHEN json_type(entry.array_value, '$[1].companionToolUses') = 'array'
+                         THEN json_object(
+                           'companionToolUses',
+                           json(json_extract(entry.array_value, '$[1].companionToolUses'))
+                         )
+                         ELSE '{}'
+                       END
+                     )
+                   ) AS entry_json
              FROM (
-               SELECT entry.key,
-                      entry.type,
-                      CASE WHEN entry.type = 'array'
-                           THEN entry.value ELSE '[]' END AS array_value
-                 FROM json_each(session_state.recall_store) AS entry
+                SELECT entry.key,
+                       entry.type,
+                       CASE WHEN entry.type = 'array'
+                            THEN entry.value ELSE '[]' END AS array_value
+                  FROM json_each(session_state.recall_store) AS entry
              ) AS entry
-            WHERE entry.type = 'array'
-              AND json_type(entry.array_value, '$[0]') = 'text'
-              AND json_extract(entry.array_value, '$[0]') LIKE 'anchor:%'
-              AND json_type(entry.array_value, '$[1]') = 'object'
-              AND json_type(entry.array_value, '$[1].input') = 'object'
-              AND json_type(entry.array_value, '$[1].input.query') = 'text'
-            ORDER BY CAST(entry.key AS INTEGER)
+             WHERE entry.type = 'array'
+               -- Persist only complete replay records; malformed anchor keys or
+               -- context fingerprints could themselves carry private input.
+               AND json_type(entry.array_value, '$[0]') = 'text'
+               AND substr(json_extract(entry.array_value, '$[0]'), 1, 7) = 'anchor:'
+               AND json_type(entry.array_value, '$[1]') = 'object'
+               AND json_type(entry.array_value, '$[1].input') = 'object'
+               AND json_type(entry.array_value, '$[1].input.query') = 'text'
+               AND json_type(entry.array_value, '$[1].input.scope') = 'text'
+               AND json_extract(entry.array_value, '$[1].input.scope') IN ('all', 'session', 'project', 'knowledge')
+               AND json_type(entry.array_value, '$[1].position') = 'integer'
+               AND json_extract(entry.array_value, '$[1].position') BETWEEN 0 AND 9007199254740991
+               AND json_type(entry.array_value, '$[1].result') = 'text'
+               AND json_type(entry.array_value, '$[1].anchorId') = 'text'
+               AND json_extract(entry.array_value, '$[1].anchorId') = substr(json_extract(entry.array_value, '$[0]'), 8)
+               AND length(json_extract(entry.array_value, '$[1].anchorId')) = 36
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 9, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 14, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 19, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 24, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 15, 1) = '4'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 20, 1) IN ('8', '9', 'a', 'b')
+               AND length(replace(json_extract(entry.array_value, '$[1].anchorId'), '-', '')) = 32
+               AND replace(json_extract(entry.array_value, '$[1].anchorId'), '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND json_type(entry.array_value, '$[1].anchorContextId') = 'text'
+               AND length(json_extract(entry.array_value, '$[1].anchorContextId')) = 64
+               AND json_extract(entry.array_value, '$[1].anchorContextId') NOT GLOB '*[^0-9a-f]*'
+             ORDER BY CAST(entry.key AS INTEGER)
          )
      ), '[]')
    WHERE recall_store IS NOT NULL AND json_valid(recall_store);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import { config } from "../src/config";
 import { create as createKnowledge } from "../src/ltm";
+import { projectId } from "../src/db";
 import {
   createRecallToolExecutor,
   type RecallToolRunner,
@@ -45,6 +46,19 @@ describe("recall detail references", () => {
     expect(noSessionPreview).not.toContain("detail ref:");
     expect(noSessionPreview).not.toContain(sourceId);
 
+    const directNoSession = await runRecallWithMetadata({
+      query: title,
+      projectPath,
+      scope: "project",
+      detailRefs: true,
+      searchConfig: {
+        ...baseConfig.search,
+        queryExpansion: false,
+        embeddings: { ...baseConfig.search.embeddings, enabled: false },
+      },
+    });
+    expect(directNoSession.result).not.toContain("detail ref:");
+
     const preview = await execute({ query: title, scope: "project" }, context);
     const detailRef = preview.match(/detail ref: `([^`]+)`/)?.[1];
 
@@ -71,6 +85,15 @@ describe("recall detail references", () => {
       { projectPath: otherProjectPath, sessionID },
     );
     expect(wrongProject).not.toContain(marker);
+
+    const unknownProjectPath = `/test/recall-detail-unknown/${randomUUID()}`;
+    expect(projectId(unknownProjectPath)).toBeUndefined();
+    const unknownProject = await execute(
+      { id: detailRef, scope: "project" },
+      { projectPath: unknownProjectPath, sessionID },
+    );
+    expect(unknownProject).not.toContain(marker);
+    expect(projectId(unknownProjectPath)).toBeUndefined();
 
     const wrongScope = await execute(
       { id: detailRef, scope: "session" },

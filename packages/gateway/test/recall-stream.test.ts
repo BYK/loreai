@@ -809,7 +809,7 @@ describe("RecallAwareAccumulator — continuation stream scenario", () => {
       contentBlockStop(0),
       // Model calls recall again
       toolUseBlockStart(1, RECALL_TOOL_NAME, "toolu_recall_2"),
-      inputJsonDelta(1, '{"id":"t:abc123"}'),
+      inputJsonDelta(1, '{"id":"t:019e18ec-e328-76c4-9c3c-09dbe8d51c6c"}'),
       contentBlockStop(1),
       messageDelta("tool_use"),
       messageStop(),

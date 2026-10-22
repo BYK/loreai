@@ -8,6 +8,8 @@ import { runRecallWithMetadata } from "../src/recall";
 function seedDetailFixture() {
   const currentProjectPath = `/test/recall-detail-scope/${crypto.randomUUID()}`;
   const otherProjectPath = `/test/recall-detail-scope/${crypto.randomUUID()}`;
+  const currentLatFile = `rules-${crypto.randomUUID()}`;
+  const foreignLatFile = `other-${crypto.randomUUID()}`;
   const currentProjectId = ensureProject(currentProjectPath);
   const otherProjectId = ensureProject(otherProjectPath);
   const ids = {
@@ -17,8 +19,8 @@ function seedDetailFixture() {
     currentTemporal: uuidv7(),
     otherSessionTemporal: uuidv7(),
     foreignTemporal: uuidv7(),
-    currentLat: uuidv7(),
-    foreignLat: uuidv7(),
+    currentLat: `${currentLatFile}#Build rule`,
+    foreignLat: `${foreignLatFile}#Build rule`,
   };
   const distillation = db().query(
     `INSERT INTO distillations
@@ -82,11 +84,12 @@ function seedDetailFixture() {
   const lat = db().query(
     `INSERT INTO lat_sections
        (id, project_id, file, heading, depth, content, content_hash, updated_at)
-     VALUES (?, ?, 'rules.md', 'Build rule', 1, ?, ?, ?)`,
+     VALUES (?, ?, ?, 'Build rule', 1, ?, ?, ?)`,
   );
   lat.run(
     ids.currentLat,
     currentProjectId,
+    currentLatFile,
     "current-project LAT secret",
     "current-lat-hash",
     now,
@@ -94,6 +97,7 @@ function seedDetailFixture() {
   lat.run(
     ids.foreignLat,
     otherProjectId,
+    foreignLatFile,
     "foreign-project LAT secret",
     "foreign-lat-hash",
     now,

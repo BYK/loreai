@@ -112,7 +112,7 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
       input: {
         query: null,
         scope: null,
-        id: "k:one",
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
         ids: null,
         detailOffset: 10,
         detailLimit: 20,
@@ -120,7 +120,7 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
       expected: {
         query: "",
         scope: "all",
-        id: "k:one",
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
         ids: undefined,
         detailOffset: 10,
         detailLimit: 20,
@@ -132,7 +132,10 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
         query: null,
         scope: null,
         id: null,
-        ids: ["k:one", "k:two"],
+        ids: [
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+        ],
         detailOffset: null,
         detailLimit: null,
       },
@@ -140,7 +143,10 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
         query: "",
         scope: "all",
         id: undefined,
-        ids: ["k:one", "k:two"],
+        ids: [
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+        ],
         detailOffset: undefined,
         detailLimit: undefined,
       },

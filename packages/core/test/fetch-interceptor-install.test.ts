@@ -174,6 +174,58 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       }
     });
 
+    test.each([
+      [
+        "gateway and provider credentials",
+        {
+          "x-lore-gateway-token": "synthetic-gateway-token",
+          "x-api-key": "synthetic-provider-key",
+        },
+      ],
+      [
+        "provider credentials without a gateway token",
+        {
+          "x-api-key": "synthetic-provider-key",
+        },
+      ],
+    ])(
+      "does not follow redirects from direct non-LLM gateway routes with %s",
+      async (_label, headers) => {
+        cleanup();
+        let hostileRequests = 0;
+        const hostile = createServer((_request, response) => {
+          hostileRequests++;
+          response.end("received");
+        });
+        const hostilePort = await listen(hostile);
+        const gateway = createServer((_request, response) => {
+          response.writeHead(302, {
+            location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+          });
+          response.end();
+        });
+        const gatewayPort = await listen(gateway);
+        const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+        globalThis.fetch = nativeFetch;
+        cleanup = installFetchInterceptor({
+          gatewayBase,
+          getHeaders: () => ({}),
+        });
+
+        try {
+          const response = await fetch(`${gatewayBase}/v1/compact`, {
+            headers,
+            redirect: "follow",
+          });
+          expect(response.status).toBe(302);
+          expect(hostileRequests).toBe(0);
+        } finally {
+          await closeServer(gateway);
+          await closeServer(hostile);
+        }
+      },
+    );
+
     test("does not classify a host sharing the gateway URL prefix as direct", async () => {
       const gatewayBase = "https://gateway.example";
       additionalHeaders["x-lore-gateway-token"] = "remote-gateway-secret";

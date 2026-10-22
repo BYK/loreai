@@ -167,7 +167,7 @@ export function buildRecallMarker(
     return `📚 Fetching details for ${ids.length} sources…`;
   if (id)
     return `📚 Fetching detail for ${
-      isValidRecallId(id) ? id : "an invalid source"
+      isValidRecallId(id) || isRecallDetailRef(id) ? id : "an invalid source"
     }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
@@ -179,6 +179,8 @@ const MAX_RECALL_MARKER_CHARS = 1024;
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
 const BATCH_MARKER_REGEX = /^📚 Fetching details for ([1-8]) sources…(?=\n|$)/;
+const TRUNCATED_DETAIL_ID_RE =
+  /^(?:(?:k|xk|d|e|r):[0-9a-f-]{1,64}|t:(?:[0-9a-f-]{1,64}|lore_tm_v1_[a-z0-9_-]{1,64}))$/i;
 
 function isValidBatchMarker(text: string): boolean {
   const match = BATCH_MARKER_REGEX.exec(text);
@@ -405,8 +407,16 @@ function insertCompanionBundle(
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
+  const detailProgress = ID_MARKER_REGEX.exec(text);
+  const isDetailProgress =
+    detailProgress !== null &&
+    detailProgress[0].length <= MAX_RECALL_MARKER_CHARS &&
+    (isValidRecallId(detailProgress[1]) ||
+      isRecallDetailRef(detailProgress[1]) ||
+      TRUNCATED_DETAIL_ID_RE.test(detailProgress[1]));
   return (
     parseRecallMarker(text) !== null ||
+    isDetailProgress ||
     parseRecallAnchorFromText(text) !== null ||
     isValidBatchMarker(text)
   );
@@ -484,7 +494,8 @@ export function parseRecallMarker(
   const idMatch = ID_MARKER_REGEX.exec(text);
   if (idMatch) {
     if (idMatch[0].length > MAX_RECALL_MARKER_CHARS) return null;
-    if (!isValidRecallId(idMatch[1])) return null;
+    if (!isValidRecallId(idMatch[1]) && !isRecallDetailRef(idMatch[1]))
+      return null;
     return { query: "", scope: "all", id: idMatch[1] };
   }
   const match = MARKER_REGEX.exec(text);
@@ -505,8 +516,9 @@ export function parseRecallMarker(
  * tool_use + tool_result pair and instead leak upstream as raw marker TEXT —
  * rewriting that (deep) assistant message and busting the prompt cache
  * (ses_14b9bf3d… incident). Durable anchors preserve replay structure while
- * replacing the original query with a fixed placeholder. Pre-anchor
- * query-keyed records are omitted because replaying them requires that query.
+ * replacing the original query with a fixed placeholder and dropping selectors,
+ * pagination details, and provider-chosen call IDs. Pre-anchor query-keyed
+ * records are omitted because replaying them requires that query.
  */
 export function serializeRecallStore(store: RecallStore): string {
   const entries: Array<[string, StoredRecall]> = [];
@@ -521,8 +533,18 @@ export function serializeRecallStore(store: RecallStore): string {
     entries.push([
       key,
       {
-        ...value,
-        input: { ...value.input, query: PERSISTED_RECALL_QUERY },
+        toolUseId: persistedRecallToolUseId(key.slice("anchor:".length)),
+        anchorId: value.anchorId,
+        input: {
+          query: PERSISTED_RECALL_QUERY,
+          ...(value.input.scope ? { scope: value.input.scope } : {}),
+        },
+        position: value.position,
+        result: value.result,
+        anchorContextId: value.anchorContextId,
+        ...(value.companionToolUses
+          ? { companionToolUses: value.companionToolUses }
+          : {}),
       },
     ]);
   }
@@ -597,6 +619,9 @@ export function deserializeRecallStore(json: string): RecallStore {
         try {
           addRecallStoreEntry(store, entry[0], {
             ...entry[1],
+            toolUseId: persistedRecallToolUseId(
+              entry[0].slice("anchor:".length),
+            ),
             input: {
               ...entry[1].input,
               query: PERSISTED_RECALL_QUERY,
@@ -611,6 +636,13 @@ export function deserializeRecallStore(json: string): RecallStore {
     // Corrupt blob — start empty; orphaned markers are removed before forwarding.
   }
   return store;
+}
+
+function persistedRecallToolUseId(anchorId: string): string {
+  // Provider-generated call IDs are untrusted and may themselves contain the
+  // private query. The anchor is local UUID provenance, so derive replay IDs
+  // from it instead of carrying the provider value across restarts.
+  return `lore-recall-${anchorId}`;
 }
 
 function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {

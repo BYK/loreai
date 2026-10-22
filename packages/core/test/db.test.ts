@@ -120,16 +120,53 @@ describe("db", () => {
     const anchorContextId = "a".repeat(64);
     const legacyQuery = "private legacy recall query";
     const anchorQuery = "private anchored recall query";
+    const privateSelector = "private selector text";
+    const privateToolUseId = "private tool-use query text";
     const anchorValue = {
-      toolUseId: "call-anchor",
+      toolUseId: privateToolUseId,
       anchorId,
       anchorContextId,
-      input: { query: anchorQuery, scope: "all" },
+      input: {
+        query: anchorQuery,
+        scope: "all",
+        id: privateSelector,
+        ids: [privateSelector],
+        detailOffset: 20,
+        detailLimit: 40,
+      },
+      position: 2,
       result: "anchored recall result",
+      companionToolUseIds: [privateToolUseId],
+      companionToolUses: [
+        {
+          id: "call_read",
+          name: "read_file",
+          input: { path: "README" },
+          side: "before",
+        },
+      ],
+      privateMetadata: anchorQuery,
     };
     const anchorRecord: [string, typeof anchorValue] = [
       `anchor:${anchorId}`,
       anchorValue,
+    ];
+    const privateAnchor = "private anchor key leak";
+    const invalidAnchorRecord = [
+      `anchor:${privateAnchor}`,
+      {
+        ...anchorValue,
+        anchorId: privateAnchor,
+      },
+    ];
+    const privateContext = "private anchor context leak";
+    const invalidContextRecord = [
+      "anchor:123e4567-e89b-42d3-a456-426614174002",
+      {
+        ...anchorValue,
+        anchorId: "123e4567-e89b-42d3-a456-426614174002",
+        anchorContextId: privateContext,
+      },
     ];
     connection
       .query(
@@ -148,6 +185,8 @@ describe("db", () => {
             },
           ],
           anchorRecord,
+          invalidAnchorRecord,
+          invalidContextRecord,
           "malformed non-array entry",
         ]),
       );
@@ -171,15 +210,32 @@ describe("db", () => {
     const persisted = loadRecallStore("recall-redaction");
     expect(persisted).not.toContain(legacyQuery);
     expect(persisted).not.toContain(anchorQuery);
+    expect(persisted).not.toContain(privateSelector);
+    expect(persisted).not.toContain(privateToolUseId);
+    expect(persisted).not.toContain(privateAnchor);
+    expect(persisted).not.toContain(privateContext);
+    expect(persisted).not.toContain("privateMetadata");
     expect(JSON.parse(persisted)).toEqual([
       [
         `anchor:${anchorId}`,
         {
-          ...anchorValue,
+          toolUseId: `lore-recall-${anchorId}`,
+          anchorId,
+          anchorContextId,
           input: {
             query: "[recall query omitted from persistent state]",
             scope: "all",
           },
+          position: 2,
+          result: "anchored recall result",
+          companionToolUses: [
+            {
+              id: "call_read",
+              name: "read_file",
+              input: { path: "README" },
+              side: "before",
+            },
+          ],
         },
       ],
     ]);

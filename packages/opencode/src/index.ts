@@ -53,7 +53,7 @@ async function resolveGatewayUrl(): Promise<string | null> {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
     log.info(
-      `remote gateway at ${url} not reachable, falling through to local discovery`,
+      "remote gateway is not reachable, falling through to local discovery",
     );
   }
 

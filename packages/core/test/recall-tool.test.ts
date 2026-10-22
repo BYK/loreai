@@ -48,14 +48,23 @@ describe("shared recall tool contract", () => {
       value: { query: "cache behavior", scope: "session" },
     });
     expect(
-      parseRecallToolArguments({ id: "k:entry", detailOffset: 4 }),
+      parseRecallToolArguments({
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        detailOffset: 4,
+      }),
     ).toEqual({
       valid: true,
-      value: { id: "k:entry", detailOffset: 4 },
+      value: {
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        detailOffset: 4,
+      },
     });
     expect(parseRecallToolArguments({ query: " " }).valid).toBe(false);
     expect(
-      parseRecallToolArguments({ id: "k:entry", ids: ["d:entry"] }).valid,
+      parseRecallToolArguments({
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        ids: ["d:019e18ec-e328-76c4-9c3c-09dbe8d51c6c"],
+      }).valid,
     ).toBe(false);
     expect(
       parseRecallToolArguments({ detailLimit: 10, query: "detail" }).valid,
@@ -64,6 +73,40 @@ describe("shared recall tool contract", () => {
       parseRecallToolArguments({ query: "cache", extra: true }).valid,
     ).toBe(false);
     expect(parseRecallToolArguments({ ids: Array(1) }).valid).toBe(false);
+  });
+
+  test("rejects query text masquerading as a source selector", () => {
+    const privateQuery = "find the private cache behavior note";
+
+    expect(parseRecallToolArguments({ id: privateQuery }).valid).toBe(false);
+    expect(parseRecallToolArguments({ ids: [privateQuery] }).valid).toBe(false);
+    expect(
+      parseRecallToolArguments({
+        ids: ["k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c", privateQuery],
+      }).valid,
+    ).toBe(false);
+  });
+
+  test("accepts only supported source and detail-reference formats", () => {
+    for (const id of [
+      "xk:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "d:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      `t:${"a".repeat(32)}`,
+      "t:lore_tm_v1_" + "A".repeat(43),
+      "lat:packages/core/README#Long-term Knowledge",
+      "r:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+    ]) {
+      expect(parseRecallToolArguments({ id }).valid, id).toBe(true);
+    }
+
+    for (const id of [
+      "k:short",
+      "t:source-1",
+      "other:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "lat:private query",
+    ]) {
+      expect(parseRecallToolArguments({ id }).valid, id).toBe(false);
+    }
   });
 
   test("executes through shared recall with host context and trusted config", async () => {

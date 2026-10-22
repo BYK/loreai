@@ -19,7 +19,12 @@ import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { createHash, randomUUID } from "node:crypto";
-import { db, ensureProject, projectName } from "./db";
+import {
+  db,
+  ensureProject,
+  projectId as getProjectId,
+  projectName,
+} from "./db";
 import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
 import {
@@ -1319,25 +1324,34 @@ export async function searchRecall(
 
       // Distillation vector search
       if (scope !== "knowledge") {
+        const distillationPid = ensureProject(projectPath);
         const distVectorHits = await abortable(
           timer.await(
-            embedding.vectorSearchDistillations(queryVec, limit),
+            embedding.vectorSearchDistillations(
+              queryVec,
+              limit,
+              undefined,
+              undefined,
+              distillationPid,
+            ),
             "vectorSearch",
           ),
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
         const distMap = await abortable(
           timer.await(
-            hydrateVectorRows<Distillation>(
+            hydrateVectorRows<Distillation & { project_id: string }>(
               distVectorHits,
-              "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id IN",
+              "SELECT id, project_id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id IN",
             ),
           ),
         );
         const distVectorTagged: TaggedResult[] = distVectorHits
           .map((hit): TaggedResult | null => {
             const row = distMap.get(hit.id);
-            if (!row) return null;
+            // Recheck tenant/project ownership after hydration; vector hit
+            // visibility is not sufficient authorization to return a row.
+            if (!row || row.project_id !== distillationPid) return null;
             return {
               source: "distillation",
               item: { ...row, rank: -hit.similarity },
@@ -1932,8 +1946,12 @@ function recallDetailContext(
   const scope = input.scope ?? "all";
   validateRecallScope(input);
   if (!input.projectPath) return null;
+  // A detail lookup must only recognize an already established project; an
+  // opaque handle must never create project ownership from a supplied path.
+  const projectId = getProjectId(input.projectPath);
+  if (!projectId) return null;
   return {
-    projectId: ensureProject(input.projectPath),
+    projectId,
     scope,
     ...(input.sessionID ? { sessionID: input.sessionID } : {}),
   };
@@ -1969,6 +1987,11 @@ function createRecallDetailRef(
   tagged: TaggedResult,
   input: RecallInput,
 ): string {
+  const sessionID = input.sessionID;
+  const projectId = getProjectId(input.projectPath);
+  // Detail handles are session-bound capabilities; never mint a reusable
+  // project-only handle when a direct caller omitted session identity.
+  if (!sessionID?.trim() || !projectId) return "";
   const now = Date.now();
   for (const [ref, detail] of recallDetailRefs) {
     if (detail.expiresAt <= now) recallDetailRefs.delete(ref);
@@ -1983,9 +2006,9 @@ function createRecallDetailRef(
   recallDetailRefs.set(ref, {
     sourceId: taggedResultKey(tagged),
     tenantId: currentTenantId(),
-    projectId: ensureProject(input.projectPath),
+    projectId,
     scope: input.scope ?? "all",
-    ...(input.sessionID ? { sessionID: input.sessionID } : {}),
+    sessionID,
     expiresAt: now + RECALL_DETAIL_REF_TTL_MS,
   });
   return ref;
@@ -2006,6 +2029,7 @@ function resolveRecallDetailRef(
   // Opaque handles keep the producing session boundary in every recall scope.
   if (
     !context ||
+    !detail.sessionID ||
     detail.tenantId !== currentTenantId() ||
     detail.projectId !== context.projectId ||
     (input.scope !== undefined && detail.scope !== context.scope) ||
@@ -2018,13 +2042,13 @@ function resolveRecallDetailRef(
   const boundContext = {
     ...context,
     scope: detail.scope,
-    ...(detail.sessionID ? { sessionID: detail.sessionID } : {}),
+    sessionID: detail.sessionID,
   };
   return detailScopeAllowsPrefix(prefix, boundContext, input)
     ? {
         sourceId: detail.sourceId,
         scope: detail.scope,
-        ...(detail.sessionID ? { sessionID: detail.sessionID } : {}),
+        sessionID: detail.sessionID,
       }
     : null;
 }
@@ -2712,7 +2736,7 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
     absoluteFloor:
       recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
     alreadyInLtmIds: input.alreadyInLtmIds,
-    ...(input.detailRefs
+    ...(input.detailRefs && input.sessionID?.trim()
       ? {
           createDetailRef: (tagged: TaggedResult) =>
             createRecallDetailRef(tagged, input),

@@ -826,7 +826,10 @@ function anthropicFollowupRecallStream(query: string): Response {
       index: 1,
       delta: {
         type: "input_json_delta",
-        partial_json: JSON.stringify({ query, id: "t:abc123" }),
+        partial_json: JSON.stringify({
+          query,
+          id: "t:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        }),
       },
     }) +
     sseEvent("content_block_stop", {

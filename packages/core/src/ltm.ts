@@ -3981,17 +3981,15 @@ async function loadContextSourceCandidates(
 
       // Vector pass (only when a context vector is available).
       if (contextVec) {
-        // vectorSearchDistillations takes no pid: the vec0 backend partitions
-        // distillation_vec by project (so results are already project-scoped),
-        // but the legacy blob backend is not — so over-fetch and re-filter by
-        // project_id in hydration below to keep another project's distillation
-        // from leaking in regardless of backend. Temporal is already
-        // project-scoped via vectorSearchTemporal(pid).
+        // Restrict candidates at the vector query on every backend, then keep
+        // the hydration project check below as defense in depth. Temporal is
+        // likewise project-scoped via vectorSearchTemporal(pid).
         const hits = await embedding.vectorSearchDistillations(
           contextVec,
           limit * 4,
           "context",
           { signal },
+          pid,
         );
         for (const h of hits) {
           // Match the knowledge path's floor semantics: a context source must

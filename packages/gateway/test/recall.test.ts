@@ -755,6 +755,14 @@ describe("buildRecallMarker", () => {
     );
   });
 
+  test("round-trips an opaque detail reference in a marker", () => {
+    const id = "r:123e4567-e89b-42d3-a456-426614174000";
+    const marker = buildRecallMarker("", "all", id);
+
+    expect(marker).toBe(`📚 Fetching detail for ${id}…`);
+    expect(parseRecallMarker(marker)).toEqual({ query: "", scope: "all", id });
+  });
+
   test("labels a bounded detail batch without exposing every source ID", () => {
     expect(buildRecallMarker("", "all", undefined, ["d:one", "t:two"])).toBe(
       "📚 Fetching details for 2 sources…",
@@ -905,18 +913,66 @@ describe("parseRecallMarker", () => {
 describe("serializeRecallStore / deserializeRecallStore", () => {
   test("persists anchored replays without their private query text", () => {
     const anchorId = "123e4567-e89b-42d3-a456-426614174000";
+    const batchAnchorId = "123e4567-e89b-42d3-a456-426614174003";
     const privateQuery = 'sync tiers "pro" max';
+    const privateSelector = "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c";
+    const privateBatchSelector = "d:019e18ec-e328-76c4-9c3c-09dbe8d51c6c";
     const store: RecallStore = new Map([
       [
         `anchor:${anchorId}`,
         {
-          toolUseId: "toolu_1",
+          toolUseId: privateQuery,
           anchorId,
-          input: { query: privateQuery, scope: "all" },
+          input: {
+            query: privateQuery,
+            scope: "all",
+            id: privateSelector,
+            detailOffset: 8,
+            detailLimit: 20,
+          },
           position: 2,
           result: "## Results\n\n* entry one\n* entry two",
           anchorContextId: "1".repeat(64),
-          companionToolUseIds: ["call_read"],
+          companionToolUseIds: [privateSelector],
+          companionToolUses: [
+            {
+              id: "call_read",
+              name: "read_file",
+              input: { path: "README" },
+              side: "before",
+            },
+          ],
+          privateMetadata: privateQuery,
+        } as StoredRecall,
+      ],
+      [
+        `anchor:${batchAnchorId}`,
+        {
+          toolUseId: "provider-call-id",
+          anchorId: batchAnchorId,
+          input: {
+            query: privateQuery,
+            scope: "project",
+            ids: [privateBatchSelector],
+          },
+          position: 4,
+          result: "batch recall result",
+          anchorContextId: "3".repeat(64),
+        },
+      ],
+      [
+        "anchor:123e4567-e89b-42d3-a456-426614174001",
+        {
+          toolUseId: "toolu_bad_selector",
+          anchorId: "123e4567-e89b-42d3-a456-426614174001",
+          input: {
+            query: privateQuery,
+            scope: "all",
+            id: "private selector text",
+          },
+          position: 3,
+          result: "invalid selector result",
+          anchorContextId: "2".repeat(64),
         },
       ],
       [
@@ -940,17 +996,39 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     ]);
     const serialized = serializeRecallStore(store);
     expect(serialized).not.toContain(privateQuery);
+    expect(serialized).not.toContain(privateSelector);
+    expect(serialized).not.toContain(privateBatchSelector);
+    expect(serialized).not.toContain("privateMetadata");
     expect(serialized).not.toContain("private-detail");
+    expect(serialized).not.toContain("private selector text");
 
     const restored = deserializeRecallStore(serialized);
-    expect(restored.size).toBe(1);
+    expect(restored.size).toBe(2);
     expect(restored.get(`anchor:${anchorId}`)).toMatchObject({
       anchorId,
       input: {
         query: "[recall query omitted from persistent state]",
         scope: "all",
       },
+      toolUseId: `lore-recall-${anchorId}`,
       result: "## Results\n\n* entry one\n* entry two",
+      companionToolUses: [
+        {
+          id: "call_read",
+          name: "read_file",
+          input: { path: "README" },
+          side: "before",
+        },
+      ],
+    });
+    expect(restored.get(`anchor:${batchAnchorId}`)).toMatchObject({
+      anchorId: batchAnchorId,
+      input: {
+        query: "[recall query omitted from persistent state]",
+        scope: "project",
+      },
+      toolUseId: `lore-recall-${batchAnchorId}`,
+      result: "batch recall result",
     });
   });
 
