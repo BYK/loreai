@@ -7,8 +7,9 @@
  * transparently reroutes LLM API calls through the gateway (preserving
  * original auth headers and URLs), registers known providers with Pi,
  * and adds a Pi-specific compaction hook (session_before_compact).
- * All other memory features (LTM injection, gradient transforms,
- * temporal capture, recall, idle work) are handled by the gateway pipeline.
+ * Recall is registered through Pi's native tool API using the shared core
+ * contract; routed recall execution, LTM injection, gradient transforms,
+ * temporal capture, and idle work remain owned by the gateway pipeline.
  *
  * If the gateway server cannot be reached, the extension logs an error
  * and becomes inert — no hooks are registered and Pi runs without
@@ -43,6 +44,7 @@ import {
   sessionIDFor,
   startInProcess,
 } from "./internal";
+import { createPiRecallTool } from "./recall-tool";
 
 /** Guard against double-installing the fetch interceptor if Pi re-initializes. */
 let fetchInterceptorInstalled = false;
@@ -120,6 +122,13 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let currentSessionTitle = "";
   let compactAuthHeaders: Record<string, string> = {};
   const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
+
+  pi.registerTool(
+    createPiRecallTool(() => ({
+      projectPath,
+      sessionID: currentSessionID,
+    })),
+  );
 
   let cachedGitRemote = getGitRemote(projectPath) ?? "";
 

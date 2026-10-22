@@ -20,12 +20,12 @@
 import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
-  MAX_RECALL_ID_CHARS,
-  MAX_RECALL_QUERY_CHARS,
   isValidRecallId,
   isValidRecallQuery,
+  RECALL_TOOL_INPUT_SCHEMA,
+  RECALL_TOOL_NAME as CORE_RECALL_TOOL_NAME,
   RECALL_TOOL_DESCRIPTION,
-  RECALL_PARAM_DESCRIPTIONS,
+  parseRecallToolArguments,
   config as loreConfig,
   type RecallScope,
   type RecallCoverage,
@@ -53,63 +53,15 @@ import { reportRecallDiagnostic } from "./recall-diagnostics";
 // Tool definition
 // ---------------------------------------------------------------------------
 
-/** Recall tool definition for injection into upstream requests. */
+/** Gateway representation of the shared recall tool contract. */
 export const RECALL_GATEWAY_TOOL: GatewayTool = {
-  name: "recall",
+  name: CORE_RECALL_TOOL_NAME,
   description: RECALL_TOOL_DESCRIPTION,
   gatewayOwned: true,
-  inputSchema: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        maxLength: MAX_RECALL_QUERY_CHARS,
-        description: RECALL_PARAM_DESCRIPTIONS.query,
-      },
-      scope: {
-        type: "string",
-        enum: ["all", "session", "project", "knowledge"],
-        description: RECALL_PARAM_DESCRIPTIONS.scope,
-      },
-      id: {
-        type: "string",
-        minLength: 1,
-        maxLength: MAX_RECALL_ID_CHARS,
-        description: RECALL_PARAM_DESCRIPTIONS.id,
-      },
-      ids: {
-        type: "array",
-        minItems: 1,
-        maxItems: MAX_RECALL_BATCH_IDS,
-        items: {
-          type: "string",
-          minLength: 1,
-          maxLength: MAX_RECALL_ID_CHARS,
-        },
-        description: RECALL_PARAM_DESCRIPTIONS.ids,
-      },
-      detailOffset: {
-        type: "integer",
-        minimum: 0,
-        description: RECALL_PARAM_DESCRIPTIONS.detailOffset,
-      },
-      detailLimit: {
-        type: "integer",
-        minimum: 1,
-        maximum: 16_000,
-        description: RECALL_PARAM_DESCRIPTIONS.detailLimit,
-      },
-    },
-    anyOf: [
-      { required: ["query"] },
-      { required: ["id"] },
-      { required: ["ids"] },
-    ],
-    additionalProperties: false,
-  },
+  inputSchema: RECALL_TOOL_INPUT_SCHEMA,
 };
 
-export const RECALL_TOOL_NAME = "recall";
+export const RECALL_TOOL_NAME = CORE_RECALL_TOOL_NAME;
 
 /**
  * Prevent an Anthropic-compatible model from issuing parallel recall calls.
@@ -1086,6 +1038,20 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+/**
+ * Preserve the gateway's private marker/replay path for native host tools.
+ * Matching the shared name and description lets the gateway own execution
+ * without injecting a duplicate or treating Lore results as client-owned output.
+ */
+export function markNativeRecallTool(tools: GatewayTool[]): GatewayTool[] {
+  return tools.map((tool) =>
+    tool.name === RECALL_TOOL_NAME &&
+    tool.description === RECALL_GATEWAY_TOOL.description
+      ? { ...tool, gatewayOwned: true }
+      : tool,
+  );
+}
+
 /** Check whether the gateway injected and owns the recall tool. */
 export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
   return tools.some(
@@ -1111,107 +1077,18 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   detailOffset?: number;
   detailLimit?: number;
 } {
-  const input = block.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("Recall input must be an object");
-  }
-  const record = input as Record<string, unknown>;
-  const allowed = new Set([
-    "query",
-    "scope",
-    "id",
-    "ids",
-    "detailOffset",
-    "detailLimit",
-  ]);
-  const unknown = Object.keys(record).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`Unknown recall property: ${unknown}`);
-  // OpenAI strict function schemas require every property to be present. The
-  // wire projection therefore represents omitted optional values as `null`;
-  // normalize those sentinels before applying the provider-neutral contract.
-  const queryValue = record.query === null ? undefined : record.query;
-  const scopeValue = record.scope === null ? undefined : record.scope;
-  const idValue = record.id === null ? undefined : record.id;
-  const idsValue = record.ids === null ? undefined : record.ids;
-  const detailOffsetValue =
-    record.detailOffset === null ? undefined : record.detailOffset;
-  const detailLimitValue =
-    record.detailLimit === null ? undefined : record.detailLimit;
-  if (queryValue !== undefined && typeof queryValue !== "string") {
-    throw new Error("Recall query must be a string");
-  }
-  if (typeof queryValue !== "undefined" && !isValidRecallQuery(queryValue)) {
-    throw new Error(
-      `Recall query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
-    );
-  }
-  if (
-    idValue !== undefined &&
-    (typeof idValue !== "string" || !idValue || !isValidRecallId(idValue))
-  ) {
-    throw new Error("Recall id must be a non-empty string");
-  }
-  if (
-    idsValue !== undefined &&
-    (!Array.isArray(idsValue) ||
-      idsValue.length === 0 ||
-      idsValue.length > MAX_RECALL_BATCH_IDS ||
-      idsValue.some((id) => !isValidRecallId(id)))
-  ) {
-    throw new Error(
-      `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
-    );
-  }
-  if (idValue !== undefined && idsValue !== undefined) {
-    throw new Error("Recall id and ids cannot be used together");
-  }
-  if (
-    detailOffsetValue !== undefined &&
-    (!Number.isSafeInteger(detailOffsetValue) ||
-      (detailOffsetValue as number) < 0)
-  ) {
-    throw new Error("Recall detailOffset must be a non-negative integer");
-  }
-  if (
-    detailLimitValue !== undefined &&
-    (!Number.isSafeInteger(detailLimitValue) ||
-      (detailLimitValue as number) < 1 ||
-      (detailLimitValue as number) > 16_000)
-  ) {
-    throw new Error("Recall detailLimit must be an integer from 1 to 16000");
-  }
-  const query = queryValue ?? "";
-  if (!query.trim() && !idValue && !idsValue) {
-    throw new Error("Recall query, id, or ids is required");
-  }
-  if (
-    (detailOffsetValue !== undefined || detailLimitValue !== undefined) &&
-    typeof idValue !== "string"
-  ) {
-    throw new Error("Recall detail ranges require exactly one id");
-  }
-  const validScopes: ReadonlySet<string> = new Set([
-    "all",
-    "session",
-    "project",
-    "knowledge",
-  ]);
-  if (
-    scopeValue !== undefined &&
-    (typeof scopeValue !== "string" || !validScopes.has(scopeValue))
-  ) {
-    throw new Error("Invalid recall scope");
-  }
+  const parsed = parseRecallToolArguments(block.input);
+  if (!parsed.valid) throw new Error(parsed.error);
   return {
-    query,
-    scope: (scopeValue as RecallScope | undefined) ?? "all",
-    ...(typeof idValue === "string" && idValue ? { id: idValue } : {}),
-    ...(Array.isArray(idsValue) ? { ids: [...idsValue] } : {}),
-    ...(typeof detailOffsetValue === "number"
-      ? { detailOffset: detailOffsetValue }
+    query: parsed.value.query ?? "",
+    scope: parsed.value.scope ?? "all",
+    ...(parsed.value.id ? { id: parsed.value.id } : {}),
+    ...(parsed.value.ids ? { ids: [...parsed.value.ids] } : {}),
+    ...(parsed.value.detailOffset !== undefined
+      ? { detailOffset: parsed.value.detailOffset }
       : {}),
-    ...(typeof detailLimitValue === "number"
-      ? { detailLimit: detailLimitValue }
+    ...(parsed.value.detailLimit !== undefined
+      ? { detailLimit: parsed.value.detailLimit }
       : {}),
   };
 }
