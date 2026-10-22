@@ -760,8 +760,8 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   };
 
   return (
-    <main
-      class="mx-auto max-w-[1240px] px-4 py-6 sm:px-7.5"
+    <section
+      class="mx-auto min-w-0 max-w-[1240px] px-4 py-6 sm:px-7.5 [overflow-wrap:anywhere]"
       data-testid="duplicate-review"
     >
       <header class="mb-5 border-b border-line pb-4">
@@ -1008,8 +1008,8 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           </StateCard>
         </Match>
         <Match when={groups().length > 0}>
-          <div class="grid gap-5 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.7fr)]">
-            <nav aria-label="Duplicate groups" class="space-y-2">
+          <div class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.7fr)]">
+            <nav aria-label="Duplicate groups" class="min-w-0 space-y-2">
               <For each={groups()}>
                 {(group, index) => {
                   const reasons = () => [
@@ -1047,6 +1047,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                         </div>
                         <Badge
                           variant="teal"
+                          class="shrink-0 whitespace-nowrap"
                           aria-label={`Best match score ${score()}%`}
                           title={`Best match score ${score()}%`}
                         >
@@ -1113,7 +1114,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                     </div>
                   </div>
 
-                  <div class="grid gap-3 p-3 sm:grid-cols-2 sm:p-4">
+                  <div class="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-4">
                     <For each={group().candidates}>
                       {(candidate, index) => {
                         const load = () =>
@@ -1137,10 +1138,10 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             data-testid="duplicate-candidate"
                           >
                             <div class="mb-3 flex items-start justify-between gap-2">
-                              <h2 class="break-words text-base font-semibold">
+                              <h2 class="min-w-0 flex-1 break-words text-base font-semibold">
                                 {current()?.title ?? candidate.title}
                               </h2>
-                              <Badge variant="outline">
+                              <Badge variant="outline" class="shrink-0">
                                 v{current()?.version ?? candidate.revision}
                               </Badge>
                             </div>
@@ -1436,6 +1437,6 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
         onConfirm={() => void applyAccepted()}
         onCancel={() => setConfirmOpen(false)}
       />
-    </main>
+    </section>
   );
 };

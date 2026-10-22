@@ -54,7 +54,7 @@ const DialogContent = <T extends ValidComponent = "div">(
       <DialogOverlay />
       <DialogPrimitive.Content
         class={cn(
-          "fixed left-1/2 top-1/2 z-50 grid max-h-screen w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto border bg-surface p-6 text-text shadow-lg sm:rounded-lg",
+          "fixed left-1/2 top-1/2 z-50 grid grid-cols-1 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border bg-surface p-4 text-text shadow-lg sm:p-6",
           props.class,
         )}
         {...rest}
@@ -86,7 +86,7 @@ const DialogHeader: Component<ComponentProps<"div">> = (props) => {
   return (
     <div
       class={cn(
-        "flex flex-col space-y-1.5 text-center sm:text-left",
+        "flex min-w-0 flex-col space-y-1.5 pr-6 text-left",
         props.class,
       )}
       {...rest}
@@ -99,7 +99,7 @@ const DialogFooter: Component<ComponentProps<"div">> = (props) => {
   return (
     <div
       class={cn(
-        "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
         props.class,
       )}
       {...rest}
@@ -119,7 +119,7 @@ const DialogTitle = <T extends ValidComponent = "h2">(
   return (
     <DialogPrimitive.Title
       class={cn(
-        "text-lg font-semibold leading-none tracking-tight",
+        "break-words text-lg font-semibold leading-tight tracking-tight",
         props.class,
       )}
       {...rest}
@@ -138,7 +138,10 @@ const DialogDescription = <T extends ValidComponent = "p">(
   const [, rest] = splitProps(props as DialogDescriptionProps, ["class"]);
   return (
     <DialogPrimitive.Description
-      class={cn("text-sm text-muted-foreground", props.class)}
+      class={cn(
+        "break-words text-sm text-muted-foreground [overflow-wrap:anywhere]",
+        props.class,
+      )}
       {...rest}
     />
   );

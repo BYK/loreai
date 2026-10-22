@@ -1,4 +1,10 @@
-import { openAccountMenu, setWorkspaceTheme } from "./workspace-helpers";
+import {
+  openAccountMenu,
+  setWorkspaceTheme,
+  openNavigation,
+  closeNavigation,
+  expectNavigationAvailable,
+} from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 function focusName(page: import("@playwright/test").Page) {
@@ -30,9 +36,15 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     }
     expect(seen.some((name) => name.startsWith("Switch project:"))).toBe(true);
     expect(seen).toContain("search");
-    expect(seen.some((name) => name.startsWith("Account and sync:"))).toBe(
-      true,
-    );
+    if (await page.getByTestId("mobile-menu-trigger").isVisible()) {
+      expect(seen).toContain("Open navigation menu");
+      await openNavigation(page);
+      await page.getByTestId("folk-status").focus();
+      expect(await focusName(page)).toMatch(/^Account and sync:/);
+    } else
+      expect(seen.some((name) => name.startsWith("Account and sync:"))).toBe(
+        true,
+      );
     expect(seen).not.toContain("theme-light");
   });
 
@@ -56,7 +68,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     await link.press("Escape");
     await expect(page.getByTestId("context-pane")).toBeHidden();
     await expect(toggle).toBeFocused();
-    await expect(page.getByTestId("icon-rail")).toBeVisible();
+    await expectNavigationAvailable(page);
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({
@@ -225,6 +237,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("folk-status-panel")).toHaveCount(0);
       await expect(page.getByTestId("folk-status")).toBeFocused();
+      await closeNavigation(page);
       // Establish keyboard modality before choosing a row: Tab may scroll the
       // reader and unmount the virtualized row that was previously visible.
       await page.keyboard.press("Tab");

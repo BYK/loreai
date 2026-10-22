@@ -1,4 +1,7 @@
-import { setWorkspaceTheme } from "./workspace-helpers";
+import {
+  setWorkspaceTheme,
+  expectCurrentNavigation,
+} from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 test.describe("/ui/fixture design specimen", () => {
@@ -73,10 +76,7 @@ test("bare UI base redirects preserve chooser queries on direct loads and refres
   await expect(
     page.getByRole("heading", { name: "Choose a project for sessions" }),
   ).toBeVisible();
-  await expect(page.getByTestId("rail-sessions")).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
+  await expectCurrentNavigation(page, "rail-sessions");
   await page.reload();
   await expect(
     page.getByRole("heading", { name: "Choose a project for sessions" }),

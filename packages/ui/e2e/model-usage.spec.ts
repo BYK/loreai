@@ -1,3 +1,4 @@
+import { expectCurrentNavigation } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 const PAGE = "/ui/model-usage";
@@ -17,10 +18,7 @@ test.describe("model usage page", () => {
     page,
   }, testInfo) => {
     await page.goto(PAGE);
-    await expect(page.getByTestId("rail-model-usage")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    await expectCurrentNavigation(page, "rail-model-usage");
     await expect(page.locator("svg.flow-svg")).toBeVisible();
     await expect(page.getByTestId("chart-status")).toContainText(
       "8 active session-days",

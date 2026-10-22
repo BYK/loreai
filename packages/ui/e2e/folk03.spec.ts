@@ -1,3 +1,4 @@
+import { openAccountMenu } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
@@ -792,10 +793,160 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
       { scope_id: null, expected_scope_id: "team-1" },
     ]);
 
-    await page.getByTestId("folk-status").click();
+    await openAccountMenu(page);
     await page.getByTestId("sync-now").click();
     await expect(
       page.getByText("Sync complete: pushed 1, pulled 2.", { exact: true }),
     ).toBeVisible();
   });
+});
+
+test("team forms fit desktop and narrow mobile widths", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium");
+  await installSignedInTeamRoutes(page);
+  await page.route("**/api/v1/teams/team-1/review-policy", (route) =>
+    route.fulfill({ json: { policy: "required" } }),
+  );
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/ui/team");
+    await expect(
+      page.getByLabel("Invite email", { exact: true }),
+    ).toBeVisible();
+    const size = await page
+      .locator("main")
+      .evaluate((el) => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+    expect
+      .soft(size.scroll, `team page at ${width}px`)
+      .toBeLessThanOrEqual(size.client + 1);
+    const email = (await page
+      .getByLabel("Invite email", { exact: true })
+      .boundingBox())!;
+    const mainBox = (await page.locator("main").boundingBox())!;
+    expect
+      .soft(email.width, "invite email remains readable")
+      .toBeGreaterThanOrEqual(140);
+    expect
+      .soft(email.x + email.width, "invite email stays inside its card")
+      .toBeLessThanOrEqual(mainBox.x + mainBox.width - 32);
+    await page
+      .getByRole("heading", { name: "Invite a teammate", exact: true })
+      .locator("..")
+      .screenshot({ path: testInfo.outputPath(`team-invite-${width}.png`) });
+    await page.screenshot({
+      path: testInfo.outputPath(`team-layout-${width}.png`),
+      fullPage: true,
+    });
+  }
+});
+
+test("populated promotion and conflict pages contain long content at every width", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium");
+  await installSignedInTeamRoutes(page);
+  const teamName = "A-long-team-name-with-a-continuous-identifier-".repeat(3);
+  await page.route("**/api/v1/teams", (route) =>
+    route.fulfill({
+      json: {
+        hosted: false,
+        teams: [
+          { id: "team-1", name: teamName, role: "admin", member_count: 2 },
+          {
+            id: "team-2",
+            name: "Another team",
+            role: "editor",
+            member_count: 1,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/promotions?*", (route) =>
+    route.fulfill({
+      json: {
+        remote: "ok",
+        complete: true,
+        requests: [
+          {
+            id: "layout-request",
+            team: { id: "team-1", name: teamName },
+            logical_id: "layout-knowledge",
+            entry_version_id: "layout-version",
+            entry_version: 1,
+            category: "decision",
+            title: "Keep the local-first store",
+            content: "Use SQLite as the only store.",
+            sealed: false,
+            proposer: { id: "user-editor", label: "Editor" },
+            mine: false,
+            status: "pending",
+            decided_by: null,
+            decided_at: null,
+            decision_note: null,
+            applied: null,
+            applied_at: null,
+            created_at: "2026-09-20T12:00:00.000Z",
+            can_decide: true,
+            decide_blocked_reason: null,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/sync/conflicts", (route) =>
+    route.fulfill({
+      json: {
+        available: true,
+        complete: true,
+        conflicts: [
+          {
+            id: 43,
+            table: "knowledge",
+            row_id: "layout-knowledge",
+            detected_at: "2026-09-20T12:00:00.000Z",
+            resolution: "remote_upsert_wins",
+            recoverable: true,
+            unrecoverable_reason: null,
+            local: {
+              title: "LongIdentifier".repeat(15),
+              content: "Keep the local copy.",
+              category: "decision",
+            },
+            current: {
+              version_id: "version-2",
+              version: 2,
+              title: "Current decision",
+              content: "Keep the current copy.",
+            },
+          },
+        ],
+      },
+    }),
+  );
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const route of ["promotions", "conflicts"]) {
+      await page.goto(`/ui/${route}`);
+      await expect(
+        page.getByTestId(
+          route === "promotions" ? "promotion-row" : "conflict-card",
+        ),
+      ).toBeVisible();
+      const main = page.locator('main[data-pane="detail"]');
+      const size = await main.evaluate((el) => ({
+        client: el.clientWidth,
+        scroll: el.scrollWidth,
+      }));
+      expect
+        .soft(size.scroll, `${route} at ${width}px`)
+        .toBeLessThanOrEqual(size.client + 1);
+      await page.screenshot({
+        path: testInfo.outputPath(`${route}-${width}.png`),
+        fullPage: true,
+      });
+    }
+  }
 });

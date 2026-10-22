@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { setWorkspaceTheme } from "./workspace-helpers";
+import {
+  setWorkspaceTheme,
+  openNavigation,
+  closeNavigation,
+  expectNavigationAvailable,
+} from "./workspace-helpers";
 
 test("permanent rail and contextual navigation retain their theme backgrounds", async ({
   page,
@@ -15,20 +20,20 @@ test("permanent rail and contextual navigation retain their theme backgrounds", 
     const toggle = page.getByTestId("context-toggle");
     if ((await toggle.getAttribute("aria-expanded")) === "false")
       await toggle.click();
-    const expected = await page
-      .getByTestId("icon-rail")
-      .evaluate((rail) => getComputedStyle(rail).backgroundColor);
+    const nav = await openNavigation(page);
+    const expected = await nav.evaluate(
+      (rail) => getComputedStyle(rail).backgroundColor,
+    );
+    expect(
+      await nav.evaluate((el) => el.getBoundingClientRect().left),
+    ).toBeGreaterThanOrEqual(0);
+    await closeNavigation(page);
     const pane = page.getByTestId("context-pane");
     await expect(pane).toBeVisible();
     expect(
       await pane.evaluate((el) => getComputedStyle(el).backgroundColor),
     ).toBe(expected);
-    expect(
-      await page
-        .getByTestId("icon-rail")
-        .evaluate((el) => el.getBoundingClientRect().left),
-    ).toBe(0);
     await toggle.click();
-    await expect(page.getByTestId("icon-rail")).toBeVisible();
+    await expectNavigationAvailable(page);
   }
 });

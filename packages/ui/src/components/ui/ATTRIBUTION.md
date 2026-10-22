@@ -39,6 +39,9 @@ edited as follows (see `src/styles/app.css` for the token mapping):
 - Toggle group pressed items use Lore's `bg-chrome`/`text-text`, and inactive
   items use `text-muted` with `bg-soft`/`text-text` hover styles.
 
+- Dialogs use viewport insets, wrapping descriptions, and gaps between stacked
+  footer actions so they remain usable on narrow screens.
+
 Keep this file up to date when copying further components.
 
 ## Locally authored primitives

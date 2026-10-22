@@ -1,3 +1,4 @@
+import { expectGatewayReachable } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 import { openProjectPicker, openAccountMenu } from "./workspace-helpers";
 
@@ -14,10 +15,7 @@ test.describe("real data browsing", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
 
     // `/` shows the navigation pane on every breakpoint (no list pane yet).
     const nav = await openProjectPicker(page);
@@ -92,10 +90,7 @@ test.describe("real data browsing", () => {
   }) => {
     await page.goto("/ui/knowledge/does-not-exist");
     await expect(page.getByText("Knowledge entry not found")).toBeVisible();
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
   });
 
   test("search entry opens workspace-wide knowledge search", async ({
@@ -171,9 +166,6 @@ test.describe("real data browsing", () => {
     expect(headers["content-encoding"]).toBe("br");
     expect(headers["vary"]).toMatch(/accept-encoding/i);
     // The page actually booted from the encoded script.
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
   });
 });

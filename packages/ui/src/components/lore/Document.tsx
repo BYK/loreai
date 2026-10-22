@@ -24,6 +24,7 @@ export const DocHeader: Component<{
   crumb: readonly string[];
   title: string;
   compact?: boolean;
+  class?: string;
   participants?: readonly Participant[];
   scope?: JSX.Element;
   trailing?: JSX.Element;
@@ -33,6 +34,7 @@ export const DocHeader: Component<{
     class={cn(
       "border-b border-line px-5 pb-3.5 pt-5 sm:px-7.5",
       props.compact && "bg-surface px-6 py-5 sm:px-7",
+      props.class,
     )}
   >
     <div class="mb-2 truncate text-xs text-muted">

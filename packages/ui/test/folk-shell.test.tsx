@@ -1,5 +1,11 @@
 import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
@@ -663,4 +669,50 @@ describe("rail account menu", () => {
       screen.queryByRole("button", { name: "Sign in to Lore" }),
     ).toBeNull();
   });
+});
+
+it("retains a pending sync and its receipt across mobile drawer remounts", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  let finish!: (result: Awaited<ReturnType<ApiClient["runSync"]>>) => void;
+  const runSync = vi.fn(
+    () =>
+      new Promise<Awaited<ReturnType<ApiClient["runSync"]>>>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  mount(
+    client({
+      getAccount: async () => ({
+        ...ANONYMOUS,
+        signed_in: true,
+        state: "signed_in",
+        user: { id: "user-1", email: null, display_name: "Ada" },
+      }),
+      runSync,
+    }),
+  );
+  const open = async () => {
+    fireEvent.click(await screen.findByTestId("mobile-menu-trigger"));
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    return screen.findByTestId("sync-now");
+  };
+  fireEvent.click(await open());
+  expect(runSync).toHaveBeenCalledTimes(1);
+  const drawer = screen.getByRole("dialog", { name: /^Navigation$/ });
+  // Close the nested layer first, then the drawer, as a user does.
+  fireEvent.keyDown(screen.getByTestId("sync-now"), { key: "Escape" });
+  fireEvent.click(within(drawer).getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+  expect(await open()).toBeDisabled();
+  fireEvent.click(screen.getByTestId("sync-now"));
+  expect(runSync).toHaveBeenCalledTimes(1);
+  finish({ pushed: 2, pulled: 3, conflicts: 0, skipped: 0 });
+  expect(
+    await screen.findByText("Sync complete: pushed 2, pulled 3."),
+  ).toBeVisible();
+  vi.unstubAllGlobals();
 });

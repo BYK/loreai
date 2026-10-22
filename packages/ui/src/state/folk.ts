@@ -48,20 +48,47 @@ export function createFolkState({ client }: { client: ApiClient }) {
       window.removeEventListener("focus", refreshAccount);
     });
   });
+  const refresh = () => {
+    account.reload();
+    sync.reload();
+    if (teamsWanted()) teams.reload();
+    else setTeamsWanted(true);
+  };
+  // Navigation can unmount the account surface while a sync is in flight.
+  // Keep its guard and result on the workspace, alongside the status reads.
+  const [syncing, setSyncing] = createSignal(false);
+  const [syncError, setSyncError] = createSignal<string | null>(null);
+  const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
+  const runSync = async () => {
+    if (syncing()) return;
+    setSyncing(true);
+    setSyncError(null);
+    setSyncReceipt(null);
+    try {
+      const result = await client.runSync();
+      setSyncReceipt(
+        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
+      );
+      refresh();
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : "Sync failed.");
+    } finally {
+      setSyncing(false);
+    }
+  };
   return {
     account,
     sync,
     teams,
+    syncing,
+    syncError,
+    syncReceipt,
+    runSync,
     loadTeams() {
       if (!teamsWanted()) setTeamsWanted(true);
     },
     /** Re-read account, sync and (once requested) teams; current data stays visible. */
-    refresh() {
-      account.reload();
-      sync.reload();
-      if (teamsWanted()) teams.reload();
-      else setTeamsWanted(true);
-    },
+    refresh,
   };
 }
 

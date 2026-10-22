@@ -12,6 +12,12 @@ import { ResizableHandle } from "~/components/ui/resizable";
 import { sidebar } from "~/state/sidebar";
 import { AppBar } from "./AppBar";
 import { Rail } from "./Rail";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "~/components/ui/dialog";
 
 export type MobilePane = "nav" | "list" | "detail";
 export interface ShellProps {
@@ -26,12 +32,13 @@ export interface ShellProps {
   banner?: JSX.Element;
 }
 
-/** Permanent primary rail, optional context, and a stable main document. */
+/** Desktop rail, mobile navigation drawer, optional context, and a stable main document. */
 export const Shell: Component<ShellProps> = (props) => {
   const location = useLocation();
   const media = window.matchMedia?.("(min-width: 48rem)");
   const [wide, setWide] = createSignal(media?.matches ?? true);
   const [mobileOpen, setMobileOpen] = createSignal(false);
+  const [menuOpen, setMenuOpen] = createSignal(false);
   const open = () =>
     hasContext() && (wide() ? !sidebar().collapsed() : mobileOpen());
   let contextPane: HTMLElement | undefined;
@@ -51,18 +58,41 @@ export const Shell: Component<ShellProps> = (props) => {
   };
   const updateWidth = () => {
     const focused = contextPane?.contains(document.activeElement);
+    const navigationFocused =
+      menuOpen() ||
+      document.querySelector("[data-workspace-navigation-open]") ||
+      document.activeElement?.closest(
+        '[data-testid="icon-rail"], [data-testid="nav-drawer"], [data-workspace-navigation-layer]',
+      );
     setWide(media?.matches ?? true);
+    setMenuOpen(false);
     setMobileOpen(false);
     if (!open() && focused) focusToggle();
+    else if (navigationFocused)
+      requestAnimationFrame(() => {
+        const target = wide()
+          ? (document.querySelector<HTMLElement>(
+              '[data-testid="icon-rail"] [aria-current="page"]',
+            ) ??
+            document.querySelector<HTMLElement>(
+              '[data-testid="rail-projects"]',
+            ))
+          : document.querySelector<HTMLElement>(
+              '[data-testid="mobile-menu-trigger"]',
+            );
+        target?.focus({ preventScroll: true });
+      });
   };
   media?.addEventListener?.("change", updateWidth);
   onCleanup(() => media?.removeEventListener?.("change", updateWidth));
-  // Route navigation closes only the narrow-screen context. The permanent rail,
-  // toolbar and main document remain available; desktop context stays open.
+  // Changing section closes mobile navigation and context; desktop context stays open.
   createEffect(
     on(
       () => location.pathname,
-      () => setMobileOpen(false),
+      () => {
+        setMobileOpen(false);
+        setMenuOpen(false);
+      },
     ),
   );
   const closeOnNavigation = (event: MouseEvent) => {
@@ -134,13 +164,54 @@ export const Shell: Component<ShellProps> = (props) => {
       data-mobile-pane={props.mobilePane}
     >
       {banner()}
-      <div class="grid min-h-0 flex-1 grid-cols-[52px_minmax(0,1fr)] sm:grid-cols-[60px_minmax(0,1fr)]">
-        <Rail projectId={props.searchProjectId} />
+      <Show when={!wide()}>
+        <Dialog open={menuOpen()} onOpenChange={setMenuOpen}>
+          <DialogContent
+            id="mobile-navigation-drawer"
+            data-testid="nav-drawer"
+            class="mobile-navigation-drawer left-0 top-0 flex h-dvh max-h-dvh w-[min(320px,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-y-0 border-l-0 bg-nav p-0 sm:p-0"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              document
+                .querySelector<HTMLElement>(
+                  '[data-testid="mobile-menu-trigger"]',
+                )
+                ?.focus({ preventScroll: true });
+            }}
+          >
+            <DialogHeader class="shrink-0 border-b border-line px-6 py-4">
+              <DialogTitle class="text-sm">Navigation</DialogTitle>
+            </DialogHeader>
+            <div
+              class="min-h-0 flex-1"
+              onClick={(event) => {
+                if (
+                  event.target instanceof Element &&
+                  event.target.closest("a[href]") &&
+                  !event.ctrlKey &&
+                  !event.metaKey &&
+                  !event.shiftKey &&
+                  !event.altKey
+                )
+                  setMenuOpen(false);
+              }}
+            >
+              <Rail expanded projectId={props.searchProjectId} />
+            </div>
+          </DialogContent>
+        </Dialog>
+      </Show>
+      <div class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[60px_minmax(0,1fr)]">
+        <Show when={wide()}>
+          <Rail projectId={props.searchProjectId} />
+        </Show>
         <div
           data-testid="workspace-content"
           class="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]"
         >
           <AppBar
+            onOpenMenu={!wide() ? () => setMenuOpen(true) : undefined}
+            menuOpen={menuOpen()}
             leading={
               <Show when={props.back}>
                 {(back) => (

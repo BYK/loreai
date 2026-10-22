@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { openProjectPicker, setWorkspaceTheme } from "./workspace-helpers";
+import {
+  openProjectPicker,
+  setWorkspaceTheme,
+  clickNavigation,
+  expectCurrentNavigation,
+  expectNavigationAvailable,
+} from "./workspace-helpers";
 
 test("project picker is reachable, searchable and returns navigation to the selected project", async ({
   page,
@@ -48,14 +54,13 @@ test("context collapse preserves the permanent rail, picker, document and deskto
   page,
 }, testInfo) => {
   const { entry } = await seededReader(page);
-  const rail = page.getByTestId("icon-rail");
   const toggle = page.getByTestId("context-toggle");
   if ((await toggle.getAttribute("aria-expanded")) === "false")
     await toggle.click();
   await expect(page.getByTestId("context-pane")).toBeVisible();
   await toggle.click();
   await expect(page.getByTestId("context-pane")).toBeHidden();
-  await expect(rail).toBeVisible();
+  await expectNavigationAvailable(page);
   await expect(page.getByTestId("project-picker-trigger")).toBeVisible();
   await expect(page.getByTestId("knowledge-document")).toContainText(
     entry.title,
@@ -120,22 +125,21 @@ test("narrow context replaces content while primary navigation remains available
 }) => {
   await page.setViewportSize({ width: 393, height: 851 });
   await seededReader(page);
-  const rail = page.getByTestId("icon-rail");
   await page.getByTestId("context-toggle").click();
   await expect(page.getByTestId("context-pane")).toBeVisible();
   await expect(page.locator('main[data-pane="detail"]')).toBeHidden();
-  await expect(rail).toBeVisible();
+  await expectNavigationAvailable(page);
   const row = page.getByTestId("knowledge-row").first();
   await row.focus();
   await row.press("Escape");
   await expect(page.getByTestId("context-pane")).toBeHidden();
   await expect(page.getByTestId("context-toggle")).toBeFocused();
   await expect(page.getByTestId("knowledge-document")).toBeVisible();
-  await page.getByTestId("rail-knowledge").click();
+  await clickNavigation(page, "rail-knowledge");
   await expect(page).toHaveURL(/\/knowledge$/);
-  await page.getByTestId("rail-costs").click();
+  await clickNavigation(page, "rail-costs");
   await expect(page).toHaveURL("/ui/costs");
-  await expect(rail).toBeVisible();
+  await expectNavigationAvailable(page);
   await expect(page.getByTestId("context-pane")).toBeHidden();
 });
 
@@ -147,7 +151,7 @@ test("context focus survives breakpoint changes and content input focus stays pu
   await page.getByTestId("knowledge-row").first().focus();
   await page.setViewportSize({ width: 393, height: 851 });
   await expect(page.getByTestId("context-toggle")).toBeFocused();
-  await expect(page.getByTestId("icon-rail")).toBeVisible();
+  await expectNavigationAvailable(page);
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const input = page.getByRole("textbox", { name: "Title", exact: true });
   await input.focus();
@@ -176,14 +180,14 @@ test("session context filters preserve transcript and anchor", async ({
   await expect(
     page.getByRole("feed", { name: "Session history" }),
   ).toBeVisible();
-  await expect(page.getByTestId("icon-rail")).toBeVisible();
+  await expectNavigationAvailable(page);
 });
 
 test("Sessions without a project offers project selection with session destinations", async ({
   page,
 }) => {
   await page.goto("/ui");
-  await page.getByTestId("rail-sessions").click();
+  await clickNavigation(page, "rail-sessions");
   await expect(page).toHaveURL("/ui?section=sessions");
   await expect(
     page.getByRole("heading", { name: "Choose a project for sessions" }),
@@ -228,7 +232,7 @@ test("narrow toolbar keeps search and account reachable with a long project name
   ]) {
     await expect(control).toBeVisible();
     const box = (await control.boundingBox())!;
-    expect(box.x).toBeGreaterThanOrEqual(52);
+    expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(320);
   }
 });
@@ -238,27 +242,15 @@ test("repeated Projects and Sessions transitions keep context destinations align
 }) => {
   await page.goto("/ui");
   for (let pass = 0; pass < 2; pass++) {
-    await page.getByTestId("rail-sessions").click();
-    await expect(
-      page.getByTestId("icon-rail").locator('[aria-current="page"]'),
-    ).toHaveCount(1);
-    await expect(page.getByTestId("rail-sessions")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    await clickNavigation(page, "rail-sessions");
+    await expectCurrentNavigation(page, "rail-sessions");
     await expect(page.getByTestId("context-toggle")).toHaveCount(0);
     await expect(page.getByTestId("project-card").first()).toHaveAttribute(
       "href",
       /\/sessions$/,
     );
-    await page.getByTestId("rail-projects").click();
-    await expect(
-      page.getByTestId("icon-rail").locator('[aria-current="page"]'),
-    ).toHaveCount(1);
-    await expect(page.getByTestId("rail-projects")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    await clickNavigation(page, "rail-projects");
+    await expectCurrentNavigation(page, "rail-projects");
     await expect(page.getByTestId("context-toggle")).toHaveCount(0);
     await expect(page.getByTestId("project-card").first()).toHaveAttribute(
       "href",
@@ -284,11 +276,7 @@ test("project picker keeps the active section and rail links have consistent des
       .filter({ hasText: "scratch" })
       .click();
     await expect(page).toHaveURL(`/ui/projects/${scratch.id}/${section}`);
-    await expect(
-      page.getByTestId(
-        `rail-${section === "duplicates" ? "duplicates" : section}`,
-      ),
-    ).toHaveAttribute("aria-current", "page");
+    await expectCurrentNavigation(page, `rail-${section}`);
   }
 });
 
@@ -306,10 +294,9 @@ test("workspace tools use full-width layouts and all destinations remain reachab
     "costs",
     "model-usage",
   ]) {
-    const link = page.getByTestId(`rail-${id}`);
-    await link.click();
+    await clickNavigation(page, `rail-${id}`);
     await expect(page).toHaveURL(`/ui/${id}`);
-    await expect(link).toHaveAttribute("aria-current", "page");
+    await expectCurrentNavigation(page, `rail-${id}`);
     await expect(page.getByTestId("context-pane")).toBeHidden();
     await expect(page.getByTestId("context-toggle")).toHaveCount(0);
     await expect(
@@ -319,7 +306,7 @@ test("workspace tools use full-width layouts and all destinations remain reachab
       .locator('main[data-pane="detail"]')
       .boundingBox())!;
     expect(main.x).toBeLessThanOrEqual(60);
-    await expect(page.getByTestId("folk-status")).toBeVisible();
+    await expectNavigationAvailable(page);
   }
 });
 
@@ -368,7 +355,7 @@ test("knowledge and search pages have no duplicate section links or empty contex
 }) => {
   await page.goto("/ui");
   for (const section of ["knowledge", "search", "projects"]) {
-    await page.getByTestId(`rail-${section}`).click();
+    await clickNavigation(page, `rail-${section}`);
     await expect(page.getByTestId("context-toggle")).toHaveCount(0);
     await expect(page.getByTestId("context-pane")).toBeHidden();
     await expect(

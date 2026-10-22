@@ -1,3 +1,4 @@
+import { clickNavigation } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 async function projectId(page: import("@playwright/test").Page, name: string) {
@@ -13,14 +14,7 @@ async function projectId(page: import("@playwright/test").Page, name: string) {
 
 async function openAllKnowledgeFromHome(page: import("@playwright/test").Page) {
   await page.goto("/ui");
-  const opener = page.getByTestId("open-nav");
-  const allKnowledge = page.getByTestId("rail-knowledge");
-  if ((await opener.isVisible()) && !(await allKnowledge.isVisible())) {
-    await opener.click();
-    await page.getByTestId("nav-drawer").getByTestId("rail-knowledge").click();
-  } else {
-    await allKnowledge.click();
-  }
+  await clickNavigation(page, "rail-knowledge");
   await expect(page).toHaveURL("/ui/knowledge");
 }
 

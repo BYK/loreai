@@ -9,8 +9,10 @@ import { ProjectPicker } from "./ProjectPicker";
 import { SearchEntry } from "./SearchEntry";
 
 export const AppBar: Component<{
-  /** Mobile-only: rendered left of the logo (a back link). */
+  /** Mobile-only: back link beside the context toggle. */
   leading?: JSX.Element;
+  onOpenMenu?: () => void;
+  menuOpen?: boolean;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
   searchProjectId?: string;
@@ -36,6 +38,20 @@ export const AppBar: Component<{
   };
   return (
     <header class="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 sm:px-4">
+      <Show when={props.onOpenMenu}>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-8 shrink-0 text-muted md:hidden"
+          aria-label="Open navigation menu"
+          aria-expanded={props.menuOpen ?? false}
+          aria-controls="mobile-navigation-drawer"
+          data-testid="mobile-menu-trigger"
+          onClick={() => props.onOpenMenu?.()}
+        >
+          <Icon name="menu" />
+        </Button>
+      </Show>
       <Show when={props.onOpenNav}>
         <Button
           variant="ghost"

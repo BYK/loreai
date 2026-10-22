@@ -1,3 +1,4 @@
+import { openNavigation } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectIdByName(page: Page, name: string) {
@@ -20,6 +21,7 @@ test.describe("Folk status surfaces", () => {
     page,
   }, testInfo) => {
     await page.goto("/ui/knowledge");
+    await openNavigation(page);
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "anonymous");
     await expect(badge).toHaveAttribute("aria-label", /Not signed in/);
@@ -60,6 +62,7 @@ test.describe("Folk status surfaces", () => {
       }),
     );
     await page.goto("/ui/knowledge");
+    await openNavigation(page);
     const badge = page.getByTestId("folk-status");
     await expect(badge).toHaveAttribute("data-folk-state", "hosted");
     await expect(page.getByTestId("account-avatar")).toHaveCount(0);
@@ -86,6 +89,7 @@ test.describe("Folk status surfaces", () => {
       }),
     );
     await page.goto("/ui/knowledge");
+    await openNavigation(page);
     const avatar = page.getByTestId("account-avatar");
     await expect(avatar).toHaveText("AL");
     await expect(avatar).toHaveAttribute(
@@ -101,6 +105,7 @@ test.describe("Folk status surfaces", () => {
   }) => {
     const loreId = await projectIdByName(page, "lore");
     await page.goto(`/ui/projects/${loreId}`);
+    await openNavigation(page);
     const loreSharing = page.getByTestId("sharing-panel");
     await expect(
       loreSharing.locator('[data-sharing-state="not_linked"]'),
@@ -112,6 +117,7 @@ test.describe("Folk status surfaces", () => {
 
     const scratchId = await projectIdByName(page, "scratch");
     await page.goto(`/ui/projects/${scratchId}`);
+    await openNavigation(page);
     const scratchSharing = page.getByTestId("sharing-panel");
     await expect(
       scratchSharing.locator('[data-sharing-state="degraded"]'),
@@ -131,12 +137,25 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
 }) => {
   await page.setViewportSize({ width: 320, height: 480 });
   await page.goto("/ui");
+  await openNavigation(page);
   const avatar = page.getByTestId("folk-status");
   await expect(page.getByTestId("anonymous-avatar")).toBeVisible();
   const box = (await avatar.boundingBox())!;
-  expect(box.x).toBeLessThan(52);
+  expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.y + box.height).toBeGreaterThan(430);
   await avatar.click();
+  // Kobalte hides outside portals after a timer and an animation frame.
+  // Verify the nested account layer after that deferred accessibility update.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        setTimeout(
+          () =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          0,
+        );
+      }),
+  );
   const panel = page.getByTestId("folk-status-panel");
   await expect(
     panel.getByRole("button", { name: "Settings", exact: true }),
@@ -147,6 +166,9 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
   expect(menuBox.x).toBeGreaterThanOrEqual(0);
   expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(320);
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(480);
+  const theme = panel.getByRole("button", { name: "Dark theme", exact: true });
+  await theme.focus();
+  await expect(theme).toBeFocused();
   const profile = panel.getByRole("button", {
     name: "Sign in to Lore",
     exact: true,
@@ -197,6 +219,7 @@ test("signed-in avatar menu keeps preferences without a sign-in action", async (
     }),
   );
   await page.goto("/ui");
+  await openNavigation(page);
   const avatar = page.getByTestId("folk-status");
   await expect(avatar.getByTestId("account-avatar")).toHaveText("AL");
   await avatar.click();

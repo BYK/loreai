@@ -23,7 +23,9 @@ import { FolkStatus } from "./FolkStatus";
 import { SECONDARY_LINKS, workspacePath } from "./navigation";
 
 /** Stable destinations: clicking an icon always opens its page, never toggles another pane. */
-export const Rail: Component<{ projectId?: string }> = (props) => {
+export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
+  props,
+) => {
   const location = useLocation();
   const path = () => workspacePath(location.pathname);
   const primary = () => {
@@ -45,47 +47,82 @@ export const Rail: Component<{ projectId?: string }> = (props) => {
     id: string,
     active: () => boolean,
     scope: string,
-  ) => (
-    <Tooltip>
-      <TooltipTrigger
-        as={NavigationLink}
+  ) =>
+    props.expanded ? (
+      <NavigationLink
         href={href}
         aria-label={label}
         data-testid={id}
         current={active()}
         class={cn(
-          "rail-action",
+          "flex min-h-10 w-full shrink-0 items-center gap-3 rounded-md px-3 text-sm text-muted outline-none hover:bg-soft hover:text-text focus-visible:ring-2 focus-visible:ring-ring",
           active() && "bg-accent-soft text-accent-soft-text",
         )}
       >
         <Icon name={icon} class="size-[18px]" />
-      </TooltipTrigger>
-      <TooltipContent>
-        <span class="font-medium">{label}</span>
-        <span class="ml-2 text-muted">{scope}</span>
-      </TooltipContent>
-    </Tooltip>
-  );
-  return (
-    <nav
-      aria-label="Primary navigation"
-      data-testid="icon-rail"
-      class="flex h-full min-h-0 flex-col items-center border-r border-line bg-nav py-2"
-    >
+        <span>{label}</span>
+      </NavigationLink>
+    ) : (
       <Tooltip>
         <TooltipTrigger
           as={NavigationLink}
-          href="/"
-          aria-label="Lore.AI — home"
-          class="rail-action mb-2 shrink-0"
+          href={href}
+          aria-label={label}
+          data-testid={id}
+          current={active()}
+          class={cn(
+            "rail-action",
+            active() && "bg-accent-soft text-accent-soft-text",
+          )}
         >
-          <Logo size={28} wordmark={false} />
+          <Icon name={icon} class="size-[18px]" />
         </TooltipTrigger>
-        <TooltipContent>Lore.AI — home</TooltipContent>
+        <TooltipContent>
+          <span class="font-medium">{label}</span>
+          <span class="ml-2 text-muted">{scope}</span>
+        </TooltipContent>
       </Tooltip>
+    );
+  const groupLabel = (label: string) =>
+    props.expanded ? (
+      <div class="mt-4 px-3 pb-1 text-xs font-medium text-muted">{label}</div>
+    ) : (
+      <div
+        class="my-1 h-px min-h-px w-5 bg-line"
+        role="separator"
+        aria-label={label}
+      />
+    );
+  return (
+    <nav
+      aria-label="Primary navigation"
+      data-testid={props.expanded ? "mobile-navigation" : "icon-rail"}
+      class={cn(
+        "flex h-full min-h-0 flex-col bg-nav py-2",
+        props.expanded
+          ? "items-stretch px-3"
+          : "items-center border-r border-line",
+      )}
+    >
+      <Show when={!props.expanded}>
+        <Tooltip>
+          <TooltipTrigger
+            as={NavigationLink}
+            href="/"
+            aria-label="Lore.AI — home"
+            class="rail-action mb-2 shrink-0"
+          >
+            <Logo size={28} wordmark={false} />
+          </TooltipTrigger>
+          <TooltipContent>Lore.AI — home</TooltipContent>
+        </Tooltip>
+      </Show>
       <div
         data-testid="rail-links"
-        class="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto py-1"
+        class={cn(
+          "flex min-h-0 w-full flex-1 flex-col gap-1 overflow-y-auto py-1",
+          !props.expanded && "items-center",
+        )}
       >
         {item(
           "/",
@@ -126,11 +163,7 @@ export const Rail: Component<{ projectId?: string }> = (props) => {
         <Show when={props.projectId}>
           {(id) => (
             <>
-              <div
-                class="my-1 h-px min-h-px w-5 bg-line"
-                role="separator"
-                aria-label="Project tools"
-              />
+              {groupLabel("Project tools")}
               {item(
                 importsHref(id()),
                 "Imports",
@@ -153,11 +186,7 @@ export const Rail: Component<{ projectId?: string }> = (props) => {
         <For each={["Knowledge tools", "Collaboration", "Operations"]}>
           {(group) => (
             <>
-              <div
-                class="my-1 h-px min-h-px w-5 bg-line"
-                role="separator"
-                aria-label={group}
-              />
+              {groupLabel(group)}
               <For
                 each={SECONDARY_LINKS.filter((link) => link.group === group)}
               >
@@ -178,7 +207,12 @@ export const Rail: Component<{ projectId?: string }> = (props) => {
           )}
         </For>
       </div>
-      <div class="flex shrink-0 flex-col items-center gap-1 border-t border-line pt-2">
+      <div
+        class={cn(
+          "flex shrink-0 items-center gap-2 border-t border-line pt-2",
+          props.expanded ? "justify-between px-3" : "flex-col gap-1",
+        )}
+      >
         <Tooltip>
           <TooltipTrigger
             as="div"
@@ -192,7 +226,12 @@ export const Rail: Component<{ projectId?: string }> = (props) => {
             <ConnectionStatus />
           </TooltipContent>
         </Tooltip>
-        <FolkStatus />
+        <div class="flex items-center gap-2">
+          <FolkStatus inDrawer={props.expanded} />
+          <Show when={props.expanded}>
+            <span class="text-xs text-muted">Account &amp; preferences</span>
+          </Show>
+        </div>
       </div>
     </nav>
   );

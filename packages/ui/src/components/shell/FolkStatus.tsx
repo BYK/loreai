@@ -32,7 +32,7 @@ const DOT: Record<FolkTone, string> = {
 /**
  * Shell account/sync badge with an explicit, single-flight sync action.
  */
-export const FolkStatus: Component = () => {
+export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const ws = useWorkspace();
   const folk = ws.state.folk;
   let trigger: HTMLButtonElement | undefined;
@@ -80,26 +80,7 @@ export const FolkStatus: Component = () => {
       setCopyStatus("Select the command above to copy it.");
     }
   };
-  const [syncing, setSyncing] = createSignal(false);
-  const [syncError, setSyncError] = createSignal<string | null>(null);
-  const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
-  const runSync = async () => {
-    if (syncing()) return;
-    setSyncing(true);
-    setSyncError(null);
-    setSyncReceipt(null);
-    try {
-      const result = await ws.client.runSync();
-      setSyncReceipt(
-        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
-      );
-      folk.refresh();
-    } catch (error) {
-      setSyncError(error instanceof Error ? error.message : "Sync failed.");
-    } finally {
-      setSyncing(false);
-    }
-  };
+  const { syncing, syncError, syncReceipt, runSync } = folk;
   const summary = createMemo(() =>
     summarizeFolkStatus({
       connection: ws.connection.state(),
@@ -145,8 +126,11 @@ export const FolkStatus: Component = () => {
     <>
       <PopoverPrimitive.Root
         open={open()}
+        modal={props.inDrawer ?? false}
         gutter={10}
-        placement="right-end"
+        placement={props.inDrawer ? "top-start" : "right-end"}
+        slide
+        overflowPadding={12}
         onOpenChange={(value) => {
           setTooltipOpen(false);
           setOpen(value);
@@ -154,9 +138,9 @@ export const FolkStatus: Component = () => {
         }}
       >
         <Tooltip
-          open={tooltipOpen() && !open() && !dialog()}
+          open={tooltipOpen() && !props.inDrawer && !open() && !dialog()}
           onOpenChange={setTooltipOpen}
-          disabled={open() || dialog()}
+          disabled={props.inDrawer || open() || dialog()}
         >
           <TooltipTrigger
             as={PopoverPrimitive.Trigger}
@@ -164,6 +148,7 @@ export const FolkStatus: Component = () => {
               trigger = element;
             }}
             data-testid="folk-status"
+            data-workspace-navigation-open={open() || dialog() ? "" : undefined}
             data-folk-state={summary().state}
             aria-label={`Account and sync: ${summary().label}${user() ? `, ${name()}` : ""}`}
             class="rail-action relative rounded-full"
@@ -202,6 +187,7 @@ export const FolkStatus: Component = () => {
         <PopoverPrimitive.Portal>
           <PopoverPrimitive.Content
             data-testid="folk-status-panel"
+            data-workspace-navigation-layer=""
             onCloseAutoFocus={(event) => {
               if (dialog()) event.preventDefault();
             }}
@@ -337,6 +323,7 @@ export const FolkStatus: Component = () => {
         }}
       >
         <DialogContent
+          data-workspace-navigation-layer=""
           class="max-w-sm rounded-lg"
           onCloseAutoFocus={(event) => {
             event.preventDefault();

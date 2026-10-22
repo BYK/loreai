@@ -629,11 +629,11 @@ export const TeamPage: Component = () => {
           </p>
         </div>
         <Show when={teams().length > 1}>
-          <label class="flex flex-col gap-1 text-xs text-muted">
+          <label class="flex w-full min-w-0 flex-col gap-1 text-xs text-muted sm:w-auto">
             Team
             <select
               aria-label="Team"
-              class="h-9 min-w-44 rounded-md border border-line bg-surface px-2 text-sm text-text"
+              class="h-9 w-full min-w-0 rounded-md border border-line bg-surface px-2 text-sm text-text"
               value={teamId()}
               onChange={(event) => void loadMembers(event.currentTarget.value)}
             >
@@ -768,7 +768,7 @@ export const TeamPage: Component = () => {
                   </p>
                 </Show>
                 <section class="mb-4 rounded-md border border-line bg-bg p-3">
-                  <label class="flex items-center gap-3 text-sm font-medium">
+                  <label class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium">
                     <input
                       type="checkbox"
                       role="switch"
@@ -792,7 +792,7 @@ export const TeamPage: Component = () => {
                       }}
                     />
                     Require review
-                    <span class="text-xs font-normal text-muted">
+                    <span class="w-full pl-7 text-xs font-normal text-muted sm:w-auto sm:pl-0">
                       {reviewPolicy() === "required"
                         ? "New proposals need approval."
                         : reviewPolicy() === "optional"
@@ -998,7 +998,7 @@ export const TeamPage: Component = () => {
                         <option value="editor">Editor</option>
                       </select>
                     </label>
-                    <label class="flex min-w-56 flex-1 flex-col gap-1 text-xs text-muted">
+                    <label class="flex w-full min-w-0 flex-col gap-1 text-xs text-muted sm:min-w-56 sm:flex-1">
                       Email (optional)
                       <input
                         aria-label="Invite email"

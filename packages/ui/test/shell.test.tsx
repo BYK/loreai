@@ -501,7 +501,8 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.keyDown(link, { key: "Escape" });
     await waitFor(() => expect(opener).toHaveFocus());
     expect(screen.getByTestId("context-pane")).not.toBeVisible();
-    expect(screen.getByTestId("icon-rail")).toBeVisible();
+    expect(screen.queryByTestId("icon-rail")).toBeNull();
+    expect(screen.getByTestId("mobile-menu-trigger")).toBeVisible();
   });
 
   it("navigates project → knowledge list → entry document with stable ids in the URL", async () => {
@@ -2248,7 +2249,8 @@ it("keeps narrow context open after reader filter submissions", async () => {
   fireEvent.submit(input.closest("form")!);
   await waitFor(() => expect(history.get()).toContain("q=SQLite"));
   expect(screen.getByTestId("context-pane")).toBeVisible();
-  expect(screen.getByTestId("icon-rail")).toBeVisible();
+  expect(screen.queryByTestId("icon-rail")).toBeNull();
+  expect(screen.getByTestId("mobile-menu-trigger")).toBeVisible();
 });
 
 it("updates picker destinations when changing chooser sections", async () => {

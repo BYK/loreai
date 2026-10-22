@@ -409,7 +409,11 @@ export const ModelUsagePage: Component = () => {
                   }
                 />
               </label>
-              <div class="flex gap-1" role="group" aria-label="Date presets">
+              <div
+                class="flex flex-wrap gap-1"
+                role="group"
+                aria-label="Date presets"
+              >
                 <For each={PRESETS}>
                   {(preset) => (
                     <Button

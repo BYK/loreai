@@ -1,3 +1,4 @@
+import { expectNavigationAvailable } from "./workspace-helpers";
 import { openProjectPicker } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -103,7 +104,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     await page.goto("/ui");
     await createV1(page);
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeAttached();
+    await expectNavigationAvailable(page);
     await expectDatabaseVersion(page, 4);
     const info = await openInfo(page);
     expect(info.version).toBe(4);
@@ -236,7 +237,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         }),
     );
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeAttached();
+    await expectNavigationAvailable(page);
     await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).stores.sort()).toEqual([...STORES].sort());
   });
@@ -260,7 +261,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         }),
     );
     await page.reload();
-    await expect(page.getByTestId("connection-status")).toBeAttached();
+    await expectNavigationAvailable(page);
     await expectDatabaseVersion(page, 4);
     expect((await openInfo(page)).version).toBe(4);
   });
@@ -269,7 +270,7 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toBeAttached();
+    await expectNavigationAvailable(page);
     await page.evaluate(async () => {
       const req = indexedDB.deleteDatabase("lore-ui");
       await new Promise<void>((resolve, reject) => {

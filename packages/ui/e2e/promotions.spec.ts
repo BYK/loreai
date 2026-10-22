@@ -1,3 +1,4 @@
+import { openNavigation } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
@@ -69,6 +70,7 @@ test.describe("knowledge promotions", () => {
     page,
   }) => {
     await page.goto("/ui");
+    await openNavigation(page);
     const navLink = page.getByTestId("rail-promotions");
     const previousLink = page.getByTestId("rail-contradictions");
     await expect(navLink).toBeVisible();

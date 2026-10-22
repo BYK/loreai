@@ -110,10 +110,13 @@ test.describe("session titles and search", () => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/sessions/e2e-session-sqlite`);
     await expect(
-      page.getByText("Refactor the sync outbox pruning").first(),
+      page.locator("main").getByRole("heading", {
+        name: "Refactor the sync outbox pruning",
+        exact: true,
+      }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Copy session id" }).first(),
+      page.locator("main").getByRole("button", { name: "Copy session id" }),
     ).toBeVisible();
   });
 

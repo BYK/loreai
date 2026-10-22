@@ -116,7 +116,7 @@ export const WarmingPage: Component = () => {
         {(data) => (
           <>
             <section class="mb-5 flex flex-wrap items-center gap-4 rounded-lg border border-line bg-bg p-4">
-              <div class="min-w-0 flex-1">
+              <div class="w-full min-w-0 sm:w-auto sm:flex-1">
                 <div class="text-sm font-semibold">
                   Cache warming is{" "}
                   <span class={data().enabled ? "text-accent" : "text-danger"}>

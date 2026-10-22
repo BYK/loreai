@@ -58,6 +58,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
     <div class="mx-auto max-w-[1040px] px-5 py-7 sm:px-8">
       <DocHeader
         compact
+        class="px-0 pt-0 sm:px-0"
         crumb={["Projects", "Overview"]}
         title={props.project.name || props.project.path}
       >
@@ -76,7 +77,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         </div>
       </DocHeader>
       <section data-testid="health" class="border-b border-line py-5">
-        <div class="mb-2 flex items-center justify-between">
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Memory health</div>
           <A
             class="text-xs text-accent underline"
@@ -86,7 +87,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             Review duplicates
           </A>
         </div>
-        <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4 [&>span]:rounded-lg [&>span]:border [&>span]:border-line [&>span]:bg-bg [&>span]:p-4 [&>span]:font-medium [&>span]:tabular-nums">
+        <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4 [&>span]:rounded-lg [&>span]:border [&>span]:border-line [&>span]:bg-bg [&>span]:min-w-0 [&>span]:p-3 sm:[&>span]:p-4 [&>span]:font-medium [&>span]:tabular-nums">
           <span>{props.project.knowledge_count} knowledge</span>
           <span>{props.project.session_count} sessions</span>
           <span>{pluralize(props.project.message_count, "message")}</span>
@@ -100,12 +101,12 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         </div>
       </section>
       <section class="py-5">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Knowledge</div>
         </div>
         <form
           role="search"
-          class="flex gap-2"
+          class="flex flex-wrap items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const data = new FormData(event.currentTarget);
@@ -114,7 +115,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             navigate(searchHref(props.project.id, q, scope()));
           }}
         >
-          <TextField class="min-w-0 flex-1">
+          <TextField class="w-full min-w-0 sm:w-auto sm:flex-1">
             <TextFieldInput
               name="q"
               aria-label="Search project memory"
@@ -136,23 +137,23 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             </SelectTrigger>
             <SelectContent />
           </Select>
-          <Button type="submit" size="sm">
+          <Button type="submit" size="sm" class="h-10 flex-1 sm:flex-none">
             Search
           </Button>
         </form>
       </section>
       <section class="border-b border-line py-5">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Recent sessions</div>
-          <div class="flex items-center gap-3">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
             <A
-              class="text-xs text-accent underline"
+              class="whitespace-nowrap text-xs text-accent underline"
               href={importsHref(props.project.id)}
             >
               Import history →
             </A>
             <A
-              class="text-xs text-accent underline"
+              class="whitespace-nowrap text-xs text-accent underline"
               href={sessionsHref(props.project.id)}
             >
               All sessions →
@@ -182,7 +183,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       </section>
       <section class="border-b border-line py-5">
         <div class="eyebrow mb-2">Identity</div>
-        <div class="font-mono text-xs">{props.project.path}</div>
+        <div class="break-all font-mono text-xs">{props.project.path}</div>
         <Show
           when={props.project.git_remote}
           fallback={
@@ -191,7 +192,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             </span>
           }
         >
-          <div class="mt-2 text-xs text-muted">{props.project.git_remote}</div>
+          <div class="mt-2 break-all text-xs text-muted">
+            {props.project.git_remote}
+          </div>
           <Show
             when={aliases().length > 0}
             fallback={
@@ -209,7 +212,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                 {(alias) => (
                   <li>
                     <A
-                      class="text-xs text-accent underline"
+                      class="break-all text-xs text-accent underline"
                       data-testid="project-alias"
                       href={projectHref(alias.id)}
                     >

@@ -45,7 +45,7 @@ export const SearchResults: Component<{
     <div class="p-5 sm:p-7.5">
       <form
         role="search"
-        class="mb-5 flex gap-2"
+        class="mb-5 flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
           e.preventDefault();
           const data = new FormData(e.currentTarget);
@@ -54,7 +54,7 @@ export const SearchResults: Component<{
           navigate(searchHref(props.project.id, q, scope()));
         }}
       >
-        <TextField class="min-w-0 flex-1">
+        <TextField class="w-full min-w-0 sm:w-auto sm:flex-1">
           <TextFieldInput name="q" value={props.q} aria-label="Search query" />
         </TextField>
         <Select
@@ -73,7 +73,7 @@ export const SearchResults: Component<{
           </SelectTrigger>
           <SelectContent />
         </Select>
-        <Button type="submit" size="sm">
+        <Button type="submit" size="sm" class="h-10 flex-1 sm:flex-none">
           Search
         </Button>
       </form>

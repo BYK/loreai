@@ -186,37 +186,39 @@ const RebuildCard: Component = () => {
 };
 
 const RebuildResults: Component<{ result: EntityRebuildResult }> = (props) => (
-  <table
-    class="mt-3 w-full text-left text-[12px]"
-    data-testid="rebuild-results"
-  >
-    <thead>
-      <tr class="text-muted">
-        <th class="py-1 pr-3 font-medium">Project</th>
-        <th class="py-1 pr-3 font-medium">Detected</th>
-        <th class="py-1 pr-3 font-medium">People</th>
-        <th class="py-1 pr-3 font-medium">Orgs</th>
-        <th class="py-1 pr-3 font-medium">Other</th>
-        <th class="py-1 pr-3 font-medium">Relations</th>
-        <th class="py-1 font-medium">Dedup merged</th>
-      </tr>
-    </thead>
-    <tbody>
-      <For each={props.result.results}>
-        {(row) => (
-          <tr class="border-t border-line">
-            <td class="truncate py-1 pr-3">{row.projectPath}</td>
-            <td class="py-1 pr-3">{row.detected}</td>
-            <td class="py-1 pr-3">{row.personsCreated}</td>
-            <td class="py-1 pr-3">{row.orgsCreated}</td>
-            <td class="py-1 pr-3">{row.otherCreated}</td>
-            <td class="py-1 pr-3">{row.relationsCreated}</td>
-            <td class="py-1">{row.dedupMerged}</td>
-          </tr>
-        )}
-      </For>
-    </tbody>
-  </table>
+  <div class="mt-3 overflow-x-auto">
+    <table
+      class="w-full min-w-[640px] text-left text-xs"
+      data-testid="rebuild-results"
+    >
+      <thead>
+        <tr class="text-muted">
+          <th class="py-1 pr-3 font-medium">Project</th>
+          <th class="py-1 pr-3 font-medium">Detected</th>
+          <th class="py-1 pr-3 font-medium">People</th>
+          <th class="py-1 pr-3 font-medium">Orgs</th>
+          <th class="py-1 pr-3 font-medium">Other</th>
+          <th class="py-1 pr-3 font-medium">Relations</th>
+          <th class="py-1 font-medium">Dedup merged</th>
+        </tr>
+      </thead>
+      <tbody>
+        <For each={props.result.results}>
+          {(row) => (
+            <tr class="border-t border-line">
+              <td class="truncate py-1 pr-3">{row.projectPath}</td>
+              <td class="py-1 pr-3">{row.detected}</td>
+              <td class="py-1 pr-3">{row.personsCreated}</td>
+              <td class="py-1 pr-3">{row.orgsCreated}</td>
+              <td class="py-1 pr-3">{row.otherCreated}</td>
+              <td class="py-1 pr-3">{row.relationsCreated}</td>
+              <td class="py-1">{row.dedupMerged}</td>
+            </tr>
+          )}
+        </For>
+      </tbody>
+    </table>
+  </div>
 );
 
 export const EntitiesPage: Component = () => {

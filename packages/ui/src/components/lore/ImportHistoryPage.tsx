@@ -56,7 +56,7 @@ export const ImportHistoryPage: Component<{
 
   return (
     <div class="p-4 sm:p-6" data-testid="import-history">
-      <div class="mb-4 flex items-center gap-2">
+      <div class="mb-4 flex flex-wrap items-center gap-2">
         <h1 class="text-lg font-semibold">Import history</h1>
         <Show when={page.data()}>
           {(data) => (
@@ -83,37 +83,42 @@ export const ImportHistoryPage: Component<{
         <Match when={rows()}>
           {(items) => (
             <>
-              <table
-                class="w-full text-left text-[13px]"
-                data-testid="imports-table"
-              >
-                <thead>
-                  <tr class="text-xs text-muted">
-                    <th class="py-1 pr-3 font-medium">Agent</th>
-                    <th class="py-1 pr-3 font-medium">Source</th>
-                    <th class="py-1 pr-3 font-medium">Created</th>
-                    <th class="py-1 pr-3 font-medium">Updated</th>
-                    <th class="py-1 font-medium">Imported</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={items()}>
-                    {(row) => (
-                      <tr class="border-t border-line" data-testid="import-row">
-                        <td class="py-2 pr-3">{row.agent_name}</td>
-                        <td class="py-2 pr-3 font-mono text-xs">
-                          {row.source_id}
-                        </td>
-                        <td class="py-2 pr-3">{row.entries_created}</td>
-                        <td class="py-2 pr-3">{row.entries_updated}</td>
-                        <td class="py-2 text-muted">
-                          {formatWhen(row.imported_at)}
-                        </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+              <div class="overflow-x-auto rounded-lg border border-line">
+                <table
+                  class="w-full min-w-[560px] text-left text-xs"
+                  data-testid="imports-table"
+                >
+                  <thead>
+                    <tr class="bg-soft text-xs text-muted">
+                      <th class="px-3 py-2 font-medium">Agent</th>
+                      <th class="px-3 py-2 font-medium">Source</th>
+                      <th class="px-3 py-2 font-medium">Created</th>
+                      <th class="px-3 py-2 font-medium">Updated</th>
+                      <th class="px-3 py-2 font-medium">Imported</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <For each={items()}>
+                      {(row) => (
+                        <tr
+                          class="border-t border-line"
+                          data-testid="import-row"
+                        >
+                          <td class="px-3 py-2">{row.agent_name}</td>
+                          <td class="px-3 py-2 font-mono text-xs">
+                            {row.source_id}
+                          </td>
+                          <td class="px-3 py-2">{row.entries_created}</td>
+                          <td class="px-3 py-2">{row.entries_updated}</td>
+                          <td class="px-3 py-2 text-muted">
+                            {formatWhen(row.imported_at)}
+                          </td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
               <div class="mt-3 flex items-center gap-2">
                 <Button
                   variant="outline"
