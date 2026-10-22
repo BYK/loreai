@@ -520,6 +520,59 @@ test.each(["buffered", "passthrough", "recall-aware"] as const)(
 );
 
 test.each([
+  ["buffered", "missing"],
+  ["buffered", "empty"],
+  ["passthrough", "missing"],
+  ["passthrough", "empty"],
+] as const)(
+  "%s Codex pinning lets an indexed later event bind a %s added ID",
+  async (mode, added) => {
+    const input = events(false);
+    const item = input[1][1].item as Record<string, unknown>;
+    if (added === "missing") delete item.id;
+    else item.id = "";
+    input[2][1].item_id = "first_id";
+    const terminal = (
+      input[input.length - 1][1].response as {
+        output: Record<string, unknown>[];
+      }
+    ).output;
+    terminal[0] = { ...terminal[0], id: "first_id" };
+    const upstream = new Response(
+      input.map(([type, data]) => frame(type, data)).join(""),
+    );
+    if (mode === "buffered") {
+      const result = await accumulateResponsesSSEStream(upstream, {
+        validation: "codex",
+        pinResponseId: true,
+      });
+      expect(result.stopReason).toBe("end_turn");
+      return;
+    }
+    const onComplete = vi.fn();
+    const text = await streamResponsesPassthrough(
+      upstream,
+      onComplete,
+      undefined,
+      "codex",
+      { pinResponseId: true },
+    ).text();
+    expect(text).not.toContain("response.failed");
+    const completed = text
+      .split("\n\n")
+      .find((chunk) => chunk.startsWith("event: response.completed\n"));
+    if (!completed) throw new Error("missing terminal");
+    expect(JSON.parse(completed.split("data: ")[1]).response.output[0].id).toBe(
+      "first_id",
+    );
+    expect(onComplete).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ stopReason: "end_turn" }),
+      true,
+    );
+  },
+);
+
+test.each([
   "summary",
   "content",
   "status",

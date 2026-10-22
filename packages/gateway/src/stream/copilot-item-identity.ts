@@ -74,8 +74,11 @@ export function createCopilotItemIdentityNormalizer(
     };
     const canonicalId = (id: unknown, index: number): unknown => {
       const declared = state.rawItems.get(index);
+      // Codex may bind the first ID after output_item.added; leave it unaliased.
       if (
         !declared ||
+        typeof declared.id !== "string" ||
+        declared.id.length === 0 ||
         !["message", "reasoning", "function_call"].includes(
           declared.type as string,
         ) ||
