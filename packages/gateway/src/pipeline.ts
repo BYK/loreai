@@ -363,6 +363,7 @@ import {
   canonicalWorkerProviderID,
   createGatewayLLMClient,
   disjointOpenAIInputTokens,
+  isAnthropicClaudeModel,
   workerProviderSupportsProtocol,
   type GatewayPromptOptions,
 } from "./llm-adapter";
@@ -8125,10 +8126,11 @@ function resolveRequestUpstreamRoute(
       : null;
   const nativeIngressAnthropicOverride =
     providerHeader != null && providerRouteUsable?.protocol === "anthropic";
-  // Copilot serves native Messages as well as Chat/Responses; explicit destinations still win.
+  // Copilot serves native Messages for Claude as well as Chat/Responses; explicit destinations still win.
   const nativeCopilotAnthropic =
     req.protocol === "anthropic" &&
     providerID === "github-copilot" &&
+    isAnthropicClaudeModel(req.model) &&
     isGitHubCopilotUpstreamBase(
       headerUpstream ?? providerRouteUsable?.url ?? "",
     ) &&

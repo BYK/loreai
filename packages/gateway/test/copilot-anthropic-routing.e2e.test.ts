@@ -208,4 +208,25 @@ describe("Copilot native Anthropic routing", () => {
     expect(body).toContain("Unsupported cross-provider request");
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  test.each([
+    ["claude-haiku-5.5", "anthropic"],
+    ["gpt-6.1-sol", "openai"],
+  ])("routes Anthropic ingress for %s via %s", async (model, protocol) => {
+    const { resolveRequestUpstreamRouteForTest } =
+      await import("../src/pipeline");
+    const { loadConfig } = await import("../src/config");
+    const route = resolveRequestUpstreamRouteForTest(
+      {
+        protocol: "anthropic",
+        model,
+        rawHeaders: {
+          authorization: "Bearer test-copilot-native-token",
+          "x-lore-provider": "github-copilot",
+        },
+      },
+      { ...loadConfig(), remoteGateway: false, hostedMode: false },
+    );
+    expect(route.effectiveProtocol).toBe(protocol);
+  });
 });
