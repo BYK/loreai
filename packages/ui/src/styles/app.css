@@ -218,7 +218,7 @@
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.12em;
-    color: var(--mark-edge); /* website --eyebrow */
+    color: var(--muted);
   }
   .passage-target {
     background: var(--mark);

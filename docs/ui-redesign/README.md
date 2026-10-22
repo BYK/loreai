@@ -11,8 +11,9 @@ touch targets. Regenerate with the mobile profile row case in
 Desktop retains the icon rail; below 768px, a logo-free toolbar button opens the
 labeled sliding drawer and the document uses the full viewport width.
 
-Earlier reader, overview, and model-usage captures predate the zinc palette.
-They document the layout work: collapsible context, full-width mobile readers,
-aligned headings, contained tables, and usable narrow-screen forms/dialogs.
-Regenerate reader captures with `workspace-shell.spec.ts`, overview captures
-with `responsive-layout.spec.ts`, and model captures with `model-usage.spec.ts`.
+The reader and model-usage captures also show the current zinc palette. Section
+labels and duplicate-review notice cards use neutral tokens; green remains on
+links, primary actions, selected navigation, status accents, and passage highlights.
+Regenerate reader captures with `workspace-shell.spec.ts` and model captures with
+`model-usage.spec.ts`. The earlier overview capture documents layout work before
+the zinc update and can be regenerated with `responsive-layout.spec.ts`.

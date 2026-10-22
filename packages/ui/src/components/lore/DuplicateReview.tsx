@@ -601,7 +601,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       <For each={receipt.refused}>
         {(refused) => (
           <div
-            class="rounded-md border border-mark-edge/60 bg-mark/30 p-3"
+            class="rounded-md border border-line bg-soft p-3"
             data-testid="refused-group"
           >
             <p class="m-0 text-sm font-medium">
@@ -808,7 +808,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
 
       <Show when={sharedTitleConflicts().length > 0}>
         <section
-          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-4"
+          class="mb-5 rounded-lg border border-line bg-soft px-4 py-4"
           aria-label="Shared title conflicts"
           data-testid="shared-title-conflicts"
         >
@@ -854,7 +854,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           <p
             class={`mb-4 rounded-md border px-3 py-2 text-sm ${
               notice().kind === "locked"
-                ? "border-mark-edge/60 bg-mark/30 text-gold"
+                ? "border-line bg-soft text-text"
                 : notice().kind === "error"
                   ? "border-danger/40 bg-danger/10 text-danger"
                   : "border-line bg-soft text-muted"
@@ -869,7 +869,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
 
       <Show when={pendingApplies().length > 0}>
         <section
-          class="mb-5 space-y-2 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-3"
+          class="mb-5 space-y-2 rounded-lg border border-line bg-soft px-4 py-3"
           aria-label="Pending apply operations"
           data-testid="pending-dedup-applies"
         >
@@ -971,7 +971,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       </Show>
       <Show when={orphaned().length > 0}>
         <section
-          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-3"
+          class="mb-5 rounded-lg border border-line bg-soft px-4 py-3"
           data-testid="orphaned-marks"
         >
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -1167,7 +1167,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             <Show
                               when={!isRemoved()}
                               fallback={
-                                <p class="rounded border border-mark-edge/60 bg-mark/30 p-3 text-sm text-gold">
+                                <p class="rounded border border-line bg-soft p-3 text-sm text-muted">
                                   Removed since this scan
                                 </p>
                               }
