@@ -27,12 +27,23 @@ import {
   type AuthCredential,
 } from "../src/auth";
 import { captureBillingPrefix, _resetForTest as resetCch } from "../src/cch";
+import {
+  recordSuccessfulAnthropicOAuthAuth,
+  _resetCostAttributionForTest,
+} from "../src/cost-attribution";
 
 // Must match QUOTA_URL in ../src/quota.ts. Used by the drift-guard test that
 // asserts production fetches the expected URL.
 const QUOTA_URL = "https://api.anthropic.com/api/oauth/usage";
 
-const BEARER: AuthCredential = { scheme: "bearer", value: "oauth-token-abc" };
+const BEARER: AuthCredential = {
+  scheme: "bearer",
+  value: "oauth-token-abc",
+};
+const CLAUDE_OAUTH_BEARER: AuthCredential = {
+  scheme: "bearer",
+  value: "sk-ant-oat01-oauth-token-abc",
+};
 const API_KEY: AuthCredential = { scheme: "api-key", value: "sk-ant-xyz" };
 const BILLING =
   "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;";
@@ -47,14 +58,22 @@ function quotaBody(fiveHour = 45.2, sevenDay = 12.8): string {
 }
 
 /** Register a Claude Code OAuth session (bearer + billing header). */
-function makeOAuthSession(sessionID: string, cred = BEARER): void {
+function makeOAuthSession(sessionID: string, cred = CLAUDE_OAUTH_BEARER): void {
   setSessionAuth(sessionID, cred);
-  captureBillingPrefix(sessionID, BILLING);
+  captureBillingPrefix(sessionID, BILLING, cred);
+  recordSuccessfulAnthropicOAuthAuth({
+    credential: cred,
+    upstreamURL: "https://api.anthropic.com/v1/messages",
+    responseURL: "https://api.anthropic.com/v1/messages",
+    responseStatus: 200,
+    directUpstreamResponse: true,
+  });
 }
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   _resetQuotaForTest();
+  _resetCostAttributionForTest();
   _resetAuthForTest();
   resetCch();
 });
@@ -138,7 +157,7 @@ describe("fetchOAuthQuotaSnapshot", () => {
       return Promise.resolve(new Response(quotaBody(), { status: 200 }));
     }) as unknown as typeof fetch;
 
-    await fetchOAuthQuotaSnapshot(BEARER, "sid-ua");
+    await fetchOAuthQuotaSnapshot(CLAUDE_OAUTH_BEARER, "sid-ua");
     const headers = capturedInit?.headers as Record<string, string>;
     // No captureSessionHeaders was called, so buildOAuthWorkerHeaders uses its
     // fallback Claude Code UA + worker betas (not sniffed session values).
@@ -412,7 +431,7 @@ describe("fetchQuotaDeduped", () => {
 // ---------------------------------------------------------------------------
 
 describe("isAnthropicOAuthSession", () => {
-  test("true for bearer + billing header", () => {
+  test("true for a verified bearer credential with a billing header", () => {
     makeOAuthSession("sid-oauth");
     expect(isAnthropicOAuthSession("sid-oauth")).toBe(true);
   });
@@ -424,7 +443,7 @@ describe("isAnthropicOAuthSession", () => {
 
   test("false for api-key session", () => {
     setSessionAuth("sid-key", API_KEY);
-    captureBillingPrefix("sid-key", BILLING);
+    captureBillingPrefix("sid-key", BILLING, API_KEY);
     expect(isAnthropicOAuthSession("sid-key")).toBe(false);
   });
 });
@@ -448,7 +467,7 @@ describe("maybeFetchQuota — provider isolation", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     setSessionAuth("sid-key", API_KEY);
-    captureBillingPrefix("sid-key", BILLING);
+    captureBillingPrefix("sid-key", BILLING, API_KEY);
     maybeFetchQuota("sid-key", API_KEY);
     expect(fetchMock).toHaveBeenCalledTimes(0);
   });
@@ -461,8 +480,8 @@ describe("maybeFetchQuota — provider isolation", () => {
     }) as unknown as typeof fetch;
 
     makeOAuthSession("sid-oauth");
-    maybeFetchQuota("sid-oauth", BEARER);
-    maybeFetchQuota("sid-oauth", BEARER); // within cooldown — skipped
+    maybeFetchQuota("sid-oauth", CLAUDE_OAUTH_BEARER);
+    maybeFetchQuota("sid-oauth", CLAUDE_OAUTH_BEARER); // within cooldown — skipped
     // Allow the first background fetch to settle.
     await new Promise((r) => setTimeout(r, 1100));
     expect(calls).toBe(1);
@@ -499,10 +518,10 @@ describe("maybeFetchQuota — provider isolation", () => {
     }) as unknown as typeof fetch;
 
     makeOAuthSession("sid-ok");
-    maybeFetchQuota("sid-ok", BEARER);
+    maybeFetchQuota("sid-ok", CLAUDE_OAUTH_BEARER);
     await new Promise((r) => setTimeout(r, 1100));
     expect(calls).toBe(1);
-    expect(getQuotaForCredential(BEARER)).not.toBeNull();
+    expect(getQuotaForCredential(CLAUDE_OAUTH_BEARER)).not.toBeNull();
   });
 });
 

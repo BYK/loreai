@@ -73,7 +73,7 @@ const MANAGEMENT_PATHS = [
   "/api/v1/warming/circuit-breaker/reset",
   "/api/v1/warming/sessions/session-1/mode",
   "/api/v1/costs",
-  "/api/v1/costs/budgets",
+  "/api/v1/costs/pacing",
   "/api/v1/contradictions",
   "/api/v1/contradictions/a/b",
   "/api/v1/sessions/s1/search",

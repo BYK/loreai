@@ -11,6 +11,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { PROVIDER_AUTH_HEADER_NAMES } from "./auth";
+import { transferResponseCompletionCallback } from "./response-completion";
 
 // ---------------------------------------------------------------------------
 // Browser-origin policy
@@ -29,11 +30,13 @@ export function withoutCors(response: Response): Response {
   for (const name of Array.from(headers.keys())) {
     if (name.startsWith("access-control-")) headers.delete(name);
   }
-  return new Response(response.body, {
+  const result = new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers,
   });
+  transferResponseCompletionCallback(response, result);
+  return result;
 }
 
 export function withManagementCors(

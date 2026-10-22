@@ -1099,6 +1099,7 @@ describe("management boundary", () => {
     const config = loadConfig();
     config.remoteGateway = false;
     config.hostedMode = false;
+    config.allowRemoteManagement = false;
     const remote = await startServer(config, {
       peerAddressForRequest: () => "192.0.2.10",
     });

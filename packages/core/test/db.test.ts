@@ -1,5 +1,4 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { DatabaseSync } from "node:sqlite";
 import {
   isEmbeddingGenerationReady,
   openReaderConnection,
@@ -47,6 +46,7 @@ import {
   UNATTRIBUTED_PROJECT_PREFIX,
   assertFts5Available,
   MIGRATIONS,
+  _applyProviderBudgetsMigrationForTest,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
 import * as temporal from "../src/temporal";
@@ -67,6 +67,7 @@ import {
   storeEmbedding,
   storeTemporalChunks,
 } from "../src/db/vec-store";
+import { Database } from "#db/driver";
 import { config } from "../src/config";
 import { withTenant } from "../src/tenant";
 import { SourceWindowStore } from "../src/source-window-store";
@@ -378,11 +379,11 @@ describe("db", () => {
     ]);
   });
 
-  test("v102 deletes the retired daily_budget KV row and keeps provider budgets", () => {
+  test("v102 deletes the retired daily_budget KV row and keeps other KV rows", () => {
     const connection = db();
     connection.exec(`
       INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('daily_budget', '25');
-      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_budgets', '[]');
+      INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('provider_pacing', '[]');
       UPDATE schema_version SET version = 101;
     `);
     close();
@@ -391,10 +392,10 @@ describe("db", () => {
     expect(
       migrated
         .query(
-          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_budgets')",
+          "SELECT key FROM kv_meta WHERE key IN ('daily_budget', 'provider_pacing')",
         )
         .all(),
-    ).toEqual([{ key: "provider_budgets" }]);
+    ).toEqual([{ key: "provider_pacing" }]);
     expect(
       (
         migrated.query("SELECT version FROM schema_version").get() as {
@@ -403,6 +404,213 @@ describe("db", () => {
       ).version,
     ).toBe(MIGRATIONS.length);
   });
+
+  test("v105 migrates subscription opt-outs and retires provider_budgets", () => {
+    const connection = db();
+    const switches = [{ provider: "anthropic", account: "a", enabled: false }];
+    const legacyBudgets = [
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: null,
+        mode: "off",
+        window: "5h",
+      },
+      {
+        provider: "openai",
+        auth_kind: "subscription",
+        account: null,
+        mode: "off",
+        window: "7d",
+      },
+      {
+        provider: "anthropic",
+        auth_kind: "subscription",
+        account: "acct",
+        mode: "pace",
+        window: "5h",
+        headroom: 12,
+      },
+      {
+        provider: "openai",
+        auth_kind: "api_key",
+        account: "key",
+        mode: "cap",
+        unit: "usd",
+        window: "day",
+        amount: 25,
+      },
+    ];
+    connection
+      .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
+      .run("provider_budgets", JSON.stringify(legacyBudgets));
+    connection
+      .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
+      .run("provider_pacing", JSON.stringify(switches));
+    connection.exec("UPDATE schema_version SET version = 102;");
+    close();
+
+    const migrated = db();
+    expect(
+      migrated
+        .query(
+          "SELECT key, value FROM kv_meta WHERE key IN ('provider_budgets', 'provider_pacing')",
+        )
+        .all(),
+    ).toEqual([
+      {
+        key: "provider_pacing",
+        value: JSON.stringify({
+          version: 1,
+          settings: [
+            ...switches,
+            { provider: "anthropic", account: "*", enabled: false },
+            { provider: "openai", account: "*", enabled: false },
+          ],
+          generations: [],
+        }),
+      },
+    ]);
+    expect(
+      (
+        migrated.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
+  test("v105 rejects malformed legacy entries without deleting their source", () => {
+    const malformedBudgets: readonly unknown[][] = [
+      [null],
+      [
+        {
+          provider: "anthropic",
+          auth_kind: "subscription",
+          account: "acct",
+          mode: "pace",
+          window: "5h",
+          headroom: null,
+        },
+      ],
+      [
+        {
+          provider: "anthropic",
+          auth_kind: "subscription",
+          account: null,
+          mode: "off",
+          window: "5h",
+          unexpected: true,
+        },
+      ],
+    ];
+
+    for (const budgets of malformedBudgets) {
+      const migrationDatabase = new Database(":memory:");
+      try {
+        migrationDatabase.exec(`
+          CREATE TABLE schema_version (version INTEGER NOT NULL);
+          INSERT INTO schema_version (version) VALUES (104);
+          CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        `);
+        migrationDatabase
+          .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+          .run("provider_budgets", JSON.stringify(budgets));
+
+        expect(() =>
+          _applyProviderBudgetsMigrationForTest(migrationDatabase),
+        ).toThrow("Cannot migrate malformed provider_budgets");
+        expect(
+          migrationDatabase
+            .query("SELECT value FROM kv_meta WHERE key = ?")
+            .get("provider_budgets"),
+        ).toEqual({ value: JSON.stringify(budgets) });
+      } finally {
+        migrationDatabase.close();
+      }
+    }
+  });
+
+  test.each([
+    [
+      "invalid setting fields",
+      {
+        version: 1,
+        settings: [
+          {
+            provider: "anthropic",
+            account: "acct",
+            enabled: false,
+            unexpected: true,
+          },
+        ],
+        generations: [],
+      },
+    ],
+    [
+      "invalid generation rows",
+      {
+        version: 1,
+        settings: [],
+        generations: [
+          { provider: "anthropic", account: "acct", generation: "1" },
+        ],
+      },
+    ],
+    [
+      "unknown pacing envelope fields",
+      {
+        version: 1,
+        settings: [],
+        generations: [],
+        unexpected: true,
+      },
+    ],
+  ])(
+    "v105 preserves both sources on malformed existing pacing state: %s",
+    (_label, state) => {
+      const migrationDatabase = new Database(":memory:");
+      const legacyBudgets = JSON.stringify([
+        {
+          provider: "openai",
+          auth_kind: "subscription",
+          account: null,
+          mode: "off",
+          window: "5h",
+        },
+      ]);
+      const pacingState = JSON.stringify(state);
+      try {
+        migrationDatabase.exec(`
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (104);
+        CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+        migrationDatabase
+          .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+          .run("provider_budgets", legacyBudgets);
+        migrationDatabase
+          .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+          .run("provider_pacing", pacingState);
+
+        expect(() =>
+          _applyProviderBudgetsMigrationForTest(migrationDatabase),
+        ).toThrow("Cannot migrate malformed provider_pacing");
+        expect(
+          migrationDatabase
+            .query("SELECT value FROM kv_meta WHERE key = ?")
+            .get("provider_budgets"),
+        ).toEqual({ value: legacyBudgets });
+        expect(
+          migrationDatabase
+            .query("SELECT value FROM kv_meta WHERE key = ?")
+            .get("provider_pacing"),
+        ).toEqual({ value: pacingState });
+      } finally {
+        migrationDatabase.close();
+      }
+    },
+  );
 
   test("upgrades legacy pending embeddings in place without dropping their work", () => {
     const connection = db();
@@ -1534,7 +1742,7 @@ describe("db", () => {
       invalidateProjectIdCache();
 
       const freshId = crypto.randomUUID();
-      const external = new DatabaseSync(process.env.LORE_DB_PATH as string);
+      const external = new Database(process.env.LORE_DB_PATH as string);
       external.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON");
       let reassigned = false;
       registerSink({
@@ -1721,7 +1929,7 @@ describe("db", () => {
       expect(projectId(path)).toBe(oldId); // prime the remote-backed memo
 
       const freshId = crypto.randomUUID();
-      const external = new DatabaseSync(process.env.LORE_DB_PATH as string);
+      const external = new Database(process.env.LORE_DB_PATH as string);
       try {
         external.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON");
         external.exec("BEGIN IMMEDIATE");

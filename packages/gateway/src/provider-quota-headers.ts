@@ -6,6 +6,24 @@
 
 import { upsertProviderQuota, log } from "@loreai/core";
 import type { CostAttribution } from "./cost-attribution";
+import {
+  capturePacingEpoch,
+  capturePacingGeneration,
+  isPacingGenerationCurrent,
+  isPacingEpochCurrent,
+  recordProviderQuotaSnapshot,
+  recordForegroundRequest,
+  recordQuotaObservation,
+} from "./provider-budgets";
+
+let lastObservationStartedAt = 0;
+
+/** Return a strictly increasing wall-clock timestamp for upstream attempts. */
+export function providerQuotaObservationStartedAt(): number {
+  const next = Math.max(Date.now(), lastObservationStartedAt + 0.001);
+  lastObservationStartedAt = next;
+  return next;
+}
 
 export type ParsedQuotaWindow = {
   window: string;
@@ -111,11 +129,12 @@ const NAMED_BUCKET_RE =
 
 /**
  * Parse all recognized quota header families into normalized windows.
- * `observedAt` (ms epoch) is used to convert relative reset durations.
+ * `resetBaseAt` (ms epoch) is the response-receipt time used to convert
+ * relative reset durations.
  */
 export function parseProviderQuotaHeaders(
   headers: Headers,
-  observedAt: number,
+  resetBaseAt: number,
 ): ParsedQuotaWindow[] {
   const windows = new Map<string, ParsedQuotaWindow>();
   const put = (w: ParsedQuotaWindow | null): ParsedQuotaWindow | null => {
@@ -230,7 +249,7 @@ export function parseProviderQuotaHeaders(
   }
   function epochFromDuration(value: string | null): number | null {
     const ms = durationMs(value);
-    return ms === null ? null : observedAt + ms;
+    return ms === null ? null : resetBaseAt + ms;
   }
 
   // --- Codex quota windows ---------------------------------------------------
@@ -338,7 +357,7 @@ export function parseProviderQuotaHeaders(
       const value =
         field === "reset"
           ? seconds !== null && seconds >= 0
-            ? observedAt + seconds * 1000
+            ? resetBaseAt + seconds * 1000
             : null
           : nonneg(num(raw));
       fillIfUnset("requests", field === "reset" ? "resetsAt" : field, value);
@@ -368,7 +387,7 @@ export function parseProviderQuotaHeaders(
       }
       if (resetMatch && target.resetsAt === null) {
         const seconds = num(resetMatch[1]);
-        if (seconds !== null) target.resetsAt = observedAt + seconds * 1000;
+        if (seconds !== null) target.resetsAt = resetBaseAt + seconds * 1000;
       }
       // A bare "name";t=30 line with no numeric field would have been
       // dropped by makeWindow; if it was dropped and still has nothing,
@@ -419,20 +438,114 @@ export function parseProviderQuotaHeaders(
   return [...windows.values()];
 }
 
+export interface ProviderQuotaPacingObservation {
+  pacingGeneration: string | null;
+  pacingObservationAllowed: boolean;
+}
+
+/**
+ * Snapshot whether a quota response may affect pacing without recording a
+ * foreground request. Background workers use this so their cadence cannot
+ * contaminate the foreground request-gap EWMA.
+ */
+export function captureProviderQuotaPacingObservation(
+  attribution: CostAttribution,
+  capturedPacingEpoch?: number | null,
+): ProviderQuotaPacingObservation {
+  const pacingMatch = {
+    provider: attribution.provider,
+    account: attribution.account,
+    auth_kind: attribution.authKind,
+  };
+  let pacingGeneration: string | null = null;
+  let pacingObservationAllowed = false;
+  if (attribution.authKind === "subscription") {
+    try {
+      const pacingEpoch =
+        capturedPacingEpoch === undefined
+          ? capturePacingEpoch(pacingMatch)
+          : capturedPacingEpoch;
+      pacingGeneration = capturePacingGeneration(pacingMatch);
+      pacingObservationAllowed =
+        pacingEpoch !== null &&
+        isPacingEpochCurrent(pacingMatch, pacingEpoch) &&
+        pacingGeneration !== null &&
+        isPacingGenerationCurrent(pacingMatch, pacingGeneration);
+    } catch {
+      try {
+        log.info("provider pacing generation unavailable");
+      } catch {
+        // A failing diagnostic sink must not affect quota capture.
+      }
+    }
+  }
+  return { pacingGeneration, pacingObservationAllowed };
+}
+
+/** Record the foreground request in memory before deferred quota persistence. */
+export function recordProviderQuotaForegroundRequest(
+  attribution: CostAttribution,
+  observedAt: number,
+  capturedPacingEpoch?: number | null,
+): ProviderQuotaPacingObservation {
+  const pacingObservation = captureProviderQuotaPacingObservation(
+    attribution,
+    capturedPacingEpoch,
+  );
+  if (
+    attribution.authKind === "subscription" &&
+    pacingObservation.pacingObservationAllowed &&
+    pacingObservation.pacingGeneration !== null
+  ) {
+    const pacingMatch = {
+      provider: attribution.provider,
+      account: attribution.account,
+      auth_kind: attribution.authKind,
+    };
+    try {
+      recordForegroundRequest(
+        pacingMatch,
+        observedAt,
+        pacingObservation.pacingGeneration,
+      );
+    } catch {
+      try {
+        log.info("provider pacing observation failed");
+      } catch {
+        // A failing diagnostic sink must not affect quota capture.
+      }
+    }
+  }
+  return pacingObservation;
+}
+
 /**
  * Parse quota headers from an upstream response and persist each window as
  * the latest snapshot for the attributed provider/account. Never throws —
  * failures (e.g. closed DB in tests) are logged at debug level.
+ * `observedAt` orders observations; `responseReceivedAt` anchors relative
+ * reset durations and must not be replaced with request-start time.
  */
 export function observeProviderQuotaHeaders(
   headers: Headers,
   attribution: CostAttribution,
   observedAt: number = Date.now(),
-): void {
+  responseReceivedAt: number = Date.now(),
+  capturedPacingEpoch?: number | null,
+  pacingObservation?: ProviderQuotaPacingObservation,
+): boolean {
+  let accepted = false;
   try {
-    const windows = parseProviderQuotaHeaders(headers, observedAt);
+    const { pacingGeneration, pacingObservationAllowed } =
+      pacingObservation ??
+      recordProviderQuotaForegroundRequest(
+        attribution,
+        observedAt,
+        capturedPacingEpoch,
+      );
+    const windows = parseProviderQuotaHeaders(headers, responseReceivedAt);
     for (const w of windows) {
-      upsertProviderQuota({
+      const row = {
         provider: attribution.provider,
         authKind: attribution.authKind,
         account: attribution.account,
@@ -445,11 +558,29 @@ export function observeProviderQuotaHeaders(
         resetsAt: w.resetsAt,
         source: w.source,
         observedAt,
-      });
+      };
+      if (upsertProviderQuota(row)) {
+        accepted = true;
+        recordProviderQuotaSnapshot(row);
+        if (pacingObservationAllowed && pacingGeneration !== null) {
+          try {
+            recordQuotaObservation(row, pacingGeneration);
+          } catch {
+            try {
+              log.info("provider pacing observation failed");
+            } catch {
+              // A failing diagnostic sink must not affect quota capture.
+            }
+          }
+        }
+      }
     }
-  } catch (error) {
-    log.info("provider quota capture failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } catch {
+    try {
+      log.info("provider quota capture failed");
+    } catch {
+      // Quota capture and its diagnostics are best-effort.
+    }
   }
+  return accepted;
 }

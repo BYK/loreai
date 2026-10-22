@@ -90,11 +90,11 @@ export type SessionCosts = {
     avoidedCompactionCost: number;
   };
 
-  // --- Budget throttle diagnostics ---
+  // --- Legacy budget-throttle counters; subscription pacing never increments these ---
   throttle: {
-    /** Number of requests that were throttled (delayed). */
+    /** Number of requests delayed by a separate throttling mechanism. */
     events: number;
-    /** Total delay imposed in milliseconds. */
+    /** Total delay imposed by a separate throttling mechanism, in milliseconds. */
     totalDelayMs: number;
   };
 
@@ -210,18 +210,6 @@ const HISTORICAL_SCAN_DAYS = 90;
 // ---------------------------------------------------------------------------
 // Throttle curve
 // ---------------------------------------------------------------------------
-
-/** Maximum throttle delay in seconds. */
-const MAX_THROTTLE_DELAY = 60;
-
-/**
- * Throttle delay in seconds for a provider-budget pressure in [0, 1]:
- * a gentle squared ramp up to MAX_THROTTLE_DELAY.
- */
-export function throttleDelayForPressure(pressure: number): number {
-  const p = Math.min(1, Math.max(0, Number.isFinite(pressure) ? pressure : 0));
-  return p > 0 ? Math.round(MAX_THROTTLE_DELAY * p * p * 10) / 10 : 0;
-}
 
 /** UTC day (YYYY-MM-DD) that cost is attributed to. */
 function utcToday(): string {

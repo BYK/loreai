@@ -14,14 +14,30 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
-import { resolveCostAttribution } from "./cost-attribution";
 import {
-  describeProviderBudget,
-  isBackgroundBudgetPaused,
-  providerBudgetPressure,
-  sessionBudgetMatch,
+  cacheAnthropicOrganizationFromResponse,
+  isPotentialAnthropicOAuthCredential,
+  isPotentialChatGPTSubscription,
+  recordSuccessfulAnthropicOAuthAuth,
+  recordSuccessfulChatGPTAuth,
+  resolveCostAttribution,
+  type CostAttribution,
+} from "./cost-attribution";
+import {
+  isSessionCurationPacingPaused,
+  capturePacingEpoch,
+  type BudgetMatch,
 } from "./provider-budgets";
-import { observeProviderQuotaHeaders } from "./provider-quota-headers";
+import {
+  observeProviderQuotaHeaders,
+  recordProviderQuotaForegroundRequest,
+  providerQuotaObservationStartedAt,
+} from "./provider-quota-headers";
+import {
+  hasNodeResponseFinishLifecycle,
+  responseCompletionCallbacks,
+  transferResponseCompletionCallback,
+} from "./response-completion";
 import { boundFallbackHistory } from "./fallback-history";
 import {
   formatUpstreamRequestShape,
@@ -468,8 +484,6 @@ import {
   updateShadowContext,
   recordWarmupHit,
   recordTTLSavings,
-  throttleDelayForPressure,
-  getSessionCosts,
 } from "./cost-tracker";
 import { isQuotaPaused } from "./quota";
 import {
@@ -1148,6 +1162,108 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
+const pendingProviderQuotaCaptures = new Set<Promise<boolean>>();
+// This enumerable symbol must survive GatewayRequest object spreads through
+// translation so every quota capture remains bound to the final HTTP response.
+const providerQuotaResponseCompletion = Symbol(
+  "providerQuotaResponseCompletion",
+);
+type RequestWithQuotaResponseCompletion = GatewayRequest & {
+  [providerQuotaResponseCompletion]?: Promise<boolean>;
+};
+
+interface QuotaResponseLifecycle {
+  completion: Promise<boolean>;
+  requiresResponseFinish: boolean;
+  bodyComplete: () => void;
+  complete: () => void;
+  discard: () => void;
+}
+
+function createQuotaResponseLifecycle(): QuotaResponseLifecycle {
+  const requiresResponseFinish = hasNodeResponseFinishLifecycle();
+  let resolveCompletion!: (completed: boolean) => void;
+  let settled = false;
+  const completion = new Promise<boolean>((resolve) => {
+    resolveCompletion = resolve;
+  });
+  const settle = (completed: boolean): void => {
+    if (settled) return;
+    settled = true;
+    resolveCompletion(completed);
+  };
+  return {
+    completion,
+    requiresResponseFinish,
+    bodyComplete: () => {
+      // Direct callers have no socket `finish`; only node:http can defer to it.
+      if (!requiresResponseFinish) settle(true);
+    },
+    complete: () => settle(true),
+    discard: () => settle(false),
+  };
+}
+
+function requestWithQuotaResponseCompletion(
+  req: GatewayRequest,
+  lifecycle: QuotaResponseLifecycle,
+): RequestWithQuotaResponseCompletion {
+  return { ...req, [providerQuotaResponseCompletion]: lifecycle.completion };
+}
+
+function quotaResponseCompletionFor(req: GatewayRequest): Promise<boolean> {
+  return (
+    (req as RequestWithQuotaResponseCompletion)[
+      providerQuotaResponseCompletion
+    ] ?? Promise.resolve(false)
+  );
+}
+
+function bindQuotaResponseCompletion(
+  response: Response,
+  lifecycle: QuotaResponseLifecycle,
+  downstreamSettled: Promise<void>,
+  didComplete: () => boolean,
+): void {
+  responseCompletionCallbacks.set(response, {
+    onComplete: lifecycle.bodyComplete,
+    onResponseFinished: lifecycle.complete,
+    onDiscard: lifecycle.discard,
+  });
+  if (!response.body) {
+    setImmediate(() => {
+      lifecycle.bodyComplete();
+    });
+    return;
+  }
+  void downstreamSettled.then(
+    () => {
+      // Response wrappers transfer callbacks to their clone. Settle the
+      // request-owned lifecycle directly so direct Hono callers do not depend
+      // on which Response object retained the callback.
+      if (didComplete()) lifecycle.bodyComplete();
+      else lifecycle.discard();
+    },
+    () => lifecycle.discard(),
+  );
+}
+
+let providerQuotaCaptureSchedulerForTest:
+  | ((callback: () => void) => void)
+  | undefined;
+
+export function setProviderQuotaCaptureSchedulerForTest(
+  scheduler: ((callback: () => void) => void) | undefined,
+): void {
+  providerQuotaCaptureSchedulerForTest = scheduler;
+}
+
+export async function _waitForProviderQuotaCapturesForTest(): Promise<void> {
+  while (pendingProviderQuotaCaptures.size > 0) {
+    await Promise.all(pendingProviderQuotaCaptures);
+  }
+}
+
 export function setPassthroughBodyReadPauseForTest(
   pause: Promise<void> | undefined,
   onWait: () => void = () => {},
@@ -1261,6 +1377,16 @@ async function resetPipelineStateInner(opts?: {
     [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
     settleTimeoutMs(),
   );
+  // Even fast resets must fence this short SQLite write before test databases
+  // or gateway storage are torn down; it remains detached from foreground work.
+  const quotaCaptures = [...pendingProviderQuotaCaptures];
+  await boundedSettle(quotaCaptures, settleTimeoutMs());
+  if (
+    quotaCaptures.some((capture) => pendingProviderQuotaCaptures.has(capture))
+  )
+    throw new Error(
+      "provider quota capture did not settle before pipeline reset",
+    );
   streamingPostResponseGeneration++;
   pipelineGenerationAbort = new AbortController();
   streamingPostResponseFinalizers.clear();
@@ -8264,6 +8390,11 @@ type UpstreamResult = {
     | "openai-responses"
     | "vertex"
     | "gemini";
+  /** Credential and trusted account identity for the request actually sent. */
+  credential: AuthCredential | null;
+  costAttribution?: CostAttribution;
+  /** Settles after response EOF (direct Hono) or HTTP finish (Node bridge). */
+  quotaCaptureCompletion?: Promise<boolean>;
 };
 
 /**
@@ -8556,6 +8687,11 @@ async function forwardToUpstream(
   // auth, and service-account scenarios can override any header — including
   // the gateway-reconstructed `x-api-key` / `Authorization`.
   applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
+  // Attribution follows the credential that will actually leave this process,
+  // not the ingress credential that configured-header overlays may replace.
+  const upstreamAuth = extractAuth(headers);
+  let responseCostAttribution: CostAttribution | undefined;
+  let responseQuotaCaptureCompletion: Promise<boolean> | undefined;
 
   // JSON.stringify escapes lone UTF-16 surrogates as e.g. "\\ud83d", which
   // upstream JSON parsers reject. Sanitize values and property names on the
@@ -8627,16 +8763,33 @@ async function forwardToUpstream(
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
+  let quotaObservationStartedAt: number | undefined;
+  type QuotaObservationTiming = {
+    observedAt: number;
+    responseReceivedAt: number;
+  };
+  const quotaObservationTimes = new WeakMap<Response, QuotaObservationTiming>();
+  const quotaObservationBodyTimes = new WeakMap<
+    ReadableStream<Uint8Array>,
+    QuotaObservationTiming
+  >();
+  let latestQuotaObservationTiming: QuotaObservationTiming | undefined;
 
   const dispatchUpstream = (dispatchSignal?: AbortSignal): Promise<Response> =>
     responseAgainstAbort(async () => {
+      const observedAt = providerQuotaObservationStartedAt();
       try {
-        return await upstreamFetch(url, {
+        const response = await upstreamFetch(url, {
           method: "POST",
           headers,
           body: upstreamBody,
           signal: dispatchSignal,
         });
+        const timing = { observedAt, responseReceivedAt: Date.now() };
+        quotaObservationTimes.set(response, timing);
+        if (response.body) quotaObservationBodyTimes.set(response.body, timing);
+        latestQuotaObservationTiming = timing;
+        return response;
       } catch (error) {
         logUpstreamFetchFailure(error, req, route, dispatchSignal);
         throw error;
@@ -8644,6 +8797,43 @@ async function forwardToUpstream(
     }, dispatchSignal);
 
   const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
+    // Timestamp before invoking interceptors too: recording/replay adapters can
+    // return a response without calling dispatchUpstream.
+    quotaObservationStartedAt = providerQuotaObservationStartedAt();
+    const quotaPacingEpoch = (() => {
+      try {
+        const quotaAttribution = resolveCostAttribution({
+          sessionID,
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: upstreamAuth,
+          requestHeaders: req.rawHeaders,
+        });
+        const potentialChatGPTSubscription = isPotentialChatGPTSubscription({
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: upstreamAuth,
+        });
+        const potentialAnthropicOAuthCredential =
+          isPotentialAnthropicOAuthCredential({
+            providerID,
+            upstreamURL: effectiveUpstreamBase,
+            credential: upstreamAuth,
+          });
+        return capturePacingEpoch({
+          provider: quotaAttribution.provider,
+          auth_kind:
+            quotaAttribution.authKind === "subscription" ||
+            potentialChatGPTSubscription ||
+            potentialAnthropicOAuthCredential
+              ? "subscription"
+              : quotaAttribution.authKind,
+        });
+      } catch {
+        // This optional snapshot only fences quota capture; dispatch continues.
+        return null;
+      }
+    })();
     const response = await (effectiveInterceptor
       ? responseAgainstAbort(
           () =>
@@ -8653,20 +8843,84 @@ async function forwardToUpstream(
           dispatchSignal,
         )
       : dispatchUpstream(dispatchSignal));
+    const responseTiming =
+      quotaObservationTimes.get(response) ??
+      (response.body
+        ? quotaObservationBodyTimes.get(response.body)
+        : undefined) ??
+      latestQuotaObservationTiming;
+    const responseReceivedAt = responseTiming?.responseReceivedAt ?? Date.now();
+    const directUpstreamResponse =
+      quotaObservationTimes.has(response) ||
+      (response.body !== null && quotaObservationBodyTimes.has(response.body));
     // Capture provider quota headers for the cost ledger (#1926). Header
     // reads only — the response object is returned untouched.
     try {
-      observeProviderQuotaHeaders(
-        response.headers,
-        resolveCostAttribution({
-          sessionID,
-          providerID,
-          upstreamURL: effectiveUpstreamBase,
-          credential: routingAuth,
-          responseHeaders: response.headers,
-          requestHeaders: req.rawHeaders,
-        }),
+      recordSuccessfulAnthropicOAuthAuth({
+        credential: upstreamAuth,
+        upstreamURL: effectiveUpstreamBase,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
+      });
+      recordSuccessfulChatGPTAuth({
+        credential: upstreamAuth,
+        upstreamURL: effectiveUpstreamBase,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
+      });
+      const attribution = resolveCostAttribution({
+        sessionID,
+        providerID,
+        upstreamURL: effectiveUpstreamBase,
+        credential: upstreamAuth,
+        responseHeaders: response.headers,
+        responseURL: response.url,
+        responseStatus: response.status,
+        directUpstreamResponse,
+        requestHeaders: req.rawHeaders,
+      });
+      responseCostAttribution = attribution;
+      const quotaObservedAt =
+        responseTiming?.observedAt ??
+        quotaObservationStartedAt ??
+        providerQuotaObservationStartedAt();
+      // Quota persistence uses synchronous SQLite. It must wait until the
+      // downstream HTTP response has finished so capture cannot stall a stream.
+      const pacingObservation = recordProviderQuotaForegroundRequest(
+        attribution,
+        quotaObservedAt,
+        quotaPacingEpoch,
       );
+      const quotaResponseHeaders = new Headers(response.headers);
+      responseQuotaCaptureCompletion = scheduleProviderQuotaCapture(() => {
+        try {
+          observeProviderQuotaHeaders(
+            quotaResponseHeaders,
+            attribution,
+            quotaObservedAt,
+            responseReceivedAt,
+            quotaPacingEpoch,
+            pacingObservation,
+          );
+          // Organization ownership is response evidence, not a side effect of
+          // whether this response happened to contain parseable quota headers.
+          cacheAnthropicOrganizationFromResponse({
+            provider: attribution.provider,
+            credential: upstreamAuth,
+            sessionID,
+            observedAt: quotaObservedAt,
+            responseStatus: response.status,
+            responseHeaders: quotaResponseHeaders,
+            upstreamURL: effectiveUpstreamBase,
+            responseURL: response.url,
+            directUpstreamResponse,
+          });
+        } catch {
+          // Deferred quota capture is best-effort and cannot affect dispatch.
+        }
+      }, quotaResponseCompletionFor(req));
     } catch {
       // Quota capture must never affect the proxied response.
     }
@@ -8680,6 +8934,13 @@ async function forwardToUpstream(
     retry: dispatch,
     serializedBody,
     effectiveProtocol,
+    credential: upstreamAuth,
+    get costAttribution() {
+      return responseCostAttribution;
+    },
+    get quotaCaptureCompletion() {
+      return responseQuotaCaptureCompletion;
+    },
     pinResponseId: shouldPinGithubCopilotResponseId(route, url),
     ...(response.status === 400
       ? {
@@ -17107,6 +17368,12 @@ export function recordCacheTurnUsage(
 type CostAttributionUpstream = {
   providerID?: string;
   url?: string;
+  /** Credential actually sent upstream after configured auth-header overlays. */
+  credential?: AuthCredential | null;
+  /** Trusted attribution captured from the exact response to this turn. */
+  attribution?: CostAttribution;
+  /** Response lifecycle that fences non-urgent curation against stale quota. */
+  quotaCaptureCompletion?: Promise<boolean>;
   /**
    * Provider identity for temporal attribution (#2026). Unlike `providerID`
    * (explicit route selection only), this falls back to the wire protocol so
@@ -17145,11 +17412,22 @@ function temporalProviderIDForRoute(
  */
 function routeAttributionUpstream(
   route: ResolvedRequestUpstreamRoute,
+  upstream?: Pick<
+    UpstreamResult,
+    "credential" | "costAttribution" | "quotaCaptureCompletion"
+  >,
 ): CostAttributionUpstream {
   return {
     providerID: route.providerID,
     url: route.effectiveUpstreamBase,
     temporalProviderID: temporalProviderIDForRoute(route),
+    ...(upstream
+      ? {
+          credential: upstream.credential,
+          attribution: upstream.costAttribution,
+          quotaCaptureCompletion: upstream.quotaCaptureCompletion,
+        }
+      : {}),
   };
 }
 
@@ -17180,15 +17458,19 @@ function accountConversationUsage(
     sessionID,
     providerID: source?.providerID,
     upstreamURL: source?.url,
-    credential: resolveAuth(sessionID, source?.providerID),
+    credential:
+      upstream?.credential !== undefined
+        ? upstream.credential
+        : resolveAuth(sessionID, source?.providerID),
     requestHeaders,
   });
+  const resolvedAttribution = upstream?.attribution ?? attribution;
   recordConversationCost(
     sessionID,
     model,
     usageForSentry,
     resolvedConversationTTL,
-    attribution,
+    resolvedAttribution,
   );
   return usageForSentry;
 }
@@ -17502,7 +17784,20 @@ function postResponseForTenant(
       sessionState.candidateHeaders = result.updatedCandidates;
     }
     if (!noStore) {
-      scheduleBackgroundWork(sessionState, config);
+      scheduleBackgroundWork(
+        sessionState,
+        config,
+        upstream?.quotaCaptureCompletion,
+        upstream
+          ? upstream.attribution
+            ? {
+                provider: upstream.attribution.provider,
+                auth_kind: upstream.attribution.authKind,
+                account: upstream.attribution.account,
+              }
+            : null
+          : undefined,
+      );
     }
     return true;
   } catch (e) {
@@ -17611,9 +17906,55 @@ function trackBackground(p: Promise<unknown>, state?: SessionState): void {
   void p.then(settled, settled);
 }
 
+function scheduleProviderQuotaCapture(
+  capture: () => void,
+  responseCompletion: Promise<boolean>,
+): Promise<boolean> {
+  const schedule =
+    providerQuotaCaptureSchedulerForTest ??
+    ((callback: () => void) => {
+      setImmediate(callback);
+    });
+  const pending = responseCompletion.then(
+    (completed) =>
+      new Promise<boolean>((resolve) => {
+        if (!completed) {
+          resolve(false);
+          return;
+        }
+        try {
+          schedule(() => {
+            try {
+              capture();
+            } catch {
+              // Deferred quota capture is best-effort.
+            } finally {
+              resolve(true);
+            }
+          });
+        } catch {
+          resolve(false);
+        }
+      }),
+    () => false,
+  );
+  pendingProviderQuotaCaptures.add(pending);
+  trackBackground(pending);
+  void pending.then(
+    () => pendingProviderQuotaCaptures.delete(pending),
+    () => pendingProviderQuotaCaptures.delete(pending),
+  );
+  return pending;
+}
+
 function scheduleBackgroundWorkForTenant(
   sessionState: SessionState,
   config: GatewayConfig,
+  options: {
+    deferCuration?: boolean;
+    curationOnly?: boolean;
+    curationBudgetMatch?: BudgetMatch | null;
+  } = {},
 ): void {
   const { sessionID, projectPath } = sessionState;
   const signal = AbortSignal.any([
@@ -17664,11 +18005,8 @@ function scheduleBackgroundWorkForTenant(
   // When the OAuth account is near quota exhaustion, skip non-urgent
   // background work to preserve remaining entitlement for user-facing turns.
   // Urgent distillation is exempt (it unblocks the next user turn).
-  // Provider budgets pause the same work when quota usage runs ahead of
-  // pace or a cap is exhausted (isBackgroundBudgetPaused).
-  const quotaPaused =
-    isQuotaPaused(resolveAuth(sessionID)) ||
-    isBackgroundBudgetPaused(sessionID, sessionState.lastUpstream);
+  // Subscription pacing never pauses distillation; it gates curation only.
+  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
 
   // Worker circuit breaker: when background workers have been failing for a
   // sustained period, stop hammering the upstream every turn — allow only a
@@ -17699,7 +18037,7 @@ function scheduleBackgroundWorkForTenant(
     sessionState.compactionAnomalyPending = false;
     saveSessionTracking(sessionID, { compactionAnomalyPending: false });
   }
-  if (urgentFromGradient || urgentFromCompaction) {
+  if (!options.curationOnly && (urgentFromGradient || urgentFromCompaction)) {
     trackBackground(
       withTenant(sessionState.storageTenantId ?? "", () =>
         distillation
@@ -17725,6 +18063,7 @@ function scheduleBackgroundWorkForTenant(
       sessionState,
     );
   } else if (
+    !options.curationOnly &&
     !isBackgroundPaused(workerProviderID) &&
     !quotaPaused &&
     !workerThrottled
@@ -17780,14 +18119,28 @@ function scheduleBackgroundWorkForTenant(
     }
   }
 
+  if (options.deferCuration) return;
+
   // Curation: run periodically when the knowledge system is enabled.
   // Cost-aware frequency: on expensive models, curate less often to reduce
   // the probability of LTM changes that bust the cache. Each LTM change
   // that exceeds the diff pinning threshold invalidates tools + messages.
   // Also gated by circuit breaker — curation is never urgent.
   // Quota-paused accounts skip curation too (non-urgent background work).
-  // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+  // Worker-throttled sessions (sustained worker failure) skip it as well, and
+  // so do accounts whose subscription pacing is throttling (#2045).
+  if (
+    isBackgroundPaused(workerProviderID) ||
+    quotaPaused ||
+    workerThrottled ||
+    // Quota capture can settle after a later turn replaces lastUpstream, so
+    // prefer the request's captured attribution (including an explicit miss).
+    isSessionCurationPacingPaused(
+      sessionID,
+      sessionState.lastUpstream,
+      options.curationBudgetMatch,
+    )
+  )
     return;
 
   const modelInputCost =
@@ -17891,9 +18244,39 @@ function scheduleBackgroundWorkForTenant(
 export function scheduleBackgroundWork(
   sessionState: SessionState,
   config: GatewayConfig,
+  quotaCaptureCompletion?: Promise<boolean>,
+  curationBudgetMatch?: BudgetMatch | null,
 ): void {
-  withTenant(sessionState.storageTenantId ?? "", () =>
-    scheduleBackgroundWorkForTenant(sessionState, config),
+  const schedule = (options?: {
+    deferCuration?: boolean;
+    curationOnly?: boolean;
+    curationBudgetMatch?: BudgetMatch | null;
+  }): void =>
+    withTenant(sessionState.storageTenantId ?? "", () =>
+      scheduleBackgroundWorkForTenant(sessionState, config, {
+        ...options,
+        curationBudgetMatch,
+      }),
+    );
+
+  if (!quotaCaptureCompletion) {
+    schedule();
+    return;
+  }
+
+  // Distillation/cache warming can proceed immediately. Curation's quota
+  // decision waits for this request's response-bound quota snapshot update.
+  schedule({ deferCuration: true });
+  trackBackground(
+    quotaCaptureCompletion
+      .then((completed) => {
+        if (completed) schedule({ curationOnly: true });
+      })
+      .catch(() => {
+        // Quota capture is optional; keep provider and callback diagnostics private.
+        log.error("quota capture completion handling failed");
+      }),
+    sessionState,
   );
 }
 
@@ -18736,6 +19119,7 @@ async function handleResponsesCompactEndpointInner(
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
   rawHeaders: Record<string, string>,
+  quotaLifecycle: QuotaResponseLifecycle,
 ): Promise<Response> {
   if (hasConflictingAuthHeaders(rawHeaders)) {
     return new Response(
@@ -18794,6 +19178,7 @@ async function handleResponsesCompactEndpointInner(
   try {
     gatewayReq = parseOpenAIResponsesRequest(body, rawHeaders);
     gatewayReq.signal = signal;
+    gatewayReq = requestWithQuotaResponseCompletion(gatewayReq, quotaLifecycle);
   } catch {
     return new Response(
       JSON.stringify({
@@ -18964,6 +19349,13 @@ export async function handleResponsesCompactEndpoint(
     }
     streamingPostResponsesAccepting = true;
     const abortScope = createForegroundAbortScope(req.signal);
+    let resolveDownstreamSettled: (() => void) | undefined;
+    let downstreamCompleted = false;
+    let downstreamCancelled = false;
+    const downstreamSettled = new Promise<void>((resolve) => {
+      resolveDownstreamSettled = resolve;
+    });
+    const quotaLifecycle = createQuotaResponseLifecycle();
     try {
       const response = await runActivePipelineRequest(
         abortScope.signal,
@@ -18976,18 +19368,39 @@ export async function handleResponsesCompactEndpoint(
             trackOperation,
             claimSession,
             rawHeaders,
+            quotaLifecycle,
           ),
-        undefined,
-        undefined,
-        undefined,
+        () => resolveDownstreamSettled?.(),
+        () => {
+          downstreamCancelled = true;
+        },
+        () => {
+          downstreamCompleted = true;
+        },
         directRequestCredentialFingerprint(req, config),
       );
-      return wrapBodyWithCleanup(
+      const wrapped = wrapBodyWithCleanup(
         response,
         abortScope.dispose,
         abortScope.signal,
+        () => {
+          downstreamCancelled = true;
+          resolveDownstreamSettled?.();
+        },
+        () => {
+          downstreamCompleted = true;
+          resolveDownstreamSettled?.();
+        },
       );
+      bindQuotaResponseCompletion(
+        wrapped,
+        quotaLifecycle,
+        downstreamSettled,
+        () => downstreamCompleted && !downstreamCancelled,
+      );
+      return wrapped;
     } catch (error) {
+      quotaLifecycle.discard();
       abortScope.dispose();
       return directCompactionFailureResponse(
         "responses/compact endpoint",
@@ -19280,16 +19693,6 @@ export function abortAwareDelay(
   });
 }
 
-export async function completeBudgetThrottleDelay(
-  delayMs: number,
-  signal: AbortSignal | undefined,
-  record: () => void,
-): Promise<void> {
-  await abortAwareDelay(delayMs, signal);
-  signal?.throwIfAborted();
-  record();
-}
-
 export function createForegroundAbortScope(caller?: AbortSignal): {
   signal: AbortSignal;
   abort: (reason?: unknown) => void;
@@ -19462,11 +19865,15 @@ export function wrapBodyWithCleanup(
   );
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
-  return new Response(body, {
+  const wrappedResponse = new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
   });
+  // Foreground routes wrap response bodies again; keep finish/discard work
+  // attached to the outer response that the HTTP server actually writes.
+  transferResponseCompletionCallback(response, wrappedResponse);
+  return wrappedResponse;
 }
 
 async function claimPipelineSession(
@@ -20154,7 +20561,7 @@ async function handleProvisionalConversationTurn(
             const state = sessions.get(identified.sessionID);
             if (state) state._dirty = true;
           },
-          routeAttributionUpstream(requestUpstream.route),
+          routeAttributionUpstream(requestUpstream.route, forwarded),
           req.rawHeaders,
         );
       },
@@ -20406,8 +20813,8 @@ async function handleProvisionalConversationTurn(
         extractProviderHeader(req.rawHeaders) || undefined,
       );
     }
-    captureBillingPrefix(state.sessionID, req.system);
-    captureSessionHeaders(state.sessionID, req.rawHeaders);
+    captureBillingPrefix(state.sessionID, req.system, credential);
+    captureSessionHeaders(state.sessionID, req.rawHeaders, credential);
     return true;
   };
   scheduleStreamingPostResponse(
@@ -20430,7 +20837,7 @@ async function handleProvisionalConversationTurn(
           undefined,
           () => {},
           undefined,
-          routeAttributionUpstream(requestUpstream.route),
+          routeAttributionUpstream(requestUpstream.route, forwarded),
           req.rawHeaders,
         );
         return;
@@ -20451,7 +20858,7 @@ async function handleProvisionalConversationTurn(
         accumulated.model,
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
-        routeAttributionUpstream(requestUpstream.route),
+        routeAttributionUpstream(requestUpstream.route, forwarded),
         req.rawHeaders,
       );
       const state = sessions.get(identified.sessionID);
@@ -21280,12 +21687,12 @@ async function handleConversationTurnPrepared(
   // x-anthropic-billing-header in the system prompt; we extract the prefix
   // so workers can rebuild it. Per-session storage prevents cross-session
   // contamination when multiple Claude Code versions share one process.
-  captureBillingPrefix(sessionID, req.system);
+  captureBillingPrefix(sessionID, req.system, cred);
 
   // Sniff Claude Code headers from conversation turns for replay on worker
   // calls. For OAuth sessions, workers need the same anthropic-beta and
   // user-agent headers as conversation turns to avoid 401 rejections.
-  captureSessionHeaders(sessionID, req.rawHeaders);
+  captureSessionHeaders(sessionID, req.rawHeaders, cred);
 
   // Track fingerprint for future correlation
   if (isNew) {
@@ -23159,73 +23566,14 @@ async function handleConversationTurnPrepared(
   };
 
   // Memory preparation is complete; its short timer cannot cancel generation.
-  // The absolute foreground lifetime started at turn admission and still
-  // covers deliberate throttling and every later upstream/recall phase.
+  // The absolute foreground lifetime started at turn admission and covers
+  // every later upstream and recall phase.
   preparation.assertActive();
   preparation.dispose();
   modifiedReq.signal = foregroundAbort.signal;
 
-  // --- Provider budget throttle (#1927) ---
-  // Apply an invisible proxy-level sleep to slow the agent when a user cap
-  // covering this request's attribution is filling up too fast. Only caps:
-  // pace budgets never delay the user's own requests, they only throttle
-  // Lore's background work. The sleep is capped
-  // to avoid causing cache busts (which would be self-defeating — costing
-  // more than the throttle saved). A DB failure must never break the request.
-  let budgetPressure: ReturnType<typeof providerBudgetPressure> = {
-    pressure: 0,
-    budget: null,
-  };
-  try {
-    budgetPressure = providerBudgetPressure(
-      sessionBudgetMatch(sessionID, sessionState.lastUpstream, req.rawHeaders),
-      "cap",
-    );
-  } catch (err) {
-    log.info(`provider-budget: evaluation failed: ${String(err)}`);
-  }
-  if (budgetPressure.pressure > 0 && budgetPressure.budget) {
-    const trippedBudget = budgetPressure.budget;
-    const delay = throttleDelayForPressure(budgetPressure.pressure);
-
-    if (delay > 0) {
-      // Cap delay to avoid pushing the next request past the cache TTL boundary.
-      // Use prevRequestTime (the request before this one) to compute how much
-      // of the cache TTL window has already been consumed.
-      const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-      const elapsed = sessionState.prevRequestTime
-        ? Date.now() - sessionState.prevRequestTime
-        : 0; // first request — no prior timing, full TTL available
-      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
-      const actualDelay = Math.min(delay, maxSafe);
-
-      if (actualDelay > 0.5) {
-        // don't bother sleeping < 500ms
-        log.info(
-          `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
-            `session=${sessionID.slice(0, 16)} ` +
-            `pressure=${budgetPressure.pressure.toFixed(2)} ` +
-            `budget=${describeProviderBudget(trippedBudget)}`,
-        );
-        try {
-          await completeBudgetThrottleDelay(
-            actualDelay * 1000,
-            foregroundAbort.signal,
-            () => {
-              const costs = getSessionCosts(sessionID);
-              if (costs) {
-                costs.throttle.events++;
-                costs.throttle.totalDelayMs += actualDelay * 1000;
-              }
-            },
-          );
-        } catch (error) {
-          foregroundAbort.dispose();
-          throw error;
-        }
-      }
-    }
-  }
+  // Foreground requests always dispatch immediately; pacing pauses only
+  // background curation.
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Start gen_ai.chat span before the upstream call so it captures real
@@ -23505,7 +23853,7 @@ async function handleConversationTurnPrepared(
           genAiSpan,
           suppressTemporalStorage,
           endGenAiSpan,
-          routeAttributionUpstream(requestUpstreamRoute),
+          routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
         );
         if (persisted) {
           persistAcceptedProvenanceLayer();
@@ -24030,7 +24378,7 @@ async function handleConversationTurnPrepared(
             () => {
               sessionState._dirty = true;
             },
-            routeAttributionUpstream(requestUpstreamRoute),
+            routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
             req.rawHeaders,
           );
           return;
@@ -24052,7 +24400,10 @@ async function handleConversationTurnPrepared(
                   genAiSpan,
                   suppressTemporalStorage,
                   endGenAiSpan,
-                  routeAttributionUpstream(requestUpstreamRoute),
+                  routeAttributionUpstream(
+                    requestUpstreamRoute,
+                    upstreamResult,
+                  ),
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
@@ -24103,7 +24454,7 @@ async function handleConversationTurnPrepared(
           () => {
             sessionState._dirty = true;
           },
-          routeAttributionUpstream(requestUpstreamRoute),
+          routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
           req.rawHeaders,
         );
       },
@@ -25707,28 +26058,42 @@ async function handleRequestForTenant(
   const downstreamSettled = new Promise<void>((resolve) => {
     resolveDownstreamSettled = resolve;
   });
-  return runActivePipelineRequest(
-    req.signal,
-    (signal, trackOperation, claimSession) =>
-      handleRequestInner(
-        { ...req, signal },
-        config,
-        requestGeneration,
-        downstreamSettled,
-        () => downstreamCancelled,
-        () => downstreamCompleted,
-        trackOperation,
-        claimSession,
-      ),
-    () => resolveDownstreamSettled?.(),
-    () => {
-      downstreamCancelled = true;
-    },
-    () => {
-      downstreamCompleted = true;
-    },
-    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-  );
+  const quotaLifecycle = createQuotaResponseLifecycle();
+  const request = requestWithQuotaResponseCompletion(req, quotaLifecycle);
+  try {
+    const response = await runActivePipelineRequest(
+      req.signal,
+      (signal, trackOperation, claimSession) =>
+        handleRequestInner(
+          { ...request, signal },
+          config,
+          requestGeneration,
+          downstreamSettled,
+          () => downstreamCancelled,
+          () => downstreamCompleted,
+          trackOperation,
+          claimSession,
+        ),
+      () => resolveDownstreamSettled?.(),
+      () => {
+        downstreamCancelled = true;
+      },
+      () => {
+        downstreamCompleted = true;
+      },
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+    bindQuotaResponseCompletion(
+      response,
+      quotaLifecycle,
+      downstreamSettled,
+      () => downstreamCompleted && !downstreamCancelled,
+    );
+    return response;
+  } catch (error) {
+    quotaLifecycle.discard();
+    throw error;
+  }
 }
 
 async function handleRequestInner(
