@@ -100,11 +100,8 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
         description: RECALL_PARAM_DESCRIPTIONS.detailLimit,
       },
     },
-    anyOf: [
-      { required: ["query"] },
-      { required: ["id"] },
-      { required: ["ids"] },
-    ],
+    // No root anyOf/oneOf/allOf: providers reject them (Copilot Gemini 400s).
+    // parseRecallInput enforces "query, id, or ids" at execution instead.
     additionalProperties: false,
   },
 };

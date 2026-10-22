@@ -199,11 +199,11 @@ describe("RECALL_GATEWAY_TOOL", () => {
     expect(props).toHaveProperty("ids");
     expect(props).toHaveProperty("detailOffset");
     expect(props).toHaveProperty("detailLimit");
-    expect(schema.anyOf).toEqual([
-      { required: ["query"] },
-      { required: ["id"] },
-      { required: ["ids"] },
-    ]);
+    // Root combinators are rejected upstream (Copilot Gemini: 400
+    // invalid_request_body); recall input is validated at execution instead.
+    for (const keyword of ["anyOf", "oneOf", "allOf", "not", "if"]) {
+      expect(schema).not.toHaveProperty(keyword);
+    }
     expect(schema).not.toHaveProperty("required");
     expect(schema.additionalProperties).toBe(false);
   });
