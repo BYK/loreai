@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { themeColor } from "./workspace-helpers";
 
 for (const theme of ["light", "dark"] as const) {
   for (const width of [1440, 390, 320]) {
@@ -75,9 +76,10 @@ for (const theme of ["light", "dark"] as const) {
           .toBe(
             route === "/ui/not-a-real-route"
               ? "rgba(0, 0, 0, 0)"
-              : theme === "dark"
-                ? "rgb(24, 24, 27)"
-                : "rgb(255, 255, 255)",
+              : await themeColor(
+                  page,
+                  `--color-olive-${theme === "dark" ? 900 : 50}`,
+                ),
           );
         const size = await main.evaluate((el) => ({
           client: el.clientWidth,
@@ -146,7 +148,7 @@ for (const theme of ["light", "dark"] as const) {
         });
       }
     });
-    test(`gateway connection form uses zinc surfaces at ${width}px in ${theme}`, async ({
+    test(`gateway connection form uses olive surfaces at ${width}px in ${theme}`, async ({
       page,
     }, testInfo) => {
       test.skip(testInfo.project.name !== "desktop-chromium");
@@ -180,10 +182,20 @@ for (const theme of ["light", "dark"] as const) {
       });
       expect
         .soft(styles.border)
-        .toBe(theme === "dark" ? "rgb(63, 63, 70)" : "rgb(228, 228, 231)");
+        .toBe(
+          await themeColor(
+            page,
+            `--color-olive-${theme === "dark" ? 700 : 200}`,
+          ),
+        );
       expect
         .soft(styles.background)
-        .toBe(theme === "dark" ? "rgb(24, 24, 27)" : "rgb(255, 255, 255)");
+        .toBe(
+          await themeColor(
+            page,
+            `--color-olive-${theme === "dark" ? 900 : 50}`,
+          ),
+        );
       expect.soft(styles.width).toBe("1px");
       const size = await gate.evaluate((el) => ({
         client: el.clientWidth,

@@ -91,3 +91,60 @@ export async function expectGatewayReachable(page: Page) {
   );
   await closeNavigation(page);
 }
+
+/** Resolve a theme token through the browser, including Tailwind OKLCH colors. */
+export async function themeColor(page: Page, token: string) {
+  return page.evaluate((name) => {
+    if (
+      !getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    ) {
+      throw new Error(`Missing theme token: ${name}`);
+    }
+    const probe = document.createElement("span");
+    probe.style.color = `var(${name})`;
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
+}
+
+/** Rasterize CSS colors before computing contrast: computed colors may be OKLCH. */
+export async function colorContrast(
+  page: Page,
+  foreground: string,
+  background: string,
+  backdrop = "white",
+) {
+  return page.evaluate(
+    ({ foreground, background, backdrop }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true })!;
+      const paint = (color: string) => {
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+      };
+      const luminance = (foreground: boolean) => {
+        context.clearRect(0, 0, 1, 1);
+        paint(backdrop);
+        paint(background);
+        if (foreground) paint(foregroundColor);
+        const channels = [...context.getImageData(0, 0, 1, 1).data]
+          .slice(0, 3)
+          .map((value) => {
+            const c = value / 255;
+            return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+          });
+        return (
+          channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722
+        );
+      };
+      const foregroundColor = foreground;
+      const a = luminance(true),
+        b = luminance(false);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    },
+    { foreground, background, backdrop },
+  );
+}

@@ -6,96 +6,95 @@
    here instead of in a tailwind.config.js (Solid UI's Tailwind 3 recipe). */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Neutral zinc surfaces with Lore green reserved for accents and states.
-   Semantic token names remain stable for owned Solid/shadcn components.
-   Brand colors remain available for logos, highlights, and charts. */
+/* Palette choices live here. Semantic roles below keep component classes stable.
+   To change families, replace olive/amber in these two scales. The logo SVGs,
+   version diffs, and categorical chart palettes remain independent. */
 :root {
-  --c0: #f7f2e8;
-  --c1: #ede5d0;
-  --c2: #dfd5bb;
-  --g0: #1a3320;
-  --g1: #2a4d32;
-  --g2: #3d6644;
-  --g3: #5a8f63;
-  --g4: #8fba96;
-  --g5: #c4ddc7;
-  --g6: #e8f2e9;
-  --ink: #1a2e1b;
-  --mid: #4a5f4c;
+  --palette-base-50: var(--color-olive-50);
+  --palette-base-100: var(--color-olive-100);
+  --palette-base-200: var(--color-olive-200);
+  --palette-base-300: var(--color-olive-300);
+  --palette-base-400: var(--color-olive-400);
+  --palette-base-500: var(--color-olive-500);
+  --palette-base-600: var(--color-olive-600);
+  --palette-base-700: var(--color-olive-700);
+  --palette-base-800: var(--color-olive-800);
+  --palette-base-900: var(--color-olive-900);
+  --palette-base-950: var(--color-olive-950);
+  --palette-accent-50: var(--color-amber-50);
+  --palette-accent-100: var(--color-amber-100);
+  --palette-accent-200: var(--color-amber-200);
+  --palette-accent-300: var(--color-amber-300);
+  --palette-accent-400: var(--color-amber-400);
+  --palette-accent-500: var(--color-amber-500);
+  --palette-accent-600: var(--color-amber-600);
+  --palette-accent-700: var(--color-amber-700);
+  --palette-accent-800: var(--color-amber-800);
+  --palette-accent-900: var(--color-amber-900);
+  --palette-accent-950: var(--color-amber-950);
 
-  /* Light theme — zinc surfaces and text. */
-  --bg: #fafafa;
-  --surface: #ffffff;
-  --chrome: #f4f4f5;
-  --nav: #f4f4f5;
-  --shade: #f4f4f5;
-  --soft: #f4f4f5;
-  --line: #e4e4e7;
-  --text: #27272a;
-  --muted: #52525b;
-  --heading: #18181b;
-  --accent: var(--g2); /* website --link */
-  --accent-hover: var(--g0); /* website --link-hover */
-  --accent-contrast: #ffffff;
-  --accent-soft: var(--g6); /* website --highlight-bg */
-  --accent-soft-text: var(--g2); /* website --highlight-text */
-  --emphasis: #27272a;
-  --inverse-bg: #3d6644;
-  --inverse-bg-hover: #2a4d32;
-  --inverse-text: #fafafa;
-  --inverse-text-dim: #e8f2e9;
-  --mark: var(--g6); /* website --highlight-bg */
-  --mark-edge: var(--g3); /* website --eyebrow */
-  --gold: var(--g1); /* website --emphasis */
-  --thread: var(--g4); /* website --link-border */
-  --quote-edge: var(--g3); /* website --eyebrow */
-  --danger: #8b3a3a; /* website --error */
+  /* Light theme: olive surfaces with readable amber actions and links. */
+  --bg: var(--palette-base-100);
+  --surface: var(--palette-base-50);
+  --chrome: var(--palette-base-100);
+  --nav: var(--chrome);
+  --shade: var(--chrome);
+  --soft: var(--chrome);
+  --line: var(--palette-base-200);
+  --text: var(--palette-base-900);
+  --muted: var(--palette-base-600);
+  --heading: var(--palette-base-950);
+  --accent: var(--palette-accent-700);
+  --accent-hover: var(--palette-accent-800);
+  --accent-contrast: var(--palette-base-50);
+  --accent-soft: var(--palette-accent-50);
+  --accent-soft-text: var(--palette-accent-800);
+
+  /* Shared roles follow the selected palette in either theme. */
+  --emphasis: var(--text);
+  --inverse-bg: var(--accent);
+  --inverse-bg-hover: var(--accent-hover);
+  --inverse-text: var(--accent-contrast);
+  --inverse-text-dim: var(--inverse-text);
+  --mark: var(--accent-soft);
+  --mark-edge: var(--accent);
+  --gold: var(--accent);
+  --thread: var(--accent);
+  --quote-edge: var(--accent);
+  --avatar-bg: var(--accent-soft);
+  --avatar-text: var(--accent-soft-text);
+  --avatar-agent-bg: var(--accent);
+  --avatar-agent-text: var(--accent-contrast);
+
+  /* Data colors and destructive states have their own meaning. */
+  --chart-accent: #3d6644;
+  --chart-emphasis: #2a4d32;
+  --danger: #8b3a3a;
   --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
-  --avatar-bg: var(--g6); /* website --highlight-bg */
-  --avatar-text: var(--g2); /* website --highlight-text */
-  --avatar-agent-bg: var(--g0); /* website --inverse-bg */
-  --avatar-agent-text: var(--c0); /* website --inverse-text */
-
-  /* Elevation — the website's two card shadows (theme.css .card / .feature). */
-  --shadow-soft: 0 4px 14px rgba(24, 24, 27, 0.06);
-  --shadow-lifted: 0 16px 48px rgba(24, 24, 27, 0.08);
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 6%, transparent);
+  --shadow-lifted: 0 16px 48px color-mix(in srgb, var(--palette-base-950) 8%, transparent);
 }
 
-/* Dark theme — zinc surfaces and text. */
 .dark {
-  --bg: #09090b;
-  --surface: #18181b;
-  --chrome: #27272a;
-  --nav: #18181b;
-  --shade: #18181b;
-  --soft: #27272a;
-  --line: #3f3f46;
-  --text: #e4e4e7;
-  --muted: #a1a1aa;
-  --heading: #fafafa;
-  --accent: #a6d6ae; /* website --link */
-  --accent-hover: #dcecdd; /* website --link-hover */
-  --accent-contrast: #09090b;
-  --accent-soft: #172c20; /* website --highlight-bg */
-  --accent-soft-text: #bfe0c4; /* website --highlight-text */
-  --emphasis: #e4e4e7;
-  --inverse-bg: #a6d6ae;
-  --inverse-bg-hover: #bfe0c4;
-  --inverse-text: #18181b;
-  --inverse-text-dim: #27272a;
-  --mark: #172c20; /* website --highlight-bg */
-  --mark-edge: #79ab84; /* website --eyebrow */
-  --gold: #9ad3a4; /* website --emphasis */
-  --thread: #4a7a55; /* website --link-border */
-  --quote-edge: #79ab84; /* website --eyebrow */
-  --danger: #e39393; /* website --error */
-  --avatar-bg: #172c20; /* website --highlight-bg */
-  --avatar-text: #bfe0c4; /* website --highlight-text */
-  --avatar-agent-bg: #1e3a29; /* website --inverse-bg */
-  --avatar-agent-text: #f2f7ee; /* website --inverse-text */
-
-  --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.28);
-  --shadow-lifted: 0 14px 34px rgba(0, 0, 0, 0.38); /* website .modal */
+  --bg: var(--palette-base-950);
+  --surface: var(--palette-base-900);
+  --chrome: var(--palette-base-800);
+  --nav: var(--surface);
+  --shade: var(--surface);
+  --line: var(--palette-base-700);
+  --text: var(--palette-base-200);
+  --muted: var(--palette-base-400);
+  --heading: var(--palette-base-50);
+  --accent: var(--palette-accent-400);
+  --accent-hover: var(--palette-accent-300);
+  --accent-contrast: var(--palette-base-950);
+  --accent-soft: var(--palette-accent-950);
+  --accent-soft-text: var(--palette-accent-200);
+  --chart-accent: #a6d6ae;
+  --chart-emphasis: #9ad3a4;
+  --danger: #e39393;
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 28%, transparent);
+  --shadow-lifted: 0 14px 34px color-mix(in srgb, var(--palette-base-950) 38%, transparent);
 }
 
 @theme inline {
@@ -132,6 +131,9 @@
   --color-soft: var(--soft);
   --color-shade: var(--shade);
   --color-gold: var(--gold);
+  --color-gold-soft: var(--accent-soft);
+  --color-chart-accent: var(--chart-accent);
+  --color-chart-emphasis: var(--chart-emphasis);
   --color-nav: var(--nav);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
@@ -143,7 +145,7 @@
      class strings resolve to Lore colours. Solid UI's `accent` (a hover
      surface) collides with Lore's brand `--accent`; the copied components
      were edited to use `soft` for hover fills instead. Filled (primary)
-     controls use the green primary colours (--inverse-*) with contrasting
+     controls use the accent primary colours (--inverse-*) with contrasting
      foregrounds for the resolved theme. */
   --color-background: var(--bg);
   --color-foreground: var(--text);
@@ -152,6 +154,7 @@
   --color-popover: var(--surface);
   --color-popover-foreground: var(--text);
   --color-primary: var(--inverse-bg);
+  --color-primary-hover: var(--inverse-bg-hover);
   --color-primary-foreground: var(--inverse-text);
   --color-secondary: var(--chrome);
   --color-secondary-foreground: var(--text);
@@ -169,7 +172,7 @@
   --radius-lg: 10px;
   --radius-xl: 14px;
 
-  /* Shadows: soft, low-alpha, green-tinted like the website's cards. */
+  /* Elevation follows the base palette. */
   --shadow-xs: var(--shadow-soft);
   --shadow-sm: var(--shadow-soft);
   --shadow-md: var(--shadow-soft);

@@ -117,7 +117,7 @@ export const CostsPage: Component = () => {
                           {day.cost > 0 ? formatMoney(day.cost) : ""}
                         </div>
                         <div
-                          class="w-full max-w-8 rounded-t bg-accent"
+                          class="w-full max-w-8 rounded-t bg-chart-accent"
                           style={{
                             height: `${Math.max(2, (day.cost / dailyMax()) * 78)}px`,
                           }}

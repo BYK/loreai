@@ -410,7 +410,7 @@ export const WarmingPage: Component = () => {
                               return (
                                 <div class="flex min-w-0 flex-1 flex-col items-center justify-end">
                                   <div
-                                    class="w-full rounded-t bg-accent"
+                                    class="w-full rounded-t bg-chart-accent"
                                     title={`${label}: ${count}`}
                                     style={{
                                       height: `${Math.max(2, (count / max) * 64)}px`,

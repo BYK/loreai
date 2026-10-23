@@ -1,4 +1,9 @@
-import { openNavigation, setWorkspaceTheme } from "./workspace-helpers";
+import {
+  openNavigation,
+  setWorkspaceTheme,
+  themeColor,
+  colorContrast,
+} from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectIdByName(page: Page, name: string) {
@@ -285,38 +290,20 @@ test("mobile profile row and account panel stay aligned with the drawer", async 
       await drawer.evaluate(
         (element) => getComputedStyle(element).backgroundColor,
       ),
-    ).toBe(theme === "dark" ? "rgb(24, 24, 27)" : "rgb(244, 244, 245)");
-    const contrast = await profile
+    ).toBe(
+      await themeColor(page, `--color-olive-${theme === "dark" ? 900 : 100}`),
+    );
+    const colors = await profile
       .getByText("Account & preferences", { exact: true })
-      .evaluate((label) => {
-        const background = document.querySelector(
-          '[data-testid="mobile-navigation"]',
-        )!;
-        const luminance = (css: string) => {
-          const channels = css
-            .match(/\d+(?:\.\d+)?/g)!
-            .slice(0, 3)
-            .map(Number)
-            .map((value) => {
-              const channel = value / 255;
-              return channel <= 0.04045
-                ? channel / 12.92
-                : ((channel + 0.055) / 1.055) ** 2.4;
-            });
-          return (
-            channels[0]! * 0.2126 +
-            channels[1]! * 0.7152 +
-            channels[2]! * 0.0722
-          );
-        };
-        const foreground = luminance(getComputedStyle(label).color);
-        const base = luminance(getComputedStyle(background).backgroundColor);
-        return (
-          (Math.max(foreground, base) + 0.05) /
-          (Math.min(foreground, base) + 0.05)
-        );
-      });
-    expect(contrast).toBeGreaterThanOrEqual(4.5);
+      .evaluate((label) => ({
+        foreground: getComputedStyle(label).color,
+        background: getComputedStyle(
+          document.querySelector('[data-testid="mobile-navigation"]')!,
+        ).backgroundColor,
+      }));
+    expect(
+      await colorContrast(page, colors.foreground, colors.background),
+    ).toBeGreaterThanOrEqual(4.5);
     if (width === 390 && theme === "dark")
       await page.screenshot({
         path: testInfo.outputPath("mobile-drawer-dark.png"),

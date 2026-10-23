@@ -45,7 +45,11 @@ const Row: Component<{ label: string; children: JSX.Element }> = (props) => (
 );
 
 function quotaTone(percent: number): string {
-  return percent < 60 ? "bg-accent" : percent < 85 ? "bg-gold" : "bg-danger";
+  return percent < 60
+    ? "bg-chart-accent"
+    : percent < 85
+      ? "bg-chart-emphasis"
+      : "bg-danger";
 }
 
 /** 5h/7d always render; other windows need a usable numeric field. */

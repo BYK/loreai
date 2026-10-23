@@ -1,4 +1,4 @@
-import { openAccountMenu } from "./workspace-helpers";
+import { openAccountMenu, themeColor } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
@@ -838,7 +838,7 @@ for (const theme of ["light", "dark"] as const) {
         .toBeLessThanOrEqual(mainBox.x + mainBox.width - 32);
       await expect(page.getByTestId("team-offline-invite")).toHaveCSS(
         "accent-color",
-        theme === "dark" ? "rgb(166, 214, 174)" : "rgb(61, 102, 68)",
+        await themeColor(page, `--color-amber-${theme === "dark" ? 400 : 700}`),
       );
       await page.getByTestId("team-offline-invite").check();
       const offline = (await page
