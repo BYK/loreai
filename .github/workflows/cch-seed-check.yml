@@ -50,7 +50,9 @@ jobs:
           else
             # check-cc-version.ts exits 1 if extraction is needed
             set +e
-            result=$(node scripts/check-cc-version.ts --json 2>&1)
+            # The checker and CCH imports use extensionless TypeScript imports;
+            # Node's native type stripping does not resolve those imports.
+            result=$(pnpm exec tsx scripts/check-cc-version.ts --json 2>&1)
             exit_code=$?
             set -e
 
@@ -100,7 +102,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # scripts/extract-cch-seed.ts (and the cch test) import the gateway ->
       # @loreai/core chain, which resolves to packages/core/dist. Build core
-      # so the imports succeed.
+      # so the imports succeed. Use tsx because cch.ts also has extensionless
+      # TypeScript imports that Node's native type stripping cannot resolve.
       - run: pnpm --filter @loreai/core run build
 
       - name: Extract and apply all missing seeds
@@ -133,7 +136,7 @@ jobs:
             echo "========================================"
 
             OUTPUT="/tmp/seed-result-${VERSION}.json"
-            node scripts/extract-cch-seed.ts \
+            pnpm exec tsx scripts/extract-cch-seed.ts \
               --version "$VERSION" \
               --output "$OUTPUT"
 
@@ -146,10 +149,10 @@ jobs:
             # Apply: pin WORKER_VERSION only for the latest version
             if [ "$VERSION" = "$LATEST_VERSION" ]; then
               echo "Applying seed for $VERSION (pinning as WORKER_VERSION)..."
-              node scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
+              pnpm exec tsx scripts/extract-cch-seed.ts --apply "$VERSION" "$SEED"
             else
               echo "Applying seed for $VERSION (backfill, no pin)..."
-              node scripts/extract-cch-seed.ts --apply --no-pin "$VERSION" "$SEED"
+              pnpm exec tsx scripts/extract-cch-seed.ts --apply --no-pin "$VERSION" "$SEED"
             fi
 
             EXTRACTED+=("$VERSION")
@@ -166,7 +169,10 @@ jobs:
       - name: Verify tests pass
         # Call vitest directly: the root `test` script chains `&& pnpm --filter
         # @loreai/ui test`, so pnpm would append the file filter to the UI run.
-        run: pnpm exec vitest run packages/gateway/test/cch.test.ts
+        run: |
+          pnpm exec vitest run \
+            packages/gateway/test/cch.test.ts \
+            packages/gateway/test/cch-seed-workflow.test.ts
 
       - name: Check for existing PR
         id: check-pr
