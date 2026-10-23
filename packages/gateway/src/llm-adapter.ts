@@ -1557,6 +1557,16 @@ export function resolveWorkerProtocol(
     // Gemini is a DISTINCT worker protocol: native generateContent (model in the
     // URL path, x-goog-api-key auth) — it must NOT collapse to "openai".
     if (explicit === "gemini") return "gemini";
+    // Copilot's native Messages endpoint serves only Claude; other worker
+    // models on a Claude session use Copilot's Chat Completions route.
+    if (
+      explicit === "anthropic" &&
+      providerID === "github-copilot" &&
+      modelID &&
+      !isAnthropicClaudeModel(modelID)
+    ) {
+      return "openai";
+    }
     return explicit === "anthropic" ? "anthropic" : "openai";
   }
   // 2. Per-model override (no explicit hint from caller) — github-copilot +
