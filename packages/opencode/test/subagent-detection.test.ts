@@ -120,6 +120,7 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
 
     const headers = await headersFor(hooks, "sa-child-1");
     expect(headers["x-lore-session-id"]).toBe("sa-child-1");
+    expect(headers["x-lore-session-parent-state"]).toBe("pending");
     await waitForHeader(
       hooks,
       "sa-child-1",
@@ -137,10 +138,15 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     const headers = await headersFor(hooks, "primary-1");
     expect(headers["x-parent-session-id"]).toBeUndefined();
     expect(headers["x-lore-session-id"]).toBe("primary-1");
+    expect(headers["x-lore-session-parent-state"]).toBe("pending");
     await vi.waitFor(() => expect(calls).toEqual(["primary-1"]));
-    expect((await headersFor(hooks, "primary-1"))["x-parent-session-id"]).toBe(
-      undefined,
-    );
+    const resolvedHeaders = await headersFor(hooks, "primary-1");
+    expect(resolvedHeaders["x-parent-session-id"]).toBeUndefined();
+    // The first request cannot wait for session.get(); it stays conservative
+    // until the asynchronous lookup confirms this is a primary session.
+    expect(resolvedHeaders["x-lore-session-parent-state"]).toBe("pending");
+    const nextTurnHeaders = await headersFor(hooks, "primary-1");
+    expect(nextTurnHeaders["x-lore-session-parent-state"]).toBe("primary");
     expect(calls).toEqual(["primary-1"]);
   });
 
@@ -213,6 +219,56 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     } finally {
       vi.useRealTimers();
       rejectLookup?.(new Error("test cleanup"));
+    }
+  });
+
+  test("a timed-out lookup releases its slot for a later retry", async () => {
+    const dir = makeTmp("timeout-retry");
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const client = createMockClient({ parents: {}, calls });
+    const sessionClient = client.session as unknown as {
+      get(args: { path: { id: string } }): Promise<{
+        data: { id: string; parentID: string };
+      }>;
+    };
+    sessionClient.get = (args: { path: { id: string } }) => {
+      calls.push(args.path.id);
+      if (calls.length === 1) {
+        return new Promise((resolve) => {
+          releaseFirst = () =>
+            resolve({
+              data: { id: args.path.id, parentID: "stale-parent" },
+            });
+        });
+      }
+      return Promise.resolve({
+        data: { id: args.path.id, parentID: "timeout-parent" },
+      });
+    };
+    const hooks = await initPlugin(dir, client);
+
+    vi.useFakeTimers();
+    try {
+      const firstHeaders = await headersFor(hooks, "timeout-child");
+      expect(firstHeaders["x-lore-session-parent-state"]).toBe("pending");
+      // Advance the metadata deadline; the SDK request itself may never settle.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await headersFor(hooks, "timeout-child");
+      await vi.waitFor(async () => {
+        const headers = await headersFor(hooks, "timeout-child");
+        expect(headers["x-parent-session-id"]).toBe("timeout-parent");
+      });
+      expect(calls).toEqual(["timeout-child", "timeout-child"]);
+
+      // A late completion from the timed-out call cannot replace newer metadata.
+      releaseFirst?.();
+      await Promise.resolve();
+      expect(
+        (await headersFor(hooks, "timeout-child"))["x-parent-session-id"],
+      ).toBe("timeout-parent");
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

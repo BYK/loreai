@@ -123,6 +123,7 @@ export function withParallelToolUseDisabled(
 export const MAX_RECALL_DEPTH = MAX_RECALL_EXECUTIONS;
 export const MAX_RECALL_STORE_ENTRIES = 128;
 export const MAX_RECALL_STORE_BYTES = 1024 * 1024;
+const MAX_RECALL_COMPANION_TOOL_USES = 128;
 
 // ---------------------------------------------------------------------------
 // Marker utilities — human-readable text ↔ recall tool round-trip
@@ -461,6 +462,66 @@ function storedRecallForText(
   return null;
 }
 
+function suppressedRecallContinuation(
+  text: string,
+  store: RecallStore,
+): string | undefined {
+  const match = storedRecallForText(text, store);
+  if (match) return match.continuation;
+  if (!isRecallMarker(text)) return undefined;
+  const anchorId = parseRecallAnchorFromText(text);
+  return anchorId
+    ? recallAnchorContinuation(text, anchorId)
+    : recallMarkerContinuation(text);
+}
+
+function suppressRecallProvenance(
+  message: GatewayMessage,
+  store: RecallStore,
+): boolean {
+  let changed = false;
+  for (const block of message.provenanceContent ?? []) {
+    if (block.type === "text") {
+      const continuation = suppressedRecallContinuation(block.text, store);
+      if (continuation !== undefined) {
+        block.text = continuation;
+        changed = true;
+      }
+      continue;
+    }
+    if (
+      block.type !== "opaque" ||
+      block.responsesItem !== true ||
+      block.raw.type !== "message" ||
+      !Array.isArray(block.raw.content)
+    ) {
+      continue;
+    }
+
+    let itemChanged = false;
+    const content = block.raw.content.map((part: unknown) => {
+      if (
+        !isRecord(part) ||
+        part.type !== "output_text" ||
+        typeof part.text !== "string"
+      ) {
+        return part;
+      }
+      const continuation = suppressedRecallContinuation(part.text, store);
+      if (continuation === undefined) return part;
+      itemChanged = true;
+      return { ...part, text: continuation };
+    });
+    if (itemChanged) {
+      // Retain each native item and its index: provenancePositions addresses
+      // these blocks, and the envelope may carry protocol-required metadata.
+      block.raw = { ...block.raw, content };
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function recallMarkerContinuation(text: string): string {
   const idMatch = ID_MARKER_REGEX.exec(text);
   const markerMatch = MARKER_REGEX.exec(text);
@@ -530,6 +591,7 @@ export function serializeRecallStore(store: RecallStore): string {
     ) {
       continue;
     }
+    const companionToolUseCounts = companionCountsFor(value);
     entries.push([
       key,
       {
@@ -542,9 +604,7 @@ export function serializeRecallStore(store: RecallStore): string {
         position: value.position,
         result: value.result,
         anchorContextId: value.anchorContextId,
-        ...(value.companionToolUses
-          ? { companionToolUses: value.companionToolUses }
-          : {}),
+        ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
       },
     ]);
   }
@@ -617,15 +677,20 @@ export function deserializeRecallStore(json: string): RecallStore {
         isValidRecallStoreEntry(entry[0], entry[1])
       ) {
         try {
+          const companionToolUseCounts = companionCountsFor(entry[1]);
           addRecallStoreEntry(store, entry[0], {
-            ...entry[1],
             toolUseId: persistedRecallToolUseId(
               entry[0].slice("anchor:".length),
             ),
+            anchorId: entry[1].anchorId,
+            anchorContextId: entry[1].anchorContextId,
             input: {
-              ...entry[1].input,
               query: PERSISTED_RECALL_QUERY,
+              ...(entry[1].input.scope ? { scope: entry[1].input.scope } : {}),
             },
+            position: entry[1].position,
+            result: entry[1].result,
+            ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
           });
         } catch {
           break;
@@ -643,6 +708,41 @@ function persistedRecallToolUseId(anchorId: string): string {
   // private query. The anchor is local UUID provenance, so derive replay IDs
   // from it instead of carrying the provider value across restarts.
   return `lore-recall-${anchorId}`;
+}
+
+function companionCountsFor(
+  item: StoredRecall,
+): { before: number; after: number } | undefined {
+  if (item.companionToolUseCounts !== undefined) {
+    return item.companionToolUseCounts;
+  }
+  if (!item.companionToolUses || item.companionToolUses.length === 0) {
+    return undefined;
+  }
+  let before = 0;
+  let after = 0;
+  for (const companion of item.companionToolUses) {
+    if (companion.side === "before") before++;
+    else after++;
+  }
+  return { before, after };
+}
+
+function isValidCompanionToolUseCounts(
+  value: unknown,
+): value is { before: number; after: number } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const counts = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(counts.before) &&
+    Number.isSafeInteger(counts.after) &&
+    (counts.before as number) >= 0 &&
+    (counts.after as number) >= 0 &&
+    (counts.before as number) + (counts.after as number) <=
+      MAX_RECALL_COMPANION_TOOL_USES
+  );
 }
 
 function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {
@@ -743,7 +843,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     return false;
   }
   if (item.companionToolUses !== undefined) {
-    if (!Array.isArray(item.companionToolUses)) return false;
+    if (
+      !Array.isArray(item.companionToolUses) ||
+      item.companionToolUses.length > MAX_RECALL_COMPANION_TOOL_USES
+    ) {
+      return false;
+    }
     for (const companion of item.companionToolUses) {
       if (!companion || typeof companion !== "object") return false;
       const record = companion as Record<string, unknown>;
@@ -756,6 +861,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
         return false;
       }
     }
+  }
+  if (
+    item.companionToolUseCounts !== undefined &&
+    !isValidCompanionToolUseCounts(item.companionToolUseCounts)
+  ) {
+    return false;
   }
   return true;
 }
@@ -788,7 +899,27 @@ export function expandRecallMarkers(
   store: RecallStore,
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
-  if (options.gatewayRecallEnabled === false) return false;
+  if (options.gatewayRecallEnabled === false) {
+    // A caller-owned colliding tool cannot receive Lore's synthetic replay,
+    // but its internal anchor must not leak as ordinary provider-visible text.
+    // Keep the stored result intact so a later request with the canonical
+    // gateway-owned tool can still replay it.
+    let suppressed = false;
+    for (const message of req.messages) {
+      if (message.role !== "assistant") continue;
+      for (let index = 0; index < message.content.length; index++) {
+        const block = message.content[index];
+        if (block.type !== "text") continue;
+        const continuation = suppressedRecallContinuation(block.text, store);
+        if (continuation === undefined) continue;
+        if (continuation) block.text = continuation;
+        else removeVisibleContentBlock(message, index--);
+        suppressed = true;
+      }
+      suppressed = suppressRecallProvenance(message, store) || suppressed;
+    }
+    return suppressed;
+  }
   let expanded = false;
   const anchorValidity = new Map<string, boolean[]>();
   const incomingMessages = structuredClone(req.messages);
@@ -884,27 +1015,36 @@ export function expandRecallMarkers(
     // were companions of the original recall. Continuation tool calls are not
     // companions and must stay after the synthetic recall result turn.
     const companions = stored.companionToolUses;
-    const beforeCompanions = companions?.filter(
-      (item) => item.side === "before",
-    );
-    const afterCompanions = companions?.filter((item) => item.side === "after");
+    const counts = companionCountsFor(stored);
+    const beforeCompanions = companions
+      ? companions.filter((item) => item.side === "before")
+      : (counts?.before ?? 0);
+    const afterCompanions = companions
+      ? companions.filter((item) => item.side === "after")
+      : (counts?.after ?? 0);
     const matchesCompanions = (
       content: GatewayContentBlock[],
       expected: typeof beforeCompanions,
-    ): boolean =>
-      content.filter((block) => block.type === "tool_use").length ===
-        expected?.length &&
-      content
-        .filter((block) => block.type === "tool_use")
-        .every((block, index) => {
+    ): boolean => {
+      const toolUses = content.filter(
+        (block): block is GatewayToolUseBlock => block.type === "tool_use",
+      );
+      // Counts survive persistence, but the corresponding provider-controlled
+      // IDs and inputs do not. Never reattach a merely same-sized neighboring
+      // tool group after restart; exact matching is available only in memory.
+      if (typeof expected === "number") return false;
+      return (
+        toolUses.length === expected.length &&
+        toolUses.every((block, index) => {
           const item = expected[index];
           return (
-            block.type === "tool_use" &&
             block.id === item.id &&
             block.name === item.name &&
             JSON.stringify(block.input) === JSON.stringify(item.input)
           );
-        });
+        })
+      );
+    };
     const takeCompanions = (message: GatewayMessage): CompanionBundle => {
       if (
         message.content.every((block) => block.type === "tool_use") &&
@@ -943,40 +1083,46 @@ export function expandRecallMarkers(
       }
       return { content: moved };
     };
-    while ((beforeCompanions?.length ?? 0) > 0 && i > 0) {
+    const beforeCompanionCount =
+      typeof beforeCompanions === "number"
+        ? beforeCompanions
+        : (beforeCompanions?.length ?? 0);
+    if (beforeCompanionCount > 0 && i > 0) {
       const previous = req.messages[i - 1];
       if (
-        previous.role !== "assistant" ||
-        !matchesCompanions(previous.content, beforeCompanions)
+        previous.role === "assistant" &&
+        matchesCompanions(previous.content, beforeCompanions)
       ) {
-        break;
-      }
-      const moved = takeCompanions(previous);
-      insertCompanionBundle(msg, 0, moved);
-      markerIdx += moved.content.length;
-      if (
-        previous.content.length === 0 &&
-        (previous.provenanceContent?.length ?? 0) === 0
-      ) {
-        req.messages.splice(i - 1, 1);
-        i -= 1;
+        const moved = takeCompanions(previous);
+        insertCompanionBundle(msg, 0, moved);
+        markerIdx += moved.content.length;
+        if (
+          previous.content.length === 0 &&
+          (previous.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(i - 1, 1);
+          i -= 1;
+        }
       }
     }
-    while ((afterCompanions?.length ?? 0) > 0) {
+    const afterCompanionCount =
+      typeof afterCompanions === "number"
+        ? afterCompanions
+        : (afterCompanions?.length ?? 0);
+    if (afterCompanionCount > 0) {
       const next = req.messages[i + 1];
       if (
-        !next ||
-        next.role !== "assistant" ||
-        !matchesCompanions(next.content, afterCompanions)
+        next &&
+        next.role === "assistant" &&
+        matchesCompanions(next.content, afterCompanions)
       ) {
-        break;
-      }
-      insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
-      if (
-        next.content.length === 0 &&
-        (next.provenanceContent?.length ?? 0) === 0
-      ) {
-        req.messages.splice(i + 1, 1);
+        insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
+        if (
+          next.content.length === 0 &&
+          (next.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(i + 1, 1);
+        }
       }
     }
 
@@ -1066,7 +1212,23 @@ export function cleanupRecallStore(
   store: RecallStore,
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
-  if (options.gatewayRecallEnabled === false) return false;
+  if (options.gatewayRecallEnabled === false) {
+    let changed = false;
+    for (const message of req.messages) {
+      if (message.role !== "assistant") continue;
+      for (let index = 0; index < message.content.length; index++) {
+        const block = message.content[index];
+        if (block.type !== "text") continue;
+        const continuation = suppressedRecallContinuation(block.text, store);
+        if (continuation === undefined) continue;
+        if (continuation) block.text = continuation;
+        else removeVisibleContentBlock(message, index--);
+        changed = true;
+      }
+      changed = suppressRecallProvenance(message, store) || changed;
+    }
+    return changed;
+  }
   if (store.size === 0) return false;
 
   // Collect all marker keys still present in assistant messages

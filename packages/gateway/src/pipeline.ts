@@ -21585,6 +21585,7 @@ async function handleConversationTurnPrepared(
   {
     const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
     const parentClientId = req.rawHeaders["x-parent-session-id"];
+    const parentStateHint = req.rawHeaders["x-lore-session-parent-state"];
     const sharedSessionId = req.rawHeaders["x-claude-code-session-id"];
     const credentialFingerprint = requestCredentialFingerprint(
       req.rawHeaders,
@@ -21596,6 +21597,43 @@ async function handleConversationTurnPrepared(
     // parent *agent*, not its session). May be undefined for a malformed or
     // adversarial sub-agent request that carries neither header.
     const parentLookupValue = parentClientId ?? sharedSessionId;
+    if (
+      sessionState.parentSessionPending &&
+      (parentClientId || isClaudeSubagent)
+    ) {
+      sessionState.parentSessionPending = false;
+      saveSessionTracking(sessionID, { parentSessionPending: false });
+    }
+    // The OpenCode adapter cannot await session.get() on the provider request.
+    // Mark its cold lookup as sub-agent-scoped before LTM selection, then clear
+    // only that unresolved classification after the adapter reports a primary
+    // session. Native parent/Claude signals always take precedence.
+    const parentNotResolvedHere =
+      !isClaudeSubagent && !parentClientId && !sessionState.parentSessionId;
+    if (
+      parentNotResolvedHere &&
+      parentStateHint === "pending" &&
+      !sessionState.isSubagent &&
+      sessionState.parentSessionPending !== true
+    ) {
+      sessionState.isSubagent = true;
+      sessionState.parentSessionPending = true;
+      saveSessionTracking(sessionID, {
+        isSubagent: true,
+        parentSessionPending: true,
+      });
+    } else if (
+      parentNotResolvedHere &&
+      parentStateHint === "primary" &&
+      sessionState.parentSessionPending === true
+    ) {
+      sessionState.isSubagent = false;
+      sessionState.parentSessionPending = false;
+      saveSessionTracking(sessionID, {
+        isSubagent: false,
+        parentSessionPending: false,
+      });
+    }
     const shouldResolveParent =
       credentialFingerprint !== null &&
       (!sessionState.isSubagent || !sessionState.parentSessionId) &&
@@ -21619,9 +21657,11 @@ async function handleConversationTurnPrepared(
       }
       if (resolvedParent) {
         sessionState.parentSessionId = resolvedParent;
+        sessionState.parentSessionPending = false;
         saveSessionTracking(sessionID, {
           isSubagent: true,
           parentSessionId: resolvedParent,
+          parentSessionPending: false,
         });
       } else if (!sessionState.parentSessionId) {
         // Parent may use Tier 3 (fingerprint) identification, or hasn't made

@@ -21,10 +21,11 @@ const nativeFetch = globalThis.fetch;
 
 async function listen(
   server: ReturnType<typeof createServer>,
+  host = "127.0.0.1",
 ): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    server.listen(0, host, resolve);
   });
   return (server.address() as AddressInfo).port;
 }
@@ -225,6 +226,99 @@ describe("installFetchInterceptor — end-to-end routing", () => {
         }
       },
     );
+
+    test.each([
+      ["a non-LLM path", "127.0.0.1", "/v1/admin"],
+      ["a local-provider LLM path", "127.0.0.1", "/v1/messages"],
+      ["an unrewritable LLM path", "127.0.0.2", "/v2/messages"],
+    ])(
+      "does not follow a credentialed redirect from %s",
+      async (_label, requestHost, path) => {
+        cleanup();
+        let hostileRequests = 0;
+        const hostile = createServer((_request, response) => {
+          hostileRequests++;
+          response.end("received");
+        });
+        const hostilePort = await listen(hostile);
+        const upstream = createServer((_request, response) => {
+          response.writeHead(302, {
+            location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+          });
+          response.end();
+        });
+        const upstreamPort = await listen(
+          upstream,
+          requestHost === "127.0.0.2" ? "0.0.0.0" : "127.0.0.1",
+        );
+        globalThis.fetch = nativeFetch;
+        cleanup = installFetchInterceptor({
+          gatewayBase: GATEWAY,
+          getHeaders: () => ({}),
+        });
+
+        try {
+          const response = await fetch(
+            `http://${requestHost}:${upstreamPort}${path}`,
+            {
+              headers: { "x-api-key": "synthetic-provider-key" },
+              redirect: "follow",
+            },
+          );
+          expect(response.status).toBe(302);
+          expect(hostileRequests).toBe(0);
+        } finally {
+          await closeServer(upstream);
+          await closeServer(hostile);
+        }
+      },
+    );
+
+    test("preserves an explicit redirect:error on credentialed pass-through", async () => {
+      await fetch("https://provider.invalid/v2/messages", {
+        headers: { "x-api-key": "synthetic-provider-key" },
+        redirect: "error",
+      });
+
+      expect(captured?.init?.redirect).toBe("error");
+    });
+
+    test("preserves Request.redirect:error on credentialed pass-through", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const upstream = createServer((_request, response) => {
+        response.writeHead(302, {
+          location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+        });
+        response.end();
+      });
+      const upstreamPort = await listen(upstream);
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const request = new Request(
+          `http://127.0.0.1:${upstreamPort}/v1/admin`,
+          {
+            headers: { "x-api-key": "synthetic-provider-key" },
+            redirect: "error",
+          },
+        );
+        await expect(fetch(request)).rejects.toThrow();
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(upstream);
+        await closeServer(hostile);
+      }
+    });
 
     test("does not classify a host sharing the gateway URL prefix as direct", async () => {
       const gatewayBase = "https://gateway.example";

@@ -122,6 +122,9 @@ describe("db", () => {
     const anchorQuery = "private anchored recall query";
     const privateSelector = "private selector text";
     const privateToolUseId = "private tool-use query text";
+    const privateCompanionId = "private companion call id";
+    const privateCompanionName = "private companion tool name";
+    const privateCompanionInput = "private companion tool input";
     const anchorValue = {
       toolUseId: privateToolUseId,
       anchorId,
@@ -139,9 +142,9 @@ describe("db", () => {
       companionToolUseIds: [privateToolUseId],
       companionToolUses: [
         {
-          id: "call_read",
-          name: "read_file",
-          input: { path: "README" },
+          id: privateCompanionId,
+          name: privateCompanionName,
+          input: { query: privateCompanionInput },
           side: "before",
         },
       ],
@@ -197,7 +200,10 @@ describe("db", () => {
       .run("recall-invalid-json", Date.now(), "{invalid");
     connection
       .query("UPDATE schema_version SET version = ?")
-      .run(MIGRATIONS.length - 1);
+      .run(MIGRATIONS.length - 2);
+    connection.exec(
+      "ALTER TABLE session_state DROP COLUMN parent_session_pending",
+    );
     close();
 
     const migrated = db();
@@ -212,6 +218,9 @@ describe("db", () => {
     expect(persisted).not.toContain(anchorQuery);
     expect(persisted).not.toContain(privateSelector);
     expect(persisted).not.toContain(privateToolUseId);
+    expect(persisted).not.toContain(privateCompanionId);
+    expect(persisted).not.toContain(privateCompanionName);
+    expect(persisted).not.toContain(privateCompanionInput);
     expect(persisted).not.toContain(privateAnchor);
     expect(persisted).not.toContain(privateContext);
     expect(persisted).not.toContain("privateMetadata");
@@ -228,18 +237,31 @@ describe("db", () => {
           },
           position: 2,
           result: "anchored recall result",
-          companionToolUses: [
-            {
-              id: "call_read",
-              name: "read_file",
-              input: { path: "README" },
-              side: "before",
-            },
-          ],
+          companionToolUseCounts: { before: 1, after: 0 },
         },
       ],
     ]);
     expect(loadRecallStore("recall-invalid-json")).toBe("[]");
+  });
+
+  test("version 107 adds durable provisional parent-lookup state", () => {
+    const connection = db();
+    connection.exec(`
+      ALTER TABLE session_state DROP COLUMN parent_session_pending;
+      UPDATE schema_version SET version = ${MIGRATIONS.length - 1};
+    `);
+    close();
+
+    const migrated = db();
+    const columns = migrated
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain(
+      "parent_session_pending",
+    );
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
   });
 
   test("upgrades v95 with a source-owned fair-retry park", () => {
@@ -4504,6 +4526,9 @@ describe("db", () => {
       lastKnownMessageCount: 137,
       lastAcceptedProvenanceLayer: 1,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
+      parentSessionId: "parent-session",
+      isSubagent: true,
+      parentSessionPending: true,
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -4526,6 +4551,9 @@ describe("db", () => {
     expect(loaded?.lastKnownMessageCount).toBe(137);
     expect(loaded?.lastAcceptedProvenanceLayer).toBe(1);
     expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
+    expect(loaded?.parentSessionId).toBe("parent-session");
+    expect(loaded?.isSubagent).toBe(true);
+    expect(loaded?.parentSessionPending).toBe(true);
   });
 
   test("stable LTM (system[1]) freeze round-trips and survives partial updates (v45)", () => {

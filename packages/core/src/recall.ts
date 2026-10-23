@@ -19,11 +19,13 @@ import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { createHash, randomUUID } from "node:crypto";
+import { TenantBoundExpiringStore } from "./recall-detail-ref-store";
 import {
   db,
   ensureProject,
   projectId as getProjectId,
   projectName,
+  withSavepoint,
 } from "./db";
 import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
@@ -186,8 +188,12 @@ type RecallDetailRef = {
 // This bounded, process-local map is the only bridge from opaque detail refs
 // to source IDs; refs never serialize the underlying ID or cross scope.
 const MAX_RECALL_DETAIL_REFS = 512;
+const MAX_RECALL_DETAIL_REFS_PER_TENANT = 64;
 const RECALL_DETAIL_REF_TTL_MS = 30 * 60 * 1000;
-const recallDetailRefs = new Map<string, RecallDetailRef>();
+const recallDetailRefs = new TenantBoundExpiringStore<RecallDetailRef>(
+  MAX_RECALL_DETAIL_REFS,
+  MAX_RECALL_DETAIL_REFS_PER_TENANT,
+);
 
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
@@ -620,6 +626,7 @@ function formatFusedResults(
     `Found ${totalFound} results, showing top ${kept.length} (score range: ${topScore.toFixed(3)}–${lowScore.toFixed(3)}).`,
   );
 
+  let emittedDetailRef = false;
   for (const tierIdx of [0, 1, 2] as const) {
     const tierResults = tiered.filter((r) => r.tier === tierIdx);
     if (!tierResults.length) continue;
@@ -650,6 +657,7 @@ function formatFusedResults(
       )
         ? config.createDetailRef?.(r.item)
         : undefined;
+      if (detailRef) emittedDetailRef = true;
       const detailRefCost = detailRef
         ? ` [detail ref: \`${detailRef}\`]`.length
         : 0;
@@ -677,7 +685,7 @@ function formatFusedResults(
   lines.push(`---`);
   if (anyTruncated) {
     lines.push(
-      config.createDetailRef
+      emittedDetailRef
         ? `*${kept.length} of ${totalFound} results shown. Use the opaque \`r:\` detail ref printed after a truncated result to inspect its detail.*`
         : `*${kept.length} of ${totalFound} results shown; some result details are truncated.*`,
     );
@@ -1993,25 +2001,20 @@ function createRecallDetailRef(
   // project-only handle when a direct caller omitted session identity.
   if (!sessionID?.trim() || !projectId) return "";
   const now = Date.now();
-  for (const [ref, detail] of recallDetailRefs) {
-    if (detail.expiresAt <= now) recallDetailRefs.delete(ref);
-  }
-  while (recallDetailRefs.size >= MAX_RECALL_DETAIL_REFS) {
-    const oldest = recallDetailRefs.keys().next().value;
-    if (oldest === undefined) break;
-    recallDetailRefs.delete(oldest);
-  }
-
   const ref = `r:${randomUUID()}`;
-  recallDetailRefs.set(ref, {
-    sourceId: taggedResultKey(tagged),
-    tenantId: currentTenantId(),
-    projectId,
-    scope: input.scope ?? "all",
-    sessionID,
-    expiresAt: now + RECALL_DETAIL_REF_TTL_MS,
-  });
-  return ref;
+  const created = recallDetailRefs.set(
+    ref,
+    {
+      sourceId: taggedResultKey(tagged),
+      tenantId: currentTenantId(),
+      projectId,
+      scope: input.scope ?? "all",
+      sessionID,
+      expiresAt: now + RECALL_DETAIL_REF_TTL_MS,
+    },
+    now,
+  );
+  return created ? ref : "";
 }
 
 function resolveRecallDetailRef(
@@ -2020,10 +2023,6 @@ function resolveRecallDetailRef(
 ): { sourceId: string; scope: RecallScope; sessionID?: string } | null {
   const detail = recallDetailRefs.get(ref);
   if (!detail) return null;
-  if (detail.expiresAt <= Date.now()) {
-    recallDetailRefs.delete(ref);
-    return null;
-  }
 
   const context = recallDetailContext(input);
   // Opaque handles keep the producing session boundary in every recall scope.
@@ -2296,6 +2295,21 @@ export function recallByIdWithMetadata(
   }
   const context = recallDetailContext(input);
   if (!context) return { result: "No matching recall detail.", coverage: [] };
+  // Keep visibility checks and every secondary metadata read on one SQLite
+  // snapshot. Otherwise an ownership change between SELECTs can attach newly
+  // private aliases, anchors, or paths to a row that was previously visible.
+  return withSavepoint("recall_detail_snapshot", () =>
+    readRecallDetailPage(id, input, offset, limit, context),
+  );
+}
+
+function readRecallDetailPage(
+  id: string,
+  input: RecallDetailOptions,
+  offset: number,
+  limit: number,
+  context: RecallDetailContext,
+): RecallRun {
   const coverage = sourceCoverage(id, input);
   if (!coverage) return { result: "No matching recall detail.", coverage: [] };
 
@@ -2339,11 +2353,16 @@ export function recallByIdWithMetadata(
       // Detail pages must retain the same code-navigation metadata as search
       // previews. Both helpers are bounded batch lookups (at most three of
       // each) and do not hydrate the entry body.
+      const refVisibility = { projectId: context.projectId, prefix };
       const detailAnchors = renderAnchors(
-        ltm.knowledgeRefAnchors([logicalId]).get(logicalId),
+        ltm
+          .knowledgeRefAnchors([logicalId], { visibility: refVisibility })
+          .get(logicalId),
       );
       const detailFiles = renderFiles(
-        ltm.knowledgeFileRefsBatch([logicalId]).get(logicalId),
+        ltm
+          .knowledgeFileRefsBatch([logicalId], { visibility: refVisibility })
+          .get(logicalId),
       );
       return detailPage(
         coverage,
@@ -2471,18 +2490,21 @@ export function recallByIdWithMetadata(
       // Preserve the useful parts of legacy entity drill-down without calling
       // the unbounded entity hydrators: aliases and relations are independently
       // capped and all untrusted display fields are clipped in SQLite.
+      const aliasVisibility = entityDetailVisibility(context, "e");
       const aliases = db()
         .query(
           `SELECT ea.alias_type, substr(ea.alias_value, 1, ?) AS alias_value
              FROM entity_aliases ea
              JOIN entities e ON e.id = ea.entity_id
             WHERE e.tenant_id = ? AND ea.entity_id = ?
+              AND ${aliasVisibility.sql}
              ORDER BY alias_type, alias_value LIMIT ?`,
         )
         .all(
           MAX_RECALL_ENTITY_LABEL_CHARS,
           currentTenantId(),
           rawId,
+          ...aliasVisibility.parameters,
           MAX_RECALL_ENTITY_ALIASES,
         ) as Array<{ alias_type: string; alias_value: string }>;
       const aliasInfo = aliases

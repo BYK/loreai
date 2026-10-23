@@ -432,6 +432,9 @@ export async function runCompaction(opts: {
   try {
     const res = await fetchImpl(`${gatewayBase}/v1/compact`, {
       method: "POST",
+      // The request carries gateway and provider credentials. Do not let fetch
+      // forward them to a redirect target outside the configured gateway.
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-lore-session-id": sessionID,

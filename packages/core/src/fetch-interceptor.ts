@@ -396,17 +396,23 @@ function prepareBoundaryRequest(
   headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
   const endpoint = boundaryEndpoint(pathname);
   if (!endpoint) {
-    return { attached: false, init: prepareGatewayFetchInit(init, headers) };
+    return {
+      attached: false,
+      init: prepareGatewayFetchInit(input, init, headers),
+    };
   }
   const sessionID = headers.get("x-lore-session-id");
   if (!sessionID) {
-    return { attached: false, init: prepareGatewayFetchInit(init, headers) };
+    return {
+      attached: false,
+      init: prepareGatewayFetchInit(input, init, headers),
+    };
   }
   headers.set(
     CONTEXT_BOUNDARY_CAPABILITY_HEADER,
     CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   );
-  const fullInit = prepareGatewayFetchInit(init, headers);
+  const fullInit = prepareGatewayFetchInit(input, init, headers);
   pruneContextBoundaries();
   const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
   const cached = contextBoundaries.get(key);
@@ -445,7 +451,7 @@ function prepareBoundaryRequest(
       boundaryKey: key,
       attached: true,
       init: {
-        ...prepareGatewayFetchInit(init, elidedHeaders),
+        ...prepareGatewayFetchInit(input, init, elidedHeaders),
         body: JSON.stringify(body),
       },
     };
@@ -456,14 +462,21 @@ function prepareBoundaryRequest(
 }
 
 function prepareGatewayFetchInit(
+  input: RequestInfo | URL,
   init: RequestInit | undefined,
   headers: Headers,
 ): RequestInit {
   const prepared: RequestInit = { ...init, headers };
-  if (hasCredentialHeaders(headers) && prepared.redirect !== "error") {
+  const requestRedirect =
+    typeof Request !== "undefined" && input instanceof Request
+      ? input.redirect
+      : undefined;
+  const explicitRedirect = init?.redirect ?? requestRedirect;
+  if (hasCredentialHeaders(headers)) {
     // Fetch may forward non-standard auth headers across redirects. Keep both
-    // provider and gateway credentials on this single gateway hop.
-    prepared.redirect = "manual";
+    // provider and gateway credentials on this single request hop. Preserve an
+    // explicit caller choice to reject redirects, including on a Request.
+    prepared.redirect = explicitRedirect === "error" ? "error" : "manual";
   }
   return prepared;
 }
@@ -822,7 +835,10 @@ export function installFetchInterceptor(
     try {
       upstream = new URL(url);
     } catch {
-      return originalFetch(input, init);
+      return originalFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders),
+      );
     }
 
     // Never intercept requests already going to the gateway, but still observe
@@ -832,11 +848,16 @@ export function installFetchInterceptor(
       observeRequestHeaders(requestHeaders, config);
       return originalFetch(
         input,
-        prepareGatewayFetchInit(init, requestHeaders),
+        prepareGatewayFetchInit(input, init, requestHeaders),
       );
     }
 
-    if (!couldBeLlmRequest) return originalFetch(input, init);
+    if (!couldBeLlmRequest) {
+      return originalFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders),
+      );
+    }
 
     // Never intercept local requests (could be local LLM or gateway itself)
     const host = upstream.hostname;
@@ -847,7 +868,10 @@ export function installFetchInterceptor(
       host === "::1" ||
       host === "[::1]"
     ) {
-      return originalFetch(input, init);
+      return originalFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders),
+      );
     }
 
     // ---- Path 1: URL matched a known LLM API pattern ----
@@ -857,7 +881,10 @@ export function installFetchInterceptor(
         // Should not happen — matchesLLMApiPath() being true means the path
         // matched a pattern, and interceptUrl handles all patterns. Pass
         // through as a safety fallback.
-        return originalFetch(input, init);
+        return originalFetch(
+          input,
+          prepareGatewayFetchInit(input, init, requestHeaders),
+        );
       }
       const headers = buildGatewayHeaders(
         input,
@@ -898,7 +925,7 @@ export function installFetchInterceptor(
         fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
         const retry = await originalFetch(
           rewrittenFetchInput(input, rewrite.gatewayUrl),
-          prepareGatewayFetchInit(init, fullHeaders),
+          prepareGatewayFetchInit(input, init, fullHeaders),
         );
         return updateContextBoundary(
           retry,
@@ -955,7 +982,7 @@ export function installFetchInterceptor(
           void response.body?.cancel().catch(() => {});
           const retry = await originalFetch(
             rewrittenFetchInput(input, rewrite.gatewayUrl),
-            prepareGatewayFetchInit(init, headers),
+            prepareGatewayFetchInit(input, init, headers),
           );
           return updateContextBoundary(
             retry,
@@ -981,7 +1008,10 @@ export function installFetchInterceptor(
       }
     }
 
-    return originalFetch(input, init);
+    return originalFetch(
+      input,
+      prepareGatewayFetchInit(input, init, requestHeaders),
+    );
   };
 
   // Preserve any extra properties on the original fetch (e.g. `preconnect`

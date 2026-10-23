@@ -2508,11 +2508,13 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   SELECT 1;
   `,
   `
-  -- Version 106: recall queries and provider call IDs are transient and must
-  -- not remain in durable session state. Keep only anchor-keyed replay records,
-  -- replacing the query with a fixed marker, dropping selectors/detail paging,
-  -- and deriving a replay call ID from the local anchor. Legacy query-keyed
-  -- records cannot be replayed without the query and are discarded.
+   -- Version 106: recall queries, provider call IDs, and companion call payloads
+   -- are transient and must not remain in durable session state. Keep only
+   -- anchor-keyed replay records, replacing the query with a fixed marker,
+   -- dropping selectors/detail paging, deriving a replay call ID from the local
+    -- anchor, and reducing companion calls to privacy-safe before/after counts.
+    -- Counts cannot authorize joining neighboring calls after restart. Legacy
+    -- query-keyed records cannot replay without the query and are discarded.
   UPDATE session_state
      SET recall_store = '[]'
    WHERE recall_store IS NOT NULL AND NOT json_valid(recall_store);
@@ -2534,14 +2536,30 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
                          'position', json_extract(entry.array_value, '$[1].position'),
                          'result', json_extract(entry.array_value, '$[1].result')
                        ),
-                       CASE
-                         WHEN json_type(entry.array_value, '$[1].companionToolUses') = 'array'
-                         THEN json_object(
-                           'companionToolUses',
-                           json(json_extract(entry.array_value, '$[1].companionToolUses'))
-                         )
-                         ELSE '{}'
-                       END
+                        CASE
+                          WHEN json_type(entry.array_value, '$[1].companionToolUses') = 'array'
+                           AND json_array_length(entry.array_value, '$[1].companionToolUses') <= 128
+                          THEN json_object(
+                            'companionToolUseCounts',
+                            json_object(
+                              'before', (
+                                SELECT count(*)
+                                  FROM json_each(entry.array_value, '$[1].companionToolUses') AS companion
+                                 WHERE CASE WHEN companion.type = 'object'
+                                            THEN json_extract(companion.value, '$.side')
+                                       END = 'before'
+                              ),
+                              'after', (
+                                SELECT count(*)
+                                  FROM json_each(entry.array_value, '$[1].companionToolUses') AS companion
+                                 WHERE CASE WHEN companion.type = 'object'
+                                            THEN json_extract(companion.value, '$.side')
+                                       END = 'after'
+                              )
+                            )
+                          )
+                          ELSE '{}'
+                        END
                      )
                    ) AS entry_json
              FROM (
@@ -2582,6 +2600,11 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
          )
      ), '[]')
    WHERE recall_store IS NOT NULL AND json_valid(recall_store);
+  `,
+  `
+  -- Version 107: record the provisional OpenCode parent-lookup state so a
+  -- completed primary-session lookup can clear only its own temporary flag.
+  ALTER TABLE session_state ADD COLUMN parent_session_pending INTEGER NOT NULL DEFAULT 0;
   `,
 ]);
 
@@ -7608,6 +7631,8 @@ export type SessionTrackingState = {
   // v26: sub-agent parent–child relationships
   parentSessionId?: string | null;
   isSubagent?: boolean;
+  /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
+  parentSessionPending?: boolean;
   // v36: project binding (survives restart so the project_id never splits)
   projectPath?: string | null;
   projectPathProvisional?: boolean;
@@ -7764,6 +7789,10 @@ export function saveSessionTracking(
     sets.push("is_subagent = ?");
     vals.push(state.isSubagent ? 1 : 0);
   }
+  if (state.parentSessionPending !== undefined) {
+    sets.push("parent_session_pending = ?");
+    vals.push(state.parentSessionPending ? 1 : 0);
+  }
   // v36: project binding
   if (state.projectPath !== undefined) {
     sets.push("project_path = ?");
@@ -7834,6 +7863,8 @@ export type LoadedSessionTracking = {
   // v26: sub-agent parent–child relationships
   parentSessionId: string | null;
   isSubagent: boolean;
+  /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
+  parentSessionPending: boolean;
   // v36: project binding
   projectPath: string | null;
   projectPathProvisional: boolean;
@@ -8184,7 +8215,7 @@ export function loadSessionTracking(
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
               last_turn_at, last_bust_at, last_accepted_provenance_layer,
-              parent_session_id, is_subagent,
+               parent_session_id, is_subagent, parent_session_pending,
               project_path, project_path_provisional,
                compaction_anomaly_pending, amnesia
        FROM session_state WHERE session_id = ?`,
@@ -8222,6 +8253,7 @@ export function loadSessionTracking(
     last_accepted_provenance_layer: number;
     parent_session_id: string | null;
     is_subagent: number;
+    parent_session_pending: number;
     project_path: string | null;
     project_path_provisional: number;
     compaction_anomaly_pending: number;
@@ -8261,6 +8293,7 @@ export function loadSessionTracking(
     lastAcceptedProvenanceLayer: row.last_accepted_provenance_layer,
     parentSessionId: row.parent_session_id,
     isSubagent: row.is_subagent === 1,
+    parentSessionPending: row.parent_session_pending === 1,
     projectPath: row.project_path,
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,

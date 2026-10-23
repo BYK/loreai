@@ -632,7 +632,12 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
           signal: controller.signal,
         }),
       ).rejects.toMatchObject({ name: "AbortError" });
-      expect(anchorSpy).toHaveBeenCalledWith([id]);
+      expect(anchorSpy).toHaveBeenCalledWith([id], {
+        visibility: {
+          prefix: "k",
+          projectId: ensureProject(PROJ),
+        },
+      });
     } finally {
       anchorSpy.mockRestore();
     }

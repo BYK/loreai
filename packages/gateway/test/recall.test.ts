@@ -917,6 +917,9 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     const privateQuery = 'sync tiers "pro" max';
     const privateSelector = "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c";
     const privateBatchSelector = "d:019e18ec-e328-76c4-9c3c-09dbe8d51c6c";
+    const privateCompanionId = "private companion call id";
+    const privateCompanionName = "private companion tool name";
+    const privateCompanionInput = "private companion tool input";
     const store: RecallStore = new Map([
       [
         `anchor:${anchorId}`,
@@ -936,9 +939,9 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
           companionToolUseIds: [privateSelector],
           companionToolUses: [
             {
-              id: "call_read",
-              name: "read_file",
-              input: { path: "README" },
+              id: privateCompanionId,
+              name: privateCompanionName,
+              input: { query: privateCompanionInput },
               side: "before",
             },
           ],
@@ -998,6 +1001,9 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     expect(serialized).not.toContain(privateQuery);
     expect(serialized).not.toContain(privateSelector);
     expect(serialized).not.toContain(privateBatchSelector);
+    expect(serialized).not.toContain(privateCompanionId);
+    expect(serialized).not.toContain(privateCompanionName);
+    expect(serialized).not.toContain(privateCompanionInput);
     expect(serialized).not.toContain("privateMetadata");
     expect(serialized).not.toContain("private-detail");
     expect(serialized).not.toContain("private selector text");
@@ -1012,14 +1018,7 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
       },
       toolUseId: `lore-recall-${anchorId}`,
       result: "## Results\n\n* entry one\n* entry two",
-      companionToolUses: [
-        {
-          id: "call_read",
-          name: "read_file",
-          input: { path: "README" },
-          side: "before",
-        },
-      ],
+      companionToolUseCounts: { before: 1, after: 0 },
     });
     expect(restored.get(`anchor:${batchAnchorId}`)).toMatchObject({
       anchorId: batchAnchorId,
@@ -1030,6 +1029,48 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
       toolUseId: `lore-recall-${batchAnchorId}`,
       result: "batch recall result",
     });
+  });
+
+  test("does not coalesce neighboring tools from count-only persisted companions", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174004";
+    const liveStore: RecallStore = new Map([
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({
+          anchorId,
+          companionToolUses: [
+            {
+              id: "private-original-call",
+              name: "private-original-name",
+              input: { query: "private-original-input" },
+              side: "before",
+            },
+          ],
+        }),
+      ],
+    ]);
+    const restored = deserializeRecallStore(serializeRecallStore(liveStore));
+    const neighboringCall = {
+      type: "tool_use" as const,
+      id: "different-call",
+      name: "different-tool",
+      input: { query: "different input" },
+    };
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+      { role: "assistant", content: [{ ...neighboringCall }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
+      },
+    ]);
+    bindCanonicalAnchors(req, restored);
+
+    expect(expandRecallMarkers(req, restored)).toBe(true);
+    expect(req.messages[1]?.content).toEqual([neighboringCall]);
+    expect(req.messages[2]?.content).toMatchObject([
+      { type: "tool_use", id: `lore-recall-${anchorId}` },
+    ]);
   });
 
   test("deserialize tolerates corrupt / empty blobs", () => {
@@ -2804,34 +2845,97 @@ describe("runRecallRecovery", () => {
 // ---------------------------------------------------------------------------
 
 describe("expandRecallMarkers", () => {
-  test("does not touch anchors when the request owns a colliding recall tool", () => {
-    const store: RecallStore = new Map([
-      [
-        "all:private",
-        {
-          toolUseId: "toolu_private",
-          input: { query: "private", scope: "all" },
-          position: 0,
-          result: "private result",
-        },
-      ],
-    ]);
+  test("suppresses a stored anchor on a client-owned collision without consuming it", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174045";
     const req = makeRequest([
       {
         role: "assistant",
-        content: [{ type: "text", text: buildRecallMarker("private", "all") }],
+        content: [
+          { type: "text", text: buildRecallAnchor(anchorId) },
+          { type: "text", text: "continuation" },
+        ],
       },
     ]);
-    const before = structuredClone(req.messages);
+    const stored = makeStoredRecall({ anchorId });
+    const store: RecallStore = new Map([[`anchor:${anchorId}`, stored]]);
+    bindCanonicalAnchors(req, store);
 
     expect(
       cleanupRecallStore(req, store, { gatewayRecallEnabled: false }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       expandRecallMarkers(req, store, { gatewayRecallEnabled: false }),
     ).toBe(false);
-    expect(req.messages).toEqual(before);
-    expect(store.has("all:private")).toBe(true);
+    expect(req.messages[0]?.content).toEqual([
+      { type: "text", text: "continuation" },
+    ]);
+    expect(store.get(`anchor:${anchorId}`)).toBe(stored);
+  });
+
+  test("suppresses recalled text from raw Responses provenance on a client-owned collision", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174046";
+    const query = "synthetic private recall query";
+    const text = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\ncontinuation`;
+    const callerTool: GatewayTool = {
+      name: RECALL_TOOL_NAME,
+      description: "Client-owned recall",
+      inputSchema: {},
+    };
+    const req = makeRequest(
+      [
+        {
+          role: "assistant",
+          content: [],
+          provenanceContent: [
+            {
+              type: "opaque",
+              responsesItem: true,
+              raw: {
+                type: "message",
+                id: "msg_recalled_text",
+                role: "assistant",
+                content: [{ type: "output_text", text, annotations: [] }],
+              },
+            },
+          ],
+          provenancePositions: [],
+        },
+      ],
+      [callerTool],
+    );
+    req.protocol = "openai-responses";
+    const stored = makeStoredRecall({
+      anchorId,
+      input: { query, scope: "project" },
+    });
+    const store: RecallStore = new Map([[`anchor:${anchorId}`, stored]]);
+    bindCanonicalAnchors(req, store);
+
+    expect(
+      cleanupRecallStore(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(true);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(false);
+    expect(req.messages[0]?.provenanceContent).toMatchObject([
+      {
+        type: "opaque",
+        raw: {
+          content: [{ type: "output_text", text: "continuation" }],
+        },
+      },
+    ]);
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: unknown[] };
+    const forwardedInput = JSON.stringify(body.input);
+    expect(forwardedInput).not.toContain(query);
+    expect(forwardedInput).not.toContain(buildRecallMarker(query));
+    expect(forwardedInput).not.toContain(buildRecallAnchor(anchorId));
+    expect(forwardedInput).toContain("continuation");
+    expect(store.get(`anchor:${anchorId}`)).toBe(stored);
   });
 
   test("expands a hidden Responses anchor without a visible status message", () => {

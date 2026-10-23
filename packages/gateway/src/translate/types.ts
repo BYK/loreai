@@ -464,8 +464,8 @@ export type StoredRecall = {
   /** Fingerprint of the transcript prefix that produced the anchor. */
   anchorContextId?: string;
   /** Non-recall tool calls emitted beside this hidden recall in the original
-   *  response. Used to restore only genuine mixed-tool turns; a tool called by
-   *  the later recall continuation must remain in its own assistant message. */
+   *  response. Legacy in-memory detail is not durable; serialization projects
+   *  it to side counts so tool IDs, names, and inputs cannot persist. */
   companionToolUseIds?: string[];
   companionToolUses?: Array<{
     id: string;
@@ -473,6 +473,9 @@ export type StoredRecall = {
     input: unknown;
     side: "before" | "after";
   }>;
+  /** Privacy-safe counts only. After restart these do not authorize coalescing
+   *  neighboring calls; that requires exact in-memory companion metadata. */
+  companionToolUseCounts?: { before: number; after: number };
 };
 
 /** Map from unique anchor or legacy marker keys to stored recall data. */
@@ -713,6 +716,8 @@ export type SessionState = {
    *  `x-claude-code-session-id` — via the headerSessionIndex).
    *  NULL/undefined for root (non-sub-agent) sessions. */
   parentSessionId?: string;
+  /** True only while OpenCode's asynchronous parent lookup is unresolved. */
+  parentSessionPending?: boolean;
 
   // --- Tier 1/2 session header identification ---
 
@@ -905,6 +910,7 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-git-remote",
   "x-lore-agent",
   "x-lore-session-title",
+  "x-lore-session-parent-state",
   "x-lore-no-store",
   GATEWAY_AUTH_HEADER,
   "x-lore-recall-invoked",

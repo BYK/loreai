@@ -203,6 +203,8 @@ const PLACEHOLDER_TITLE_RE = /^new session\b/i;
 /** Re-check a real (non-placeholder) title at most this often — a session
  *  can be renamed mid-flight, but titles are not worth polling per turn. */
 const TITLE_REFETCH_MS = 5 * 60 * 1000;
+/** Bound optional metadata lookups so a hung SDK call cannot suppress retries. */
+const SESSION_INFO_LOOKUP_TIMEOUT_MS = 5_000;
 
 function reapStaleSessionParent(): void {
   const cutoff = Date.now() - SESSION_STATE_TTL_MS;
@@ -245,7 +247,11 @@ function applySessionInfo(
 function resolveSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
-): { parentID: string | null; title: string | null } {
+): {
+  parentID: string | null;
+  title: string | null;
+  parentLookupPending: boolean;
+} {
   const cached = sessionParent.get(sessionID);
   if (cached) {
     cached.lastSeenAt = Date.now();
@@ -261,13 +267,21 @@ function resolveSessionInfo(
           ? true
           : Date.now() - cached.titleFetchedAt > TITLE_REFETCH_MS;
     if (!needsRefetch) {
-      return { parentID: cached.parentID, title: cached.title };
+      return {
+        parentID: cached.parentID,
+        title: cached.title,
+        parentLookupPending: false,
+      };
     }
     fetchSessionInfo(client, sessionID);
-    return { parentID: cached.parentID, title: cached.title };
+    return {
+      parentID: cached.parentID,
+      title: cached.title,
+      parentLookupPending: false,
+    };
   }
   fetchSessionInfo(client, sessionID);
-  return { parentID: null, title: null };
+  return { parentID: null, title: null, parentLookupPending: true };
 }
 
 function fetchSessionInfo(
@@ -277,11 +291,15 @@ function fetchSessionInfo(
   if (sessionInfoLookups.has(sessionID)) return;
 
   // Session metadata is optional: never await it on a provider request. A
-  // failed lookup stays uncached so a later turn can retry it.
-  let lookup: Promise<void>;
-  lookup = Promise.resolve()
+  // failed or timed-out lookup stays uncached so a later turn can retry it.
+  let lookup: Promise<void> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const request = Promise.resolve()
     .then(() => client.session.get({ path: { id: sessionID } }))
     .then((res) => {
+      // A timeout or newer lookup owns the slot now; late responses cannot
+      // overwrite metadata resolved by a later turn.
+      if (!lookup || sessionInfoLookups.get(sessionID) !== lookup) return;
       const entry = sessionParent.get(sessionID) ?? {
         parentID: null,
         title: null,
@@ -294,12 +312,16 @@ function fetchSessionInfo(
     })
     .catch(() => {
       // Metadata failures must not escape into request handling.
-    })
-    .finally(() => {
-      if (sessionInfoLookups.get(sessionID) === lookup) {
-        sessionInfoLookups.delete(sessionID);
-      }
     });
+  const deadline = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, SESSION_INFO_LOOKUP_TIMEOUT_MS);
+  });
+  lookup = Promise.race([request, deadline]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+    if (sessionInfoLookups.get(sessionID) === lookup) {
+      sessionInfoLookups.delete(sessionID);
+    }
+  });
   sessionInfoLookups.set(sessionID, lookup);
 }
 
@@ -483,6 +505,12 @@ export const LorePlugin: Plugin = async (ctx) => {
         const sessionInfo = resolveSessionInfo(ctx.client, input.sessionID);
         if (sessionInfo.parentID) {
           output.headers["x-parent-session-id"] = sessionInfo.parentID;
+        } else {
+          // The initial lookup is intentionally fire-and-forget. Tell the
+          // gateway to apply the conservative sub-agent budget until it can
+          // classify a root session and clear that temporary state.
+          output.headers["x-lore-session-parent-state"] =
+            sessionInfo.parentLookupPending ? "pending" : "primary";
         }
         // Forward the harness's own session title so the gateway can persist
         // it as the session's explicit title (#1921). Percent-encoded — header
