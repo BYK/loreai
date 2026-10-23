@@ -50,7 +50,9 @@ jobs:
           else
             # check-cc-version.ts exits 1 if extraction is needed
             set +e
-            result=$(node scripts/check-cc-version.ts --json 2>&1)
+            # The checker and CCH imports use extensionless TypeScript imports;
+            # Node's native type stripping does not resolve those imports.
+            result=$(pnpm exec tsx scripts/check-cc-version.ts --json 2>&1)
             exit_code=$?
             set -e
 
