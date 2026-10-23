@@ -41,6 +41,14 @@ logo-free toolbar button opens a labeled sliding drawer and the document uses
 the full viewport width. The mobile account row is fully tappable, its panel
 aligns with the drawer, and theme controls have 44px touch targets.
 
+The knowledge reader keeps search above a compact Filters/sort row. A labeled
+filter panel applies category and scope together, with explanations for project,
+shared, and global visibility. Applied filters appear as removable chips; clearing
+them preserves the selected entry and sort order. Both directions are available
+for updated/created date, title, and confidence. Existing multi-column sorts from
+the table remain intact. Filter and select panels scroll within the available
+viewport height, including 320×480 portrait and 568×320 landscape screens.
+
 Screenshots use the disposable database seeded by the UI browser tests.
 `responsive-layout.spec.ts` audits 23 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,

@@ -1,6 +1,9 @@
 import type { Component } from "solid-js";
 
 const paths = {
+  filter: "M4 7h16 M7 12h10 M10 17h4",
+  sort: "M8 4v16 m-3-3 3 3 3-3 M16 20V4 m-3 3 3-3 3 3",
+  close: "m6 6 12 12 M6 18 18 6",
   monitor: "M3 4h18v13H3z M12 17v4 M8 21h8",
   sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1.5 1.5 M17.5 17.5 19 19 M5 19l1.5-1.5 M17.5 6.5 19 5",
   moon: "M20.5 13a9 9 0 0 1-9.5-9.5A9 9 0 1 0 20.5 13",

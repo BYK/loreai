@@ -386,3 +386,173 @@ test("leaving a narrow reader list restores focus to the persistent toolbar", as
   await expect(page.getByTestId("context-toggle")).toHaveCount(0);
   await expect(page.getByTestId("project-picker-trigger")).toBeFocused();
 });
+
+test("knowledge filters combine, dismiss and clear without losing the reader or custom sorting", async ({
+  page,
+}, testInfo) => {
+  const { project, entry } = await seededReader(page);
+  const readerPath = `/ui/projects/${project.id}/knowledge/${entry.id}`;
+  const customSort = "title:desc,confidence:asc";
+  await page.goto(
+    `${readerPath}?q=SQLite&sort=${encodeURIComponent(customSort)}`,
+  );
+  const toggle = page.getByTestId("context-toggle");
+  if ((await toggle.getAttribute("aria-expanded")) === "false")
+    await toggle.click();
+  const toolbar = page.getByTestId("knowledge-list-toolbar");
+  const filters = toolbar.getByRole("button", { name: "Filters", exact: true });
+  await filters.click();
+  const panel = page.getByRole("dialog", {
+    name: "Knowledge filters",
+    exact: true,
+  });
+  await panel.getByRole("button", { name: /^Category/ }).click();
+  await page.getByRole("option", { name: "Decisions", exact: true }).click();
+  await panel.getByRole("button", { name: /^Scope/ }).click();
+  await page
+    .getByRole("option", { name: "Project + shared", exact: true })
+    .click();
+  expect(new URL(page.url()).searchParams.has("category")).toBe(false);
+  await panel.getByRole("button", { name: "Apply filters" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(filters).toBeFocused();
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/knowledge/${entry.id}\\?q=SQLite&category=decision&scope=all&sort=`,
+    ),
+  );
+  expect(new URL(page.url()).searchParams.get("sort")).toBe(customSort);
+  await expect(page.getByTestId("knowledge-row").first()).toBeVisible();
+  await filters.click();
+  await panel.getByRole("button", { name: /^Category/ }).click();
+  await page.getByRole("option", { name: "Gotchas", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("category")).toBe("decision");
+  await toolbar
+    .getByRole("button", { name: "Remove category: Decisions" })
+    .click();
+  await expect(
+    toolbar.getByRole("button", { name: "Remove category: Decisions" }),
+  ).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("scope")).toBe("all");
+  expect(new URL(page.url()).searchParams.get("q")).toBe("SQLite");
+  await toolbar
+    .getByRole("button", { name: "Clear filters", exact: true })
+    .click();
+  await expect(
+    toolbar.getByRole("textbox", { name: "Filter knowledge list" }),
+  ).toHaveValue("");
+  await expect(page).toHaveURL(
+    `${readerPath}?sort=${encodeURIComponent(customSort)}`,
+  );
+  if (testInfo.project.name.includes("mobile")) await toggle.click();
+  await expect(page.getByTestId("knowledge-document")).toContainText(
+    entry.title,
+  );
+});
+
+for (const theme of ["light", "dark"] as const) {
+  test(`knowledge filter controls fit narrow panes and viewport edges in ${theme} mode`, async ({
+    page,
+  }, testInfo) => {
+    await seededReader(page);
+    const mobile = testInfo.project.name.includes("mobile");
+    await page.setViewportSize({
+      width: mobile ? 320 : 1280,
+      height: mobile ? 851 : 800,
+    });
+    await setWorkspaceTheme(page, theme);
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const toolbar = page.getByTestId("knowledge-list-toolbar");
+    await toolbar.getByRole("button", { name: "Filters", exact: true }).click();
+    const panel = page.getByRole("dialog", {
+      name: "Knowledge filters",
+      exact: true,
+    });
+    await expect(panel).toBeVisible();
+    const box = (await panel.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+    if (mobile) {
+      for (const button of await panel.getByRole("button").all()) {
+        expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      }
+    }
+    await panel.getByRole("button", { name: /^Scope/ }).click();
+    await expect(
+      page.getByRole("option", { name: "Shared knowledge", exact: true }),
+    ).toBeVisible();
+    if (mobile)
+      expect(
+        (await page
+          .getByRole("option", { name: "Shared knowledge", exact: true })
+          .boundingBox())!.height,
+      ).toBeGreaterThanOrEqual(44);
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeVisible();
+    await expect(panel.getByRole("button", { name: /^Scope/ })).toBeFocused();
+    await page.screenshot({
+      path: testInfo.outputPath(`knowledge-filters-${theme}.png`),
+      fullPage: true,
+    });
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(
+      toolbar.getByRole("button", { name: "Filters", exact: true }),
+    ).toBeFocused();
+    await toolbar.getByRole("button", { name: /^List sort/ }).click();
+    await page
+      .getByRole("option", { name: "Lowest confidence", exact: true })
+      .click();
+    await expect(page).toHaveURL(/sort=confidence%3Aasc$/);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}
+
+for (const viewport of [
+  { width: 320, height: 480 },
+  { width: 568, height: 320 },
+]) {
+  test(`knowledge filters remain reachable at ${viewport.width}×${viewport.height}`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.includes("mobile"));
+    await page.setViewportSize(viewport);
+    await seededReader(page);
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    await page.getByRole("button", { name: "Filters", exact: true }).click();
+    const panel = page.getByRole("dialog", {
+      name: "Knowledge filters",
+      exact: true,
+    });
+    await expect(panel).toBeVisible();
+    await expect
+      .poll(async () => {
+        const box = (await panel.boundingBox())!;
+        return box.y >= 0 && box.y + box.height <= viewport.height;
+      })
+      .toBe(true);
+    await panel.getByRole("button", { name: /^Category/ }).click();
+    await page.getByRole("option", { name: "Decisions", exact: true }).click();
+    await panel.getByRole("button", { name: /^Scope/ }).click();
+    await page
+      .getByRole("option", { name: "Project + shared", exact: true })
+      .click();
+    await panel.getByRole("button", { name: "Apply filters" }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(page).toHaveURL(/category=decision&scope=all$/);
+    await expect(
+      page.getByRole("button", { name: "Filters", exact: true }),
+    ).toBeFocused();
+  });
+}
