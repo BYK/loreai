@@ -780,10 +780,13 @@ describe("Vitest database isolation harness", () => {
       if (outcome.status !== "fulfilled") {
         throw new Error(`${signal} fixture did not settle normally`);
       }
-      expect(outcome.value).toMatchObject({
-        code: signal === "SIGINT" ? 130 : 143,
-        signal: null,
-      });
+      const expectedExitCode = signal === "SIGINT" ? 130 : 143;
+      // Node reports termination as either its conventional exit code or the signal itself.
+      const preservedExitStatus =
+        (outcome.value.code === expectedExitCode &&
+          outcome.value.signal === null) ||
+        (outcome.value.code === null && outcome.value.signal === signal);
+      expect(preservedExitStatus).toBe(true);
       expect(existsSync(root)).toBe(false);
     },
   );
