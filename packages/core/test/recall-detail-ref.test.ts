@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { config } from "../src/config";
 import { create as createKnowledge, setFileRefs } from "../src/ltm";
 import { ensureProject, projectId, db } from "../src/db";
@@ -11,6 +11,7 @@ import {
   type RecallToolRunner,
 } from "../src/recall-tool";
 import { runRecallWithMetadata } from "../src/recall";
+import { TenantBoundExpiringStore } from "../src/recall-detail-ref-store";
 
 const passThroughLogSink: LogSink = {
   info() {},
@@ -110,6 +111,48 @@ describe("recall detail references", () => {
       context,
     );
     expect(wrongScope).not.toContain(marker);
+  });
+
+  test("gives query guidance when the bounded detail-ref store refuses a handle", async () => {
+    const projectPath = `/test/recall-detail-ref-capacity/${randomUUID()}`;
+    const sessionID = randomUUID();
+    const marker = `detail-ref-capacity-body-${randomUUID()}`;
+    const title = `detail-ref-capacity-title-${randomUUID()}`;
+    const content = Array.from({ length: 100 }, () => `${marker}.`).join(" ");
+    const sourceId = createKnowledge({
+      projectPath,
+      category: "gotcha",
+      title,
+      content,
+      scope: "project",
+    });
+    const baseConfig = config();
+    const rejectAtCapacity = vi
+      .spyOn(TenantBoundExpiringStore.prototype, "set")
+      .mockReturnValue(false);
+
+    try {
+      const recalled = await runRecallWithMetadata({
+        query: title,
+        projectPath,
+        sessionID,
+        scope: "project",
+        detailRefs: true,
+        searchConfig: {
+          ...baseConfig.search,
+          queryExpansion: false,
+          embeddings: { ...baseConfig.search.embeddings, enabled: false },
+        },
+      });
+
+      expect(rejectAtCapacity).toHaveBeenCalledOnce();
+      expect(recalled.result).toContain("Narrow the query");
+      expect(recalled.result).not.toContain("detail ref:");
+      expect(recalled.result).not.toContain(sourceId);
+      expect(recalled.result).toContain(marker);
+    } finally {
+      rejectAtCapacity.mockRestore();
+    }
   });
 
   test("does not emit a detail ref when only an oversized title exceeds budget", async () => {

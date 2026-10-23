@@ -687,7 +687,7 @@ function formatFusedResults(
     lines.push(
       emittedDetailRef
         ? `*${kept.length} of ${totalFound} results shown. Use the opaque \`r:\` detail ref printed after a truncated result to inspect its detail.*`
-        : `*${kept.length} of ${totalFound} results shown; some result details are truncated.*`,
+        : `*${kept.length} of ${totalFound} results shown; some result details are truncated. Narrow the query or request a specific excerpt for more detail.*`,
     );
   } else {
     lines.push(`*${kept.length} of ${totalFound} results shown.*`);
@@ -1396,7 +1396,10 @@ export async function searchRecall(
         const temporalVectorTagged: TaggedResult[] = temporalVectorHits
           .map((hit): TaggedResult | null => {
             const row = temporalMap.get(hit.id);
-            if (!row) return null;
+            // 🔴 A vector candidate can change projects after search and
+            // before this separate hydration read; only the current owner may
+            // receive the temporal row or its coverage credit.
+            if (!row || row.project_id !== pid) return null;
             return {
               source: "temporal",
               item: { ...row, rank: -hit.similarity },

@@ -41,6 +41,16 @@ import { createRecallTool } from "./recall-tool";
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
+function gatewayOriginForLog(value: string): string {
+  try {
+    // The configured URL may contain credentials or a private path/query.
+    // Keep operational logs useful without retaining any of those components.
+    return new URL(value).origin;
+  } catch {
+    return "<gateway>";
+  }
+}
+
 /**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
@@ -373,14 +383,16 @@ export const LorePlugin: Plugin = async (ctx) => {
           // Try to find a running gateway first (probes port file + known ports).
           const existingUrl = await resolveGatewayUrl();
           if (existingUrl) {
-            log.info(`gateway detected at ${existingUrl}`);
+            log.info(`gateway detected at ${gatewayOriginForLog(existingUrl)}`);
             return existingUrl;
           }
           // No running gateway — start one in-process (handles fallback chain).
           log.info("starting gateway in-process…");
           const startedUrl = await startInProcess();
           if (startedUrl) {
-            log.info(`gateway started in-process at ${startedUrl}`);
+            log.info(
+              `gateway started in-process at ${gatewayOriginForLog(startedUrl)}`,
+            );
             return startedUrl;
           }
           return null;
@@ -479,7 +491,9 @@ export const LorePlugin: Plugin = async (ctx) => {
       },
 
       tool:
-        loreDisabled || !shouldRegisterNativeRecallTool(gatewayBase)
+        loreDisabled ||
+        Boolean(process.env.LORE_REMOTE_URL) ||
+        !shouldRegisterNativeRecallTool(gatewayBase)
           ? {}
           : { [RECALL_TOOL_NAME]: createRecallTool() },
 
@@ -610,8 +624,9 @@ export const LorePlugin: Plugin = async (ctx) => {
             return headers;
           },
         });
-        log.info(`routing through ${gatewayBase}`);
-        log.info(`dashboard: ${gatewayBase}/ui`);
+        const gatewayLogOrigin = gatewayOriginForLog(gatewayBase);
+        log.info(`routing through ${gatewayLogOrigin}`);
+        log.info(`dashboard available at ${gatewayLogOrigin}/ui`);
       }
 
       processInitDone = true;

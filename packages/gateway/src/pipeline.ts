@@ -6689,6 +6689,10 @@ function getOrCreateSession(
     // Restore sub-agent parent–child relationship (v26)
     if (persisted?.isSubagent) {
       state.isSubagent = true;
+      // Preserve the provisional classification across restarts so a later
+      // primary-session observation can clear it instead of leaving a false
+      // sub-agent attribution permanently pinned.
+      state.parentSessionPending = persisted.parentSessionPending === true;
       if (persisted.parentSessionId) {
         state.parentSessionId = persisted.parentSessionId;
       }

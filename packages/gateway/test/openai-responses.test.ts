@@ -708,6 +708,132 @@ describe("parseOpenAIResponsesRequest", () => {
     );
   });
 
+  test("preserves valid tool-search call and output items as native provenance", () => {
+    const toolSearchCall = {
+      type: "tool_search_call",
+      id: "tsc_1",
+      call_id: "call_1",
+      execution: "client",
+      status: "completed",
+      arguments: { query: "weather forecast" },
+    };
+    const toolSearchOutput = {
+      type: "tool_search_output",
+      id: "tso_1",
+      call_id: "call_1",
+      execution: "client",
+      status: "completed",
+      tools: [],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "find a tool" },
+          toolSearchCall,
+          toolSearchOutput,
+        ],
+      },
+      headers,
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+
+    expect(body.input).toContainEqual(toolSearchCall);
+    expect(body.input).toContainEqual(toolSearchOutput);
+  });
+
+  test.each([
+    [
+      "tool_search_call without arguments",
+      {
+        type: "tool_search_call",
+        execution: "client",
+      },
+    ],
+    [
+      "tool_search_call with invalid execution",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "gateway",
+      },
+    ],
+    [
+      "tool_search_call with invalid call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        call_id: 7,
+      },
+    ],
+    [
+      "tool_search_call with an unknown field",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        private_marker: "unexpected",
+      },
+    ],
+    [
+      "tool_search_output without tools",
+      { type: "tool_search_output", execution: "server" },
+    ],
+    [
+      "tool_search_output with invalid execution",
+      { type: "tool_search_output", tools: [], execution: "provider" },
+    ],
+    [
+      "tool_search_output with invalid call_id",
+      { type: "tool_search_output", tools: [], call_id: false },
+    ],
+    [
+      "tool_search_output with an unknown field",
+      {
+        type: "tool_search_output",
+        tools: [],
+        unexpected: "private",
+      },
+    ],
+  ] as const)("rejects %s at Responses ingress", (_label, item) => {
+    expect(() =>
+      parseOpenAIResponsesRequest({ model: "gpt-5.6", input: [item] }, headers),
+    ).toThrow();
+  });
+
+  test("rejects tool-search output attributed to a different execution owner", () => {
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        {
+          model: "gpt-5.6",
+          input: [
+            {
+              type: "tool_search_call",
+              id: "tsc_owner",
+              call_id: "call_owner",
+              execution: "client",
+              status: "completed",
+              arguments: {},
+            },
+            {
+              type: "tool_search_output",
+              id: "tso_owner",
+              call_id: "call_owner",
+              execution: "server",
+              status: "completed",
+              tools: [],
+            },
+          ],
+        },
+        headers,
+      ),
+    ).toThrow();
+  });
+
   test("coalesces canonical fragments from one assistant message", () => {
     const message = {
       type: "message",

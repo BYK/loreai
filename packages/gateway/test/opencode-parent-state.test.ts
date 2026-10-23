@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { setUpstreamInterceptor } from "../src/pipeline";
+import { resetPipelineState, setUpstreamInterceptor } from "../src/pipeline";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeReplayInterceptor } from "./helpers/replay";
 import {
@@ -16,7 +16,7 @@ afterEach(async () => {
   harness = undefined;
 });
 
-it("keeps cold OpenCode sessions subagent-scoped until parent lookup resolves", async () => {
+it("restores pending parent classification across a pipeline restart", async () => {
   const sessionID = "opencode-pending-parent-state";
   const fixtures = [
     makeFixtureEntry({
@@ -34,6 +34,18 @@ it("keeps cold OpenCode sessions subagent-scoped until parent lookup resolves", 
         { role: "user", content: "Second turn" },
       ],
       responseText: "Second reply",
+    }),
+    makeFixtureEntry({
+      seq: 2,
+      system: DEFAULT_SYSTEM,
+      requestMessages: [
+        { role: "user", content: "First turn" },
+        { role: "assistant", content: "First reply" },
+        { role: "user", content: "Second turn" },
+        { role: "assistant", content: "Second reply" },
+        { role: "user", content: "Third turn" },
+      ],
+      responseText: "Third reply",
     }),
   ];
   harness = await createHarness({ fixtures });
@@ -65,11 +77,36 @@ it("keeps cold OpenCode sessions subagent-scoped until parent lookup resolves", 
     }>("SELECT is_subagent, parent_session_pending FROM session_state"),
   ).toEqual([{ is_subagent: 1, parent_session_pending: 1 }]);
 
+  // Clear the in-memory session cache to model a gateway process restart;
+  // the next turn has no parent-state header and must hydrate the durable flag.
+  await resetPipelineState();
+  setUpstreamInterceptor(makeReplayInterceptor(fixtures));
+
+  const afterRestart = await harness.chat(
+    request([
+      { role: "user", content: "First turn" },
+      { role: "assistant", content: "First reply" },
+      { role: "user", content: "Second turn" },
+    ]),
+    "test-key",
+    { "x-lore-session-id": sessionID },
+  );
+  expect(afterRestart.status).toBe(200);
+  await afterRestart.text();
+  expect(
+    harness.queryDB<{
+      is_subagent: number;
+      parent_session_pending: number;
+    }>("SELECT is_subagent, parent_session_pending FROM session_state"),
+  ).toEqual([{ is_subagent: 1, parent_session_pending: 1 }]);
+
   const resolvedPrimary = await harness.chat(
     request([
       { role: "user", content: "First turn" },
       { role: "assistant", content: "First reply" },
       { role: "user", content: "Second turn" },
+      { role: "assistant", content: "Second reply" },
+      { role: "user", content: "Third turn" },
     ]),
     "test-key",
     {

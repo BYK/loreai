@@ -11,6 +11,7 @@
 import { describe, test, expect, vi } from "vitest";
 import {
   accumulateResponsesSSEStream,
+  assertSuccessfulResponsesCompletion,
   isSupportedResponsesOutputItemType,
   isValidResponsesOutputItemStatus,
   responsesDoneItemMatchesAdded,
@@ -95,11 +96,199 @@ function buildSSEResponse(
   ]);
 }
 
+const validToolSearchItems: Array<Record<string, unknown>> = [
+  {
+    type: "tool_search_call",
+    id: "tsc_1",
+    call_id: "call_1",
+    execution: "client",
+    status: "completed",
+    arguments: { query: "weather forecast" },
+  },
+  {
+    type: "tool_search_output",
+    id: "tso_1",
+    call_id: "call_1",
+    execution: "client",
+    status: "completed",
+    tools: [],
+  },
+];
+
+const invalidToolSearchItems: Array<[string, Record<string, unknown>]> = [
+  [
+    "call missing required arguments",
+    { type: "tool_search_call", execution: "client" },
+  ],
+  [
+    "call with invalid execution",
+    { type: "tool_search_call", arguments: {}, execution: "gateway" },
+  ],
+  [
+    "call with invalid call_id",
+    {
+      type: "tool_search_call",
+      arguments: {},
+      execution: "client",
+      call_id: 7,
+    },
+  ],
+  [
+    "call with an unknown field",
+    {
+      type: "tool_search_call",
+      arguments: {},
+      execution: "client",
+      private_marker: "unexpected",
+    },
+  ],
+  ["output missing required tools", { type: "tool_search_output" }],
+  [
+    "output with invalid execution",
+    { type: "tool_search_output", tools: [], execution: "provider" },
+  ],
+  [
+    "output with invalid call_id",
+    { type: "tool_search_output", tools: [], call_id: false },
+  ],
+  [
+    "output with an unknown field",
+    {
+      type: "tool_search_output",
+      tools: [],
+      unexpected: "private",
+    },
+  ],
+];
+
+describe("Responses tool-search completion validation", () => {
+  const completion = (output: Array<Record<string, unknown>>) => ({
+    id: "resp_tool_search",
+    model: "gpt-5.6",
+    status: "completed",
+    usage: { input_tokens: 1, output_tokens: 1 },
+    output,
+  });
+
+  test("accepts complete tool-search call and output envelopes", () => {
+    expect(() =>
+      assertSuccessfulResponsesCompletion(completion(validToolSearchItems)),
+    ).not.toThrow();
+  });
+
+  test("rejects a tool-search result attributed to a different execution owner", () => {
+    const call = validToolSearchItems[0];
+    const output = { ...validToolSearchItems[1], execution: "server" };
+    expect(() =>
+      assertSuccessfulResponsesCompletion(completion([call, output])),
+    ).toThrow("upstream Responses request did not complete");
+  });
+
+  test.each(invalidToolSearchItems)(
+    "rejects non-streamed %s",
+    (_label, item) => {
+      expect(() =>
+        assertSuccessfulResponsesCompletion(completion([item])),
+      ).toThrow("upstream Responses request did not complete");
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // accumulateResponsesSSEStream
 // ---------------------------------------------------------------------------
 
 describe("accumulateResponsesSSEStream", () => {
+  test("rejects streamed tool-search call/output owner mismatch", async () => {
+    const call = validToolSearchItems[0];
+    const output = { ...validToolSearchItems[1], execution: "server" };
+    const events = [call, output].flatMap((item, output_index) => [
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          output_index,
+          item: { ...item, status: "in_progress" },
+        },
+      },
+      {
+        event: "response.output_item.done",
+        data: {
+          type: "response.output_item.done",
+          output_index,
+          item: { ...item, status: "completed" },
+        },
+      },
+    ]);
+    const response = buildSSEResponse([
+      ...events,
+      {
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            id: "resp_tool_search_owner_mismatch",
+            model: "gpt-5.6",
+            status: "completed",
+            usage: { input_tokens: 1, output_tokens: 1 },
+            output: [call, output],
+          },
+        },
+      },
+    ]);
+
+    await expect(
+      accumulateResponsesSSEStream(response, { validation: "public" }),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test.each(invalidToolSearchItems)(
+    "rejects streamed %s",
+    async (_label, item) => {
+      const isCall = item.type === "tool_search_call";
+      const added = {
+        ...item,
+        status: isCall ? "in_progress" : "completed",
+      };
+      const done = { ...item, status: "completed" };
+      const response = buildSSEResponse([
+        {
+          event: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: added,
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: done,
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "resp_tool_search_stream",
+              model: "gpt-5.6",
+              status: "completed",
+              usage: { input_tokens: 1, output_tokens: 1 },
+              output: [done],
+            },
+          },
+        },
+      ]);
+
+      await expect(
+        accumulateResponsesSSEStream(response, { validation: "public" }),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
   test("accumulates text output from delta events", async () => {
     const response = buildSSEResponse([
       {

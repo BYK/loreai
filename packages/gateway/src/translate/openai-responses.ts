@@ -37,6 +37,10 @@ import {
 import { extractAuth } from "../auth";
 import { isImageBlock, toResponsesImage } from "./images";
 import {
+  hasConsistentResponsesToolSearchOwnership,
+  isValidResponsesToolSearchItem,
+} from "./responses-tool-search";
+import {
   assertResponsesToolOutputEnvelope,
   portableResponsesFunctionCall,
   portableResponsesToolOutput,
@@ -454,6 +458,7 @@ function createInputItemsBuilder(): {
   const messages: GatewayMessage[] = [];
   const instructions: string[] = [];
   const elevatedItems: ParsedInputItems["elevatedItems"] = [];
+  const toolSearchItems: Record<string, unknown>[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
   let sawItem = false;
   let sawConversationItem = false;
@@ -489,6 +494,13 @@ function createInputItemsBuilder(): {
     const raw = item as Record<string, unknown>;
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
+
+    if (itemType === "tool_search_call" || itemType === "tool_search_output") {
+      if (!isValidResponsesToolSearchItem(raw, "input")) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      toolSearchItems.push(raw);
+    }
 
     // Track only the state that can affect normalization across an item seam.
     if (itemType === "message" || (!itemType && role)) {
@@ -797,6 +809,9 @@ function createInputItemsBuilder(): {
   };
 
   const finish = (): ParsedInputItems => {
+    if (!hasConsistentResponsesToolSearchOwnership(toolSearchItems)) {
+      throw new InvalidCrossProviderRequestError();
+    }
     const boundarySafe =
       sawItem &&
       // Elevated items live in req.system rather than the normalized message
