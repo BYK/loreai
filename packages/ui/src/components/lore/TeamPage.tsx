@@ -1011,7 +1011,7 @@ export const TeamPage: Component = () => {
                         }
                       />
                     </label>
-                    <label class="flex items-center gap-2 text-xs text-muted">
+                    <label class="flex min-h-9 items-center gap-2 text-xs text-muted">
                       <input
                         type="checkbox"
                         checked={offlineInvite()}

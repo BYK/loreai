@@ -143,8 +143,8 @@
      class strings resolve to Lore colours. Solid UI's `accent` (a hover
      surface) collides with Lore's brand `--accent`; the copied components
      were edited to use `soft` for hover fills instead. Filled (primary)
-     controls use the website's dark-block colours (--inverse-*), which keep
-     light text in both themes exactly like the site's buttons. */
+     controls use the green primary colours (--inverse-*) with contrasting
+     foregrounds for the resolved theme. */
   --color-background: var(--bg);
   --color-foreground: var(--text);
   --color-card: var(--surface);
@@ -205,6 +205,9 @@
   textarea {
     font: inherit;
     color: inherit;
+  }
+  input:where([type="checkbox"], [type="radio"]) {
+    accent-color: var(--accent);
   }
   h1,
   h2 {
