@@ -6,24 +6,22 @@
  * by running the binary against a local capture server, then scans the
  * binary for the seed that satisfies all oracle pairs.
  *
- * Runs under Node.js (>= 22.16, excluding 23.x) via built-in TypeScript
- * type-stripping — no bundler or `tsx` required. Relative imports use explicit
- * `.ts` extensions because native Node does not resolve extensionless module
- * specifiers.
+ * Run with `pnpm exec tsx`: the imported CCH modules use extensionless
+ * TypeScript imports that Node's native type-stripping cannot resolve.
  *
  * Usage:
  *   # Fully automated — download + generate oracles + extract
- *   node scripts/extract-cch-seed.ts --version 2.1.138
+ *   pnpm exec tsx scripts/extract-cch-seed.ts --version 2.1.138
  *
  *   # Use a local binary — generate oracles + extract
- *   node scripts/extract-cch-seed.ts --binary ./claude
+ *   pnpm exec tsx scripts/extract-cch-seed.ts --binary ./claude
  *
  *   # Legacy mode — use pre-captured oracle pairs
- *   node scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
- *   node scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
+ *   pnpm exec tsx scripts/extract-cch-seed.ts --version 2.1.138 --oracle pairs.json
+ *   pnpm exec tsx scripts/extract-cch-seed.ts --binary ./claude --oracle pairs.json
  *
  *   # Apply extracted seed to cch.ts
- *   node scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
+ *   pnpm exec tsx scripts/extract-cch-seed.ts --apply 2.1.138 0x4D659218E32A3268
  *
  * Oracle pairs JSON format (for --oracle):
  *   [
@@ -80,11 +78,11 @@ const { values: args, positionals } = parseArgs({
 
 if (args.help) {
   console.log(`Usage:
-  node scripts/extract-cch-seed.ts --version <VERSION>
-  node scripts/extract-cch-seed.ts --binary <path>
-  node scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
-  node scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
-  node scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
+  pnpm exec tsx scripts/extract-cch-seed.ts --version <VERSION>
+  pnpm exec tsx scripts/extract-cch-seed.ts --binary <path>
+  pnpm exec tsx scripts/extract-cch-seed.ts --version <VERSION> --oracle <pairs.json>
+  pnpm exec tsx scripts/extract-cch-seed.ts --apply <VERSION> <SEED_HEX>
+  pnpm exec tsx scripts/extract-cch-seed.ts --apply --no-pin <VERSION> <SEED_HEX>
 
 Options:
   -v, --version   Claude Code version to download from npm (e.g. 2.1.138)
@@ -851,7 +849,7 @@ Add this to VERSION_SEEDS in packages/gateway/src/cch.ts:
 Then update WORKER_VERSION if pinning to this version.
 
 Or run:
-  node scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
+  pnpm exec tsx scripts/extract-cch-seed.ts --apply "${version}" "0x${hex}"
 ================================================================================`);
 
     // Write JSON output if requested

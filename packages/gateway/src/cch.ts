@@ -225,7 +225,7 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.306": SEED_2_1_138,
   "2.1.307": SEED_2_1_138,
   // Future versions: extract and add entries here.
-  // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
+  // Use `pnpm exec tsx scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
