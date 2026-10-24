@@ -66,6 +66,12 @@ describe("specific task evidence in passive knowledge ranking", () => {
   );
 
   it("bounds aggregate reference work and falls back to hybrid rank without removing candidates", async () => {
+    // The bounded scan starts with the newest row. Explicitly advance creation
+    // time so the last filler and exact match cannot tie within one millisecond.
+    let creationTime = Date.now();
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => creationTime++);
     vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
     vi.spyOn(embedding, "embed").mockResolvedValue([new Float32Array([1, 0])]);
     const projectPath = `${PROJECT}/total-reference-work`;
@@ -92,6 +98,7 @@ describe("specific task evidence in passive knowledge ranking", () => {
       title: "Settlement invariant",
       content: "For src/ledger.ts, preserve settlement.",
     });
+    clock.mockRestore();
     vi.spyOn(embedding, "vectorSearch").mockResolvedValue([
       { id: weakId, similarity: 1 },
       { id: exactId, similarity: 0.4 },
