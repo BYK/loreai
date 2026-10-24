@@ -1,5 +1,11 @@
 import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
@@ -93,7 +99,7 @@ describe("Folk shell status", () => {
     clearGatewayAuthToken();
   });
 
-  it("shows anonymous status and lazily loads teams when opened", async () => {
+  it("keeps anonymous status compact without empty team or sync sections", async () => {
     mount(client());
 
     const badge = await screen.findByTestId("folk-status");
@@ -108,9 +114,9 @@ describe("Folk shell status", () => {
     expect(screen.getByTestId("folk-status-detail")).toHaveTextContent(
       "lore login",
     );
-    expect(
-      await screen.findByText("No team memberships are known on this device."),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId("folk-teams")).toBeNull();
+    expect(screen.queryByText("Teams", { exact: true })).toBeNull();
+    expect(screen.queryByTestId("sync-now")).toBeNull();
   });
 
   it("shows account identity, provider and team membership", async () => {
@@ -408,7 +414,7 @@ describe("Folk shell status", () => {
         expect(badge).toHaveAttribute("data-folk-state", state),
       );
       fireEvent.click(badge);
-      expect(await screen.findByText("Teams unavailable.")).toBeInTheDocument();
+      expect(screen.queryByText("Teams unavailable.")).toBeNull();
       expect(screen.queryByText("Loading teams…")).not.toBeInTheDocument();
       expect(getTeams).not.toHaveBeenCalled();
     },
@@ -458,9 +464,9 @@ describe("Folk shell status", () => {
     await waitFor(() =>
       expect(screen.queryByText("Ada team")).not.toBeInTheDocument(),
     );
-    expect(
-      await screen.findByText("No team memberships are known on this device."),
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId("folk-teams")).toBeNull();
+    expect(screen.queryByText("Teams", { exact: true })).toBeNull();
+    expect(screen.queryByTestId("sync-now")).toBeNull();
   });
 
   it("cancels an old account's team request and ignores its late response", async () => {
@@ -611,4 +617,291 @@ describe("Folk shell status", () => {
       "reachable",
     );
   });
+});
+
+describe("rail account menu", () => {
+  it("keeps an anonymous avatar and preferences available without signing in", async () => {
+    mount(client());
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    expect(
+      screen
+        .getByTestId("anonymous-avatar")
+        .closest('[data-testid="icon-rail"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('header [data-testid="folk-status"]'),
+    ).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(screen.getByTestId("theme-toggle")).toBeVisible();
+    const profile = screen.getByRole("button", { name: "Sign in to Lore" });
+    await waitFor(() => expect(profile).toHaveTextContent("Anonymous"));
+    expect(profile).toHaveAttribute("aria-haspopup", "dialog");
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    fireEvent.click(profile);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    expect(dialog).toHaveTextContent("lore login");
+  });
+
+  it.each(["refreshing", "unavailable", "hosted"] as const)(
+    "keeps %s account states read-only instead of offering sign-in",
+    async (state) => {
+      mount(client({ getAccount: async () => ({ ...ANONYMOUS, state }) }));
+      const trigger = await screen.findByTestId("folk-status");
+      await waitFor(() =>
+        expect(trigger).toHaveAttribute("data-folk-state", state),
+      );
+      fireEvent.click(trigger);
+      const panel = await screen.findByTestId("folk-status-panel");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(
+        within(panel).queryByRole("button", { name: "Sign in to Lore" }),
+      ).toBeNull();
+      expect(panel).not.toHaveTextContent("Anonymous");
+      expect(within(panel).getByTestId("theme-toggle")).toBeVisible();
+    },
+  );
+
+  it("keeps expired accounts identifiable and offers explicit reauthentication", async () => {
+    mount(
+      client({ getAccount: async () => ({ ...ANONYMOUS, state: "expired" }) }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "expired"),
+    );
+    fireEvent.click(trigger);
+    const profile = await screen.findByRole("button", {
+      name: "Sign in to Lore",
+    });
+    expect(profile).toHaveTextContent("Session expired");
+    fireEvent.click(profile);
+    expect(
+      await screen.findByRole("dialog", { name: "Sign in to Lore" }),
+    ).toHaveTextContent("lore login");
+  });
+
+  it("retains confirmed identity and teams throughout healthy account reloads", async () => {
+    const signedIn: AccountStatus = {
+      ...ANONYMOUS,
+      signed_in: true,
+      state: "signed_in",
+      user: { id: "ada", display_name: "Ada Lovelace", email: null },
+      provider: "github",
+    };
+    let finish!: (account: AccountStatus) => void;
+    const getAccount = vi
+      .fn()
+      .mockResolvedValueOnce(signedIn)
+      .mockImplementation(
+        () =>
+          new Promise<AccountStatus>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    mount(
+      client({
+        getAccount,
+        getTeams: async () => ({
+          hosted: false,
+          teams: [
+            {
+              id: "team-ada",
+              name: "Ada team",
+              role: "editor",
+              member_count: 1,
+            },
+          ],
+        }),
+      }),
+    );
+    await screen.findByTestId("account-avatar");
+    fireEvent.click(screen.getByTestId("folk-status"));
+    await waitFor(() => expect(getAccount).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("account-avatar")).toHaveTextContent("AL");
+    expect(screen.getByTestId("folk-account")).toHaveTextContent(
+      "Ada Lovelace",
+    );
+    expect(await screen.findByTestId("folk-teams")).toHaveTextContent(
+      "Ada team",
+    );
+    finish(signedIn);
+    await waitFor(() =>
+      expect(screen.getByTestId("folk-account")).toHaveTextContent(
+        "Ada Lovelace",
+      ),
+    );
+    // Let the first reload settle before starting a second pending poll.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(getAccount).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId("account-avatar")).toHaveTextContent("AL");
+    expect(screen.getByTestId("folk-account")).toHaveTextContent(
+      "Ada Lovelace",
+    );
+    expect(screen.getByTestId("folk-teams")).toHaveTextContent("Ada team");
+    finish(ANONYMOUS);
+    await waitFor(() =>
+      expect(screen.queryByTestId("account-avatar")).toBeNull(),
+    );
+    expect(screen.queryByTestId("folk-teams")).toBeNull();
+  });
+
+  it("keeps cached anonymous sign-in hidden after an error and during retry", async () => {
+    let state: "anonymous" | "error" | "pending" = "anonymous";
+    let finish!: (account: AccountStatus) => void;
+    mount(
+      client({
+        getAccount: async () => {
+          if (state === "error") throw new Error("account unavailable");
+          if (state === "pending")
+            return new Promise<AccountStatus>((resolve) => {
+              finish = resolve;
+            });
+          return ANONYMOUS;
+        },
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    await screen.findByRole("button", { name: "Sign in to Lore" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    state = "error";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "unavailable"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Lore" }),
+    ).toBeNull();
+    state = "pending";
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Lore" }),
+    ).toBeNull();
+    finish(ANONYMOUS);
+    expect(
+      await screen.findByRole("button", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+  });
+
+  it("keeps the signed-in avatar in the rail with preferences", async () => {
+    mount(
+      client({
+        getAccount: async () => ({
+          ...ANONYMOUS,
+          signed_in: true,
+          state: "signed_in",
+          user: { id: "ada", display_name: "Ada Lovelace", email: null },
+        }),
+      }),
+    );
+    const avatar = await screen.findByTestId("account-avatar");
+    expect(avatar).toHaveTextContent("AL");
+    expect(avatar.closest('[data-testid="folk-status"]')).not.toBeNull();
+    fireEvent.click(screen.getByTestId("folk-status"));
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(screen.getByTestId("theme-toggle")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Sign in to Lore" }),
+    ).toBeNull();
+  });
+});
+
+it("retains a confirmed account through drawer remounts during a healthy poll", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  const account: AccountStatus = {
+    ...ANONYMOUS,
+    signed_in: true,
+    state: "signed_in",
+    user: { id: "ada", display_name: "Ada Lovelace", email: null },
+  };
+  let finish!: (account: AccountStatus) => void;
+  const getAccount = vi
+    .fn()
+    .mockResolvedValueOnce(account)
+    .mockImplementation(
+      () =>
+        new Promise<AccountStatus>((resolve) => {
+          finish = resolve;
+        }),
+    );
+  try {
+    mount(client({ getAccount }));
+    fireEvent.click(await screen.findByTestId("mobile-menu-trigger"));
+    await screen.findByTestId("account-avatar");
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(getAccount).toHaveBeenCalledTimes(2));
+    const drawer = screen.getByRole("dialog", { name: /^Navigation$/ });
+    fireEvent.click(within(drawer).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+    fireEvent.click(screen.getByTestId("mobile-menu-trigger"));
+    expect(await screen.findByTestId("account-avatar")).toHaveTextContent("AL");
+    expect(screen.getByTestId("folk-status")).toHaveTextContent("Ada Lovelace");
+    finish(ANONYMOUS);
+    await waitFor(() =>
+      expect(screen.queryByTestId("account-avatar")).toBeNull(),
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("retains a pending sync and its receipt across mobile drawer remounts", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  let finish!: (result: Awaited<ReturnType<ApiClient["runSync"]>>) => void;
+  const runSync = vi.fn(
+    () =>
+      new Promise<Awaited<ReturnType<ApiClient["runSync"]>>>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  mount(
+    client({
+      getAccount: async () => ({
+        ...ANONYMOUS,
+        signed_in: true,
+        state: "signed_in",
+        user: { id: "user-1", email: null, display_name: "Ada" },
+      }),
+      runSync,
+    }),
+  );
+  const open = async () => {
+    fireEvent.click(await screen.findByTestId("mobile-menu-trigger"));
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    return screen.findByTestId("sync-now");
+  };
+  fireEvent.click(await open());
+  expect(runSync).toHaveBeenCalledTimes(1);
+  const drawer = screen.getByRole("dialog", { name: /^Navigation$/ });
+  // Close the nested layer first, then the drawer, as a user does.
+  fireEvent.keyDown(screen.getByTestId("sync-now"), { key: "Escape" });
+  fireEvent.click(within(drawer).getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+  expect(await open()).toBeDisabled();
+  fireEvent.click(screen.getByTestId("sync-now"));
+  expect(runSync).toHaveBeenCalledTimes(1);
+  finish({ pushed: 2, pulled: 3, conflicts: 0, skipped: 0 });
+  expect(
+    await screen.findByText("Sync complete: pushed 2, pulled 3."),
+  ).toBeVisible();
+  vi.unstubAllGlobals();
 });

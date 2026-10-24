@@ -1,3 +1,7 @@
+import {
+  setWorkspaceTheme,
+  expectCurrentNavigation,
+} from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 test.describe("/ui/fixture design specimen", () => {
@@ -33,7 +37,7 @@ test.describe("/ui/fixture design specimen", () => {
       path: testInfo.outputPath("fixture-light.png"),
       fullPage: true,
     });
-    await page.getByTestId("theme-dark").click();
+    await setWorkspaceTheme(page, "dark");
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.screenshot({
       path: testInfo.outputPath("fixture-dark.png"),
@@ -62,4 +66,19 @@ test.describe("/ui/fixture design specimen", () => {
     await page.reload();
     await expect(page.getByTestId("reader-blocks")).toBeVisible();
   });
+});
+
+test("bare UI base redirects preserve chooser queries on direct loads and refresh", async ({
+  page,
+}) => {
+  await page.goto("/ui?section=sessions");
+  await expect(page).toHaveURL(/\/ui\/\?section=sessions$/);
+  await expect(
+    page.getByRole("heading", { name: "Choose a project for sessions" }),
+  ).toBeVisible();
+  await expectCurrentNavigation(page, "rail-sessions");
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Choose a project for sessions" }),
+  ).toBeVisible();
 });

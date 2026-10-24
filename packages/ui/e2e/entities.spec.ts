@@ -1,13 +1,11 @@
+import { expectGatewayReachable } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 test.describe("entities (UI-08)", () => {
   test("list → detail → edit notes → save", async ({ page }, testInfo) => {
     const notesValue = `First programmer, annotated the engine. [${testInfo.project.name}-${testInfo.retry}-${Date.now()}]`;
     await page.goto("/ui/entities");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
 
     const rows = page.getByTestId("entity-row");
     await expect(rows).toHaveCount(4);

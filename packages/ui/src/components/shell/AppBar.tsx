@@ -1,129 +1,98 @@
 import type { Component, JSX } from "solid-js";
-import { For, Show } from "solid-js";
-import { A } from "@solidjs/router";
-
+import { Show } from "solid-js";
+import { useLocation } from "@solidjs/router";
+import { Icon } from "./Icon";
 import { Button } from "~/components/ui/button";
-import { THEME_CHOICES, theme, type ThemeChoice } from "~/lib/theme";
 import { useWorkspace } from "~/routes/workspace";
-
-import { Avatar } from "../lore/Avatar";
-import { FolkStatus } from "./FolkStatus";
-import { Logo } from "./Logo";
+import { projectDestination, secondaryPage, workspacePath } from "./navigation";
+import { ProjectPicker } from "./ProjectPicker";
 import { SearchEntry } from "./SearchEntry";
 
-const THEME_OPTIONS: Record<ThemeChoice, { icon: string; label: string }> = {
-  system: { icon: "◐", label: "System" },
-  light: { icon: "☀", label: "Light" },
-  dark: { icon: "☾", label: "Dark" },
-};
-
-/**
- * Segmented System / Light / Dark control. `System` (the default) follows the
- * OS preference live; the other two force a mode and persist it.
- */
-export const ThemeToggle: Component<{ class?: string }> = (props) => {
-  const t = theme();
-  return (
-    <div
-      role="group"
-      aria-label="Colour theme"
-      data-testid="theme-toggle"
-      data-theme-choice={t.choice()}
-      class={`inline-flex items-center rounded-md border border-line bg-chrome p-0.5 ${props.class ?? ""}`}
-    >
-      <For each={THEME_CHOICES}>
-        {(choice) => (
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 aria-pressed:bg-surface aria-pressed:text-heading aria-pressed:shadow-sm"
-            aria-label={`${THEME_OPTIONS[choice].label} theme`}
-            aria-pressed={t.choice() === choice}
-            title={
-              choice === "system"
-                ? `Follow the system setting (currently ${t.resolved()})`
-                : `Always use ${choice} mode`
-            }
-            data-testid={`theme-${choice}`}
-            onClick={() => t.setChoice(choice)}
-          >
-            <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
-            <span class="hidden md:inline">{THEME_OPTIONS[choice].label}</span>
-          </Button>
-        )}
-      </For>
-    </div>
-  );
-};
-
 export const AppBar: Component<{
-  /** Mobile-only: rendered left of the logo (a back link). */
+  /** Mobile-only: back link beside the context toggle. */
   leading?: JSX.Element;
+  onOpenMenu?: () => void;
+  menuOpen?: boolean;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
   searchProjectId?: string;
+  navigationOpen?: boolean;
+  contextLabel?: string;
+  pageLabel?: string;
 }> = (props) => {
   const ws = useWorkspace();
-  const account = () => {
-    const folk = ws.state.folk;
-    const current = folk.account.data();
-    return ws.connection.state() === "reachable" &&
-      !folk.account.error() &&
-      !folk.account.loading() &&
-      current?.signed_in &&
-      current.state === "signed_in"
-      ? current.user
-      : null;
+  const location = useLocation();
+  const section = () => {
+    if (props.pageLabel) return props.pageLabel;
+    const path = workspacePath(location.pathname);
+    const secondary = secondaryPage(path);
+    if (secondary) return secondary.label;
+    if (path.includes("/knowledge")) return "Knowledge";
+    if (
+      path.includes("/sessions") ||
+      new URLSearchParams(location.search).get("section") === "sessions"
+    )
+      return "Sessions";
+    if (path.includes("/imports")) return "Imports";
+    if (path.includes("/duplicates")) return "Find duplicates";
+    if (path.includes("/search")) return "Search";
+    return props.searchProjectId ? "Overview" : "Projects";
   };
   return (
-    <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
+    <header class="flex h-12 min-w-0 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 sm:px-4">
+      <Show when={props.onOpenMenu}>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-8 shrink-0 text-muted md:hidden"
+          aria-label="Open navigation menu"
+          aria-expanded={props.menuOpen ?? false}
+          aria-controls="mobile-navigation-drawer"
+          data-testid="mobile-menu-trigger"
+          onClick={() => props.onOpenMenu?.()}
+        >
+          <Icon name="menu" />
+        </Button>
+      </Show>
+      <Show when={props.onOpenNav}>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-8 shrink-0 text-muted"
+          aria-label={
+            props.navigationOpen
+              ? "Collapse context pane"
+              : "Expand context pane"
+          }
+          title={`${props.navigationOpen ? "Hide" : "Show"} ${(props.contextLabel ?? "context").toLowerCase()} list`}
+          data-testid="context-toggle"
+          aria-expanded={props.navigationOpen ?? false}
+          aria-controls="workspace-context"
+          onClick={() => props.onOpenNav?.()}
+        >
+          <Icon name="panel" />
+        </Button>
+      </Show>
       <Show when={props.leading}>
         <span class="lg:hidden">{props.leading}</span>
       </Show>
-      <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
-        <Logo wordmark="sm" />
-      </A>
+      <ProjectPicker
+        compact
+        emptyLabel="Workspace"
+        hrefForProject={(id) =>
+          projectDestination(location.pathname, location.search, id)
+        }
+        projects={ws.projects.data()}
+        loading={ws.projects.loading()}
+        error={ws.projects.error()}
+        activeProjectId={props.searchProjectId ?? null}
+        onRetry={ws.projects.reload}
+        stale={ws.state.projects.status()}
+      />
+      <span class="hidden shrink-0 text-xs font-medium text-heading xl:inline">
+        {section()}
+      </span>
       <SearchEntry searchProjectId={props.searchProjectId} />
-      <div class="ml-auto flex items-center gap-2 sm:gap-4">
-        <FolkStatus />
-        <ThemeToggle />
-        <Show when={account()}>
-          {(user) => {
-            const name = () => user().display_name || user().email || "Account";
-            const initials = () =>
-              name()
-                .split(/\s+/)
-                .filter(Boolean)
-                .map((part) => part[0])
-                .slice(0, 2)
-                .join("")
-                .toUpperCase();
-            return (
-              <span
-                data-testid="account-avatar"
-                role="img"
-                aria-label={`Signed in as ${name()}`}
-                title={name()}
-                class="hidden sm:inline-flex"
-              >
-                <Avatar label={initials()} />
-              </span>
-            );
-          }}
-        </Show>
-        <Show when={props.onOpenNav}>
-          <Button
-            variant="outline"
-            size="sm"
-            class="lg:hidden"
-            aria-label="Open navigation"
-            data-testid="open-nav"
-            onClick={() => props.onOpenNav?.()}
-          >
-            ☰
-          </Button>
-        </Show>
-      </div>
     </header>
   );
 };

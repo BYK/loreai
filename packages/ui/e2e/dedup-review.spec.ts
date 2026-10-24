@@ -1,3 +1,4 @@
+import { openNavigation } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 async function projectByName(page: import("@playwright/test").Page) {
@@ -61,25 +62,13 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     });
 
     await page.goto(`/ui/projects/${projectId}`);
-    const navOpener = page.getByTestId("open-nav");
-    const navDuplicates = page.getByTestId("nav-duplicates");
-    if (await navOpener.isVisible()) {
-      await navOpener.click();
-      const drawerLink = page
-        .getByTestId("nav-drawer")
-        .getByTestId("nav-duplicates");
-      await expect(drawerLink).toHaveAttribute(
-        "href",
-        `/ui/projects/${projectId}/duplicates`,
-      );
-      await drawerLink.click();
-    } else {
-      await expect(navDuplicates).toHaveAttribute(
-        "href",
-        `/ui/projects/${projectId}/duplicates`,
-      );
-      await navDuplicates.click();
-    }
+    const nav = await openNavigation(page);
+    const navDuplicates = nav.getByTestId("rail-duplicates");
+    await expect(navDuplicates).toHaveAttribute(
+      "href",
+      `/ui/projects/${projectId}/duplicates`,
+    );
+    await navDuplicates.click();
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     await page.goto(`/ui/projects/${projectId}`);
     await page.getByTestId("review-duplicates-link").click();

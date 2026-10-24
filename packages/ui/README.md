@@ -1376,7 +1376,7 @@ seeded e2e gateway and the Vite dev server (fixture routes).
 
 | # | Deviation from the specimens | Decision |
 |---|---|---|
-| 1 | Colour palette: the app renders the website's cream/green brand tokens, not the specimen's cool pale-blue chrome and teal accent. | **Accepted** — deliberate token decision, see "Design tokens: website → UI mapping". Structure, radii, borders and focus treatment follow the specimen. |
+| 1 | Colour palette: the app uses olive surfaces with amber accents. | **Accepted** — see "Design tokens: olive foundation and amber accents". Structure, radii, borders and focus treatment follow the specimen. |
 | 2 | App bar shows the Lore.AI logo instead of the "Lore" wordmark; "Local workspace" / avatar match. | **Accepted** — brand. |
 | 3 | Knowledge table (mobile): five columns squeezed the title to ~6 characters. | **Fixed** here — scope/confidence/updated columns are hidden below `sm`; title + category remain. |
 | 4 | Knowledge table (desktop): title and preview cells were clipped mid-word without an ellipsis. | **Fixed** here (`truncate` on the cell children). |
@@ -1614,55 +1614,37 @@ dedup suggestion rows, delete session/distillation buttons, move
 knowledge and the aggregate home dashboard — are out-of-scope follow-ups.
 
 
-## Design tokens: website → UI mapping
+## Design tokens: olive foundation and amber accents
 
-The app shares the marketing website's design language. Token **names** are
-the design-fixture v2.2 names (`--bg`, `--chrome`, `--mark`, …); token
-**values** are copied from the website theme —
-`packages/website/public/theme.css` (`:root` light palette and
-`[data-theme="dark"]` dark palette) and `src/styles/starlight.css` (fonts,
-header). Only semantic token values are copied, never the website's layout
-or component CSS. Everything lives in `src/styles/app.css` (`:root`, `.dark`,
-`@theme inline`) and `src/styles/fonts.css`. Keep this table and that file in
-sync.
+The UI uses an olive base for surfaces, borders, and text in both themes.
+Amber marks primary actions, links, selected navigation, focus rings, and
+highlights. The marketing website keeps its own cream/green palette.
 
-Raw brand palette (identical in both themes, exactly as on the website):
-`--c0 #f7f2e8`, `--c1 #ede5d0`, `--c2 #dfd5bb` (cream); `--g0 #1a3320` …
-`--g6 #e8f2e9` (greens); `--ink #1a2e1b`, `--mid #4a5f4c`.
+`src/styles/app.css` maps `--palette-base-*` and `--palette-accent-*` to
+Tailwind olive and amber. Semantic aliases derive from those two scales, so
+changing a family updates owned Solid/shadcn components without page-level
+color changes. See [the palette guide](../../docs/ui-redesign/README.md) for
+role mappings and visual comparisons.
 
-| Website variable (`theme.css`) | Light value | Dark value | UI token (`app.css`) | Tailwind utility |
-|---|---|---|---|---|
-| `--bg` | `--c0` | `#0d1913` | `--bg` | `bg-bg`, `bg-background` |
-| `--surface` | `--c0` | `#14251b` | `--surface` | `bg-surface`, `bg-card`, `bg-popover` |
-| `--surface-alt` | `--c1` | `#1a3124` | `--chrome` | `bg-chrome`, `bg-secondary` |
-| `--bg-alt` | `--c1` | `#101f17` | `--nav`, `--shade` | `bg-nav`, `bg-shade` |
-| `--border` | `--c2` | `#26402f` | `--line` | `border-line`, `border-border`, `border-input` (and the base `*` border colour) |
-| `--text` | `--ink` | `#e8f1e6` | `--text` | `text-text`, `text-foreground` |
-| `--text-muted` | `--mid` | `#9fbaa6` | `--muted` | `text-muted`, `text-muted-foreground` |
-| `--heading` | `--g0` | `#f2f7ee` | `--heading` | `text-heading` (base `h1`, `h2`) |
-| `--link` | `--g2` | `#a6d6ae` | `--accent` | `text-accent`, `ring-ring` (base `a`) |
-| `--link-hover` | `--g0` | `#dcecdd` | `--accent-hover` | `text-accent-hover` (base `a:hover`) |
-| `--link-border` | `--g4` | `#4a7a55` | `--thread` | `border-thread` (discussion thread line) |
-| `--inverse-text` (light) / `--bg` (dark) | `--c0` | `#0d1913` | `--accent-contrast` | `text-accent-contrast`, `text-accent-foreground` |
-| `--highlight-bg` | `--g6` | `#172c20` | `--soft`, `--accent-soft`, `--mark`, `--avatar-bg` | `bg-soft`, `bg-accent-soft`, `bg-mark`; `.passage-target` |
-| `--highlight-text` | `--g2` | `#bfe0c4` | `--accent-soft-text`, `--avatar-text` | `text-accent-soft-text` |
-| `--eyebrow` | `--g3` | `#79ab84` | `--mark-edge`, `--quote-edge` | `text-mark-edge`, `border-quote-edge`; `.eyebrow` |
-| `--emphasis` | `--g1` | `#9ad3a4` | `--emphasis`, `--gold` | `text-emphasis`, `text-gold` |
-| `--inverse-bg` | `--g0` | `#1e3a29` | `--inverse-bg`, `--avatar-agent-bg` | `bg-inverse`, `bg-primary` (filled buttons, fixture banner) |
-| `--inverse-bg-hover` | `--g1` | `#26492f` | `--inverse-bg-hover` | `bg-inverse-hover` |
-| `--inverse-text` | `--c0` | `#f2f7ee` | `--inverse-text`, `--avatar-agent-text` | `text-inverse-text`, `text-primary-foreground` |
-| `--inverse-text-dim` | `--g5` | `#c4ddc7` | `--inverse-text-dim` | `text-inverse-text-dim` |
-| `--error` | `#8b3a3a` | `#e39393` | `--danger` (+ derived `--danger-soft`, 10 % mix over `--surface`) | `text-danger`, `bg-danger-soft`, `bg-destructive` |
-| `.card` shadow `0 4px 14px rgba(26,51,32,.06)` | as is | `0 4px 14px rgba(0,0,0,.28)` | `--shadow-soft` | `shadow-xs`, `shadow-sm`, `shadow-md` |
-| `.feature` shadow `0 16px 48px rgba(26,51,32,.08)` / `.modal` shadow `0 14px 34px rgba(0,0,0,.38)` | `.feature` | `.modal` | `--shadow-lifted` | `shadow-lg`, `shadow-xl` |
-| `--sans` `"DM Sans", sans-serif` | | | `--font-sans` (`"DM Sans Variable", "DM Sans", sans-serif`) | `font-sans` (base `html`) |
-| `--serif` `'Playfair Display', Georgia, serif` | | | `--font-serif` | `font-serif` (logo wordmark) |
-| `starlight.css --sl-font-mono` | | | `--font-mono` | `font-mono` |
-| radii: website buttons/cards 3–6 px, pills 20 px | | | `--radius-sm 4px`, `--radius-md 6px`, `--radius-lg 10px`, `--radius-xl 14px` | `rounded-sm/md/lg/xl` |
+| Semantic token | Light scale | Dark scale | Purpose |
+|---|---|---|---|
+| `--bg` | Base 100 | Base 950 | Workspace background |
+| `--surface` | Base 50 | Base 900 | Documents, cards, dialogs, popovers |
+| `--nav`, `--shade` | Base 100 | Base 900 | Navigation and secondary surfaces |
+| `--chrome`, `--soft` | Base 100 | Base 800 | Toolbars, neutral hover and secondary states |
+| `--line` | Base 200 | Base 700 | Borders and dividers |
+| `--text`, `--emphasis` | Base 900 | Base 200 | Body and emphasized text |
+| `--muted` | Base 600 | Base 400 | Secondary text and icons |
+| `--heading` | Base 950 | Base 50 | Headings |
+| `--accent`, `--inverse-bg` | Accent 700 | Accent 400 | Links, focus, primary actions |
+| `--accent-hover` | Accent 800 | Accent 300 | Hovered links and primary actions |
+| `--accent-soft` | Accent 50 | Accent 950 | Selected navigation and highlights |
+| `--accent-soft-text` | Accent 800 | Accent 200 | Text on accent highlights |
 
-Not mapped on purpose: `--nav-bg` (the website's dark marketing header — the
-app keeps a light chrome bar so the pane hierarchy stays quiet), gradients,
-hero/orbit illustrations, and every layout rule.
+Logo SVGs, categorical model chart colors, and green/red version diffs stay
+independent. Cost/quota bars and warming histograms retain their previous green
+colors through separate chart tokens. Destructive states retain their red roles.
+Typography and component radii do not depend on the chosen color family.
 
 **Fonts** are self-hosted from `@fontsource-variable/dm-sans` and
 `@fontsource/playfair-display` (OFL-1.1) via hand-written `@font-face` rules

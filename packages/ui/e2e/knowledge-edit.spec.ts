@@ -422,10 +422,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
         .locator('[data-pane="list"] [data-testid="knowledge-row"]')
         .filter({ hasText: titleDraft }),
     ).toHaveCount(0);
-    const projectNav = page.locator(
-      `[data-pane="nav"] [data-testid="nav-project"][href$="/projects/${projectId}"]`,
-    );
-    await expect(projectNav.locator("span").last()).toHaveText(
+    await expect(page.getByTestId("active-project-count").first()).toHaveText(
       String(initialKnowledgeCount - 1),
     );
     await page.goForward();

@@ -1,6 +1,7 @@
 import type { Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { searchHref, workspaceSearchHref } from "~/lib/href";
+import { Icon } from "./Icon";
 import { cn } from "~/lib/utils";
 
 export const SearchEntry: Component<{
@@ -11,8 +12,8 @@ export const SearchEntry: Component<{
   return (
     <form
       class={cn(
-        "flex rounded-md border border-line bg-bg text-[13px] text-muted",
-        "h-8 md:h-auto md:w-[320px] md:max-w-full",
+        "ml-auto flex min-w-0 items-center rounded-md border border-line bg-bg text-[13px] text-muted",
+        "h-8 md:w-[min(27rem,40vw)]",
         props.class,
       )}
       onSubmit={(event) => {
@@ -24,6 +25,7 @@ export const SearchEntry: Component<{
         else navigate(workspaceSearchHref(q));
       }}
     >
+      <Icon name="search" class="ml-2.5 hidden size-3.5 md:block" />
       <input
         name="q"
         aria-label="Search"
@@ -32,7 +34,7 @@ export const SearchEntry: Component<{
             ? "Search this project's memory…"
             : "Search all knowledge…"
         }
-        class="hidden min-w-0 flex-1 bg-transparent px-3 outline-none md:block"
+        class="hidden h-full min-w-0 flex-1 bg-transparent px-2.5 text-xs outline-none md:block"
       />
       <button
         type="submit"
@@ -40,7 +42,7 @@ export const SearchEntry: Component<{
         aria-label="Search"
         class="size-8 md:hidden"
       >
-        ⌕
+        <Icon name="search" class="mx-auto size-3.5" />
       </button>
     </form>
   );

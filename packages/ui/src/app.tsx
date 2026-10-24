@@ -1,28 +1,23 @@
 import type { Component, ParentProps } from "solid-js";
 import { lazy, createSignal, Show } from "solid-js";
-import { A, type RouteDefinition, Router } from "@solidjs/router";
+import { type RouteDefinition, Router } from "@solidjs/router";
 
 import { Browse } from "./routes/Browse";
+import { NotFound } from "./routes/NotFound";
 import { WorkspaceProvider } from "./routes/workspace";
 import { setGatewayAuthToken, type ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
 import { theme } from "./lib/theme";
+import { Button } from "./components/ui/button";
+import {
+  TextField,
+  TextFieldInput,
+  TextFieldLabel,
+} from "./components/ui/text-field";
 import { useWorkspace } from "./routes/workspace";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
 export const ROUTER_BASE = "/ui";
-
-const NotFound: Component = () => (
-  <main class="mx-auto max-w-xl p-8 text-sm" data-testid="not-found">
-    <h1 class="text-lg font-semibold">Page not found</h1>
-    <p class="mt-2 text-muted">
-      Nothing is served at this address.{" "}
-      <A href="/" class="underline">
-        Back to projects
-      </A>
-    </p>
-  </main>
-);
 
 /**
  * Dev/test-only screens: the design specimen and the UI-01 compatibility
@@ -201,33 +196,33 @@ const RemoteGatewayAuthGate: Component<ParentProps> = (props) => {
       fallback={props.children}
     >
       <main
-        class="mx-auto max-w-xl p-8 text-sm"
+        class="mx-auto w-full max-w-xl p-5 text-sm sm:p-8"
         data-testid="gateway-auth-gate"
       >
-        <h1 class="text-lg font-semibold">Connect to your gateway</h1>
-        <p class="mt-2 text-muted">
-          Enter the LORE_GATEWAY_AUTH_TOKEN configured on this gateway to open
-          its dashboard.
+        <h1 class="text-[25px] font-semibold leading-tight">
+          Connect to your gateway
+        </h1>
+        <p class="mt-3 text-muted">
+          Enter the{" "}
+          <code class="text-xs [overflow-wrap:anywhere]">
+            LORE_GATEWAY_AUTH_TOKEN
+          </code>{" "}
+          configured on this gateway to open its dashboard.
         </p>
-        <form class="mt-6 grid gap-3" onSubmit={connect}>
-          <label class="grid gap-2" for="gateway-token">
-            <span>Gateway token</span>
-            <input
+        <form class="mt-6 grid gap-4" onSubmit={connect}>
+          <TextField value={token()} onChange={setToken} required>
+            <TextFieldLabel>Gateway token</TextFieldLabel>
+            <TextFieldInput
               id="gateway-token"
-              class="rounded border border-default bg-panel px-3 py-2"
+              class="bg-surface"
               type="password"
               autocomplete="current-password"
-              value={token()}
               onInput={(event) => setToken(event.currentTarget.value)}
-              required
             />
-          </label>
-          <button
-            class="w-fit rounded border border-default px-3 py-2"
-            type="submit"
-          >
+          </TextField>
+          <Button class="w-full sm:w-fit" type="submit">
             Connect
-          </button>
+          </Button>
           <p class="text-muted" role="status">
             {workspace.connection.detail()}
           </p>

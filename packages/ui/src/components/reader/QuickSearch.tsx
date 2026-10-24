@@ -7,6 +7,7 @@
  */
 import { Show, type Component, type JSX } from "solid-js";
 
+import { Icon } from "~/components/shell/Icon";
 import { Button } from "~/components/ui/button";
 import { formatCount } from "~/reader/quick-search";
 
@@ -92,7 +93,7 @@ export const QuickSearchBar: Component<{
         disabled={!props.canStep}
         onClick={() => props.onStep(-1)}
       >
-        ↑
+        <Icon name="up" />
       </Button>
       <Button
         type="button"
@@ -103,7 +104,7 @@ export const QuickSearchBar: Component<{
         disabled={!props.canStep}
         onClick={() => props.onStep(1)}
       >
-        ↓
+        <Icon name="down" />
       </Button>
       <Button
         type="button"
@@ -131,7 +132,7 @@ export const QuickSearchBar: Component<{
         aria-label="Close search"
         onClick={props.onClose}
       >
-        ✕
+        <Icon name="close" />
       </Button>
     </span>
     {props.children}

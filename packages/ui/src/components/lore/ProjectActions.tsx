@@ -311,7 +311,12 @@ const RenameDialog: Component<{
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!dirty() || props.pending}>
+            <Button
+              pending={props.pending}
+              icon="save"
+              type="submit"
+              disabled={!dirty() || props.pending}
+            >
               {props.pending ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
@@ -480,6 +485,7 @@ const MoveSessionsDialog: Component<{
             Cancel
           </Button>
           <Button
+            pending={props.pending}
             type="button"
             disabled={!canSubmit()}
             onClick={() =>

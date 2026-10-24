@@ -98,10 +98,10 @@ export const KnowledgeDocument: Component<{
       data-knowledge-id={props.entry.id}
     >
       <DocHeader
+        compact
         crumb={[
           props.project?.name || props.project?.path || "Project",
           "Knowledge",
-          props.entry.title,
         ]}
         title={props.entry.title}
         participants={[authorOf(props.entry)]}
@@ -130,190 +130,201 @@ export const KnowledgeDocument: Component<{
           >
             <Badge variant="outline">{props.entry.approval_status}</Badge>
           </Show>
+          <Show when={props.actions}>
+            <div class="ml-auto flex items-center gap-2">{props.actions}</div>
+          </Show>
         </div>
-        <Show when={props.actions}>
-          <div class="mt-3">{props.actions}</div>
-        </Show>
       </DocHeader>
 
-      <div class="mx-auto max-w-[940px] px-5 py-6 sm:px-7.5">
-        <div class="text-[15px] leading-relaxed [&_p]:my-0 [&_p+p]:mt-3">
+      <div class="mx-auto max-w-[800px] px-6 py-7 sm:px-7">
+        <div class="text-[15px] leading-[1.75] [overflow-wrap:anywhere] [&_p]:my-0 [&_p+p]:mt-4">
           <For each={paragraphs(props.entry.content)}>{(p) => <p>{p}</p>}</For>
         </div>
 
-        <section
-          class="mt-7 rounded-lg border border-line bg-bg px-4 py-3.5 text-xs"
-          data-testid="trust-section"
-        >
-          <div class="eyebrow mb-2">Why trust this</div>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <div>
-              <div class="font-semibold">Source</div>
-              <Show
-                when={sourceSession()}
-                fallback={
-                  <span class="text-muted">No source session recorded.</span>
-                }
-              >
-                {(session) => (
-                  <div class="flex flex-wrap items-center gap-2">
-                    <Show
-                      when={projectId()}
-                      fallback={
-                        <>
-                          <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
-                            {session()}
-                          </code>
-                          <span class="text-muted">
-                            · exact message not recorded
-                          </span>
-                        </>
-                      }
-                    >
-                      {(projectId) => (
-                        <>
-                          <A
-                            class="text-accent underline"
-                            href={sessionHref(projectId(), session())}
-                            aria-label="Distilled from session"
-                          >
-                            {session()}
-                          </A>
-                          <span class="text-muted">
-                            · exact message not recorded
-                          </span>
-                        </>
-                      )}
-                    </Show>
-                  </div>
-                )}
-              </Show>
-              <Show when={sourceSession()}>
-                <Show when={props.evidence}>
-                  {(evidence) => (
-                    <Show
-                      when={props.project}
-                      fallback={
-                        <div class="mt-2 text-muted">Checking source…</div>
-                      }
-                    >
-                      <div class="mt-2 text-muted">
-                        <Show
-                          when={evidence().data()}
-                          fallback={
-                            <Show
-                              when={evidence().error()}
-                              fallback="Checking source…"
+        <details open class="mt-8 rounded-lg border border-line bg-bg">
+          <summary class="cursor-pointer px-4 py-3 text-xs font-medium text-muted">
+            Source &amp; details
+          </summary>
+          <section
+            class="border-t border-line px-4 py-4 text-xs"
+            data-testid="trust-section"
+          >
+            <div class="eyebrow mb-2">Why trust this</div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div>
+                <div class="font-semibold">Source</div>
+                <Show
+                  when={sourceSession()}
+                  fallback={
+                    <span class="text-muted">No source session recorded.</span>
+                  }
+                >
+                  {(session) => (
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Show
+                        when={projectId()}
+                        fallback={
+                          <>
+                            <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
+                              {session()}
+                            </code>
+                            <span class="text-muted">
+                              · exact message not recorded
+                            </span>
+                          </>
+                        }
+                      >
+                        {(projectId) => (
+                          <>
+                            <A
+                              class="text-accent underline"
+                              href={sessionHref(projectId(), session())}
+                              aria-label="Distilled from session"
                             >
-                              {errorStateFor(
-                                evidence().error(),
-                                "Source session",
-                                evidence().reload,
-                              )}
-                            </Show>
-                          }
-                        >
-                          {(value) => (
-                            <Switch>
-                              <Match when={value().state === "available"}>
-                                Source session available
-                              </Match>
-                              <Match when={value().state === "summary_only"}>
-                                <div class="mt-1">
-                                  Original messages expired · retained summary
-                                  only —{" "}
-                                  {pluralize(
-                                    value().detail?.distillations.length ?? 0,
-                                    "distillation",
-                                  )}
-                                </div>
-                                <Show
-                                  when={props.loadDistillation}
-                                  fallback={
-                                    <For
-                                      each={value().detail?.distillations ?? []}
-                                    >
-                                      {(distillation) => (
-                                        <div class="mt-1 text-muted">
-                                          gen {distillation.generation},{" "}
-                                          {formatWhen(distillation.created_at)}
-                                        </div>
-                                      )}
-                                    </For>
-                                  }
-                                >
-                                  {(load) => (
-                                    <For
-                                      each={value().detail?.distillations ?? []}
-                                    >
-                                      {(distillation) => (
-                                        <RetainedSummary
-                                          distillation={distillation}
-                                          load={load()}
-                                        />
-                                      )}
-                                    </For>
-                                  )}
-                                </Show>
-                                <div class="mt-1 text-muted">
-                                  Open in the{" "}
-                                  <Show
-                                    when={projectId()}
-                                    fallback="session reader."
-                                  >
-                                    {(id) => (
-                                      <>
-                                        {" "}
-                                        <A
-                                          class="text-accent underline"
-                                          href={sessionHref(
-                                            id(),
-                                            sourceSession() ?? "",
-                                          )}
-                                        >
-                                          session reader.
-                                        </A>
-                                      </>
-                                    )}
-                                  </Show>
-                                </div>
-                              </Match>
-                              <Match when={value().state === "unavailable"}>
-                                Source session no longer available
-                              </Match>
-                            </Switch>
-                          )}
-                        </Show>
-                      </div>
-                    </Show>
+                              {session()}
+                            </A>
+                            <span class="text-muted">
+                              · exact message not recorded
+                            </span>
+                          </>
+                        )}
+                      </Show>
+                    </div>
                   )}
                 </Show>
-              </Show>
-              <Show when={props.files}>
-                {(files) => <KnowledgeFiles loader={files()} />}
-              </Show>
-            </div>
-            <div class="space-y-2">
-              <div>
-                <span class="font-semibold">Sharing</span>{" "}
-                {isShared() ? "shared" : "project"}
-              </div>
-              <div>
-                <span class="font-semibold">Last change</span>{" "}
-                {formatWhen(props.entry.updated_at ?? props.entry.created_at)}
-                <Show when={recordedWriter()}>
-                  {" · "}
-                  {recordedWriter()}
+                <Show when={sourceSession()}>
+                  <Show when={props.evidence}>
+                    {(evidence) => (
+                      <Show
+                        when={props.project}
+                        fallback={
+                          <div class="mt-2 text-muted">Checking source…</div>
+                        }
+                      >
+                        <div class="mt-2 text-muted">
+                          <Show
+                            when={evidence().data()}
+                            fallback={
+                              <Show
+                                when={evidence().error()}
+                                fallback="Checking source…"
+                              >
+                                {errorStateFor(
+                                  evidence().error(),
+                                  "Source session",
+                                  evidence().reload,
+                                )}
+                              </Show>
+                            }
+                          >
+                            {(value) => (
+                              <Switch>
+                                <Match when={value().state === "available"}>
+                                  Source session available
+                                </Match>
+                                <Match when={value().state === "summary_only"}>
+                                  <div class="mt-1">
+                                    Original messages expired · retained summary
+                                    only —{" "}
+                                    {pluralize(
+                                      value().detail?.distillations.length ?? 0,
+                                      "distillation",
+                                    )}
+                                  </div>
+                                  <Show
+                                    when={props.loadDistillation}
+                                    fallback={
+                                      <For
+                                        each={
+                                          value().detail?.distillations ?? []
+                                        }
+                                      >
+                                        {(distillation) => (
+                                          <div class="mt-1 text-muted">
+                                            gen {distillation.generation},{" "}
+                                            {formatWhen(
+                                              distillation.created_at,
+                                            )}
+                                          </div>
+                                        )}
+                                      </For>
+                                    }
+                                  >
+                                    {(load) => (
+                                      <For
+                                        each={
+                                          value().detail?.distillations ?? []
+                                        }
+                                      >
+                                        {(distillation) => (
+                                          <RetainedSummary
+                                            distillation={distillation}
+                                            load={load()}
+                                          />
+                                        )}
+                                      </For>
+                                    )}
+                                  </Show>
+                                  <div class="mt-1 text-muted">
+                                    Open in the{" "}
+                                    <Show
+                                      when={projectId()}
+                                      fallback="session reader."
+                                    >
+                                      {(id) => (
+                                        <>
+                                          {" "}
+                                          <A
+                                            class="text-accent underline"
+                                            href={sessionHref(
+                                              id(),
+                                              sourceSession() ?? "",
+                                            )}
+                                          >
+                                            session reader.
+                                          </A>
+                                        </>
+                                      )}
+                                    </Show>
+                                  </div>
+                                </Match>
+                                <Match when={value().state === "unavailable"}>
+                                  Source session no longer available
+                                </Match>
+                              </Switch>
+                            )}
+                          </Show>
+                        </div>
+                      </Show>
+                    )}
+                  </Show>
+                </Show>
+                <Show when={props.files}>
+                  {(files) => <KnowledgeFiles loader={files()} />}
                 </Show>
               </div>
-              <div>
-                <span class="font-semibold">Recorded confidence</span>{" "}
-                {formatConfidence(props.entry.confidence)} — recorded value, not
-                a probability of correctness
+              <div class="space-y-2">
+                <div>
+                  <span class="font-semibold">Sharing</span>{" "}
+                  {isShared() ? "shared" : "project"}
+                </div>
+                <div>
+                  <span class="font-semibold">Last change</span>{" "}
+                  {formatWhen(props.entry.updated_at ?? props.entry.created_at)}
+                  <Show when={recordedWriter()}>
+                    {" · "}
+                    {recordedWriter()}
+                  </Show>
+                </div>
+                <div>
+                  <span class="font-semibold">Recorded confidence</span>{" "}
+                  {formatConfidence(props.entry.confidence)} — recorded value,
+                  not a probability of correctness
+                </div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </details>
 
         <Show when={props.versions}>
           {(versions) => (
@@ -409,14 +420,18 @@ export const KnowledgeDocument: Component<{
           </dl>
         </details>
 
-        <div class="mt-7 border-t border-dashed border-line pt-5">
-          <div class="eyebrow mb-1">Actions</div>
-          <p class="m-0 text-xs text-muted">
-            Edits and deletions are revision-checked; restores create a new
-            version.
-          </p>
-          <FutureActionRow actions={FUTURE_ACTIONS} primary="Ask agent" />
-        </div>
+        <details class="mt-6 border-t border-line pt-4">
+          <summary class="cursor-pointer text-xs font-medium text-muted">
+            More actions
+          </summary>
+          <div class="pt-3">
+            <p class="m-0 text-xs text-muted">
+              Edits and deletions are revision-checked; restores create a new
+              version.
+            </p>
+            <FutureActionRow actions={FUTURE_ACTIONS} primary="Ask agent" />
+          </div>
+        </details>
       </div>
     </article>
   );

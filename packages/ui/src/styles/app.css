@@ -6,103 +6,95 @@
    here instead of in a tailwind.config.js (Solid UI's Tailwind 3 recipe). */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Lore design tokens. The token *names* come from design-fixture v2.2; the
-   *values* are derived from the marketing website's theme
-   (packages/website/public/theme.css, src/styles/starlight.css) so the app
-   and the site share one palette. Only the semantic tokens are copied —
-   never the website's layout CSS. The mapping (website var → UI token) is
-   documented in packages/ui/README.md; keep the two in sync.
-
-   Raw brand palette (theme.css :root --c0..--c2 cream, --g0..--g6 greens,
-   --ink/--mid). Fixed across themes, like on the website. */
+/* Palette choices live here. Semantic roles below keep component classes stable.
+   To change families, replace olive/amber in these two scales. The logo SVGs,
+   version diffs, and categorical chart palettes remain independent. */
 :root {
-  --c0: #f7f2e8;
-  --c1: #ede5d0;
-  --c2: #dfd5bb;
-  --g0: #1a3320;
-  --g1: #2a4d32;
-  --g2: #3d6644;
-  --g3: #5a8f63;
-  --g4: #8fba96;
-  --g5: #c4ddc7;
-  --g6: #e8f2e9;
-  --ink: #1a2e1b;
-  --mid: #4a5f4c;
+  --palette-base-50: var(--color-olive-50);
+  --palette-base-100: var(--color-olive-100);
+  --palette-base-200: var(--color-olive-200);
+  --palette-base-300: var(--color-olive-300);
+  --palette-base-400: var(--color-olive-400);
+  --palette-base-500: var(--color-olive-500);
+  --palette-base-600: var(--color-olive-600);
+  --palette-base-700: var(--color-olive-700);
+  --palette-base-800: var(--color-olive-800);
+  --palette-base-900: var(--color-olive-900);
+  --palette-base-950: var(--color-olive-950);
+  --palette-accent-50: var(--color-amber-50);
+  --palette-accent-100: var(--color-amber-100);
+  --palette-accent-200: var(--color-amber-200);
+  --palette-accent-300: var(--color-amber-300);
+  --palette-accent-400: var(--color-amber-400);
+  --palette-accent-500: var(--color-amber-500);
+  --palette-accent-600: var(--color-amber-600);
+  --palette-accent-700: var(--color-amber-700);
+  --palette-accent-800: var(--color-amber-800);
+  --palette-accent-900: var(--color-amber-900);
+  --palette-accent-950: var(--color-amber-950);
 
-  /* Light theme — website light semantic tokens (theme.css :root). */
-  --bg: var(--c0); /* website --bg */
-  --surface: var(--c0); /* website --surface */
-  --chrome: var(--c1); /* website --surface-alt */
-  --nav: var(--c1); /* website --bg-alt */
-  --shade: var(--c1); /* website --bg-alt */
-  --soft: var(--g6); /* website --highlight-bg */
-  --line: var(--c2); /* website --border */
-  --text: var(--ink); /* website --text */
-  --muted: var(--mid); /* website --text-muted */
-  --heading: var(--g0); /* website --heading */
-  --accent: var(--g2); /* website --link */
-  --accent-hover: var(--g0); /* website --link-hover */
-  --accent-contrast: var(--c0); /* website --inverse-text */
-  --accent-soft: var(--g6); /* website --highlight-bg */
-  --accent-soft-text: var(--g2); /* website --highlight-text */
-  --emphasis: var(--g1); /* website --emphasis */
-  --inverse-bg: var(--g0); /* website --inverse-bg */
-  --inverse-bg-hover: var(--g1); /* website --inverse-bg-hover */
-  --inverse-text: var(--c0); /* website --inverse-text */
-  --inverse-text-dim: var(--g5); /* website --inverse-text-dim */
-  --mark: var(--g6); /* website --highlight-bg */
-  --mark-edge: var(--g3); /* website --eyebrow */
-  --gold: var(--g1); /* website --emphasis */
-  --thread: var(--g4); /* website --link-border */
-  --quote-edge: var(--g3); /* website --eyebrow */
-  --danger: #8b3a3a; /* website --error */
+  /* Light theme: olive surfaces with readable amber actions and links. */
+  --bg: var(--palette-base-100);
+  --surface: var(--palette-base-50);
+  --chrome: var(--palette-base-100);
+  --nav: var(--chrome);
+  --shade: var(--chrome);
+  --soft: var(--chrome);
+  --line: var(--palette-base-200);
+  --text: var(--palette-base-900);
+  --muted: var(--palette-base-600);
+  --heading: var(--palette-base-950);
+  --accent: var(--palette-accent-700);
+  --accent-hover: var(--palette-accent-800);
+  --accent-contrast: var(--palette-base-50);
+  --accent-soft: var(--palette-accent-50);
+  --accent-soft-text: var(--palette-accent-800);
+
+  /* Shared roles follow the selected palette in either theme. */
+  --emphasis: var(--text);
+  --inverse-bg: var(--accent);
+  --inverse-bg-hover: var(--accent-hover);
+  --inverse-text: var(--accent-contrast);
+  --inverse-text-dim: var(--inverse-text);
+  --mark: var(--accent-soft);
+  --mark-edge: var(--accent);
+  --gold: var(--accent);
+  --thread: var(--accent);
+  --quote-edge: var(--accent);
+  --avatar-bg: var(--accent-soft);
+  --avatar-text: var(--accent-soft-text);
+  --avatar-agent-bg: var(--accent);
+  --avatar-agent-text: var(--accent-contrast);
+
+  /* Data colors and destructive states have their own meaning. */
+  --chart-accent: #3d6644;
+  --chart-emphasis: #2a4d32;
+  --danger: #8b3a3a;
   --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
-  --avatar-bg: var(--g6); /* website --highlight-bg */
-  --avatar-text: var(--g2); /* website --highlight-text */
-  --avatar-agent-bg: var(--g0); /* website --inverse-bg */
-  --avatar-agent-text: var(--c0); /* website --inverse-text */
-
-  /* Elevation — the website's two card shadows (theme.css .card / .feature). */
-  --shadow-soft: 0 4px 14px rgba(26, 51, 32, 0.06);
-  --shadow-lifted: 0 16px 48px rgba(26, 51, 32, 0.08);
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 6%, transparent);
+  --shadow-lifted: 0 16px 48px color-mix(in srgb, var(--palette-base-950) 8%, transparent);
 }
 
-/* Dark theme — website dark semantic tokens (theme.css [data-theme="dark"],
-   which is also what starlight.css uses for the docs). */
 .dark {
-  --bg: #0d1913; /* website --bg */
-  --surface: #14251b; /* website --surface */
-  --chrome: #1a3124; /* website --surface-alt */
-  --nav: #101f17; /* website --bg-alt */
-  --shade: #101f17; /* website --bg-alt */
-  --soft: #172c20; /* website --highlight-bg */
-  --line: #26402f; /* website --border */
-  --text: #e8f1e6; /* website --text */
-  --muted: #9fbaa6; /* website --text-muted */
-  --heading: #f2f7ee; /* website --heading */
-  --accent: #a6d6ae; /* website --link */
-  --accent-hover: #dcecdd; /* website --link-hover */
-  --accent-contrast: #0d1913; /* website --bg (dark text on the light accent) */
-  --accent-soft: #172c20; /* website --highlight-bg */
-  --accent-soft-text: #bfe0c4; /* website --highlight-text */
-  --emphasis: #9ad3a4; /* website --emphasis */
-  --inverse-bg: #1e3a29; /* website --inverse-bg */
-  --inverse-bg-hover: #26492f; /* website --inverse-bg-hover */
-  --inverse-text: #f2f7ee; /* website --inverse-text */
-  --inverse-text-dim: #c4ddc7; /* website --inverse-text-dim */
-  --mark: #172c20; /* website --highlight-bg */
-  --mark-edge: #79ab84; /* website --eyebrow */
-  --gold: #9ad3a4; /* website --emphasis */
-  --thread: #4a7a55; /* website --link-border */
-  --quote-edge: #79ab84; /* website --eyebrow */
-  --danger: #e39393; /* website --error */
-  --avatar-bg: #172c20; /* website --highlight-bg */
-  --avatar-text: #bfe0c4; /* website --highlight-text */
-  --avatar-agent-bg: #1e3a29; /* website --inverse-bg */
-  --avatar-agent-text: #f2f7ee; /* website --inverse-text */
-
-  --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.28);
-  --shadow-lifted: 0 14px 34px rgba(0, 0, 0, 0.38); /* website .modal */
+  --bg: var(--palette-base-950);
+  --surface: var(--palette-base-900);
+  --chrome: var(--palette-base-800);
+  --nav: var(--surface);
+  --shade: var(--surface);
+  --line: var(--palette-base-700);
+  --text: var(--palette-base-200);
+  --muted: var(--palette-base-400);
+  --heading: var(--palette-base-50);
+  --accent: var(--palette-accent-400);
+  --accent-hover: var(--palette-accent-300);
+  --accent-contrast: var(--palette-base-950);
+  --accent-soft: var(--palette-accent-950);
+  --accent-soft-text: var(--palette-accent-200);
+  --chart-accent: #a6d6ae;
+  --chart-emphasis: #9ad3a4;
+  --danger: #e39393;
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 28%, transparent);
+  --shadow-lifted: 0 14px 34px color-mix(in srgb, var(--palette-base-950) 38%, transparent);
 }
 
 @theme inline {
@@ -139,6 +131,9 @@
   --color-soft: var(--soft);
   --color-shade: var(--shade);
   --color-gold: var(--gold);
+  --color-gold-soft: var(--accent-soft);
+  --color-chart-accent: var(--chart-accent);
+  --color-chart-emphasis: var(--chart-emphasis);
   --color-nav: var(--nav);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
@@ -150,8 +145,8 @@
      class strings resolve to Lore colours. Solid UI's `accent` (a hover
      surface) collides with Lore's brand `--accent`; the copied components
      were edited to use `soft` for hover fills instead. Filled (primary)
-     controls use the website's dark-block colours (--inverse-*), which keep
-     light text in both themes exactly like the site's buttons. */
+     controls use the accent primary colours (--inverse-*) with contrasting
+     foregrounds for the resolved theme. */
   --color-background: var(--bg);
   --color-foreground: var(--text);
   --color-card: var(--surface);
@@ -159,6 +154,7 @@
   --color-popover: var(--surface);
   --color-popover-foreground: var(--text);
   --color-primary: var(--inverse-bg);
+  --color-primary-hover: var(--inverse-bg-hover);
   --color-primary-foreground: var(--inverse-text);
   --color-secondary: var(--chrome);
   --color-secondary-foreground: var(--text);
@@ -176,7 +172,7 @@
   --radius-lg: 10px;
   --radius-xl: 14px;
 
-  /* Shadows: soft, low-alpha, green-tinted like the website's cards. */
+  /* Elevation follows the base palette. */
   --shadow-xs: var(--shadow-soft);
   --shadow-sm: var(--shadow-soft);
   --shadow-md: var(--shadow-soft);
@@ -213,6 +209,9 @@
     font: inherit;
     color: inherit;
   }
+  input:where([type="checkbox"], [type="radio"]) {
+    accent-color: var(--accent);
+  }
   h1,
   h2 {
     color: var(--heading);
@@ -225,7 +224,7 @@
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.12em;
-    color: var(--mark-edge); /* website --eyebrow */
+    color: var(--muted);
   }
   .passage-target {
     background: var(--mark);
@@ -440,3 +439,27 @@
     font-weight: 700;
   }
 }
+
+/* Navigation occupies a grid track, so opening it moves the workspace. */
+.workspace-frame { transition: grid-template-columns 200ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) { .workspace-frame { transition: none; } }
+
+/* Primary navigation remains visible independently of the context pane. */
+.rail-action { display:flex; align-items:center; justify-content:center; width:36px; height:36px; flex-shrink:0; border-radius:8px; color:var(--muted); outline:none; }
+.rail-action:hover { background:var(--soft); color:var(--text); }
+.rail-action:focus-visible { box-shadow:inset 0 0 0 2px var(--accent); }
+.rail-action[aria-current="page"] { background:var(--accent-soft); color:var(--accent-soft-text); }
+
+/* Mobile navigation enters from the leading edge without moving the reader. */
+@keyframes mobile-navigation-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes mobile-navigation-out { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+.mobile-navigation-drawer[data-expanded] { animation: mobile-navigation-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.mobile-navigation-drawer[data-closed] { animation: mobile-navigation-out 150ms ease-in; }
+@media (prefers-reduced-motion: reduce) { .mobile-navigation-drawer[data-expanded], .mobile-navigation-drawer[data-closed] { animation: none; } }
+
+
+@keyframes mobile-bottom-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes mobile-bottom-sheet-out { from { transform: translateY(0); } to { transform: translateY(100%); } }
+.mobile-bottom-sheet[data-expanded] { animation: mobile-bottom-sheet-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.mobile-bottom-sheet[data-closed] { animation: mobile-bottom-sheet-out 150ms ease-in; }
+@media (prefers-reduced-motion: reduce) { .mobile-bottom-sheet[data-expanded], .mobile-bottom-sheet[data-closed] { animation: none; } }
