@@ -40,7 +40,10 @@ import {
   onMount,
   untrack,
 } from "solid-js";
-import { createVirtualizer } from "@tanstack/solid-virtual";
+import {
+  createVirtualizer,
+  observeElementOffset,
+} from "@tanstack/solid-virtual";
 
 import { StaleBadge } from "~/components/lore/StaleBadge";
 import {
@@ -268,6 +271,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   const [listOffset, setListOffset] = createSignal(0);
   const [toolbarHeight, setToolbarHeight] = createSignal(0);
   let toolbarEl: HTMLDivElement | undefined;
+  const distanceFromToolbar = (row: HTMLElement, scroll: HTMLElement) =>
+    row.getBoundingClientRect().top -
+    (toolbarEl?.getBoundingClientRect().bottom ??
+      scroll.getBoundingClientRect().top);
 
   // A stable key function: measurements re-derive only when the count or a
   // measured size changes, not on every content update.
@@ -286,6 +293,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       return toolbarHeight();
     },
     getScrollElement: () => scrollEl ?? null,
+    // The idle debounce can run between an immediate scrollTop write and its
+    // native scroll event. Its captured offset then predates a prepend: read
+    // the live position so fresh row measurements cannot roll the view back.
+    observeElementOffset: (instance, callback) =>
+      observeElementOffset(instance, (offset, isScrolling) =>
+        callback(
+          isScrolling ? offset : (instance.scrollElement?.scrollTop ?? offset),
+          isScrolling,
+        ),
+      ),
     estimateSize: () => ROW_ESTIMATE,
     overscan: ROW_OVERSCAN,
   });
@@ -654,10 +671,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
      * appends add height below the fold that must not move the view). */
     anchorStart: number;
     anchor: { key: string; index: number } | null;
-    /** The first row at the fold and its screen top, refreshed every
-     * frame until the page lands — the mount window and the first
-     * measures of the rows at the top keep shifting the fold for a few
-     * frames, so only the freshest capture reflects the settled view. */
+    /** A mounted row and its distance from the sticky toolbar's visible
+     * edge. Loading reflows retain this reference; gestures refresh it to
+     * follow where the user is reading while the page is in flight. */
     pin: { key: string; top: number } | null;
     /** The fold row itself — the row actually under the eye. It sits at
      * the viewport edge and slips in and out of the overscan range, so
@@ -716,42 +732,38 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           pinItem && rowEl
             ? {
                 key: String(pinItem.key),
-                top: rowEl.getBoundingClientRect().top,
+                top: distanceFromToolbar(rowEl, el),
               }
             : null,
         foldPin:
           foldItem && foldEl
             ? {
                 key: String(foldItem.key),
-                top: foldEl.getBoundingClientRect().top,
+                top: distanceFromToolbar(foldEl, el),
               }
             : null,
       };
     };
-    // The repin only guards loads that started near the top — the scroll-up
-    // auto-load path, where a whole fresh page of unmeasured rows lands
-    // between the fold and the top. Mid-scroll loads have their neighbours
-    // measured already and the estimate delta alone holds the view.
-    const enablePin = el.scrollTop - listOffset() < el.clientHeight;
+    // Pin manual mid-history loads too: wrapping progress/search controls can
+    // change the sticky toolbar's height even when neighbouring rows are measured.
+    // Store distance from its visible edge, not an absolute document position.
     prepend = {
       top: el.scrollTop,
       anchorStart:
         virtualizer.getOffsetForIndex(last?.index ?? 0, "start")?.[0] ?? 0,
       anchor: last ? { key: String(last.key), index: last.index } : null,
-      ...(enablePin ? pinNow(items) : { pin: null, foldPin: null }),
+      ...pinNow(items),
       serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
     };
-    // Refresh the pin every frame until the page lands: `getVirtualItems`
-    // can still return the pre-scroll mount window right now, an unmounted
-    // row cannot witness the prepend, the first measures of the rows
-    // already at the top keep shifting the fold for a few frames, and a
-    // user scroll mid-load moves the fold too — the refresh deliberately
-    // does not stop on gestures, so the pin that lands is at most a frame
-    // behind what the user is looking at.
+    // Sample the mount window until the page lands, filling missing pins
+    // and following user gestures. Without a gesture, loading-control
+    // reflows must not replace the original reading position.
     const firstKeyAtCall = rows()[0]?.key;
-    if (enablePin && typeof requestAnimationFrame === "function") {
+    if (typeof requestAnimationFrame === "function") {
       let frames = 0;
+      let lastPinSerial = prepend.serialAtStart;
+      let lastPinScrollTop = el.scrollTop;
       const capturePin = () => {
         // A prepend changed the top row — the request is spent. A live
         // append at the end leaves the fold untouched, so keep refreshing.
@@ -769,8 +781,19 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         if (!staleMount) {
           const { pin, foldPin } = pinNow(mounted);
           if (prepend) {
-            if (pin) prepend.pin = pin;
-            if (foldPin) prepend.foldPin = foldPin;
+            // A new gesture or continued momentum can replace the anchor.
+            // Once the offset settles, a later toolbar-only reflow cannot.
+            const serial = userSerial() ?? -1;
+            const userMoved =
+              serial >= 0 &&
+              (serial !== lastPinSerial ||
+                (serial !== prepend.serialAtStart &&
+                  el.scrollTop !== lastPinScrollTop));
+            lastPinSerial = serial;
+            lastPinScrollTop = el.scrollTop;
+            if (pin && (userMoved || !prepend.pin)) prepend.pin = pin;
+            if (foldPin && (userMoved || !prepend.foldPin))
+              prepend.foldPin = foldPin;
           }
         }
         requestAnimationFrame(capturePin);
@@ -841,10 +864,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // their real heights over the next frames, and each first-measure
         // adjustment drags the viewport. Keep correcting for a couple dozen
         // frames — a correction that finds no drift costs nothing, and late
-        // measures must not get the last word. The pin was refreshed every
-        // frame while the page was in flight, gestures included, so it is
-        // at most a frame behind the screen the user last saw — capturing
-        // one here would read the pre-relayout DOM instead.
+        // measures must not get the last word. The pin follows user gestures
+        // while the page is in flight; capturing one here would read the
+        // pre-relayout DOM instead.
         const pin = before.pin;
         const foldPin = before.foldPin;
         if ((pin || foldPin) && typeof requestAnimationFrame === "function") {
@@ -864,7 +886,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               const rowEl = el.querySelector<HTMLElement>(
                 `[data-row-key="${CSS.escape(p.key)}"]`,
               );
-              return rowEl ? rowEl.getBoundingClientRect().top - p.top : null;
+              return rowEl ? distanceFromToolbar(rowEl, el) - p.top : null;
             };
             const drift =
               (primary ? readDrift(primary) : null) ??
@@ -1990,7 +2012,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     {(row) => (
                       <div
                         ref={(el) =>
-                          queueMicrotask(() => virtualizer.measureElement(el))
+                          queueMicrotask(() => {
+                            // A new range can remove this row before its ref
+                            // runs. Detached nodes report zero height and would
+                            // corrupt the cached offsets used for prepends.
+                            if (el.isConnected) virtualizer.measureElement(el);
+                          })
                         }
                         data-index={item()?.index}
                         data-row-key={row().key}

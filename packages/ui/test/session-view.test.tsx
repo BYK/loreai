@@ -1432,6 +1432,208 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     await tick();
   };
 
+  it("keeps the reading window when an idle callback precedes the native prepend scroll event", async () => {
+    const [messages, setMessages] = createSignal(older(40));
+    let deliver!: () => void;
+    let idle: (() => void) | undefined;
+    const nativeTimeout = window.setTimeout.bind(window);
+    const timer = vi.spyOn(window, "setTimeout").mockImplementation(((
+      handler: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      // Capture the real virtualizer debounce, including the offset its last
+      // native scroll event observed. Do not synthesize a virtualizer state.
+      if (delay === 150 && typeof handler === "function")
+        idle = handler as () => void;
+      return nativeTimeout(handler, delay, ...args);
+    }) as typeof window.setTimeout);
+    const layout = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.dataset.rowKey?.startsWith("m.page-") ? 104 : sizeOf(this);
+      });
+    try {
+      mount({
+        get messages() {
+          return messages();
+        },
+        distillations: [],
+        messageCount: 140,
+        hasOlder: true,
+        onLoadOlder: () =>
+          new Promise<void>((resolve) => {
+            deliver = () => {
+              setMessages((previous) => [
+                ...older(100).map((message, i) => ({
+                  ...message,
+                  id: `page-${i}`,
+                })),
+                ...previous,
+              ]);
+              resolve();
+            };
+          }),
+      });
+      for (let i = 0; i < 30; i++) await new Promise(requestAnimationFrame);
+      fireScroll(scrollEl(), 2000);
+      await tick();
+      fireEvent.click(screen.getByTestId("load-older"));
+      expect(idle).toBeDefined();
+      const reset = idle!;
+      const el = scrollEl();
+      // Browsers update scrollTop immediately but deliver the scroll event
+      // later. Let the pending idle callback run in that intervening task.
+      Object.defineProperty(el, "scrollTo", {
+        configurable: true,
+        value: (options?: ScrollToOptions | number) => {
+          const top = typeof options === "number" ? options : options?.top;
+          if (typeof top === "number") el.scrollTop = top;
+        },
+      });
+      deliver();
+      await tick();
+      expect(el.scrollTop).toBeGreaterThan(13000);
+      reset();
+      await tick();
+      expect(el.scrollTop).toBeGreaterThan(13000);
+      expect(mountedKeys()).toContain("m.old-16");
+      el.dispatchEvent(new Event("scroll"));
+      await tick();
+      expect(el.scrollTop).toBeGreaterThan(13000);
+      expect(mountedKeys()).toContain("m.old-16");
+    } finally {
+      timer.mockRestore();
+      layout.mockRestore();
+    }
+  });
+
+  for (const gesture of [
+    "without a gesture",
+    "after a settled gesture",
+    "during momentum",
+  ] as const) {
+    it(`keeps the reading anchor through loading-toolbar reflows ${gesture}`, async () => {
+      const [messages, setMessages] = createSignal(older(40));
+      let toolbarBottom = 100;
+      let deliver!: () => void;
+      const originalRect = HTMLElement.prototype.getBoundingClientRect;
+      const layout = vi
+        .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+        .mockImplementation(function (this: HTMLElement) {
+          const rect = originalRect.call(this);
+          if (this.dataset.testid === "reader-toolbar")
+            return new DOMRect(
+              rect.x,
+              rect.y,
+              rect.width,
+              toolbarBottom - rect.y,
+            );
+          if (this.dataset.rowKey) {
+            const top = Number(this.dataset.index) * 120 - scrollEl().scrollTop;
+            return new DOMRect(rect.x, top, rect.width, 120);
+          }
+          return rect;
+        });
+      try {
+        mount({
+          get messages() {
+            return messages();
+          },
+          distillations: [],
+          messageCount: 140,
+          hasOlder: true,
+          onLoadOlder: () =>
+            new Promise<void>((resolve) => {
+              // The progress controls wrap differently during loading. Browser
+              // anchoring may keep row tops unchanged while the toolbar moves.
+              toolbarBottom = 80;
+              deliver = () => {
+                toolbarBottom = 100;
+                setMessages((previous) => [
+                  ...older(100).map((message, i) => ({
+                    ...message,
+                    id: `page-${i}`,
+                  })),
+                  ...previous,
+                ]);
+                resolve();
+              };
+            }),
+        });
+        for (let i = 0; i < 30; i++) await new Promise(requestAnimationFrame);
+        fireScroll(scrollEl(), 2000);
+        await tick();
+        fireEvent.click(screen.getByTestId("load-older"));
+        for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+        if (gesture !== "without a gesture") {
+          scrollEl().dispatchEvent(new Event("wheel"));
+          fireScroll(scrollEl(), 2080);
+          for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+          if (gesture === "after a settled gesture") {
+            toolbarBottom = 60;
+          } else {
+            // Momentum continues after the initial input event: no new serial.
+            fireScroll(scrollEl(), 2160);
+          }
+          for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+        }
+        deliver();
+        for (let i = 0; i < 30; i++) await new Promise(requestAnimationFrame);
+        const latest =
+          gesture === "without a gesture"
+            ? 2000
+            : gesture === "after a settled gesture"
+              ? 2080
+              : 2160;
+        // Gestures happened under the 80px loading toolbar. Restoring its
+        // 100px edge needs 20px less scroll to keep the same visible distance.
+        const toolbarGrowth = gesture === "without a gesture" ? 0 : 20;
+        expect(scrollEl().scrollTop).toBe(latest + 100 * 120 - toolbarGrowth);
+      } finally {
+        layout.mockRestore();
+      }
+    });
+  }
+
+  it("does not cache zero heights from rows removed before deferred measurement", async () => {
+    const layout = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.isConnected ? sizeOf(this) : 0;
+      });
+    try {
+      const [messages, setMessages] = createSignal(older(40));
+      mount({
+        get messages() {
+          return messages();
+        },
+        distillations: [],
+        messageCount: 140,
+        hasOlder: true,
+        onLoadOlder: async () => {
+          setMessages((previous) => [
+            ...older(100).map((message, i) => ({
+              ...message,
+              id: `page-${i}`,
+            })),
+            ...previous,
+          ]);
+        },
+      });
+      for (let i = 0; i < 30; i++) await new Promise(requestAnimationFrame);
+      fireScroll(scrollEl(), 2000);
+      await tick();
+      fireEvent.click(screen.getByTestId("load-older"));
+      await tick();
+      // The estimate-delta scroll replaces the transient mount window before
+      // its queued refs run. Detached nodes must retain their 120px estimate.
+      expect(screen.getByTestId("session-rows").style.height).toBe("16800px");
+    } finally {
+      layout.mockRestore();
+    }
+  });
+
   it("lands at the newest message once rows first exist", async () => {
     mount({
       messages: older(40),

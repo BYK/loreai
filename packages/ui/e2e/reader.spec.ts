@@ -251,40 +251,46 @@ test.describe("session reader", () => {
     await fresh.close();
   });
 
-  test("loading older history twice keeps the row under the eye where it was", async ({
-    page,
-  }) => {
-    // The distillation over messages 0–9 is the first row throughout: the
-    // prepended pages land after it, so a first-row witness would never see
-    // them. The rows arrive unmeasured and are measured against the scroll
-    // offset the virtualiser holds at that moment. Measured from the sticky
-    // toolbar's edge, which the row is read against.
-    await openReader(page);
-    await revealRow(page, "needle-180 ");
-    const rowTop = () =>
-      rowWith(page, "needle-180 ").evaluate(
-        (row) =>
-          row.getBoundingClientRect().top -
-          document
-            .querySelector('[data-testid="reader-toolbar"]')!
-            .getBoundingClientRect().bottom,
+  for (const theme of ["light", "dark"] as const) {
+    test(`loading older history twice keeps the row under the eye where it was in ${theme}`, async ({
+      page,
+    }) => {
+      // The distillation over messages 0–9 is the first row throughout: the
+      // prepended pages land after it, so a first-row witness would never see
+      // them. The rows arrive unmeasured and are measured against the scroll
+      // offset the virtualiser holds at that moment. Measured from the sticky
+      // toolbar's edge, which the row is read against.
+      await page.addInitScript(
+        (choice) => localStorage.setItem("lore.ui.theme", choice),
+        theme,
       );
-    const before = await rowTop();
-    await clickLoadOlder(page);
-    await expect(page.getByTestId("reader-coverage-line")).toContainText(
-      "200 of 230",
-    );
-    // The unmeasured prepended rows settle once the virtualiser measures
-    // them; the row's position converges to where it was, never a fixed wait.
-    await expect
-      .poll(async () => Math.abs((await rowTop()) - before))
-      .toBeLessThan(2);
-    await clickLoadOlder(page);
-    await expect(page.getByTestId("history-start")).toBeVisible();
-    await expect
-      .poll(async () => Math.abs((await rowTop()) - before))
-      .toBeLessThan(2);
-  });
+      await openReader(page);
+      await revealRow(page, "needle-180 ");
+      const rowTop = () =>
+        rowWith(page, "needle-180 ").evaluate(
+          (row) =>
+            row.getBoundingClientRect().top -
+            document
+              .querySelector('[data-testid="reader-toolbar"]')!
+              .getBoundingClientRect().bottom,
+        );
+      const before = await rowTop();
+      await clickLoadOlder(page);
+      await expect(page.getByTestId("reader-coverage-line")).toContainText(
+        "200 of 230",
+      );
+      // The unmeasured prepended rows settle once the virtualiser measures
+      // them; the row's position converges to where it was, never a fixed wait.
+      await expect
+        .poll(async () => Math.abs((await rowTop()) - before))
+        .toBeLessThan(2);
+      await clickLoadOlder(page);
+      await expect(page.getByTestId("history-start")).toBeVisible();
+      await expect
+        .poll(async () => Math.abs((await rowTop()) - before))
+        .toBeLessThan(2);
+    });
+  }
 
   test("a distillation is labelled compressed context, placed after its sources and never a search hit", async ({
     page,
