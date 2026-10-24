@@ -21,13 +21,7 @@ import { useWorkspace } from "~/routes/workspace";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { errorStateFor } from "./ErrorState";
 import { ListRow } from "./Panes";
 import { StateCard } from "./StateCard";
@@ -275,21 +269,14 @@ export const EntitiesPage: Component = () => {
       </p>
 
       <div class="mb-4 flex items-center gap-2">
-        <Select
+        <ResponsiveSelect
+          label="Entity type"
+          sheetTitle="Filter by entity type"
           value={typeFilter() ?? "all"}
-          onChange={(v) => setType(v)}
+          onChange={setType}
           options={["all", ...ENTITY_TYPES]}
-          itemComponent={(item) => (
-            <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-          )}
-        >
-          <SelectTrigger aria-label="Entity type" class="h-10 w-36">
-            <SelectValue<string>>
-              {(state) => state.selectedOption()}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent />
-        </Select>
+          triggerClass="h-10 w-36"
+        />
         <Show when={list.loader.data()}>
           {(page) => (
             <span class="text-xs text-muted">

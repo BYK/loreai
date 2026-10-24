@@ -26,13 +26,7 @@ import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { ResponsiveSelect } from "../ui/responsive-select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 
 type KnowledgeTableRow = KnowledgeEntry & {
@@ -207,30 +201,20 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     options: readonly string[],
     placeholder: string,
   ) => (
-    <Select
+    <ResponsiveSelect
+      label={name}
+      sheetTitle={
+        name === "category" ? "Knowledge category" : "Knowledge scope"
+      }
       value={props.query[name] ?? null}
       onChange={(value) =>
-        go({
-          ...props.query,
-          [name]: (value || null) as never,
-          cursor: null,
-        })
+        go({ ...props.query, [name]: (value || null) as never, cursor: null })
       }
       options={["", ...options]}
       placeholder={placeholder}
-      itemComponent={(item) => (
-        <SelectItem item={item.item}>
-          {item.item.rawValue || placeholder}
-        </SelectItem>
-      )}
-    >
-      <SelectTrigger aria-label={name} class="h-9 min-w-32 text-xs">
-        <SelectValue<string>>
-          {(state) => state.selectedOption() || placeholder}
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent />
-    </Select>
+      optionLabel={(value) => value || placeholder}
+      triggerClass="h-9 min-w-32 text-xs"
+    />
   );
   return (
     <div class="p-4 sm:p-5">
@@ -253,10 +237,10 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
               value={props.query.q}
               aria-label="Knowledge search"
               placeholder="Filter knowledge"
-              class="h-9 text-xs"
+              class="h-11 text-base md:h-9 md:text-xs"
             />
           </TextField>
-          <Button type="submit" size="sm">
+          <Button type="submit" size="sm" class="h-11 md:h-9">
             Search
           </Button>
         </form>

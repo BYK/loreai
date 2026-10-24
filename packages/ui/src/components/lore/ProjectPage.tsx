@@ -20,13 +20,7 @@ import { ListRow } from "./Panes";
 import { SharingPanel } from "./SharingPanel";
 import { StateCard } from "./StateCard";
 import { Button } from "../ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 
 export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
@@ -120,24 +114,22 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
               name="q"
               aria-label="Search project memory"
               placeholder="Search this project"
+              class="h-11 md:h-10"
             />
           </TextField>
-          <Select
+          <ResponsiveSelect
+            label="Search scope"
+            sheetTitle="Search scope"
             value={scope()}
-            onChange={setScope}
+            onChange={(value) => setScope((value ?? "all") as RecallScope)}
             options={["all", "session", "project", "knowledge"]}
-            itemComponent={(item) => (
-              <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-            )}
+            triggerClass="h-10 w-28"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            class="h-11 flex-1 sm:flex-none md:h-10"
           >
-            <SelectTrigger aria-label="Search scope" class="h-10 w-28">
-              <SelectValue<string>>
-                {(state) => state.selectedOption()}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent />
-          </Select>
-          <Button type="submit" size="sm" class="h-10 flex-1 sm:flex-none">
             Search
           </Button>
         </form>

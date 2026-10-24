@@ -1054,7 +1054,8 @@ describe("shell: workspace knowledge and search", () => {
     const { history } = mount("/knowledge?cursor=next", client);
     await screen.findAllByTestId("knowledge-row");
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: /^project\b/ }), {
+    const projectTrigger = screen.getByRole("button", { name: /^project\b/ });
+    fireEvent.pointerDown(projectTrigger, {
       button: 0,
     });
     fireEvent.click(
@@ -1063,6 +1064,9 @@ describe("shell: workspace knowledge and search", () => {
 
     await waitFor(() =>
       expect(history.get()).toBe("/knowledge?project=p-empty"),
+    );
+    expect(screen.getByRole("button", { name: /^project\b/ })).toBe(
+      projectTrigger,
     );
     expect(client.allPageOpts.at(-1)).toEqual(
       expect.objectContaining({ project: "p-empty", cursor: null }),
@@ -1076,6 +1080,9 @@ describe("shell: workspace knowledge and search", () => {
     );
 
     await waitFor(() => expect(history.get()).toBe("/knowledge"));
+    expect(screen.getByRole("button", { name: /^project\b/ })).toBe(
+      projectTrigger,
+    );
   });
 
   it("keeps an unknown project filter visible while projects load", async () => {

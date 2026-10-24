@@ -1,13 +1,6 @@
 import type { Component } from "solid-js";
 import { A } from "@solidjs/router";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  onCleanup,
-  Show,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { KnowledgeQuery } from "~/contracts";
 import {
   KNOWLEDGE_CATEGORIES,
@@ -30,13 +23,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  DialogTrigger,
-} from "~/components/ui/dialog";
+import { Dialog, DialogTitle, DialogTrigger } from "~/components/ui/dialog";
 import { Icon } from "~/components/shell/Icon";
+import { BottomSheetContent } from "~/components/ui/bottom-sheet";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
+import { createResponsiveOverlay } from "~/lib/responsive-overlay";
 
 const categoryLabels: Record<string, string> = {
   decision: "Decisions",
@@ -85,29 +76,13 @@ export const KnowledgeListToolbar: Component<{
   const appliedSearch = createMemo(() => props.query.q);
   const [search, setSearch] = createSignal(appliedSearch());
   createEffect(() => setSearch(appliedSearch()));
-  const [open, setOpen] = createSignal(false);
-  const media = window.matchMedia?.("(min-width: 48rem)");
-  const [mobile, setMobile] = createSignal(media ? !media.matches : false);
   let toolbar: HTMLElement | undefined;
-  const focusFilters = () => {
-    const trigger = toolbar?.querySelector<HTMLButtonElement>(
-      "[data-knowledge-filters-trigger]",
-    );
-    if (trigger?.getClientRects().length)
-      trigger.focus({ preventScroll: true });
-    else
-      document
-        .querySelector<HTMLButtonElement>('[data-testid="context-toggle"]')
-        ?.focus({ preventScroll: true });
-  };
-  const changeLayout = () => {
-    const wasOpen = open();
-    setOpen(false);
-    setMobile(media ? !media.matches : false);
-    if (wasOpen) queueMicrotask(focusFilters);
-  };
-  media?.addEventListener("change", changeLayout);
-  onCleanup(() => media?.removeEventListener("change", changeLayout));
+  const { mobile, open, setOpen, restoreFocus } = createResponsiveOverlay(
+    () =>
+      toolbar?.querySelector<HTMLButtonElement>(
+        "[data-knowledge-filters-trigger]",
+      ) ?? undefined,
+  );
   const [category, setCategory] =
     createSignal<KnowledgeQuery["category"]>(null);
   const [scope, setScope] = createSignal<KnowledgeQuery["scope"]>(null);
@@ -157,10 +132,10 @@ export const KnowledgeListToolbar: Component<{
   const filterButtonContents = () => (
     <>
       <Icon name="filter" />
-      Filters
+      <span class="hidden md:inline">Filters</span>
       <Show when={active().length}>
         <span
-          class="rounded bg-accent-soft px-1.5 text-[11px] tabular-nums text-accent-soft-text"
+          class="absolute right-0 top-0 rounded bg-accent-soft px-1 text-[10px] tabular-nums text-accent-soft-text md:static md:px-1.5 md:text-[11px]"
           aria-label={`${active().length} active filters`}
         >
           {active().length}
@@ -370,26 +345,24 @@ export const KnowledgeListToolbar: Component<{
                 as={Button}
                 variant="outline"
                 size="sm"
-                class="h-11 shrink-0 gap-1.5 px-2.5 md:h-8"
+                class="relative size-11 shrink-0 p-0"
                 aria-label="Filters"
                 data-knowledge-filters-trigger
               >
                 {filterButtonContents()}
               </DialogTrigger>
-              <DialogContent
-                onCloseAutoFocus={(event) => {
-                  event.preventDefault();
-                  queueMicrotask(focusFilters);
-                }}
+              <BottomSheetContent
+                onCloseAutoFocus={restoreFocus}
                 data-testid="knowledge-filter-panel"
                 data-filter-presentation="sheet"
-                class="knowledge-filter-sheet bottom-0 left-0 top-auto flex max-h-[calc(100dvh-1rem)] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-b-none rounded-t-xl border-x-0 border-b-0 p-0 sm:p-0 [&>button]:right-2 [&>button]:top-2 [&>button]:size-11"
               >
                 {filterForm(true)}
-              </DialogContent>
+              </BottomSheetContent>
             </Dialog>
           </Show>
-          <Select
+          <ResponsiveSelect
+            label="List sort"
+            sheetTitle="Sort knowledge"
             value={currentSort()}
             options={sortOptions()}
             onChange={(value) => {
@@ -397,23 +370,12 @@ export const KnowledgeListToolbar: Component<{
               if (sort && value !== currentSort())
                 props.onChange({ ...props.query, sort, cursor: null });
             }}
-            itemComponent={(item) => (
-              <SelectItem item={item.item} class="min-h-11 md:min-h-8">
-                {sortLabel(item.item.rawValue)}
-              </SelectItem>
-            )}
-          >
-            <SelectTrigger
-              aria-label="List sort"
-              class="h-11 min-w-0 flex-1 gap-1.5 border-transparent bg-transparent px-2 text-xs text-muted hover:bg-soft md:h-8"
-            >
-              <Icon name="sort" />
-              <SelectValue<string> class="min-w-0 flex-1 truncate text-left">
-                {(state) => sortLabel(state.selectedOption())}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
-          </Select>
+            optionLabel={sortLabel}
+            icon="sort"
+            triggerClass="h-11 min-w-0 flex-1 gap-1.5 border-transparent bg-transparent px-2 text-xs text-muted hover:bg-soft md:h-8"
+            itemClass="min-h-11 md:min-h-8"
+            contentClass="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain"
+          />
         </div>
         <Show when={active().length}>
           <div

@@ -27,10 +27,10 @@ function mount(initial: KnowledgeQuery = DEFAULT_KNOWLEDGE_QUERY) {
 }
 
 async function choose(label: string, option: string) {
-  fireEvent.pointerDown(
-    screen.getByRole("button", { name: new RegExp(`^${label}`) }),
-    { pointerId: 1, button: 0 },
-  );
+  const trigger = screen.getByRole("button", { name: new RegExp(`^${label}`) });
+  if (trigger.getAttribute("aria-haspopup") === "dialog")
+    fireEvent.click(trigger);
+  else fireEvent.pointerDown(trigger, { pointerId: 1, button: 0 });
   fireEvent.click(await screen.findByRole("option", { name: option }));
 }
 

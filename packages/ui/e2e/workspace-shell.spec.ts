@@ -717,3 +717,249 @@ test("nested knowledge filter options remain accessible after deferred modal upd
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`knowledge sort uses the responsive choice layout in ${theme}`, async ({
+    page,
+  }, testInfo) => {
+    const mobile = testInfo.project.name.includes("mobile");
+    await page.setViewportSize({
+      width: mobile ? 320 : 1280,
+      height: mobile ? 851 : 800,
+    });
+    const { project, entry } = await seededReader(page);
+    const path = `/ui/projects/${project.id}/knowledge/${entry.id}`;
+    const customSort = "title:desc,confidence:asc";
+    await page.goto(
+      `${path}?q=SQLite&category=decision&scope=all&sort=${encodeURIComponent(customSort)}`,
+    );
+    await setWorkspaceTheme(page, theme);
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const filters = page.getByRole("button", { name: "Filters", exact: true });
+    if (mobile) {
+      const box = (await filters.boundingBox())!;
+      expect(box.width).toBe(44);
+      expect(box.height).toBe(44);
+      await expect(filters.getByText("Filters", { exact: true })).toBeHidden();
+      await expect(filters).toContainText("3");
+    } else
+      await expect(filters.getByText("Filters", { exact: true })).toBeVisible();
+    const sort = page.getByRole("button", { name: /^List sort/ });
+    await sort.click();
+    const sheet = page.getByRole("dialog", {
+      name: "Sort knowledge",
+      exact: true,
+    });
+    if (mobile) {
+      await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
+      await expect
+        .poll(async () => {
+          const box = (await sheet.boundingBox())!;
+          return (
+            box.x === 0 &&
+            Math.abs(box.y + box.height - 851) < 0.5 &&
+            box.width === 320
+          );
+        })
+        .toBe(true);
+      await expect(
+        page.getByRole("option", { name: "Custom sort", exact: true }),
+      ).toHaveAttribute("aria-selected", "true");
+      await page
+        .getByRole("option", { name: "Title A–Z", exact: true })
+        .focus();
+      await page.keyboard.press("ArrowDown");
+      expect(new URL(page.url()).searchParams.get("sort")).toBe(customSort);
+    } else await expect(sheet).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`knowledge-sort-${theme}.png`),
+      scale: "css",
+      fullPage: true,
+    });
+    if (mobile) {
+      await page
+        .getByRole("option", { name: "Title A–Z", exact: true })
+        .focus();
+      await page.keyboard.press("Enter");
+    } else
+      await page
+        .getByRole("option", { name: "Title A–Z", exact: true })
+        .click();
+    await expect(page).toHaveURL(
+      `${path}?q=SQLite&category=decision&scope=all&sort=title%3Aasc`,
+    );
+    if (mobile) {
+      await expect(sheet).toHaveCount(0);
+      await expect(sort).toBeFocused();
+    }
+  });
+}
+
+test("mobile sort keeps options reachable in landscape and restores focus through resizing", async ({
+  page,
+}, testInfo) => {
+  test.skip(!testInfo.project.name.includes("mobile"));
+  await page.setViewportSize({ width: 568, height: 320 });
+  await seededReader(page);
+  await page.getByTestId("context-toggle").click();
+  const sort = page.getByRole("button", { name: /^List sort/ });
+  await sort.click();
+  const sheet = page.getByRole("dialog", {
+    name: "Sort knowledge",
+    exact: true,
+  });
+  await expect(sheet).toBeVisible();
+  await page
+    .getByRole("option", { name: "Recently updated", exact: true })
+    .focus();
+  await page.keyboard.press("End");
+  const last = page.getByRole("option", {
+    name: "Lowest confidence",
+    exact: true,
+  });
+  await expect(last).toBeFocused();
+  await expect(last).toBeInViewport();
+  expect(new URL(page.url()).searchParams.has("sort")).toBe(false);
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(sheet).toHaveCount(0);
+  await expect(sort).toBeFocused();
+  await page.setViewportSize({ width: 390, height: 851 });
+  await page.getByTestId("context-toggle").click();
+  await sort.click();
+  await page.getByRole("option", { name: "Title A–Z", exact: true }).click();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(sheet).toHaveCount(0);
+  await expect(sort).toBeFocused();
+  await expect(page).toHaveURL(/sort=title%3Aasc$/);
+});
+
+test("knowledge table and search scope share mobile selection sheets", async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name.includes("mobile");
+  const { project } = await seededReader(page);
+  await page.goto("/ui/knowledge?q=SQLite&sort=title:asc");
+  for (const [label, title, value] of [
+    ["category", "Knowledge category", "decision"],
+    ["project", "Filter by project", "lore"],
+    ["scope", "Knowledge scope", "project"],
+  ] as const) {
+    const trigger = page.getByRole("button", {
+      name: new RegExp(`^${label}\\b`),
+    });
+    await trigger.click();
+    const sheet = page.getByRole("dialog", { name: title, exact: true });
+    if (mobile)
+      await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
+    else await expect(sheet).toHaveCount(0);
+    await page.getByRole("option", { name: value, exact: true }).click();
+    if (mobile) {
+      await expect(sheet).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    }
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get(label))
+      .toBe(label === "project" ? project.id : value);
+    expect(new URL(page.url()).searchParams.get("q")).toBe("SQLite");
+    expect(new URL(page.url()).searchParams.get("sort")).toBe("title:asc");
+  }
+  const projectFilter = page.getByRole("button", { name: /^project\b/ });
+  await projectFilter.click();
+  await page.getByRole("option", { name: "All projects", exact: true }).click();
+  await expect
+    .poll(() => new URL(page.url()).searchParams.has("project"))
+    .toBe(false);
+  if (mobile) await expect(projectFilter).toBeFocused();
+  expect(new URL(page.url()).searchParams.get("category")).toBe("decision");
+  expect(new URL(page.url()).searchParams.get("scope")).toBe("project");
+  await page.goto(`/ui/projects/${project.id}/search?q=SQLite&scope=all`);
+  await page.getByRole("button", { name: /^Search scope/ }).click();
+  const sheet = page.getByRole("dialog", { name: "Search scope", exact: true });
+  if (mobile)
+    await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
+  else await expect(sheet).toHaveCount(0);
+  await page.getByRole("option", { name: "knowledge", exact: true }).click();
+  expect(new URL(page.url()).searchParams.get("scope")).toBe("all");
+  await page
+    .getByRole("search")
+    .getByRole("button", { name: "Search", exact: true })
+    .click();
+  await expect(page).toHaveURL(
+    `/ui/projects/${project.id}/search?q=SQLite&scope=knowledge`,
+  );
+});
+
+test("desktop sort dropdown hands focus to the mobile toolbar on resize", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await seededReader(page);
+  await page.getByRole("button", { name: /^List sort/ }).click();
+  await expect(page.getByRole("listbox")).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 480 });
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expect(
+    page.getByRole("dialog", { name: "Sort knowledge", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("context-toggle")).toBeFocused();
+});
+
+test("workspace selectors use sheets on mobile and preserve desktop dropdowns", async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name.includes("mobile");
+  const { project } = await seededReader(page);
+  const choose = async (label: string, title: string, value: string) => {
+    const trigger = page.getByRole("button", {
+      name: new RegExp(`^${label}\\b`),
+    });
+    await trigger.click();
+    const sheet = page.getByRole("dialog", { name: title, exact: true });
+    if (mobile)
+      await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
+    else await expect(sheet).toHaveCount(0);
+    await page.getByRole("option", { name: value, exact: true }).click();
+    if (mobile) {
+      await expect(sheet).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    }
+  };
+  await page.goto("/ui/entities");
+  await choose("Entity type", "Filter by entity type", "person");
+  await expect(page).toHaveURL("/ui/entities?type=person");
+  await choose("Entity type", "Filter by entity type", "all");
+  await expect(page).toHaveURL("/ui/entities");
+
+  await page.goto(`/ui/projects/${project.id}`);
+  await page
+    .getByRole("textbox", { name: "Search project memory" })
+    .fill("SQLite");
+  await choose("Search scope", "Search scope", "knowledge");
+  await expect(page).toHaveURL(`/ui/projects/${project.id}`);
+  await page
+    .getByRole("search")
+    .getByRole("button", { name: "Search", exact: true })
+    .click();
+  await expect(page).toHaveURL(
+    `/ui/projects/${project.id}/search?q=SQLite&scope=knowledge`,
+  );
+
+  await page.goto("/ui/model-usage");
+  await choose("Project", "Filter model usage by project", "lore");
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("project"))
+    .toBe(project.id);
+  await expect(page.getByTestId("chart-status")).toContainText(
+    "6 active session-days",
+  );
+  await choose("Project", "Filter model usage by project", "All projects");
+  await expect
+    .poll(() => new URL(page.url()).searchParams.has("project"))
+    .toBe(false);
+  await expect(page.getByTestId("chart-status")).toContainText(
+    "8 active session-days",
+  );
+});

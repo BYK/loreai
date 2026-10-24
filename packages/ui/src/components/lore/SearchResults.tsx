@@ -12,13 +12,7 @@ import type { ProjectSummary, RecallScope } from "~/contracts";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 import { Button } from "../ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { ResponsiveSelect } from "../ui/responsive-select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 import { useWorkspace } from "~/routes/workspace";
 import { searchHref } from "~/lib/href";
@@ -55,25 +49,29 @@ export const SearchResults: Component<{
         }}
       >
         <TextField class="w-full min-w-0 sm:w-auto sm:flex-1">
-          <TextFieldInput name="q" value={props.q} aria-label="Search query" />
+          <TextFieldInput
+            name="q"
+            value={props.q}
+            aria-label="Search query"
+            class="h-11 md:h-10"
+          />
         </TextField>
-        <Select
+        <ResponsiveSelect
           name="scope"
+          label="Search scope"
+          sheetTitle="Search scope"
           value={scope()}
-          onChange={setScope}
+          onChange={(value) => {
+            if (value) setScope(value as RecallScope);
+          }}
           options={["all", "session", "project", "knowledge"]}
-          itemComponent={(item) => (
-            <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-          )}
+          triggerClass="h-10 w-28"
+        />
+        <Button
+          type="submit"
+          size="sm"
+          class="h-11 flex-1 sm:flex-none md:h-10"
         >
-          <SelectTrigger aria-label="Search scope" class="h-10 w-28">
-            <SelectValue<string>>
-              {(state) => state.selectedOption()}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent />
-        </Select>
-        <Button type="submit" size="sm" class="h-10 flex-1 sm:flex-none">
           Search
         </Button>
       </form>

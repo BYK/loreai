@@ -43,13 +43,7 @@ import { StateCard } from "~/components/lore/StateCard";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
 import { createLoader } from "~/lib/loader";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 
 function decodeParam(segment: string | undefined) {
   if (segment === undefined) return undefined;
@@ -259,16 +253,25 @@ export const Browse: Component<{
     );
   };
   const projectFilter = () => {
-    const current = allQuery().project;
-    const options = ["", ...(ws.projects.data() ?? []).map((p) => p.id)];
-    if (current && !options.includes(current)) options.push(current);
+    const current = () => allQuery().project;
+    const options = createMemo(() => {
+      const values = [
+        "",
+        ...(ws.projects.data() ?? []).map((project) => project.id),
+      ];
+      const selected = current();
+      if (selected && !values.includes(selected)) values.push(selected);
+      return values;
+    });
     const projectName = (id: string) => {
       const project = ws.projectById(id);
       return project?.name || project?.path || id;
     };
     return (
-      <Select
-        value={current}
+      <ResponsiveSelect
+        label="project"
+        sheetTitle="Filter by project"
+        value={current()}
         onChange={(project) =>
           navigate(
             allKnowledgeHref({
@@ -278,26 +281,11 @@ export const Browse: Component<{
             }),
           )
         }
-        options={options}
+        options={options()}
         placeholder="All projects"
-        itemComponent={(item) => (
-          <SelectItem item={item.item}>
-            {item.item.rawValue
-              ? projectName(item.item.rawValue)
-              : "All projects"}
-          </SelectItem>
-        )}
-      >
-        <SelectTrigger aria-label="project" class="h-9 min-w-32 text-xs">
-          <SelectValue<string>>
-            {(state) => {
-              const selected = state.selectedOption();
-              return selected ? projectName(selected) : "All projects";
-            }}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent />
-      </Select>
+        optionLabel={(value) => (value ? projectName(value) : "All projects")}
+        triggerClass="h-9 min-w-32 text-xs"
+      />
     );
   };
   const detail = () => {

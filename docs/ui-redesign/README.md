@@ -53,6 +53,21 @@ reduced-motion preference. Nested selectors use modal accessibility scopes, and
 closing/resizing restores focus to the current visible control. Short-screen
 coverage includes 320×480 portrait and 568×320 landscape viewports.
 
+On mobile, the reader's Filters trigger is a 44px icon button with an applied
+filter count. Sorting opens a choice sheet, marks the current sort, and applies
+only after a choice is activated; arrow navigation and dismissal preserve the
+query. The same owned `ResponsiveSelect` is used for knowledge table category,
+scope, and project filters, project search scope, entity type, and model usage
+project selection. Desktop dropdowns keep their existing layout. `BottomSheetContent` centralizes motion, safe areas, and
+scrolling, while the shared responsive overlay restores focus when a menu closes
+or changes presentation across the breakpoint. The searchable project switcher
+and controls already inside dialogs retain their specialized interactions.
+
+| Sort presentation | Light | Dark |
+| --- | --- | --- |
+| Mobile sheet | ![Mobile sort, light](knowledge-sort-mobile-light.png) | ![Mobile sort, dark](knowledge-sort-mobile-dark.png) |
+| Desktop dropdown | ![Desktop sort, light](knowledge-sort-desktop-light.png) | ![Desktop sort, dark](knowledge-sort-desktop-dark.png) |
+
 Screenshots use the disposable database seeded by the UI browser tests.
 `responsive-layout.spec.ts` audits 23 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,

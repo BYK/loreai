@@ -13,13 +13,7 @@ import { API_BASE, apiPath, isApiError } from "~/lib/api";
 import { fuzzyRank } from "~/lib/fuzzy";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
 import { errorStateFor } from "./ErrorState";
 import { ModelFlowChart, shortModelName } from "./ModelFlowChart";
@@ -334,7 +328,10 @@ export const ModelUsagePage: Component = () => {
           <>
             <div class="mb-5 flex flex-wrap items-end gap-3">
               <div class="min-w-52">
-                <Select
+                <ResponsiveSelect
+                  label="Project"
+                  sheetTitle="Filter model usage by project"
+                  data-testid="project-select"
                   value={project() ?? "all"}
                   onChange={(value) =>
                     setProject(value === "all" ? null : value)
@@ -348,38 +345,16 @@ export const ModelUsagePage: Component = () => {
                       ].filter((id): id is string => !!id),
                     ),
                   ]}
-                  itemComponent={(props) => (
-                    <SelectItem item={props.item}>
-                      {props.item.rawValue === "all"
-                        ? "All projects"
-                        : (ws.projects
-                            .data()
-                            ?.find((p) => p.id === props.item.rawValue)?.name ??
-                          ws.projects
-                            .data()
-                            ?.find((p) => p.id === props.item.rawValue)?.path ??
-                          props.item.rawValue)}
-                    </SelectItem>
-                  )}
-                >
-                  <SelectTrigger
-                    aria-label="Project"
-                    class="h-9 w-52 text-xs"
-                    data-testid="project-select"
-                  >
-                    <SelectValue<string>>
-                      {(state) =>
-                        state.selectedOption() === "all"
-                          ? "All projects"
-                          : (ws.projects
-                              .data()
-                              ?.find((p) => p.id === state.selectedOption())
-                              ?.name ?? state.selectedOption())
-                      }
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent />
-                </Select>
+                  optionLabel={(value) =>
+                    value === "all"
+                      ? "All projects"
+                      : (ws.projects.data()?.find((p) => p.id === value)
+                          ?.name ??
+                        ws.projects.data()?.find((p) => p.id === value)?.path ??
+                        value)
+                  }
+                  triggerClass="h-9 w-52 text-xs"
+                />
               </div>
               <label class="flex items-center gap-1.5 text-xs text-muted">
                 From
