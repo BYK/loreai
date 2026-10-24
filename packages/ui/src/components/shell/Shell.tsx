@@ -129,6 +129,15 @@ export const Shell: Component<ShellProps> = (props) => {
     )
       return;
     if (!contextPane?.contains(event.target as Node)) return;
+    // Search clearing, native selects and editable content own Escape while
+    // focused. Do not turn that form interaction into a persisted pane collapse.
+    if (
+      event.target instanceof Element &&
+      event.target.closest(
+        'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+      )
+    )
+      return;
     event.preventDefault();
     changeOpen(false);
   };

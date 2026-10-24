@@ -487,6 +487,91 @@ describe("shell: project navigation and real-data path", () => {
     );
   });
 
+  for (const wide of [true, false]) {
+    for (const [section, path, role, label] of [
+      [
+        "knowledge",
+        "/projects/p-lore/knowledge/k-sqlite",
+        "textbox",
+        "Filter knowledge list",
+      ],
+      [
+        "sessions",
+        "/projects/p-lore/sessions/s-42",
+        "searchbox",
+        "Filter session list",
+      ],
+    ] as const) {
+      it(`keeps ${section} context open when Escape is pressed in its search on ${wide ? "desktop" : "mobile"}`, async () => {
+        vi.stubGlobal("matchMedia", () => ({
+          matches: wide,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }));
+        mount(path, fakeClient());
+        const toggle = await screen.findByTestId("context-toggle");
+        if (toggle.getAttribute("aria-expanded") === "false")
+          fireEvent.click(toggle);
+        const input = await screen.findByRole(role, { name: label });
+        input.focus();
+        fireEvent.input(input, { target: { value: "SQLite" } });
+        const preference = localStorage.getItem("lore.ui.sidebarCollapsed");
+        fireEvent.keyDown(input, { key: "Escape" });
+        expect(toggle).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByTestId("context-pane")).toBeVisible();
+        expect(input).toHaveFocus();
+        expect(localStorage.getItem("lore.ui.sidebarCollapsed")).toBe(
+          preference,
+        );
+      });
+    }
+  }
+
+  it("leaves Escape to native controls and nested editable content", async () => {
+    const history = createMemoryHistory();
+    history.set({ value: "/" });
+    render(() => (
+      <MemoryRouter history={history} root={createAppRoot(fakeClient())}>
+        <Route
+          path="*"
+          component={() => (
+            <Shell
+              mobilePane="list"
+              detail={<div>Document</div>}
+              list={
+                <form>
+                  <textarea aria-label="Notes" />
+                  <select aria-label="Selection">
+                    <option>One</option>
+                  </select>
+                  <div contentEditable={true}>
+                    <span data-testid="editable-child">Editable</span>
+                  </div>
+                </form>
+              }
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+    const toggle = screen.getByTestId("context-toggle");
+    for (const target of [
+      screen.getByLabelText("Notes"),
+      screen.getByLabelText("Selection"),
+      screen.getByTestId("editable-child"),
+    ]) {
+      const event = new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(localStorage.getItem("lore.ui.sidebarCollapsed")).not.toBe("true");
+    }
+  });
+
   it("closes narrow context with Escape and returns focus to the toolbar", async () => {
     vi.stubGlobal("matchMedia", () => ({
       matches: false,

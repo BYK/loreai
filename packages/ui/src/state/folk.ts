@@ -1,6 +1,7 @@
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { ApiClient } from "~/lib/api";
+import type { AccountStatus } from "~/contracts";
 import { createLoader } from "~/lib/loader";
 
 /**
@@ -17,18 +18,22 @@ export function createFolkState({ client }: { client: ApiClient }) {
   const sync = createLoader(always, async (_key, signal) =>
     client.getSyncStatus(signal),
   );
-  const [teamsWanted, setTeamsWanted] = createSignal(false);
-  const teamIdentity = createMemo<string | null>((previous) => {
-    // A pending poll has not changed the account. Retain its options until
-    // the result confirms an identity change or a failure.
+  // Keep the last confirmed account during healthy background reads, including
+  // drawer remounts. A failed read invalidates it: clearing the loader's error
+  // for a retry must not revive its retained (now unverified) data.
+  const confirmedAccount = createMemo<AccountStatus | undefined>((previous) => {
+    if (account.error() !== undefined) return undefined;
     if (account.loading()) return previous;
-    if (account.error() !== undefined) return null;
-    const current = account.data();
+    return account.data();
+  });
+  const [teamsWanted, setTeamsWanted] = createSignal(false);
+  const teamIdentity = createMemo<string | null>(() => {
+    const current = confirmedAccount();
     if (current?.state === "anonymous") return "anonymous";
     return current?.signed_in && current.state === "signed_in" && current.user
       ? `user:${current.user.id}`
       : null;
-  }, null);
+  });
   const teams = createLoader(
     () => (teamsWanted() ? teamIdentity() : null),
     async (_key, signal) => client.getTeams(signal),
@@ -78,6 +83,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
   };
   return {
     account,
+    confirmedAccount,
     sync,
     teams,
     syncing,

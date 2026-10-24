@@ -41,25 +41,21 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const [tooltipOpen, setTooltipOpen] = createSignal(false);
   const [dialog, setDialog] = createSignal(false);
   const clipboard = createClipboard(dialog);
+  const account = () =>
+    ws.connection.state() === "reachable" ? folk.confirmedAccount() : undefined;
   const user = () => {
-    const current = folk.account.data();
-    return ws.connection.state() === "reachable" &&
-      !folk.account.error() &&
-      !folk.account.loading() &&
-      current?.signed_in &&
-      current.state === "signed_in"
+    const current = account();
+    return current?.signed_in && current.state === "signed_in"
       ? current.user
       : null;
   };
+  const canSignIn = () =>
+    account()?.state === "anonymous" || account()?.state === "expired";
   const name = () =>
     user()?.display_name ||
     user()?.email ||
     user()?.id ||
-    (folk.account.loading()
-      ? "Checking account…"
-      : folk.account.error()
-        ? "Account unavailable"
-        : "Anonymous");
+    (summary().state === "anonymous" ? "Anonymous" : summary().label);
   const initials = () =>
     name()
       .split(/\s+/)
@@ -77,7 +73,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const summary = createMemo(() =>
     summarizeFolkStatus({
       connection: ws.connection.state(),
-      account: folk.account.data(),
+      account: account(),
       accountError: folk.account.error(),
       sync: folk.sync.data(),
       syncError: folk.sync.error(),
@@ -105,7 +101,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
         <span class="block text-xs font-normal text-muted">
           {props.interactive ? "Sign in to Lore" : summary().label}
         </span>
-        <Show when={user() && folk.account.data()?.provider}>
+        <Show when={user() && account()?.provider}>
           {(provider) => (
             <span class="block text-xs font-normal text-muted">
               via {provider()}
@@ -228,11 +224,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
               Account & preferences
             </PopoverPrimitive.Title>
             <Show
-              when={
-                !user() &&
-                (!folk.account.loading() ||
-                  folk.account.data()?.state === "anonymous")
-              }
+              when={canSignIn()}
               fallback={
                 <div class="flex items-center gap-3 px-2 py-2">
                   <ProfileIdentity />
@@ -272,7 +264,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
             </PopoverPrimitive.Description>
             <Show
               when={
-                (folk.account.data()?.signed_in && folk.sync.data()?.enabled) ||
+                (account()?.signed_in && folk.sync.data()?.enabled) ||
                 syncReceipt() ||
                 syncError()
               }
@@ -372,7 +364,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
             </DialogDescription>
           </DialogHeader>
           <div class="space-y-3 text-sm">
-            <Show when={folk.account.data()?.state === "hosted"}>
+            <Show when={account()?.state === "hosted"}>
               <p class="text-muted">
                 This gateway is running in hosted mode. For local account
                 access, restart it with <code>lore start --local</code>, then

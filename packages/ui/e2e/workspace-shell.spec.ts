@@ -1088,3 +1088,47 @@ test("workspace selectors use sheets on mobile and preserve desktop dropdowns", 
     "8 active session-days",
   );
 });
+
+for (const section of ["knowledge", "sessions"] as const) {
+  test(`Escape in ${section} context search keeps the pane and its preference`, async ({
+    page,
+  }) => {
+    const { project } = await seededReader(page);
+    if (section === "sessions") {
+      await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
+      await expect(page.getByTestId("session-view")).toBeVisible();
+    }
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const pane = page.getByTestId("context-pane");
+    const input = pane.getByRole(
+      section === "sessions" ? "searchbox" : "textbox",
+      {
+        name:
+          section === "sessions"
+            ? "Filter session list"
+            : "Filter knowledge list",
+      },
+    );
+    await input.fill("SQLite");
+    const preference = await page.evaluate(() =>
+      localStorage.getItem("lore.ui.sidebarCollapsed"),
+    );
+    await input.press("Escape");
+    await expect(pane).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(input).toBeFocused();
+    // Search inputs retain native Escape-to-clear behavior.
+    if (section === "sessions") await expect(input).toHaveValue("");
+    expect(
+      await page.evaluate(() =>
+        localStorage.getItem("lore.ui.sidebarCollapsed"),
+      ),
+    ).toBe(preference);
+    await pane.locator("a[href]").first().focus();
+    await page.keyboard.press("Escape");
+    await expect(pane).toBeHidden();
+    await expect(toggle).toBeFocused();
+  });
+}

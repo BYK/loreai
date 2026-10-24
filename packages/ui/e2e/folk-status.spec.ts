@@ -355,3 +355,33 @@ test("mobile profile row and account panel stay aligned with the drawer", async 
     await expect(profile).toBeFocused();
   }
 });
+
+for (const state of ["refreshing", "unavailable", "hosted"] as const) {
+  test(`${state} account state keeps preferences without an anonymous sign-in prompt`, async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/account", (route) =>
+      route.fulfill({
+        json: {
+          signed_in: false,
+          user: null,
+          provider: null,
+          expires_at: null,
+          state,
+        },
+      }),
+    );
+    await page.goto("/ui/knowledge");
+    await openNavigation(page);
+    const trigger = page.getByTestId("folk-status");
+    await expect(trigger).toHaveAttribute("data-folk-state", state);
+    await trigger.click();
+    const panel = page.getByTestId("folk-status-panel");
+    await expect(panel).toBeVisible();
+    await expect(panel.getByTestId("theme-toggle")).toBeVisible();
+    await expect(
+      panel.getByRole("button", { name: "Sign in to Lore", exact: true }),
+    ).toHaveCount(0);
+    await expect(panel).not.toContainText("Anonymous");
+  });
+}
