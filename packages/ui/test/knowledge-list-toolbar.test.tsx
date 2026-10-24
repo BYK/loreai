@@ -92,9 +92,18 @@ describe.each(["desktop", "mobile"] as const)(
           screen.queryByRole("dialog", { name: "Knowledge filters" }),
         ).toBeNull(),
       );
-      fireEvent.click(
-        screen.getByRole("button", { name: "Remove category: Decisions" }),
-      );
+      if (device === "mobile") {
+        expect(
+          screen.queryByRole("group", { name: "Applied knowledge filters" }),
+        ).toBeNull();
+        fireEvent.click(filterTrigger);
+        await choose("Category", "All categories");
+        fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+      } else {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Remove category: Decisions" }),
+        );
+      }
       expect(query()).toEqual({
         ...initial,
         category: null,
@@ -103,6 +112,7 @@ describe.each(["desktop", "mobile"] as const)(
       });
       expect(filterTrigger).toHaveAccessibleDescription("2 active filters");
       expect(screen.getByLabelText("2 active filters")).toHaveTextContent("2");
+      if (device === "mobile") fireEvent.click(filterTrigger);
       fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
       expect(filterTrigger).toHaveAccessibleDescription("0 active filters");
       expect(screen.queryByLabelText(/active filters?$/)).toBeNull();

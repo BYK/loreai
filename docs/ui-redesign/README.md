@@ -43,8 +43,10 @@ aligns with the drawer, and theme controls have 44px touch targets.
 
 The knowledge reader keeps search above a compact Filters/sort row. A labeled
 filter panel applies category and scope together, with explanations for project,
-shared, and global visibility. Applied filters appear as removable chips; clearing
-them preserves the selected entry and sort order. Both directions are available
+shared, and global visibility. Desktop shows applied filters as removable chips;
+clearing them preserves the selected entry and sort order. On mobile, chips are hidden
+and Clear all lives inside the filter sheet, leaving the toolbar compact. The
+badge still reports applied filters. Both directions are available
 for updated/created date, title, and confidence. Existing multi-column sorts from
 the table remain intact. Desktop keeps its anchored popover. Below 768px, Filters
 opens a full-width bottom sheet with a backdrop, a 44px close control, scrollable

@@ -450,17 +450,43 @@ test("knowledge filters combine, dismiss and clear without losing the reader or 
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
   expect(new URL(page.url()).searchParams.get("category")).toBe("decision");
-  await toolbar
-    .getByRole("button", { name: "Remove category: Decisions" })
-    .click();
-  await expect(
-    toolbar.getByRole("button", { name: "Remove category: Decisions" }),
-  ).toHaveCount(0);
+  const mobile = testInfo.project.name.includes("mobile");
+  if (mobile) {
+    await expect(
+      toolbar.getByRole("group", { name: "Applied knowledge filters" }),
+    ).toHaveCount(0);
+    await filters.click();
+    await panel.getByRole("button", { name: /^Category/ }).click();
+    await page
+      .getByRole("option", { name: "All categories", exact: true })
+      .click();
+    await panel.getByRole("button", { name: "Apply filters" }).click();
+    await expect(panel).toHaveCount(0);
+  } else {
+    await toolbar
+      .getByRole("button", { name: "Remove category: Decisions" })
+      .click();
+    await expect(
+      toolbar.getByRole("button", { name: "Remove category: Decisions" }),
+    ).toHaveCount(0);
+  }
+  await expect
+    .poll(() => new URL(page.url()).searchParams.has("category"))
+    .toBe(false);
   expect(new URL(page.url()).searchParams.get("scope")).toBe("all");
   expect(new URL(page.url()).searchParams.get("q")).toBe("SQLite");
-  await toolbar
-    .getByRole("button", { name: "Clear filters", exact: true })
-    .click();
+  if (mobile) {
+    await filters.click();
+    await panel
+      .getByRole("button", { name: "Clear filters", exact: true })
+      .click();
+    await expect(panel).toHaveCount(0);
+    await expect(filters).toBeFocused();
+  } else {
+    await toolbar
+      .getByRole("button", { name: "Clear filters", exact: true })
+      .click();
+  }
   await expect(
     toolbar.getByRole("textbox", { name: "Filter knowledge list" }),
   ).toHaveValue("");
@@ -768,6 +794,11 @@ for (const theme of ["light", "dark"] as const) {
       await expect(filters).toContainText("3");
     } else
       await expect(filters.getByText("Filters", { exact: true })).toBeVisible();
+    const chips = page.getByRole("group", {
+      name: "Applied knowledge filters",
+    });
+    if (mobile) await expect(chips).toHaveCount(0);
+    else await expect(chips).toBeVisible();
     await expect(filters).toHaveAccessibleDescription("3 active filters");
     const badge = filters.getByLabel("3 active filters");
     await expect(badge).toHaveText("3");
@@ -778,6 +809,30 @@ for (const theme of ["light", "dark"] as const) {
       path: testInfo.outputPath(`knowledge-toolbar-${theme}.png`),
       scale: "css",
     });
+    if (mobile) {
+      await filters.click();
+      const panel = page.getByRole("dialog", {
+        name: "Knowledge filters",
+        exact: true,
+      });
+      for (const name of ["Clear filters", "Cancel", "Apply filters"]) {
+        await expect(
+          panel.getByRole("button", { name, exact: true }),
+        ).toBeInViewport();
+      }
+      expect(
+        await panel.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth,
+        ),
+      ).toBe(true);
+      await page.screenshot({
+        path: testInfo.outputPath(`knowledge-active-filters-${theme}.png`),
+        scale: "css",
+        fullPage: true,
+      });
+      await panel.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await expect(panel).toHaveCount(0);
+    }
     const sort = page.getByRole("button", { name: /^List sort/ });
     await sort.click();
     const sheet = page.getByRole("dialog", {

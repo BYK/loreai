@@ -230,6 +230,21 @@ export const KnowledgeListToolbar: Component<{
             : "flex justify-end gap-2 border-t border-line bg-soft px-4 py-3"
         }
       >
+        <Show when={sheet && active().length}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="mr-auto h-11 px-2 text-xs text-muted"
+            aria-label="Clear filters"
+            onClick={() => {
+              setOpen(false);
+              clear();
+            }}
+          >
+            Clear all
+          </Button>
+        </Show>
         <Button
           type="button"
           variant="ghost"
@@ -381,7 +396,7 @@ export const KnowledgeListToolbar: Component<{
             contentClass="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain"
           />
         </div>
-        <Show when={active().length}>
+        <Show when={!mobile() && active().length}>
           <div
             class="flex flex-wrap items-center gap-1.5"
             aria-label="Applied knowledge filters"
