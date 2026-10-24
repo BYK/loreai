@@ -71,7 +71,10 @@ describe.each(["desktop", "mobile"] as const)(
         cursor: "older",
       };
       const { change, query } = mount(initial);
-      fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+      const filterTrigger = screen.getByRole("button", { name: "Filters" });
+      expect(filterTrigger).toHaveAccessibleDescription("1 active filter");
+      expect(screen.getByLabelText("1 active filter")).toHaveTextContent("1");
+      fireEvent.click(filterTrigger);
       await choose("Category", "Decisions");
       await choose("Scope", "Project + shared");
       expect(change).not.toHaveBeenCalled();
@@ -82,6 +85,8 @@ describe.each(["desktop", "mobile"] as const)(
         scope: "all",
         cursor: null,
       });
+      expect(filterTrigger).toHaveAccessibleDescription("3 active filters");
+      expect(screen.getByLabelText("3 active filters")).toHaveTextContent("3");
       await waitFor(() =>
         expect(
           screen.queryByRole("dialog", { name: "Knowledge filters" }),
@@ -96,7 +101,11 @@ describe.each(["desktop", "mobile"] as const)(
         scope: "all",
         cursor: null,
       });
+      expect(filterTrigger).toHaveAccessibleDescription("2 active filters");
+      expect(screen.getByLabelText("2 active filters")).toHaveTextContent("2");
       fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+      expect(filterTrigger).toHaveAccessibleDescription("0 active filters");
+      expect(screen.queryByLabelText(/active filters?$/)).toBeNull();
       expect(query()).toEqual({
         ...initial,
         q: "",

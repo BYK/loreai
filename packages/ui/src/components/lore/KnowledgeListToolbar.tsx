@@ -129,14 +129,16 @@ export const KnowledgeListToolbar: Component<{
     });
   };
   const sortLabel = (value: string) => sorts[value] ?? "Custom sort";
+  const activeFilterLabel = () =>
+    `${active().length} active ${active().length === 1 ? "filter" : "filters"}`;
   const filterButtonContents = () => (
     <>
       <Icon name="filter" />
       <span class="hidden md:inline">Filters</span>
       <Show when={active().length}>
         <span
-          class="absolute right-0 top-0 rounded bg-accent-soft px-1 text-[10px] tabular-nums text-accent-soft-text md:static md:px-1.5 md:text-[11px]"
-          aria-label={`${active().length} active filters`}
+          class="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-medium leading-none tabular-nums text-accent-contrast ring-2 ring-surface md:static md:h-5 md:min-w-5 md:text-[11px] md:ring-0"
+          aria-label={activeFilterLabel()}
         >
           {active().length}
         </span>
@@ -325,6 +327,7 @@ export const KnowledgeListToolbar: Component<{
                   size="sm"
                   class="h-11 shrink-0 gap-1.5 px-2.5 md:h-8"
                   aria-label="Filters"
+                  aria-description={activeFilterLabel()}
                   data-knowledge-filters-trigger
                 >
                   {filterButtonContents()}
@@ -347,6 +350,7 @@ export const KnowledgeListToolbar: Component<{
                 size="sm"
                 class="relative size-11 shrink-0 p-0"
                 aria-label="Filters"
+                aria-description={activeFilterLabel()}
                 data-knowledge-filters-trigger
               >
                 {filterButtonContents()}

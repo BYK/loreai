@@ -50,6 +50,27 @@ async function seededReader(page: import("@playwright/test").Page) {
   return { project, entry };
 }
 
+async function expectSheetCloseInCorner(
+  sheet: import("@playwright/test").Locator,
+) {
+  const button = sheet.getByRole("button", { name: "Dismiss", exact: true });
+  const box = (await sheet.boundingBox())!;
+  const target = (await button.boundingBox())!;
+  const icon = (await button.locator("svg").boundingBox())!;
+  expect(target.width).toBeGreaterThanOrEqual(44);
+  expect(target.height).toBeGreaterThanOrEqual(44);
+  expect(target.y - box.y).toBeGreaterThanOrEqual(0);
+  expect(target.y - box.y).toBeLessThanOrEqual(6);
+  expect(box.x + box.width - target.x - target.width).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width - target.x - target.width).toBeLessThanOrEqual(6);
+  expect(
+    Math.abs(icon.x + icon.width / 2 - target.x - target.width / 2),
+  ).toBeLessThan(0.5);
+  expect(
+    Math.abs(icon.y + icon.height / 2 - target.y - target.height / 2),
+  ).toBeLessThan(0.5);
+}
+
 test("context collapse preserves the permanent rail, picker, document and desktop preference", async ({
   page,
 }, testInfo) => {
@@ -488,6 +509,7 @@ for (const theme of ["light", "dark"] as const) {
     expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
     if (mobile) {
       await expect(panel).toHaveAttribute("data-filter-presentation", "sheet");
+      await expectSheetCloseInCorner(panel);
       expect(box.x).toBe(0);
       expect(box.width).toBe(page.viewportSize()!.width);
       expect(box.y + box.height).toBe(page.viewportSize()!.height);
@@ -746,6 +768,16 @@ for (const theme of ["light", "dark"] as const) {
       await expect(filters).toContainText("3");
     } else
       await expect(filters.getByText("Filters", { exact: true })).toBeVisible();
+    await expect(filters).toHaveAccessibleDescription("3 active filters");
+    const badge = filters.getByLabel("3 active filters");
+    await expect(badge).toHaveText("3");
+    const badgeBox = (await badge.boundingBox())!;
+    expect(badgeBox.width).toBeGreaterThanOrEqual(16);
+    expect(badgeBox.height).toBeGreaterThanOrEqual(16);
+    await page.getByTestId("knowledge-list-toolbar").screenshot({
+      path: testInfo.outputPath(`knowledge-toolbar-${theme}.png`),
+      scale: "css",
+    });
     const sort = page.getByRole("button", { name: /^List sort/ });
     await sort.click();
     const sheet = page.getByRole("dialog", {
@@ -764,6 +796,7 @@ for (const theme of ["light", "dark"] as const) {
           );
         })
         .toBe(true);
+      await expectSheetCloseInCorner(sheet);
       await expect(
         page.getByRole("option", { name: "Custom sort", exact: true }),
       ).toHaveAttribute("aria-selected", "true");
