@@ -5,6 +5,7 @@ import {
   clickNavigation,
   expectCurrentNavigation,
   expectNavigationAvailable,
+  waitForOverlayMotion,
 } from "./workspace-helpers";
 
 test("project picker is reachable, searchable and returns navigation to the selected project", async ({
@@ -529,15 +530,7 @@ for (const theme of ["light", "dark"] as const) {
       exact: true,
     });
     await expect(panel).toBeVisible();
-    if (mobile)
-      await expect
-        .poll(async () => {
-          const box = (await panel.boundingBox())!;
-          return (
-            Math.abs(box.y + box.height - page.viewportSize()!.height) < 0.5
-          );
-        })
-        .toBe(true);
+    if (mobile) await waitForOverlayMotion(panel);
     const box = (await panel.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
@@ -946,12 +939,8 @@ test("mobile sort keeps options reachable in landscape and restores focus throug
   });
   await expect(last).toBeFocused();
   // A deferred initial-focus callback must not reset an early keyboard choice.
-  await sheet.evaluate(async (element) => {
-    await Promise.all(
-      element.getAnimations().map((animation) => animation.finished),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  });
+  await waitForOverlayMotion(sheet);
+  await sheet.evaluate(() => new Promise((resolve) => setTimeout(resolve, 50)));
   await expect(last).toBeFocused();
   await expect(last).toBeInViewport();
   await expect(

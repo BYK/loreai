@@ -7,7 +7,7 @@
  * stubbed to fixed sizes; that is enough to mount a window of rows and
  * exercise every state transition without measuring real pixels.
  */
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -731,39 +731,35 @@ describe("SessionView: in-session search", () => {
     );
     expect(screen.queryByTestId("search-coverage")).toBeNull();
 
+    const expectCurrentHit = (key: string) =>
+      waitFor(() => {
+        // The summary updates before scrolling mounts the virtual row.
+        const marks = document.querySelectorAll<HTMLElement>(
+          "mark.passage-search",
+        );
+        expect(marks).toHaveLength(1);
+        expect(marks[0]!.textContent).toBe("needle");
+        expect(
+          marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
+        ).toBe(key);
+      });
+
     fireEvent.click(screen.getByTestId("search-next"));
-    await tick();
+    await expectCurrentHit("m.old-3");
     expect(screen.getByTestId("search-summary")).toHaveTextContent(
       "1 of 3 in loaded history",
     );
-    let marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
-    expect(marks).toHaveLength(1);
-    expect(marks[0]!.textContent).toBe("needle");
-    expect(
-      marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
-    ).toBe("m.old-3");
 
     fireEvent.click(screen.getByTestId("search-next"));
-    await tick();
+    await expectCurrentHit("m.old-47");
     expect(screen.getByTestId("search-summary")).toHaveTextContent("2 of 3");
-    marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
-    expect(marks).toHaveLength(1);
-    expect(
-      marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
-    ).toBe("m.old-47");
     expect(mounted()).toContain("m.old-47");
 
     // Previous wraps from the first hit to the last.
     fireEvent.click(screen.getByTestId("search-prev"));
     fireEvent.click(screen.getByTestId("search-prev"));
-    await tick();
+    await expectCurrentHit("m.old-58");
     expect(screen.getByTestId("search-summary")).toHaveTextContent("3 of 3");
-    expect(
-      document
-        .querySelector("mark.passage-search")
-        ?.closest("[data-row-key]")
-        ?.getAttribute("data-row-key"),
-    ).toBe("m.old-58");
 
     fireEvent.click(screen.getByTestId("search-clear"));
     await tick();
@@ -1698,6 +1694,10 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     fireScroll(scroll, 50);
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     await tick();
+    // Landing/scroll frames can still be settling after zero-delay tasks.
+    await waitFor(() =>
+      expect(screen.getByTestId("older-retry")).toBeEnabled(),
+    );
     fireEvent.click(screen.getByTestId("older-retry"));
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
   });

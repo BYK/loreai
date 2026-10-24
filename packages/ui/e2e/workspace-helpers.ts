@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 export async function openProjectPicker(page: Page) {
   const picker = page.getByRole("dialog", {
@@ -147,4 +147,14 @@ export async function colorContrast(
     },
     { foreground, background, backdrop },
   );
+}
+
+/** Measure overlays only after their actual entrance motion has finished. */
+export async function waitForOverlayMotion(overlay: Locator) {
+  await expect(overlay).toBeVisible();
+  await overlay.evaluate(async (element) => {
+    await Promise.all(
+      element.getAnimations().map((animation) => animation.finished),
+    );
+  });
 }
