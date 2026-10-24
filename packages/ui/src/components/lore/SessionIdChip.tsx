@@ -1,53 +1,50 @@
 import type { Component } from "solid-js";
-import { Show, createSignal } from "solid-js";
+import { Show } from "solid-js";
+import { Button } from "~/components/ui/button";
+import { createClipboard } from "~/lib/clipboard";
 
-function writeClipboard(text: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return Promise.reject(new Error("Clipboard unavailable"));
-}
-
-/**
- * Monospace session id + inline copy button (#1921). The id truncates with a
- * `title` attribute carrying the full value; the copy button stops the click
- * so a chip inside a row link never triggers navigation.
- */
+/** Copy stays local even when the chip lives inside a navigable session row. */
 export const SessionIdChip: Component<{ id: string; class?: string }> = (
   props,
 ) => {
-  const [copied, setCopied] = createSignal(false);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const copy = (event: MouseEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    void writeClipboard(props.id)
-      .then(() => {
-        setCopied(true);
-        if (timer !== undefined) clearTimeout(timer);
-        timer = setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
-  };
-
+  const clipboard = createClipboard(() => props.id);
   return (
     <span
-      class={`inline-flex max-w-full items-center gap-1 font-mono text-xs text-muted ${props.class ?? ""}`}
+      class={`inline-flex max-w-full flex-wrap items-center gap-1 font-mono text-xs text-muted ${props.class ?? ""}`}
     >
-      <span class="truncate" title={props.id}>
+      <span class="min-w-0 truncate" title={props.id}>
         {props.id}
       </span>
-      <button
+      <Button
         type="button"
-        class="shrink-0 text-[11px] text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid"
+        variant="ghost"
+        size="sm"
+        class="h-11 min-w-11 shrink-0 gap-1 px-1.5 sm:h-8 sm:min-w-0 disabled:pointer-events-auto text-[11px] text-accent [&_svg]:size-3.5"
         aria-label="Copy session id"
-        onClick={copy}
+        pending={clipboard.pending()}
+        icon={clipboard.copied() ? "check" : "copy"}
+        onClick={(event: MouseEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void clipboard.copy(props.id);
+        }}
       >
-        <Show when={copied()} fallback="copy">
-          Copied
-        </Show>
-      </button>
+        {clipboard.pending()
+          ? "Copying…"
+          : clipboard.copied()
+            ? "Copied"
+            : "Copy"}
+      </Button>
+      <span class="sr-only" role="status">
+        {clipboard.copied() ? "Copied session id" : ""}
+      </span>
+      <Show when={clipboard.error()}>
+        {(error) => (
+          <span role="alert" class="basis-full text-xs text-danger">
+            {error()}
+          </span>
+        )}
+      </Show>
     </span>
   );
 };

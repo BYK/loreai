@@ -79,6 +79,21 @@ are not echoed. Authentication and deleted-knowledge states retain their own
 existing handling. Both variants use the semantic olive/amber theme and have
 44px actions, wrapping labels, and internally scrollable short-screen layouts.
 
+## Action feedback and icons
+
+The owned shadcn `Button` accepts `icon` and `pending`. Pending buttons disable
+activation, expose `aria-busy`, and replace their leading icon with the shared
+loading glyph. Motion is limited to pending indicators and follows reduced
+motion. Features still own their requests, errors, and confirmed receipts.
+
+`createClipboard` provides shared pending, copied, and error feedback. Pass a
+reactive source identity so selection, session, account-dialog, and invite changes
+invalidate old results. Duplicate pending writes are ignored; completion is
+announced only after `writeText` resolves. Errors retain a manual-copy fallback,
+and disposal clears timers and suppresses late feedback. The icon registry supplies
+consistent decorative SVGs for copy/link/save/sync actions, sort direction,
+search controls, dialog close buttons, and loading/empty/locked/error states.
+
 ## Screenshot comparison
 
 [PR #2094](https://github.com/BYK/loreai/pull/2094) contains the complete

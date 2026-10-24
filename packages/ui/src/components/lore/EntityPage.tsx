@@ -12,6 +12,7 @@ import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import { knowledgeHref } from "~/lib/href";
+import { Icon } from "~/components/shell/Icon";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
@@ -115,6 +116,8 @@ const MetadataForm: Component<{
       </Switch>
       <div class="mt-3 flex items-center gap-3">
         <Button
+          pending={saving()}
+          icon="save"
           size="sm"
           disabled={!dirty() || saving()}
           onClick={() => void save()}
@@ -123,7 +126,13 @@ const MetadataForm: Component<{
           {saving() ? "Saving…" : "Save"}
         </Button>
         <Show when={saved() && !dirty()}>
-          <span class="text-xs text-muted">Saved.</span>
+          <span
+            class="inline-flex items-center gap-1.5 text-xs text-muted"
+            role="status"
+          >
+            <Icon name="check" />
+            Saved.
+          </span>
         </Show>
       </div>
     </section>

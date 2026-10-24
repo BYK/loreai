@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import type { Component, JSX } from "solid-js";
 import {
   children,
@@ -224,7 +225,7 @@ export const Shell: Component<ShellProps> = (props) => {
                     class="flex size-8 shrink-0 items-center justify-center text-xs text-accent sm:w-auto sm:max-w-20 md:hidden"
                     title={back().label}
                   >
-                    <span aria-hidden="true">←</span>
+                    <Icon name="arrow" />
                     <span class="sr-only sm:not-sr-only sm:truncate">
                       {back().label}
                     </span>

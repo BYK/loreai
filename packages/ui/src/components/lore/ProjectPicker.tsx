@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 import { Combobox } from "@kobalte/core/combobox";
 import { createMemo, createSignal, Show } from "solid-js";
 import type { Component } from "solid-js";
@@ -117,16 +118,7 @@ export const ProjectPicker: Component<{
           aria-label="Show target projects"
           class="h-full px-3 text-muted outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            class="size-4"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="m6 9 6 6 6-6" />
-          </svg>
+          <Icon name="chevron" class="rotate-90" />
         </Combobox.Trigger>
       </Combobox.Control>
       {/* Keep the popup inside the parent dialog's focus and accessibility scope. */}

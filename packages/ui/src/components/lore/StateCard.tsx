@@ -1,15 +1,16 @@
 import type { Component, JSX } from "solid-js";
 import { Show } from "solid-js";
 
+import { Icon, type IconName } from "~/components/shell/Icon";
 import { cn } from "~/lib/utils";
 
 export type StateKind = "empty" | "error" | "locked" | "loading";
 
-const ICON: Record<StateKind, string> = {
-  empty: "○",
-  error: "!",
-  locked: "🔒",
-  loading: "…",
+const ICON: Record<StateKind, IconName> = {
+  empty: "empty",
+  error: "warning",
+  locked: "lock",
+  loading: "loading",
 };
 
 /**
@@ -49,7 +50,12 @@ export const StateCard: Component<{
             : "bg-chrome text-muted",
         )}
       >
-        {ICON[props.kind]}
+        <Icon
+          name={ICON[props.kind]}
+          class={
+            props.kind === "loading" ? "motion-safe:animate-spin" : undefined
+          }
+        />
       </span>
       <div class="min-w-0">
         <div

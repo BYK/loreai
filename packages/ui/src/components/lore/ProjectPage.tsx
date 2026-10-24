@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -58,7 +59,8 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       >
         <div class="mt-4 flex flex-wrap gap-2">
           <Button as={A} href={knowledgeListHref(props.project.id)} size="sm">
-            Browse knowledge ({props.project.knowledge_count}) →
+            <Icon name="book" /> Browse knowledge (
+            {props.project.knowledge_count})
           </Button>
           <Button
             as={A}
@@ -139,16 +141,16 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           <div class="eyebrow">Recent sessions</div>
           <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
             <A
-              class="whitespace-nowrap text-xs text-accent underline"
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
               href={importsHref(props.project.id)}
             >
-              Import history →
+              Import history <Icon name="chevron" class="size-3.5" />
             </A>
             <A
-              class="whitespace-nowrap text-xs text-accent underline"
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
               href={sessionsHref(props.project.id)}
             >
-              All sessions →
+              All sessions <Icon name="chevron" class="size-3.5" />
             </A>
           </div>
         </div>

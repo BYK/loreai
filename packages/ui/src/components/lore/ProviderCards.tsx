@@ -371,7 +371,13 @@ const BudgetEditor: Component<{
         </p>
       </Show>
       <div class="flex gap-2">
-        <Button size="sm" type="submit" disabled={busy()}>
+        <Button
+          pending={busy()}
+          icon="save"
+          size="sm"
+          type="submit"
+          disabled={busy()}
+        >
           {busy() ? "Saving…" : "Save budgets"}
         </Button>
         <Button

@@ -130,7 +130,9 @@ test.describe("session titles and search", () => {
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/sessions$`),
     );
-    await expect(row.getByText("Copied")).toBeVisible();
+    await expect(
+      row.getByRole("button", { name: "Copy session id" }),
+    ).toContainText("Copied");
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     expect(copied).toBe("e2e-session-sqlite");
   });
@@ -147,7 +149,9 @@ test.describe("mobile list (375x812)", () => {
       name: /Refactor the sync outbox pruning/,
     });
     await expect(row).toBeVisible();
-    const box = await row.locator(".font-medium").boundingBox();
+    const box = await row
+      .getByTitle("Refactor the sync outbox pruning", { exact: true })
+      .boundingBox();
     expect(box).not.toBeNull();
     expect(box?.height ?? 0).toBeLessThan(30);
     await expect(

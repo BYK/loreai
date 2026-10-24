@@ -1,6 +1,15 @@
 import type { Component } from "solid-js";
 
 const paths = {
+  copy: "M9 9h12v12H9z M15 9V3H3v12h6",
+  link: "m10 13 4-4 M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0 M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0",
+  save: "M3 3h15l3 3v15H3z M7 3v6h10V3 M7 21v-8h10v8",
+  refresh: "M20 7v5h-5 M4 17v-5h5 M6 6a8 8 0 0 1 14 6 M18 18a8 8 0 0 1-14-6",
+  loading: "M21 12a9 9 0 1 1-9-9",
+  lock: "M5 10h14v11H5z M8 10V6a4 4 0 0 1 8 0v4 M12 14v3",
+  empty: "M4 5h16v15H4z M4 13h5l1 3h4l1-3h5",
+  up: "M12 20V4 m-6 6 6-6 6 6",
+  down: "M12 4v16 m-6-6 6 6 6-6",
   filter: "M4 7h16 M7 12h10 M10 17h4",
   sort: "M8 4v16 m-3-3 3 3 3-3 M16 20V4 m-3 3 3-3 3 3",
   close: "m6 6 12 12 M6 18 18 6",

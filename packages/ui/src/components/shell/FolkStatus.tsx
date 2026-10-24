@@ -1,3 +1,4 @@
+import { createClipboard } from "~/lib/clipboard";
 import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
 import { For, Show, createMemo, createSignal } from "solid-js";
@@ -39,7 +40,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const [open, setOpen] = createSignal(false);
   const [tooltipOpen, setTooltipOpen] = createSignal(false);
   const [dialog, setDialog] = createSignal(false);
-  const [copyStatus, setCopyStatus] = createSignal("");
+  const clipboard = createClipboard(dialog);
   const user = () => {
     const current = folk.account.data();
     return ws.connection.state() === "reachable" &&
@@ -68,17 +69,9 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
       .join("")
       .toUpperCase();
   const showSignIn = () => {
-    setCopyStatus("");
+    clipboard.reset();
     setDialog(true);
     setOpen(false);
-  };
-  const copyLogin = async () => {
-    try {
-      await navigator.clipboard.writeText("lore login");
-      setCopyStatus("Copied command");
-    } catch {
-      setCopyStatus("Select the command above to copy it.");
-    }
   };
   const { syncing, syncError, syncReceipt, runSync } = folk;
   const summary = createMemo(() =>
@@ -293,7 +286,8 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
                       variant="outline"
                       size="sm"
                       data-testid="sync-now"
-                      disabled={syncing()}
+                      pending={syncing()}
+                      icon="refresh"
                       onClick={() => void runSync()}
                       class={cn(
                         "h-auto px-2 py-1",
@@ -394,13 +388,22 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => void copyLogin()}
+              pending={clipboard.pending()}
+              icon={clipboard.copied() ? "check" : "copy"}
+              onClick={() => void clipboard.copy("lore login")}
             >
-              Copy command
+              {clipboard.copied() ? "Copied command" : "Copy command"}
             </Button>
             <p class="text-xs text-muted" role="status">
-              {copyStatus()}
+              {clipboard.copied() ? "Command copied to clipboard" : ""}
             </p>
+            <Show when={clipboard.error()}>
+              {(error) => (
+                <p role="alert" class="text-xs text-danger">
+                  {error()}
+                </p>
+              )}
+            </Show>
             <p class="text-xs text-muted">
               Return here after signing in. Your account updates automatically.
             </p>

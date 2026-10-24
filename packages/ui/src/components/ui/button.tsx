@@ -7,6 +7,7 @@ import type { PolymorphicProps } from "@kobalte/core/polymorphic";
 import type { VariantProps } from "class-variance-authority";
 import { cva } from "class-variance-authority";
 
+import { Icon, type IconName } from "~/components/shell/Icon";
 import { cn } from "~/lib/utils";
 
 const buttonVariants = cva(
@@ -43,6 +44,10 @@ type ButtonProps<T extends ValidComponent = "button"> =
     VariantProps<typeof buttonVariants> & {
       class?: string | undefined;
       children?: JSX.Element;
+      /** Pending is presentational; the caller owns the operation and receipt. */
+      pending?: boolean;
+      "aria-busy"?: JSX.AriaAttributes["aria-busy"];
+      icon?: IconName;
     };
 
 const Button = <T extends ValidComponent = "button">(
@@ -52,6 +57,11 @@ const Button = <T extends ValidComponent = "button">(
     "variant",
     "size",
     "class",
+    "children",
+    "pending",
+    "icon",
+    "disabled",
+    "aria-busy",
   ]);
   return (
     <ButtonPrimitive.Root
@@ -60,7 +70,17 @@ const Button = <T extends ValidComponent = "button">(
         local.class,
       )}
       {...others}
-    />
+      disabled={local.pending || local.disabled}
+      aria-busy={local.pending || local["aria-busy"]}
+    >
+      {(local.pending || local.icon) && (
+        <Icon
+          name={local.pending ? "loading" : local.icon!}
+          class={local.pending ? "motion-safe:animate-spin" : undefined}
+        />
+      )}
+      {local.children}
+    </ButtonPrimitive.Root>
   );
 };
 

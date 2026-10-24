@@ -132,6 +132,8 @@ export const WarmingPage: Component = () => {
                 </p>
               </div>
               <Button
+                pending={busy() === "enabled"}
+                icon="save"
                 size="sm"
                 disabled={!data().can_toggle || busy() === "enabled"}
                 onClick={() =>
@@ -198,6 +200,7 @@ export const WarmingPage: Component = () => {
                     </p>
                   </div>
                   <Button
+                    pending={busy() === "reset"}
                     size="sm"
                     variant="outline"
                     disabled={!data().can_edit || busy() === "reset"}

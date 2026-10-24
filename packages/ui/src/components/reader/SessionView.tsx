@@ -1,3 +1,4 @@
+import { createClipboard } from "~/lib/clipboard";
 /**
  * The session reader (UI-06b): a virtualised, selectable, addressable
  * document of one session's captured history.
@@ -219,13 +220,6 @@ function errorMessage(err: unknown): string {
   return typeof err === "string" ? err : "unknown error";
 }
 
-function writeClipboard(text: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return Promise.reject(new Error("Clipboard unavailable"));
-}
-
 const RowContent: Component<{
   row: ReaderRow;
   distillation: (id: string) => DistillationState | undefined;
@@ -348,10 +342,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // -- selection -----------------------------------------------------------
   const [selection, setSelection] = createSignal<ReaderSelection | null>(null);
   const [selectionHint, setSelectionHint] = createSignal<string | null>(null);
-  const [copied, setCopied] = createSignal<"reference" | "link" | null>(null);
-  const [copyError, setCopyError] = createSignal<string | null>(null);
-  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
-  onCleanup(() => clearTimeout(copiedTimer));
+  const clipboard = createClipboard(() => [props.sessionId, selection()]);
+  const [copyKind, setCopyKind] = createSignal<"reference" | "link" | null>(
+    null,
+  );
+  const copied = () => (clipboard.copied() ? copyKind() : null);
+  const copyError = clipboard.error;
 
   const highlight = createMemo<PassageHighlight | null>(() => {
     const s = selection();
@@ -377,8 +373,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     batch(() => {
       setSelection(next);
       setSelectionHint(null);
-      setCopied(null);
-      setCopyError(null);
+      clipboard.reset();
     });
     publish(next?.anchor ?? null);
   }
@@ -413,7 +408,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
   async function copy(kind: "reference" | "link") {
     const s = selection();
-    if (!s) return;
+    if (!s || clipboard.pending()) return;
+    setCopyKind(kind);
     const link = deepLinkFor(props.linkBase(), s.anchor, s.quote);
     const text =
       kind === "link"
@@ -424,19 +420,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
             sessionId: props.sessionId,
             link,
           });
-    try {
-      await writeClipboard(text);
-      setCopyError(null);
-      setCopied(kind);
-      clearTimeout(copiedTimer);
-      copiedTimer = setTimeout(() => setCopied(null), 2000);
-    } catch (err) {
-      setCopyError(
-        err instanceof Error && err.message
-          ? `Copy failed: ${err.message}`
-          : "Copy failed",
-      );
-    }
+    await clipboard.copy(text);
   }
 
   // -- deep links ----------------------------------------------------------
@@ -2088,6 +2072,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 <Button
                   size="sm"
                   data-testid="copy-with-source"
+                  pending={clipboard.pending() && copyKind() === "reference"}
+                  disabled={clipboard.pending()}
+                  icon={copied() === "reference" ? "check" : "copy"}
                   onClick={() => void copy("reference")}
                 >
                   {copied() === "reference" ? "Copied" : "Copy with source"}
@@ -2096,10 +2083,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                   size="sm"
                   variant="outline"
                   data-testid="copy-link"
+                  pending={clipboard.pending() && copyKind() === "link"}
+                  disabled={clipboard.pending()}
+                  icon={copied() === "link" ? "check" : "link"}
                   onClick={() => void copy("link")}
                 >
                   {copied() === "link" ? "Link copied" : "Copy link"}
                 </Button>
+                <span class="sr-only" role="status">
+                  {copied() ? "Copied selection" : ""}
+                </span>
                 <Show when={copyError()}>
                   {(err) => (
                     <span class="text-xs text-danger" role="alert">

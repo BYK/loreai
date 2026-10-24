@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
@@ -169,9 +170,12 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     if (position < 0) return null;
     const key = props.query.sort[position]!;
     return (
-      <span class="ml-1 text-muted" aria-hidden="true">
+      <span
+        class="ml-1 inline-flex items-center gap-0.5 text-muted"
+        aria-hidden="true"
+      >
         {props.query.sort.length > 1 ? `${position + 1} ` : ""}
-        {key.dir === "asc" ? "↑" : "↓"}
+        <Icon name={key.dir === "asc" ? "up" : "down"} class="size-3.5" />
       </span>
     );
   };

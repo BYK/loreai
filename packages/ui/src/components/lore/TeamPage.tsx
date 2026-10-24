@@ -1,3 +1,4 @@
+import { createClipboard } from "~/lib/clipboard";
 import type { Component } from "solid-js";
 import {
   createEffect,
@@ -102,7 +103,7 @@ export const TeamPage: Component = () => {
   const [inviteReceipt, setInviteReceipt] =
     createSignal<TeamInviteReceipt | null>(null);
   const [inviteError, setInviteError] = createSignal("");
-  const [copyMessage, setCopyMessage] = createSignal("");
+  const clipboard = createClipboard(inviteReceipt);
   const [removeTarget, setRemoveTarget] = createSignal<TeamMember | null>(null);
   const [removeError, setRemoveError] = createSignal<MutationFailure | null>(
     null,
@@ -149,7 +150,7 @@ export const TeamPage: Component = () => {
     setInviteError("");
     setInviteEmail("");
     setOfflineInvite(false);
-    setCopyMessage("");
+    clipboard.reset();
     setActionError("");
     setReviewPolicyError(null);
     setStaleMemberId(null);
@@ -424,7 +425,7 @@ export const TeamPage: Component = () => {
     const epoch = actionEpoch;
     setBusy(true);
     setInviteError("");
-    setCopyMessage("");
+    clipboard.reset();
     try {
       const receipt = await ws.tracked(() =>
         ws.client.inviteTeamMember(current.team?.id ?? teamId(), {
@@ -574,18 +575,13 @@ export const TeamPage: Component = () => {
   const copyAcceptCommand = async () => {
     const receipt = inviteReceipt();
     if (!receipt) return;
-    try {
-      await navigator.clipboard.writeText(receipt.invite.accept_command);
-      setCopyMessage("Accept command copied.");
-    } catch {
-      setCopyMessage("Clipboard is unavailable; copy the command above.");
-    }
+    await clipboard.copy(receipt.invite.accept_command);
   };
 
   const closeInviteReceipt = (open: boolean) => {
     if (!open) {
       setInviteReceipt(null);
-      setCopyMessage("");
+      clipboard.reset();
     }
   };
 
@@ -1023,6 +1019,7 @@ export const TeamPage: Component = () => {
                       Offline invite
                     </label>
                     <Button
+                      pending={busy()}
                       type="submit"
                       size="sm"
                       disabled={
@@ -1110,6 +1107,8 @@ export const TeamPage: Component = () => {
               Cancel
             </Button>
             <Button
+              pending={savingReviewPolicy()}
+              icon="save"
               disabled={
                 !canAct() ||
                 savingReviewPolicy() ||
@@ -1182,6 +1181,7 @@ export const TeamPage: Component = () => {
               Cancel
             </Button>
             <Button
+              pending={removing()}
               variant="destructive"
               disabled={
                 !canAct() ||
@@ -1232,15 +1232,24 @@ export const TeamPage: Component = () => {
                     ? "Invite email sent."
                     : "Share this command with the teammate securely."}
                 </p>
-                <Show when={copyMessage()}>
+                <Show when={clipboard.copied()}>
                   <p class="text-xs text-muted" role="status">
-                    {copyMessage()}
+                    Accept command copied.
                   </p>
+                </Show>
+                <Show when={clipboard.error()}>
+                  {(error) => (
+                    <p role="alert" class="text-xs text-danger">
+                      {error()}
+                    </p>
+                  )}
                 </Show>
                 <DialogFooter>
                   <Button
                     size="sm"
                     variant="outline"
+                    pending={clipboard.pending()}
+                    icon={clipboard.copied() ? "check" : "copy"}
                     onClick={() => void copyAcceptCommand()}
                   >
                     Copy accept command

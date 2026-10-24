@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 /**
  * Model usage page (#2026): distinct sessions per model per UTC day, read
  * from the assistant turns Lore stored — the same metric as Model Tides.
@@ -261,9 +262,12 @@ export const ModelUsagePage: Component = () => {
     if (position < 0) return null;
     const key = sort()[position]!;
     return (
-      <span class="ml-1 text-muted" aria-hidden="true">
+      <span
+        class="ml-1 inline-flex items-center gap-0.5 text-muted"
+        aria-hidden="true"
+      >
         {sort().length > 1 ? `${position + 1} ` : ""}
-        {key.dir === "asc" ? "↑" : "↓"}
+        <Icon name={key.dir === "asc" ? "up" : "down"} class="size-3.5" />
       </span>
     );
   };

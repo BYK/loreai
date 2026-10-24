@@ -365,6 +365,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             </p>
           </Show>
           <Button
+            pending={creating()}
             class="mt-3"
             type="submit"
             disabled={props.disabled || creating()}
@@ -676,7 +677,11 @@ export const TeamParityActions: Component<Props> = (props) => {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={props.disabled || creating()}>
+              <Button
+                pending={creating()}
+                type="submit"
+                disabled={props.disabled || creating()}
+              >
                 {creating() ? "Creating…" : "Create team"}
               </Button>
             </DialogFooter>

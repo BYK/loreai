@@ -11,7 +11,9 @@ test.describe("import history (UI-08)", () => {
 
     await page.goto(`/ui/projects/${lore!.id}`);
     await expectGatewayReachable(page);
-    await page.getByRole("link", { name: "Import history →" }).click();
+    await page
+      .getByRole("link", { name: "Import history", exact: true })
+      .click();
 
     await expect(page).toHaveURL(
       new RegExp(`/ui/projects/${lore!.id}/imports$`),
