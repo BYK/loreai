@@ -1376,7 +1376,7 @@ seeded e2e gateway and the Vite dev server (fixture routes).
 
 | # | Deviation from the specimens | Decision |
 |---|---|---|
-| 1 | Colour palette: the app uses zinc surfaces with Lore green accents. | **Accepted** — see "Design tokens: zinc foundation and green accents". Structure, radii, borders and focus treatment follow the specimen. |
+| 1 | Colour palette: the app uses olive surfaces with amber accents. | **Accepted** — see "Design tokens: olive foundation and amber accents". Structure, radii, borders and focus treatment follow the specimen. |
 | 2 | App bar shows the Lore.AI logo instead of the "Lore" wordmark; "Local workspace" / avatar match. | **Accepted** — brand. |
 | 3 | Knowledge table (mobile): five columns squeezed the title to ~6 characters. | **Fixed** here — scope/confidence/updated columns are hidden below `sm`; title + category remain. |
 | 4 | Knowledge table (desktop): title and preview cells were clipped mid-word without an ellipsis. | **Fixed** here (`truncate` on the cell children). |
@@ -1614,32 +1614,37 @@ dedup suggestion rows, delete session/distillation buttons, move
 knowledge and the aggregate home dashboard — are out-of-scope follow-ups.
 
 
-## Design tokens: zinc foundation and green accents
+## Design tokens: olive foundation and amber accents
 
-The UI uses neutral zinc surfaces, borders, and text in both themes. Lore green
-is reserved for primary actions, links, current navigation, focus rings, status,
-and highlights. The marketing website retains its own cream/green palette.
+The UI uses an olive base for surfaces, borders, and text in both themes.
+Amber marks primary actions, links, selected navigation, focus rings, and
+highlights. The marketing website keeps its own cream/green palette.
 
-Semantic tokens live in `src/styles/app.css`; owned Solid/shadcn components use
-these aliases instead of hardcoded component colors.
+`src/styles/app.css` maps `--palette-base-*` and `--palette-accent-*` to
+Tailwind olive and amber. Semantic aliases derive from those two scales, so
+changing a family updates owned Solid/shadcn components without page-level
+color changes. See [the palette guide](../../docs/ui-redesign/README.md) for
+role mappings and visual comparisons.
 
-| Semantic token | Light | Dark | Purpose |
+| Semantic token | Light scale | Dark scale | Purpose |
 |---|---|---|---|
-| `--bg` | `#fafafa` | `#09090b` | Workspace background |
-| `--surface` | `#ffffff` | `#18181b` | Documents, cards, dialogs, popovers |
-| `--nav`, `--shade` | `#f4f4f5` | `#18181b` | Navigation and secondary surfaces |
-| `--chrome`, `--soft` | `#f4f4f5` | `#27272a` | Toolbars, neutral hover and secondary states |
-| `--line` | `#e4e4e7` | `#3f3f46` | Borders and dividers |
-| `--text`, `--emphasis` | `#27272a` | `#e4e4e7` | Body and emphasized text |
-| `--muted` | `#52525b` | `#a1a1aa` | Secondary text and icons |
-| `--heading` | `#18181b` | `#fafafa` | Headings |
-| `--accent`, `--inverse-bg` | `#3d6644` | `#a6d6ae` | Links, focus, primary actions |
-| `--accent-soft` | `#e8f2e9` | `#172c20` | Selected navigation and gentle highlights |
-| `--accent-soft-text` | `#3d6644` | `#bfe0c4` | Text on green highlights |
-| `--danger` | `#8b3a3a` | `#e39393` | Errors and destructive actions |
+| `--bg` | Base 100 | Base 950 | Workspace background |
+| `--surface` | Base 50 | Base 900 | Documents, cards, dialogs, popovers |
+| `--nav`, `--shade` | Base 100 | Base 900 | Navigation and secondary surfaces |
+| `--chrome`, `--soft` | Base 100 | Base 800 | Toolbars, neutral hover and secondary states |
+| `--line` | Base 200 | Base 700 | Borders and dividers |
+| `--text`, `--emphasis` | Base 900 | Base 200 | Body and emphasized text |
+| `--muted` | Base 600 | Base 400 | Secondary text and icons |
+| `--heading` | Base 950 | Base 50 | Headings |
+| `--accent`, `--inverse-bg` | Accent 700 | Accent 400 | Links, focus, primary actions |
+| `--accent-hover` | Accent 800 | Accent 300 | Hovered links and primary actions |
+| `--accent-soft` | Accent 50 | Accent 950 | Selected navigation and highlights |
+| `--accent-soft-text` | Accent 800 | Accent 200 | Text on accent highlights |
 
-Existing brand variables remain available for logos, avatars, and charts.
-Typography, radii, and component layout are unchanged by the palette update.
+Logo SVGs, categorical model chart colors, and green/red version diffs stay
+independent. Cost/quota bars and warming histograms retain their previous green
+colors through separate chart tokens. Destructive states retain their red roles.
+Typography and component radii do not depend on the chosen color family.
 
 **Fonts** are self-hosted from `@fontsource-variable/dm-sans` and
 `@fontsource/playfair-display` (OFL-1.1) via hand-written `@font-face` rules

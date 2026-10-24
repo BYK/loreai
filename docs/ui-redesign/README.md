@@ -68,13 +68,12 @@ project selection. Desktop dropdowns keep their existing layout.
 or changes presentation across the breakpoint. The searchable project switcher
 and controls already inside dialogs retain their specialized interactions.
 
-Filter-count previews: [desktop](knowledge-toolbar-desktop-light.png) and
-[mobile](knowledge-toolbar-mobile-light.png).
+## Screenshot comparison
 
-| Sort presentation | Light | Dark |
-| --- | --- | --- |
-| Mobile sheet | ![Mobile sort, light](knowledge-sort-mobile-light.png) | ![Mobile sort, dark](knowledge-sort-mobile-dark.png) |
-| Desktop dropdown | ![Desktop sort, light](knowledge-sort-desktop-light.png) | ![Desktop sort, dark](knowledge-sort-desktop-dark.png) |
+[PR #2094](https://github.com/BYK/loreai/pull/2094) contains the complete
+before/after gallery for desktop and mobile in both themes, including navigation,
+readers, tables, account controls, dialogs, and the new selection sheets.
+Screenshots are attached to the PR rather than committed as build artifacts.
 
 Screenshots use the disposable database seeded by the UI browser tests.
 `responsive-layout.spec.ts` audits 23 routes at 1440, 390, and 320px in both
@@ -85,8 +84,7 @@ live palette propagation, and independent chart colors on desktop and mobile.
 `workspace-shell.spec.ts` and `model-usage.spec.ts` capture readers and charts.
 Rebuild the gateway bundle before regenerating production-route screenshots.
 
-The team captures show the pane scrolled to organization/invitation forms;
-`team-invite-mobile-dark.png` is the invitation card detail. Gateway connection
-captures are taken before entering the synthetic token used to check required
-validation and Enter submission. The old overview capture documents an earlier
-layout and is retained as historical reference.
+The team captures include organization/invitation forms. All captures use a
+throw-away seeded database and synthetic account/team data; no personal account,
+credentials, or production database is used. Before and after use the same
+fixtures, viewport, and theme, with real builds of the base and redesign UI.

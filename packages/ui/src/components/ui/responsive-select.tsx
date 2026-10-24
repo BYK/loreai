@@ -32,6 +32,7 @@ export const ResponsiveSelect: Component<{
   "data-testid"?: string;
 }> = (props) => {
   let trigger: HTMLButtonElement | undefined;
+  let listbox: HTMLUListElement | undefined;
   const overlay = createResponsiveOverlay(() => trigger);
   const label = (value: string) =>
     props.optionLabel?.(value) ??
@@ -112,12 +113,35 @@ export const ResponsiveSelect: Component<{
         </DialogTrigger>
         <BottomSheetContent
           data-select-presentation="sheet"
+          onOpenAutoFocus={(event) => {
+            // Focus once through Dialog; Listbox's deferred autoFocus can overwrite
+            // keyboard navigation that happens while the sheet is opening.
+            event.preventDefault();
+            // The content effect can run before its child refs are mounted.
+            queueMicrotask(() => {
+              if (!overlay.open() || !listbox?.isConnected) return;
+              if (
+                listbox
+                  .closest('[role="dialog"]')
+                  ?.contains(document.activeElement)
+              )
+                return;
+              const option =
+                listbox.querySelector<HTMLElement>(
+                  '[role="option"][aria-selected="true"]',
+                ) ?? listbox.querySelector<HTMLElement>('[role="option"]');
+              (option ?? listbox).focus({ preventScroll: true });
+            });
+          }}
           onCloseAutoFocus={overlay.restoreFocus}
         >
           <DialogTitle class="shrink-0 border-b border-line p-4 pr-16 text-sm">
             {props.sheetTitle}
           </DialogTitle>
           <Listbox.Root<{ value: string; label: string }>
+            ref={(element) => {
+              listbox = element;
+            }}
             aria-label={props.label}
             options={choices()}
             optionValue="value"
@@ -127,7 +151,6 @@ export const ResponsiveSelect: Component<{
             selectionBehavior="replace"
             disallowEmptySelection
             allowDuplicateSelectionEvents
-            autoFocus
             onChange={(keys) => {
               const value = keys.values().next().value;
               if (value === undefined || !overlay.open()) return;

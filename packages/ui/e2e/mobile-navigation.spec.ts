@@ -110,3 +110,51 @@ test("resizing mobile account layers returns focus to desktop navigation", async
     await expect(page.getByTestId("mobile-menu-trigger")).toBeFocused();
   }
 });
+
+test("mobile navigation honors reduced motion when opening and closing", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 390, height: 740 });
+  await page.goto("/ui/knowledge");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await openNavigation(page);
+    const drawer = page.getByTestId("nav-drawer");
+    await expect(drawer).toBeVisible();
+    expect(
+      await drawer.evaluate(
+        (element) => getComputedStyle(element).animationName,
+      ),
+    ).toBe("none");
+    await page.evaluate(() => {
+      const state = window as Window & { drawerClosePaint?: Promise<string> };
+      state.drawerClosePaint = new Promise((resolve) => {
+        document.addEventListener(
+          "keydown",
+          () => {
+            requestAnimationFrame(() => {
+              const closing = document.querySelector(
+                '[data-testid="nav-drawer"]',
+              );
+              resolve(
+                closing ? getComputedStyle(closing).animationName : "none",
+              );
+            });
+          },
+          { once: true },
+        );
+      });
+    });
+    await page.keyboard.press("Escape");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as Window & { drawerClosePaint?: Promise<string> })
+            .drawerClosePaint,
+      ),
+    ).toBe("none");
+    await expect(drawer).toHaveCount(0);
+    await expect(page.getByTestId("mobile-menu-trigger")).toBeFocused();
+  }
+});

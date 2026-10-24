@@ -447,7 +447,7 @@
 /* Primary navigation remains visible independently of the context pane. */
 .rail-action { display:flex; align-items:center; justify-content:center; width:36px; height:36px; flex-shrink:0; border-radius:8px; color:var(--muted); outline:none; }
 .rail-action:hover { background:var(--soft); color:var(--text); }
-.rail-action:focus-visible { box-shadow:inset 0 0 0 2px var(--ring); }
+.rail-action:focus-visible { box-shadow:inset 0 0 0 2px var(--accent); }
 .rail-action[aria-current="page"] { background:var(--accent-soft); color:var(--accent-soft-text); }
 
 /* Mobile navigation enters from the leading edge without moving the reader. */
@@ -455,7 +455,7 @@
 @keyframes mobile-navigation-out { from { transform: translateX(0); } to { transform: translateX(-100%); } }
 .mobile-navigation-drawer[data-expanded] { animation: mobile-navigation-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 .mobile-navigation-drawer[data-closed] { animation: mobile-navigation-out 150ms ease-in; }
-@media (prefers-reduced-motion: reduce) { .mobile-navigation-drawer { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mobile-navigation-drawer[data-expanded], .mobile-navigation-drawer[data-closed] { animation: none; } }
 
 
 @keyframes mobile-bottom-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }

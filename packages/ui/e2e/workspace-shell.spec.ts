@@ -184,7 +184,7 @@ test("context focus survives breakpoint changes and content input focus stays pu
 
 test("session context filters preserve transcript and anchor", async ({
   page,
-}) => {
+}, testInfo) => {
   const { project } = await seededReader(page);
   await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader?a=example`);
   const toggle = page.getByTestId("context-toggle");
@@ -192,6 +192,15 @@ test("session context filters preserve transcript and anchor", async ({
     await toggle.click();
   await expect(page.getByTestId("session-context-list")).toBeVisible();
   const input = page.getByRole("searchbox", { name: "Filter session list" });
+  if (testInfo.project.name.includes("mobile")) {
+    for (const control of [
+      input,
+      page.getByRole("button", { name: "Find", exact: true }),
+      page.getByRole("link", { name: "Open as list", exact: true }),
+    ]) {
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+  }
   await input.fill("reader");
   await input.press("Enter");
   await expect(page).toHaveURL(/sessions\/e2e-reader\?a=example&q=reader$/);
@@ -893,22 +902,61 @@ test("mobile sort keeps options reachable in landscape and restores focus throug
   await seededReader(page);
   await page.getByTestId("context-toggle").click();
   const sort = page.getByRole("button", { name: /^List sort/ });
+  // Normal opening must focus the selected option without moving the header.
   await sort.click();
+  const initialSheet = page.getByRole("dialog", {
+    name: "Sort knowledge",
+    exact: true,
+  });
+  const selected = page.getByRole("option", {
+    name: "Recently updated",
+    exact: true,
+  });
+  await expect(selected).toBeFocused();
+  await expect(
+    initialSheet.getByRole("heading", { name: "Sort knowledge", exact: true }),
+  ).toBeInViewport();
+  await page.keyboard.press("Escape");
+  await expect(initialSheet).toHaveCount(0);
+  // Navigate in the same turn as opening, before deferred autofocus can run.
+  await sort.evaluate(async (element) => {
+    if (!(element instanceof HTMLButtonElement))
+      throw new Error("sort trigger is not a button");
+    element.click();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const first = document.querySelector<HTMLElement>('[role="option"]');
+    if (!first) throw new Error("sort options did not mount");
+    first.focus({ preventScroll: true });
+    first.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "End",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
   const sheet = page.getByRole("dialog", {
     name: "Sort knowledge",
     exact: true,
   });
   await expect(sheet).toBeVisible();
-  await page
-    .getByRole("option", { name: "Recently updated", exact: true })
-    .focus();
-  await page.keyboard.press("End");
   const last = page.getByRole("option", {
     name: "Lowest confidence",
     exact: true,
   });
   await expect(last).toBeFocused();
+  // A deferred initial-focus callback must not reset an early keyboard choice.
+  await sheet.evaluate(async (element) => {
+    await Promise.all(
+      element.getAnimations().map((animation) => animation.finished),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+  await expect(last).toBeFocused();
   await expect(last).toBeInViewport();
+  await expect(
+    sheet.getByRole("heading", { name: "Sort knowledge", exact: true }),
+  ).toBeInViewport();
   expect(new URL(page.url()).searchParams.has("sort")).toBe(false);
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 1280, height: 800 });

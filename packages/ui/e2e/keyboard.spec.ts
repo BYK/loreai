@@ -269,3 +269,29 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     });
   }
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`desktop rail links and account retain visible keyboard focus in ${theme}`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.addInitScript(
+      (choice) => localStorage.setItem("lore.ui.theme", choice),
+      theme,
+    );
+    await page.goto("/ui/");
+    await expect(page.getByTestId("icon-rail")).toBeVisible();
+    await page.keyboard.press("Tab");
+    for (const id of ["rail-projects", "rail-knowledge", "folk-status"]) {
+      const control = page.getByTestId(id);
+      await control.focus();
+      await expect(control).toBeFocused();
+      const focus = await control.evaluate((element) => ({
+        visible: element.matches(":focus-visible"),
+        shadow: getComputedStyle(element).boxShadow,
+      }));
+      expect(focus.visible).toBe(true);
+      expect(focus.shadow).not.toBe("none");
+    }
+  });
+}

@@ -39,7 +39,7 @@ export const SessionContextList: Component<{
           <strong class="text-heading">Sessions</strong>
           <A
             href={sessionsHref(props.projectId, cursor(), q() || null)}
-            class="text-muted hover:text-text"
+            class="inline-flex min-h-11 items-center text-muted hover:text-text md:min-h-0"
           >
             Open as list
           </A>
@@ -66,10 +66,10 @@ export const SessionContextList: Component<{
               aria-label="Filter session list"
               placeholder="Find a session…"
               value={q()}
-              class="h-8 text-xs"
+              class="h-11 text-base md:h-8 md:text-xs"
             />
           </TextField>
-          <Button type="submit" size="sm" class="h-8 px-2 text-xs">
+          <Button type="submit" size="sm" class="h-11 px-2 text-xs md:h-8">
             Find
           </Button>
         </form>
@@ -116,6 +116,7 @@ export const SessionContextList: Component<{
           <Button
             variant="link"
             size="sm"
+            class="h-11 md:h-8"
             onClick={() => setParams({ cursor: undefined })}
           >
             First page
@@ -124,6 +125,7 @@ export const SessionContextList: Component<{
         <Button
           variant="link"
           size="sm"
+          class="h-11 md:h-8"
           disabled={!data()?.next_cursor}
           onClick={() =>
             setParams({ cursor: data()?.next_cursor ?? undefined })
