@@ -5,7 +5,10 @@ import { config } from "../src/config";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
-import { KNOWLEDGE_HEADER_OVERHEAD_TOKENS } from "../src/prompt";
+import {
+  KNOWLEDGE_HEADER_OVERHEAD_TOKENS,
+  formatKnowledge,
+} from "../src/prompt";
 import { runReadJob } from "../src/read-job";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import {
@@ -206,7 +209,7 @@ test("a selected version tombstoned before hydration rejects the whole selection
   expect(changed).toBe(true);
 });
 
-test.each(["confidence", "sharing", "ownership"] as const)(
+test.each(["confidence-floor", "sharing", "ownership", "version"] as const)(
   "a selected header changed by %s before hydration cannot freeze stale ranking",
   async (change) => {
     const foreignProject = ensureProject("/test/ltm/candidate-hydration/other");
@@ -219,7 +222,12 @@ test.each(["confidence", "sharing", "ownership"] as const)(
     serve(() => {
       if (changed) return;
       changed = true;
-      if (change === "confidence") ltm.update(target, { confidence: 0.4 });
+      if (change === "confidence-floor")
+        ltm.update(target, { confidence: 0.2 });
+      else if (change === "version")
+        ltm.update(target, {
+          content: "An edited current version needs a fresh selection.",
+        });
       else if (change === "sharing")
         db()
           .query("UPDATE knowledge SET cross_project = 0 WHERE id = ?")
@@ -236,6 +244,71 @@ test.each(["confidence", "sharing", "ownership"] as const)(
       }),
     ).rejects.toBeInstanceOf(ReadPreparationUnavailableError);
     expect(changed).toBe(true);
+  },
+);
+
+test.each([
+  ["task", "confidence"],
+  ["task", "reconfirmation"],
+  ["preference", "confidence"],
+  ["preference", "reconfirmation"],
+] as const)(
+  "benign %s %s updates retain the request's ranking snapshot",
+  async (path, change) => {
+    const category = path === "preference" ? "preference" : "gotcha";
+    const target = create(
+      "Quasar primary rule",
+      "Quasar keeps stable routing.",
+      {
+        category,
+        confidence: 0.9,
+      },
+    );
+    create("Quasar secondary rule", "Quasar keeps stable routing.", {
+      category,
+      confidence: 0.5,
+    });
+    const original = ltm.get(target);
+    if (!original) throw new Error("Missing seeded knowledge");
+    const options = {
+      ...(path === "preference" ? { categories: ["preference"] } : {}),
+      contextHint: "quasar",
+      deferEffects: true,
+    };
+    const expected = await ltm.forSession(PROJECT, undefined, 1000, options);
+    let changed = false;
+    serve(() => {
+      if (changed) return;
+      changed = true;
+      const clock = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(original.updated_at + 1000);
+      try {
+        ltm.update(
+          target,
+          change === "confidence"
+            ? { confidence: 0.4 }
+            : { updatedBy: "background-agent" },
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+    const selected = await ltm.forSession(PROJECT, undefined, 1000, options);
+    expect(changed).toBe(true);
+    expect(ltm.get(target)?.id).toBe(original.id);
+    expect(ltm.get(target)?.updated_at).toBe(original.updated_at + 1000);
+    expect(ltm.get(target)?.confidence).toBe(
+      change === "confidence" ? 0.4 : 0.9,
+    );
+    expect(
+      selected.map((entry) => [entry.id, entry.confidence, entry.updated_at]),
+    ).toEqual(
+      expected.map((entry) => [entry.id, entry.confidence, entry.updated_at]),
+    );
+    expect(formatKnowledge(selected, 1000)).toBe(
+      formatKnowledge(expected, 1000),
+    );
   },
 );
 

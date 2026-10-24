@@ -2937,6 +2937,12 @@ const SELECTION_COLUMNS = [
   "confidence",
   "updated_at",
 ] as const;
+const SELECTION_SCOPE_COLUMNS = [
+  "id",
+  "category",
+  "project_id",
+  "cross_project",
+] as const;
 type SelectionCandidate = Pick<
   KnowledgeEntry,
   (typeof SELECTION_COLUMNS)[number]
@@ -2994,11 +3000,26 @@ async function hydrateSelectionCandidates(
     if (
       !entry ||
       entry.tenant_id !== scope.tenantId ||
-      SELECTION_COLUMNS.some((column) => entry[column] !== candidate[column])
+      SELECTION_SCOPE_COLUMNS.some(
+        (column) => entry[column] !== candidate[column],
+      )
     ) {
       throw new ReadPreparationUnavailableError("knowledge", "unavailable");
     }
-    return entry;
+    // Confidence feedback and metadata-only reconfirmations can advance these
+    // ranking fields without replacing the current version. Keep this request's
+    // header snapshot instead of making ordinary background updates fail a turn.
+    // The query still rejects retired/below-floor entries and changed versions.
+    if (
+      entry.confidence === candidate.confidence &&
+      entry.updated_at === candidate.updated_at
+    )
+      return entry;
+    return {
+      ...entry,
+      confidence: candidate.confidence,
+      updated_at: candidate.updated_at,
+    };
   });
 }
 
