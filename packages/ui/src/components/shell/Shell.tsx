@@ -25,6 +25,8 @@ export interface ShellProps {
   nav?: () => JSX.Element;
   list?: JSX.Element;
   contextLabel?: string;
+  /** Explicit title for screens outside the normal section routes. */
+  pageLabel?: string;
   detail: JSX.Element;
   mobilePane: MobilePane;
   back?: { href: string; label: string };
@@ -210,6 +212,7 @@ export const Shell: Component<ShellProps> = (props) => {
           class="grid min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]"
         >
           <AppBar
+            pageLabel={props.pageLabel}
             onOpenMenu={!wide() ? () => setMenuOpen(true) : undefined}
             menuOpen={menuOpen()}
             leading={

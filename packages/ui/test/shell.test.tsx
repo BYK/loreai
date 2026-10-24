@@ -1765,6 +1765,88 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(screen.queryByText("Keep SQLite")).toBeNull();
   });
 
+  it("keeps workspace navigation and safe recovery links on unknown routes under /ui", async () => {
+    mount(
+      "/ui/missing-page?token=private-value",
+      fakeClient(),
+      undefined,
+      "/ui",
+    );
+    const page = screen.getByTestId("not-found");
+    expect(screen.getByTestId("icon-rail")).toBeInTheDocument();
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+    expect(
+      within(page).getByRole("heading", { name: "Page not found" }),
+    ).toBeInTheDocument();
+    expect(
+      within(page).getByRole("link", { name: "Browse projects" }),
+    ).toHaveAttribute("href", "/ui");
+    expect(
+      within(page).getByRole("link", { name: "Search knowledge" }),
+    ).toHaveAttribute("href", "/ui/search?q=");
+    expect(page).not.toHaveTextContent("private-value");
+    expect(
+      screen.queryByRole("link", { name: /Return to project/ }),
+    ).toBeNull();
+  });
+
+  it("recovers to a known project without guessing project IDs from the route", async () => {
+    const { history } = mount(
+      "/ui/projects/p-lore/missing-page",
+      fakeClient(),
+      undefined,
+      "/ui",
+    );
+    const recovery = await screen.findByRole("link", {
+      name: "Return to project: lore",
+    });
+    expect(recovery).toHaveAttribute("href", "/ui/projects/p-lore");
+    fireEvent.click(recovery);
+    await waitFor(() => expect(history.get()).toBe("/ui/projects/p-lore"));
+    expect(screen.queryByTestId("not-found")).toBeNull();
+  });
+
+  it.each(["missing-project", "%25E0%25A4%25A", "p-lore%2F..%2Fother"])(
+    "keeps global recovery for an unrecognized project segment %s",
+    async (id) => {
+      mount(`/projects/${id}/missing-page`, fakeClient());
+      await waitFor(() =>
+        expect(screen.getByTestId("connection-status")).toHaveAttribute(
+          "data-connection",
+          "reachable",
+        ),
+      );
+      expect(
+        screen.queryByRole("link", { name: /Return to project/ }),
+      ).toBeNull();
+      expect(
+        within(screen.getByTestId("not-found")).getByRole("link", {
+          name: "Browse projects",
+        }),
+      ).toHaveAttribute("href", "/");
+    },
+  );
+
+  it("offers project recovery only after the workspace confirms that project", async () => {
+    let release: (projects: ProjectSummary[]) => void = () => {};
+    mount(
+      "/projects/p-lore/missing-page",
+      fakeClient({
+        listProjects: () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      }),
+    );
+    expect(
+      screen.queryByRole("link", { name: /Return to project/ }),
+    ).toBeNull();
+    release(PROJECTS);
+    expect(
+      await screen.findByRole("link", { name: "Return to project: lore" }),
+    ).toHaveAttribute("href", "/projects/p-lore");
+  });
+
   it("shows the not-found page for unknown client routes", () => {
     mount("/definitely/not/a/route", fakeClient());
     expect(screen.getByTestId("not-found")).toBeInTheDocument();

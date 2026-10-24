@@ -36,6 +36,7 @@ for (const theme of ["light", "dark"] as const) {
         `/ui/knowledge/${entry.id}`,
         `${base}/knowledge/${entry.id}`,
         "/ui/not-a-real-route",
+        `${base}/not-a-real-route`,
         "/ui/contradictions",
         "/ui/promotions",
         "/ui/team",
@@ -74,12 +75,10 @@ for (const theme of ["light", "dark"] as const) {
             `${route}: neutral document surface`,
           )
           .toBe(
-            route === "/ui/not-a-real-route"
-              ? "rgba(0, 0, 0, 0)"
-              : await themeColor(
-                  page,
-                  `--color-olive-${theme === "dark" ? 900 : 50}`,
-                ),
+            await themeColor(
+              page,
+              `--color-olive-${theme === "dark" ? 900 : 50}`,
+            ),
           );
         const size = await main.evaluate((el) => ({
           client: el.clientWidth,

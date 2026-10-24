@@ -1,8 +1,9 @@
 import type { Component, ParentProps } from "solid-js";
 import { lazy, createSignal, Show } from "solid-js";
-import { A, type RouteDefinition, Router } from "@solidjs/router";
+import { type RouteDefinition, Router } from "@solidjs/router";
 
 import { Browse } from "./routes/Browse";
+import { NotFound } from "./routes/NotFound";
 import { WorkspaceProvider } from "./routes/workspace";
 import { setGatewayAuthToken, type ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
@@ -17,18 +18,6 @@ import { useWorkspace } from "./routes/workspace";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
 export const ROUTER_BASE = "/ui";
-
-const NotFound: Component = () => (
-  <main class="mx-auto max-w-xl p-8 text-sm" data-testid="not-found">
-    <h1 class="text-lg font-semibold">Page not found</h1>
-    <p class="mt-2 text-muted">
-      Nothing is served at this address.{" "}
-      <A href="/" class="underline">
-        Back to projects
-      </A>
-    </p>
-  </main>
-);
 
 /**
  * Dev/test-only screens: the design specimen and the UI-01 compatibility

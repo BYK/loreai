@@ -18,10 +18,12 @@ export const AppBar: Component<{
   searchProjectId?: string;
   navigationOpen?: boolean;
   contextLabel?: string;
+  pageLabel?: string;
 }> = (props) => {
   const ws = useWorkspace();
   const location = useLocation();
   const section = () => {
+    if (props.pageLabel) return props.pageLabel;
     const path = workspacePath(location.pathname);
     const secondary = secondaryPage(path);
     if (secondary) return secondary.label;

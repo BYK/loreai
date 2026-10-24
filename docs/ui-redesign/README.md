@@ -68,6 +68,17 @@ project selection. Desktop dropdowns keep their existing layout.
 or changes presentation across the breakpoint. The searchable project switcher
 and controls already inside dialogs retain their specialized interactions.
 
+## Not-found recovery
+
+Unknown client routes use the same workspace shell, keeping the desktop rail and
+mobile drawer available. The page provides Browse projects and Search knowledge
+links using owned shadcn buttons, and shows a project return card only after the
+workspace confirms the project from the route. Invalid, unknown, or pending
+project IDs retain global recovery links. Rejected addresses and query values
+are not echoed. Authentication and deleted-knowledge states retain their own
+existing handling. Both variants use the semantic olive/amber theme and have
+44px actions, wrapping labels, and internally scrollable short-screen layouts.
+
 ## Screenshot comparison
 
 [PR #2094](https://github.com/BYK/loreai/pull/2094) contains the complete
@@ -76,7 +87,7 @@ readers, tables, account controls, dialogs, and the new selection sheets.
 Screenshots are attached to the PR rather than committed as build artifacts.
 
 Screenshots use the disposable database seeded by the UI browser tests.
-`responsive-layout.spec.ts` audits 23 routes at 1440, 390, and 320px in both
+`responsive-layout.spec.ts` audits 24 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,
 live palette propagation, and independent chart colors on desktop and mobile.
 `folk03.spec.ts` covers populated team, promotion, and conflict layouts.
