@@ -44,8 +44,20 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
-import { resolveCostAttribution } from "./cost-attribution";
-import { observeProviderQuotaHeaders } from "./provider-quota-headers";
+import {
+  cacheAnthropicOrganizationFromResponse,
+  isPotentialAnthropicOAuthCredential,
+  isPotentialChatGPTSubscription,
+  recordSuccessfulAnthropicOAuthAuth,
+  recordSuccessfulChatGPTAuth,
+  resolveCostAttribution,
+} from "./cost-attribution";
+import {
+  captureProviderQuotaPacingObservation,
+  observeProviderQuotaHeaders,
+  providerQuotaObservationStartedAt,
+} from "./provider-quota-headers";
+import { capturePacingEpoch } from "./provider-budgets";
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import {
@@ -1545,6 +1557,16 @@ export function resolveWorkerProtocol(
     // Gemini is a DISTINCT worker protocol: native generateContent (model in the
     // URL path, x-goog-api-key auth) — it must NOT collapse to "openai".
     if (explicit === "gemini") return "gemini";
+    // Copilot's native Messages endpoint serves only Claude; other worker
+    // models on a Claude session use Copilot's Chat Completions route.
+    if (
+      explicit === "anthropic" &&
+      providerID === "github-copilot" &&
+      modelID &&
+      !isAnthropicClaudeModel(modelID)
+    ) {
+      return "openai";
+    }
     return explicit === "anthropic" ? "anthropic" : "openai";
   }
   // 2. Per-model override (no explicit hint from caller) — github-copilot +
@@ -1791,7 +1813,7 @@ function buildAnthropicWorkerRequest(
   // as the first system block with a cch=00000 placeholder that gets
   // signed after JSON serialization.
   const billingBlock =
-    cred.scheme === "bearer" ? buildBillingBlock(sessionID, user) : null;
+    cred.scheme === "bearer" ? buildBillingBlock(sessionID, user, cred) : null;
 
   // System prompt caching for workers: send as block array with 1h TTL.
   // Worker calls come in bursts (distillation, curation) separated by
@@ -1873,7 +1895,7 @@ function buildAnthropicWorkerRequest(
   // For OAuth sessions, include Claude Code headers (anthropic-beta,
   // user-agent, etc.) sniffed from conversation turns. Without these,
   // Anthropic may reject worker calls with 401 even when the token is valid.
-  const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
+  const oauthHeaders = buildOAuthWorkerHeaders(sessionID, cred);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -2959,6 +2981,80 @@ async function buildWorkerRequest(
   }
 }
 
+type ResolvedWorkerRequestAuth = {
+  headers: Record<string, string>;
+  credential: AuthCredential | null;
+};
+
+/** Resolve and canonicalize the single auth header sent by a worker attempt. */
+function resolveWorkerRequestAuth(
+  headers: Record<string, string>,
+  selectedCredential: AuthCredential,
+  protocol: WorkerProtocol,
+): ResolvedWorkerRequestAuth | null {
+  const credentialHeaderNames = new Set([
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+  ]);
+  const credentialHeaders = Object.entries(headers).filter(([name]) =>
+    credentialHeaderNames.has(name.toLowerCase()),
+  );
+  // Count entries, not distinct lowercase names: fetch may combine case-variant
+  // duplicates differently from the attribution code.
+  if (credentialHeaders.length !== 1) return null;
+
+  const credentialHeader = credentialHeaders[0];
+  if (!credentialHeader) return null;
+  const [wireName, rawValue] = credentialHeader;
+  const normalizedName = wireName.toLowerCase();
+  let scheme: AuthCredential["scheme"];
+  let value: string;
+  let canonicalName: string;
+  let canonicalValue: string;
+  if (normalizedName === "authorization") {
+    const bearer = /^Bearer\s+(\S+)$/i.exec(rawValue.trim());
+    if (!bearer?.[1]) return null;
+    scheme = "bearer";
+    value = bearer[1];
+    canonicalName = "Authorization";
+    canonicalValue = `Bearer ${value}`;
+  } else {
+    value = rawValue.trim();
+    if (!value || /\s/.test(value)) return null;
+    scheme = "api-key";
+    canonicalName = normalizedName;
+    canonicalValue = value;
+  }
+
+  const canonicalHeaders: Record<string, string> = {};
+  for (const [name, headerValue] of Object.entries(headers)) {
+    if (!credentialHeaderNames.has(name.toLowerCase())) {
+      canonicalHeaders[name] = headerValue;
+    }
+  }
+  canonicalHeaders[canonicalName] = canonicalValue;
+
+  // Vertex's ADC token is not the session credential used for quota
+  // attribution. Elsewhere, preserve the scheme actually sent on the wire.
+  const credential =
+    protocol === "vertex"
+      ? null
+      : selectedCredential.scheme === scheme &&
+          selectedCredential.value === value
+        ? selectedCredential
+        : { scheme, value };
+  return { headers: canonicalHeaders, credential };
+}
+
+export function _resolveWorkerRequestAuthForTest(
+  headers: Record<string, string>,
+  selectedCredential: AuthCredential,
+  protocol: WorkerProtocol,
+): ResolvedWorkerRequestAuth | null {
+  return resolveWorkerRequestAuth(headers, selectedCredential, protocol);
+}
+
 /** Dispatch to the correct worker response parser for a resolved target. */
 function parseWorkerResponse(
   protocol: WorkerProtocol,
@@ -3930,8 +4026,67 @@ export function createGatewayLLMClient(
               await abortableSleep(delay, requestSignal);
             };
 
+            // Keep reset conversion anchored to response receipt even if later
+            // worker response parsing takes time.
+            const quotaObservationReceivedTimes = new WeakMap<
+              Response,
+              number
+            >();
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
+              const quotaObservationStartedAt =
+                providerQuotaObservationStartedAt();
+              // Bind attribution and trust decisions to this exact built request;
+              // auth refreshes may replace the initial credential between attempts.
+              const requestAuth = resolveWorkerRequestAuth(
+                req.headers,
+                activeCred,
+                target.protocol,
+              );
+              if (!requestAuth) {
+                throw new Error(
+                  "worker request rejected because authentication headers are invalid",
+                );
+              }
+              // Bind dispatch and attribution to the exact same canonicalized
+              // single-credential header set; never send ambiguous auth.
+              req = { ...req, headers: requestAuth.headers };
+              const attemptCredential = requestAuth.credential;
+              const quotaPacingEpoch = (() => {
+                try {
+                  const quotaAttribution = resolveCostAttribution({
+                    sessionID: opts?.sessionID,
+                    providerID: credentialProviderID ?? model.providerID,
+                    upstreamURL: target.url,
+                    credential: attemptCredential,
+                    requestHeaders: req.headers,
+                  });
+                  const potentialChatGPTSubscription =
+                    isPotentialChatGPTSubscription({
+                      providerID: credentialProviderID ?? model.providerID,
+                      upstreamURL: target.url,
+                      credential: attemptCredential,
+                    });
+                  const potentialAnthropicOAuthCredential =
+                    isPotentialAnthropicOAuthCredential({
+                      providerID: credentialProviderID ?? model.providerID,
+                      upstreamURL: target.url,
+                      credential: attemptCredential,
+                    });
+                  return capturePacingEpoch({
+                    provider: quotaAttribution.provider,
+                    auth_kind:
+                      quotaAttribution.authKind === "subscription" ||
+                      potentialChatGPTSubscription ||
+                      potentialAnthropicOAuthCredential
+                        ? "subscription"
+                        : quotaAttribution.authKind,
+                  });
+                } catch {
+                  // The quota fence is optional and never blocks worker dispatch.
+                  return null;
+                }
+              })();
               let response: Response;
               try {
                 recordPromptDispatch(model, target.protocol);
@@ -3974,7 +4129,26 @@ export function createGatewayLLMClient(
                 throw new WorkerTransportFailureError(e);
               }
 
+              quotaObservationReceivedTimes.set(response, Date.now());
               finalStatus = response.status;
+              try {
+                recordSuccessfulAnthropicOAuthAuth({
+                  credential: attemptCredential,
+                  upstreamURL: target.url,
+                  responseURL: response.url,
+                  responseStatus: response.status,
+                  directUpstreamResponse: true,
+                });
+                recordSuccessfulChatGPTAuth({
+                  credential: attemptCredential,
+                  upstreamURL: target.url,
+                  responseURL: response.url,
+                  responseStatus: response.status,
+                  directUpstreamResponse: true,
+                });
+              } catch {
+                // Credential classification is optional and never blocks work.
+              }
 
               if (response.ok) {
                 // If a prior attempt stripped `temperature` and the request now
@@ -4350,8 +4524,11 @@ export function createGatewayLLMClient(
                     sessionID: opts?.sessionID,
                     providerID: credentialProviderID ?? model.providerID,
                     upstreamURL: target.url,
-                    credential: cred,
+                    credential: attemptCredential,
                     responseHeaders: response.headers,
+                    responseURL: response.url,
+                    responseStatus: response.status,
+                    directUpstreamResponse: true,
                     requestHeaders: req.headers,
                   });
                   recordWorkerCost(
@@ -4363,7 +4540,34 @@ export function createGatewayLLMClient(
                     undefined,
                     attribution,
                   );
-                  observeProviderQuotaHeaders(response.headers, attribution);
+                  observeProviderQuotaHeaders(
+                    response.headers,
+                    attribution,
+                    quotaObservationStartedAt,
+                    quotaObservationReceivedTimes.get(response) ?? Date.now(),
+                    quotaPacingEpoch,
+                    captureProviderQuotaPacingObservation(
+                      attribution,
+                      quotaPacingEpoch,
+                    ),
+                  );
+                  // A verified organization is response identity evidence even
+                  // when the provider omitted quota fields for this response.
+                  try {
+                    cacheAnthropicOrganizationFromResponse({
+                      provider: attribution.provider,
+                      credential: attemptCredential,
+                      sessionID: opts?.sessionID,
+                      observedAt: quotaObservationStartedAt,
+                      responseStatus: response.status,
+                      responseHeaders: response.headers,
+                      upstreamURL: target.url,
+                      responseURL: response.url,
+                      directUpstreamResponse: true,
+                    });
+                  } catch {
+                    // Identity caching is optional and cannot invalidate worker output.
+                  }
                 }
 
                 // Enrich span with retry metadata on eventual success

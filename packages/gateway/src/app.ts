@@ -27,6 +27,7 @@ import type { GatewayConfig } from "./config";
 import { hasConflictingAuthHeaders } from "./auth";
 import { responseAgainstAbort } from "./abort-race";
 import { createForegroundAbortScope, wrapBodyWithCleanup } from "./pipeline";
+import { initializeProviderPacingState } from "./provider-budgets";
 import {
   browserOriginDeniedResponse,
   conflictingProviderAuthResponse,
@@ -61,7 +62,7 @@ export type {
   GatewayEnv,
   GatewayRequestEnv,
 } from "./routes/types";
-export { responseCompletionCallbacks } from "./routes/control";
+export { responseCompletionCallbacks } from "./response-completion";
 export { handleModelsPassthrough } from "./routes/models";
 
 // ---------------------------------------------------------------------------
@@ -163,6 +164,10 @@ function isGatewayOperatorMutation(method: string, path: string): boolean {
   );
 }
 
+function isGatewayTokenRequiredManagementPath(path: string): boolean {
+  return /^\/api\/v1\/costs\/pacing\/?$/.test(path);
+}
+
 /**
  * Management authorization (`/`, `/api*`, `/ui*`). Authorizes from node:http's
  * socket metadata, never from Forwarded, X-Forwarded-For, Host, or another
@@ -194,6 +199,17 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     // The gateway Bearer token authenticates access to this process; it does not
     // identify the caller represented by the gateway's persisted Supabase session.
     if (remotePeer && isGatewayOperatorMutation(c.req.method, c.req.path)) {
+      return withManagementCors(hiddenManagementResponse(), origin);
+    }
+
+    // Pacing changes local provider-account behavior, so remote callers must
+    // configure and present a gateway token even when anonymous remote
+    // dashboard access is enabled. Check before OPTIONS and body reads.
+    if (
+      remotePeer &&
+      isGatewayTokenRequiredManagementPath(c.req.path) &&
+      !config.gatewayAuthToken
+    ) {
       return withManagementCors(hiddenManagementResponse(), origin);
     }
 
@@ -323,6 +339,7 @@ export function createGatewayApp(
   config: GatewayConfig,
   options: GatewayAppOptions = {},
 ): Hono<GatewayEnv> {
+  initializeProviderPacingState();
   const app = new Hono<GatewayEnv>({ getPath: rawPathname });
 
   // Access policy first — ahead of every route, including static UI, health

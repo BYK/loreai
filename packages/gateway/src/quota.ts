@@ -28,7 +28,8 @@ import { log } from "@loreai/core";
 import type { AuthCredential } from "./auth";
 import { authFingerprint, resolveAuth } from "./auth";
 import { runBackground } from "./background-limiter";
-import { isClaudeCodeOAuthSession, buildOAuthWorkerHeaders } from "./cch";
+import { buildOAuthWorkerHeaders } from "./cch";
+import { isVerifiedAnthropicOAuthCredential } from "./cost-attribution";
 import { parseRetryAfter } from "./llm-adapter";
 import { upstreamFetch } from "./fetch";
 
@@ -204,7 +205,9 @@ export async function fetchOAuthQuotaSnapshot(
     // browser-access, request-id) sniffed from the session's conversation
     // turns. Anthropic's OAuth endpoints validate the client fingerprint and
     // can 403 a request that lacks a recognizable Claude Code user-agent.
-    const ccHeaders = sessionID ? buildOAuthWorkerHeaders(sessionID) : null;
+    const ccHeaders = sessionID
+      ? buildOAuthWorkerHeaders(sessionID, cred)
+      : null;
     const response = await upstreamFetch(QUOTA_URL, {
       method: "GET",
       headers: {
@@ -295,17 +298,15 @@ export function fetchQuotaDeduped(
 /**
  * Whether a session should have its Anthropic OAuth quota tracked.
  *
- * Requires BOTH a bearer credential AND a Claude Code OAuth session (billing
- * header observed). Strictly excludes API-key sessions and all non-Anthropic
- * providers (a non-Anthropic bearer token never carries the billing header).
+ * Requires a bearer credential that succeeded against Anthropic's canonical
+ * API. A client billing header or token prefix alone never establishes auth.
  */
 export function isAnthropicOAuthSession(
   sessionID: string,
   cred?: AuthCredential | null,
 ): boolean {
   const c = cred ?? resolveAuth(sessionID);
-  if (c?.scheme !== "bearer") return false;
-  return isClaudeCodeOAuthSession(sessionID);
+  return isVerifiedAnthropicOAuthCredential(c);
 }
 
 // ---------------------------------------------------------------------------

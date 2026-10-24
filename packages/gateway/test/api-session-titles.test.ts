@@ -34,6 +34,7 @@ beforeAll(async () => {
   const config = loadConfig();
   config.remoteGateway = false;
   config.hostedMode = false;
+  config.allowRemoteManagement = false;
   server = await startServer(config);
   baseURL = `http://127.0.0.1:${server.port}`;
   // Same non-loopback peer seam as management-access.test.ts.

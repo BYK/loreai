@@ -1,4 +1,12 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Every pacing signal says "throttling": the warmer must ignore all of them.
+vi.mock("../src/provider-budgets", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/provider-budgets")>()),
+  pacingDelayMs: () => 60_000,
+  isCurationPacingPaused: () => true,
+  isSessionCurationPacingPaused: () => true,
+}));
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -1168,6 +1176,23 @@ describe("shouldWarm", () => {
     const hist = createHistogram();
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000); // 6m gaps
 
+    expect(shouldWarm(state, profile, hist, now)).toBe(true);
+  });
+
+  test("is not gated by subscription pacing", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 

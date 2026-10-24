@@ -6,7 +6,7 @@ import type { CostsSnapshot } from "~/contracts";
 
 type Providers = CostsSnapshot["providers"];
 type Quotas = CostsSnapshot["quotas"];
-type Budgets = CostsSnapshot["provider_budgets"];
+type Pacing = CostsSnapshot["provider_pacing"];
 
 const NOW = 1_800_000_000_000;
 const money = (usd: number) => `$${usd.toFixed(4)}`;
@@ -49,24 +49,32 @@ function quotaRow(overrides: Partial<Quotas[number]> = {}): Quotas[number] {
   };
 }
 
-function budgetRow(overrides: Partial<Budgets[number]> = {}): Budgets[number] {
+function pacingWindow(
+  overrides: Partial<Pacing[number]["windows"][number]> = {},
+): Pacing[number]["windows"][number] {
+  return {
+    window: "5h",
+    used: 23,
+    resets_at: NOW + 2 * 3600_000 + 14 * 60_000,
+    sustainable_rate: 34.6,
+    current_rate: 8.1,
+    rate_source: "average",
+    ratio: 0.23,
+    throttling: false,
+    recommended_extra_gap_ms: 0,
+    ...overrides,
+  };
+}
+
+function pacingRow(overrides: Partial<Pacing[number]> = {}): Pacing[number] {
   return {
     provider: "anthropic",
-    auth_kind: "subscription",
     account: "a1b2c3d4e5f6",
-    mode: "cap",
-    unit: "percent",
-    window: "7d",
-    amount: 80,
-    used: 41,
-    target: null,
-    ahead: null,
-    fraction: 41 / 80,
-    pressure: 0,
-    resets_at: NOW + 3 * 24 * 3600_000,
-    stale: false,
-    implicit: false,
-    status: "ok",
+    enabled: true,
+    throttling: false,
+    recommended_extra_gap_ms: 0,
+    request_gap_ms: 12_000,
+    windows: [pacingWindow()],
     ...overrides,
   };
 }
@@ -74,15 +82,21 @@ function budgetRow(overrides: Partial<Budgets[number]> = {}): Budgets[number] {
 function renderCards(
   providers: Providers,
   quotas: Quotas,
-  budgets: Budgets = [],
+  pacing: Pacing = [],
+  onSetPacing?: (setting: {
+    provider: string;
+    account: string;
+    enabled: boolean;
+  }) => Promise<void>,
 ) {
   return render(() => (
     <ProviderCards
       providers={providers}
       quotas={quotas}
-      budgets={budgets}
+      pacing={pacing}
       money={money}
       now={() => NOW}
+      onSetPacing={onSetPacing}
     />
   ));
 }
@@ -215,221 +229,173 @@ describe("ProviderCards", () => {
     // remaining alone (no limit) is not enough for a non-5h/7d window
     expect(container.textContent).not.toContain("credits");
   });
-
-  it("shows matching budgets with used/amount and stale suffix", () => {
-    renderCards(
-      [providerRow()],
-      [],
-      [
-        budgetRow(),
-        budgetRow({
-          unit: "usd",
-          window: "day",
-          amount: 10,
-          used: 12.5,
-          fraction: 1.25,
-          pressure: 1,
-        }),
-        budgetRow({
-          unit: "tokens",
-          window: "week",
-          amount: 100_000,
-          used: null,
-          fraction: null,
-          stale: true,
-          status: "stale",
-        }),
-        budgetRow({
-          mode: "pace",
-          unit: undefined,
-          amount: undefined,
-          headroom: 10,
-          window: "5h",
-          used: 30,
-          target: 52,
-          ahead: -22,
-          fraction: null,
-          implicit: true,
-        }),
-        budgetRow({
-          mode: "off",
-          unit: undefined,
-          amount: undefined,
-          window: "7d",
-          used: null,
-          fraction: null,
-          status: "off",
-        }),
-        // wrong auth_kind and wrong provider — filtered out
-        budgetRow({ auth_kind: "api_key" }),
-        budgetRow({ provider: "openai" }),
-      ],
-    );
-    const card = screen.getByTestId("provider-card");
-    expect(card.textContent).toContain("Budgets");
-    expect(card.textContent).toContain("Quota cap · 7d");
-    expect(card.textContent).toContain("41% / 80%");
-    expect(card.textContent).toContain("USD cap · day");
-    expect(card.textContent).toContain("$12.5000 / $10.0000");
-    expect(card.textContent).toContain("Tokens cap · week");
-    expect(card.textContent).toContain("Pace · 5h");
-    expect(card.textContent).toContain("30% / 52% pace");
-    expect(card.textContent).toContain("Pace off · 7d");
-    expect(card.textContent).toContain("—");
-    expect(card.textContent).toContain("(stale)");
-  });
-
-  it("marks over-budget rows with text-danger", () => {
-    renderCards(
-      [providerRow()],
-      [],
-      [budgetRow({ used: 90, fraction: 90 / 80, pressure: 1 })],
-    );
-    const danger = screen
-      .getByTestId("provider-card")
-      .querySelector(".text-danger");
-    expect(danger?.textContent).toContain("90% / 80%");
-  });
 });
-
-function paceRow(overrides: Partial<Budgets[number]> = {}): Budgets[number] {
-  return budgetRow({
-    mode: "pace",
-    unit: undefined,
-    amount: undefined,
-    window: "5h",
-    headroom: 10,
-    used: 23,
-    target: 70,
-    ahead: -47,
-    fraction: null,
-    implicit: true,
-    ...overrides,
-  });
-}
 
 describe("ProviderCards pacing", () => {
-  it("draws the even-pace tick at target − headroom and says on pace", () => {
-    renderCards([providerRow()], [quotaRow()], [paceRow()]);
-    const tick = screen.getByTestId("pace-tick");
-    expect(tick.style.left).toBe("60%");
-    expect(screen.getByTestId("pace-state").textContent).toBe("on pace");
+  it("shows sustainable rate and curation state without claiming request delays", () => {
+    renderCards([providerRow()], [quotaRow()], [pacingRow()]);
+    expect(screen.getByTestId("pacing-rates").textContent).toBe(
+      "sustainable 35 pts/hcurrent 8.1 pts/h (window avg)",
+    );
+    expect(screen.getByTestId("pacing-state").textContent).toBe(
+      "within sustainable rate",
+    );
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "inactive",
+    );
+    expect(screen.getByTestId("pacing-control").textContent).toContain(
+      "Provider pacing never delays user requests.",
+    );
+    expect(
+      screen.getByRole("switch", { name: "Automatic pacing" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("budget-editor")).toBeNull();
+    expect(screen.queryByText(/Edit budgets/)).toBeNull();
   });
 
-  it("says how far ahead of pace and that Lore is slowing", () => {
+  it("reports the curation pause without claiming to slow user requests", () => {
     renderCards(
       [providerRow()],
-      [quotaRow({ used_percent: 82 })],
-      [paceRow({ used: 82, ahead: 12, pressure: 1, status: "paused" })],
+      [quotaRow()],
+      [
+        pacingRow({
+          throttling: true,
+          recommended_extra_gap_ms: 12_400,
+          windows: [
+            pacingWindow({
+              current_rate: 69.2,
+              rate_source: "observed",
+              ratio: 2,
+              throttling: true,
+              recommended_extra_gap_ms: 12_400,
+            }),
+          ],
+        }),
+      ],
     );
-    const state = screen.getByTestId("pace-state");
+    const state = screen.getByTestId("pacing-state");
     expect(state.textContent).toBe(
-      "ahead of pace by 12 pts — Lore is slowing background work",
+      "2.0× the sustainable rate — background curation paused",
     );
     expect(state.className).toContain("text-danger");
-  });
-
-  it("marks a stale window and hides the tick", () => {
-    renderCards(
-      [providerRow()],
-      [quotaRow({ stale: true })],
-      [paceRow({ stale: true, status: "stale", target: null, ahead: null })],
+    expect(screen.getByTestId("pacing-rates").textContent).toBe(
+      "sustainable 35 pts/hcurrent 69 pts/h",
     );
-    expect(screen.queryByTestId("pace-tick")).toBeNull();
-    expect(screen.getByTestId("pace-state").textContent).toBe("stale");
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "active",
+    );
+    expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("12s");
+    expect(screen.queryByText("Current delay")).toBeNull();
+    expect(
+      screen.getByText(/gap estimate is informational only/i),
+    ).not.toBeNull();
+    expect(
+      screen.getByText(/Provider pacing never delays user requests/),
+    ).not.toBeNull();
   });
-});
 
-describe("ProviderCards budget editor", () => {
-  it("is absent without a save handler (hosted mode)", () => {
-    renderCards([providerRow()], [quotaRow()], [paceRow()]);
-    expect(screen.queryByRole("button", { name: "Edit budgets" })).toBeNull();
-  });
-
-  it("saves subscription pace/headroom/cap via onSaveBudgets", async () => {
-    const onSave = vi.fn(async () => {});
-    render(() => (
+  it("expires the curation pause when its quota window resets", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const result = render(() => (
       <ProviderCards
         providers={[providerRow()]}
         quotas={[quotaRow()]}
-        budgets={[paceRow(), paceRow({ window: "7d" })]}
+        pacing={[
+          pacingRow({
+            throttling: true,
+            recommended_extra_gap_ms: 12_400,
+            windows: [
+              pacingWindow({
+                resets_at: NOW + 30_000,
+                throttling: true,
+                recommended_extra_gap_ms: 12_400,
+              }),
+            ],
+          }),
+        ]}
         money={money}
-        now={() => NOW}
-        onSaveBudgets={onSave}
       />
     ));
-    fireEvent.click(screen.getByRole("button", { name: "Edit budgets" }));
-    fireEvent.input(
-      screen.getByLabelText("Pace headroom for the 5h window (points)"),
-      { target: { value: "20" } },
+
+    try {
+      expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+        "active",
+      );
+      vi.setSystemTime(NOW + 30_000);
+      vi.advanceTimersByTime(30_000);
+      expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+        "inactive",
+      );
+      expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("none");
+    } finally {
+      result.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("hides pacing for a stale window", () => {
+    renderCards(
+      [providerRow()],
+      [quotaRow({ resets_at: NOW - 1 })],
+      [pacingRow()],
     );
-    fireEvent.click(screen.getByLabelText("Pace the 7d window"));
-    fireEvent.input(screen.getByLabelText("Quota cap for the 7d window (%)"), {
-      target: { value: "90" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save budgets" }));
-    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
-    const scope = {
-      provider: "anthropic",
-      auth_kind: "subscription",
-      account: "a1b2c3d4e5f6",
-    };
-    expect(onSave).toHaveBeenCalledWith([
-      { ...scope, mode: "pace", window: "5h", headroom: 20 },
-      { ...scope, mode: "off", window: "7d" },
-      { ...scope, mode: "cap", unit: "percent", window: "7d", amount: 90 },
-    ]);
+    expect(screen.queryByTestId("pacing-rates")).toBeNull();
+  });
+
+  it("API-key cards get no pacing switch", () => {
+    renderCards(
+      [providerRow({ auth_kind: "api_key", account: "k1" })],
+      [],
+      [pacingRow({ account: "k1" })],
+    );
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByTestId("pacing-control")).toBeNull();
+  });
+
+  it("the switch is read-only without a handler (hosted mode)", () => {
+    renderCards([providerRow()], [quotaRow()], [pacingRow()]);
+    expect(screen.getByRole("switch")).toBeDisabled();
+  });
+
+  it("toggling sends { provider, account, enabled } and shows errors", async () => {
+    const onSet = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("nope"));
+    renderCards([providerRow()], [quotaRow()], [pacingRow()], onSet);
+    const toggle = screen.getByRole("switch", { name: "Automatic pacing" });
+    fireEvent.click(toggle);
     await waitFor(() =>
-      expect(screen.queryByTestId("budget-editor")).toBeNull(),
+      expect(onSet).toHaveBeenCalledWith({
+        provider: "anthropic",
+        account: "a1b2c3d4e5f6",
+        enabled: false,
+      }),
+    );
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe("Error: nope"),
     );
   });
 
-  it("shows validation and save errors inline without closing", async () => {
-    const onSave = vi.fn(async () => {
-      throw new Error("boom");
-    });
-    render(() => (
-      <ProviderCards
-        providers={[
-          providerRow({
-            provider: "openai",
-            auth_kind: "api_key",
-            account: "k1",
-          }),
-        ]}
-        quotas={[]}
-        budgets={[]}
-        money={money}
-        now={() => NOW}
-        onSaveBudgets={onSave}
-      />
-    ));
-    fireEvent.click(screen.getByRole("button", { name: "Edit budgets" }));
-    fireEvent.input(screen.getByLabelText("USD cap per day"), {
-      target: { value: "0" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save budgets" }));
-    expect(screen.getByRole("alert").textContent).toMatch(/positive/);
-    expect(onSave).not.toHaveBeenCalled();
-
-    fireEvent.input(screen.getByLabelText("USD cap per day"), {
-      target: { value: "5" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save budgets" }));
-    await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("boom"),
+  it("a disabled account says pacing off and has no curation pause", () => {
+    renderCards(
+      [providerRow()],
+      [quotaRow()],
+      [
+        pacingRow({
+          enabled: false,
+          windows: [pacingWindow({ throttling: true, ratio: 3 })],
+        }),
+      ],
     );
-    expect(onSave).toHaveBeenCalledWith([
-      {
-        provider: "openai",
-        auth_kind: "api_key",
-        account: "k1",
-        mode: "cap",
-        unit: "usd",
-        window: "day",
-        amount: 5,
-      },
-    ]);
-    expect(screen.getByTestId("budget-editor")).toBeTruthy();
+    expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByTestId("pacing-state").textContent).toBe("pacing off");
+    expect(screen.getByTestId("pacing-curation-state").textContent).toBe(
+      "inactive",
+    );
+    expect(screen.getByTestId("pacing-extra-gap").textContent).toBe("off");
   });
 });

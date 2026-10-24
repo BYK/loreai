@@ -3,13 +3,13 @@ import {
   signBody,
   resignBody,
   hasBillingHeader,
-  captureBillingPrefix,
-  captureSessionHeaders,
-  buildBillingBlock,
+  captureBillingPrefix as captureBillingPrefixImpl,
+  captureSessionHeaders as captureSessionHeadersImpl,
+  buildBillingBlock as buildBillingBlockImpl,
   buildCodexWorkerHeaders,
-  buildOAuthWorkerHeaders,
+  buildOAuthWorkerHeaders as buildOAuthWorkerHeadersImpl,
   deleteBillingPrefix,
-  isClaudeCodeOAuthSession,
+  isClaudeCodeOAuthSession as isClaudeCodeOAuthSessionImpl,
   validateSeed,
   resolveSeed,
   _resetForTest,
@@ -25,11 +25,40 @@ import {
 } from "../src/cch";
 import { xxHash64 } from "../src/xxhash";
 import { log } from "@loreai/core";
+import type { AuthCredential } from "../src/auth";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const SID_A = "sess-a";
 const SID_B = "sess-b";
+const OAUTH_CREDENTIAL = {
+  scheme: "bearer",
+  value: "sk-ant-oat01-test",
+} as const;
+
+const captureBillingPrefix = (
+  sessionID: string,
+  system: string,
+  credential: AuthCredential = OAUTH_CREDENTIAL,
+) => captureBillingPrefixImpl(sessionID, system, credential);
+const captureSessionHeaders = (
+  sessionID: string,
+  headers: Record<string, string>,
+  credential: AuthCredential = OAUTH_CREDENTIAL,
+) => captureSessionHeadersImpl(sessionID, headers, credential);
+const buildBillingBlock = (
+  sessionID: string | undefined,
+  userMessage: string,
+  credential: AuthCredential = OAUTH_CREDENTIAL,
+) => buildBillingBlockImpl(sessionID, userMessage, credential);
+const buildOAuthWorkerHeaders = (
+  sessionID: string | undefined,
+  credential: AuthCredential = OAUTH_CREDENTIAL,
+) => buildOAuthWorkerHeadersImpl(sessionID, credential);
+const isClaudeCodeOAuthSession = (
+  sessionID: string,
+  credential: AuthCredential = OAUTH_CREDENTIAL,
+) => isClaudeCodeOAuthSessionImpl(sessionID, credential);
 
 beforeEach(() => {
   _resetForTest();
@@ -318,6 +347,25 @@ describe("captureBillingPrefix", () => {
     );
     captureBillingPrefix(SID_A, "later turn with no header");
     expect(buildBillingBlock(SID_A, "test message")).not.toBeNull();
+  });
+
+  test("billing state does not cross bearer credentials in one session", () => {
+    const differentCredential = {
+      scheme: "bearer",
+      value: "sk-ant-api03-key",
+    } as const;
+    captureBillingPrefix(
+      SID_A,
+      "x-anthropic-billing-header: cc_version=2.1.138.fbe; cc_entrypoint=cli; cch=a39d0;",
+      OAUTH_CREDENTIAL,
+    );
+
+    expect(isClaudeCodeOAuthSession(SID_A, OAUTH_CREDENTIAL)).toBe(true);
+    expect(isClaudeCodeOAuthSession(SID_A, differentCredential)).toBe(false);
+    expect(buildBillingBlock(SID_A, "test message", differentCredential)).toBe(
+      null,
+    );
+    expect(buildOAuthWorkerHeaders(SID_A, differentCredential)).toBeNull();
   });
 });
 

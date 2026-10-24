@@ -41,7 +41,13 @@ import {
 } from "./sentry";
 import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
 import { SHUTDOWN_DEADLINE_MS } from "./shutdown-deadline";
-import { createGatewayApp, responseCompletionCallbacks } from "./app";
+import { createGatewayApp } from "./app";
+import {
+  discardResponseCompletion,
+  notifyResponseCompletion,
+  notifyResponseFinished,
+  withNodeResponseFinishLifecycle,
+} from "./response-completion";
 import { responseAgainstAbort } from "./abort-race";
 import {
   constantTimeTokenMatches,
@@ -640,6 +646,18 @@ export async function handleNodeRequest(
   const ingressAbort = bindNodeIngressAbort(nodeReq, nodeRes);
   let responseStarted = false;
   let responseCompleted = false;
+  let responseCompletionNotified = false;
+  let responseForCompletion: Response | undefined;
+  const settleResponseCompletion = (completed: boolean): void => {
+    const completedResponse = responseForCompletion;
+    if (!completedResponse || responseCompletionNotified) return;
+    responseCompletionNotified = true;
+    if (completed) {
+      setImmediate(() => notifyResponseFinished(completedResponse));
+    } else {
+      discardResponseCompletion(completedResponse);
+    }
+  };
   try {
     const url = `http://${bracketHost(host)}:${port}${nodeReq.url ?? "/"}`;
 
@@ -659,17 +677,20 @@ export async function handleNodeRequest(
 
     const response = await responseAgainstAbort(
       () =>
-        Promise.resolve(
-          fetch(
-            req,
-            peerAddressForRequest
-              ? peerAddressForRequest(nodeReq)
-              : nodeReq.socket.remoteAddress,
-            nodeReq.rawHeaders,
+        withNodeResponseFinishLifecycle(() =>
+          Promise.resolve(
+            fetch(
+              req,
+              peerAddressForRequest
+                ? peerAddressForRequest(nodeReq)
+                : nodeReq.socket.remoteAddress,
+              nodeReq.rawHeaders,
+            ),
           ),
         ),
       ingressAbort.signal,
     );
+    responseForCompletion = response;
 
     const headerEntries: [string, string][] = [];
     response.headers.forEach((value, key) => {
@@ -700,6 +721,9 @@ export async function handleNodeRequest(
         cancelAndReleaseReader(reader, ingressAbort.signal.reason);
       }
     }
+    // Body EOF precedes the Node response's `finish`; finish-only work is
+    // notified after writableFinished below.
+    notifyResponseCompletion(response);
     if (!nodeRes.destroyed) {
       const completed = waitForNodeResponseCompletion(
         nodeRes,
@@ -707,12 +731,9 @@ export async function handleNodeRequest(
       );
       nodeRes.end();
       await completed;
-      responseCompleted = true;
+      responseCompleted = nodeRes.writableFinished;
     }
-    if (responseCompleted) {
-      const onResponseComplete = responseCompletionCallbacks.get(response);
-      if (onResponseComplete) setImmediate(onResponseComplete);
-    }
+    settleResponseCompletion(responseCompleted);
   } catch (err) {
     if (!ingressAbort.signal.aborted) log.error("request handler error:", err);
     if (
@@ -736,6 +757,7 @@ export async function handleNodeRequest(
       nodeRes.destroy();
     }
   } finally {
+    settleResponseCompletion(responseCompleted);
     ingressAbort.cleanup();
   }
 }

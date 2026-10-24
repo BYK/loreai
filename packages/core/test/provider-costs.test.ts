@@ -5,6 +5,7 @@ import {
   getProviderCostTotals,
   isProviderQuotaStale,
   QUOTA_STALE_FALLBACK_MS,
+  MAX_PROVIDER_QUOTA_ROWS,
   getProviderDayUsage,
   upsertProviderQuota,
   listProviderQuotas,
@@ -257,8 +258,12 @@ describe("provider_quotas snapshots", () => {
   });
 
   test("older observed_at does not overwrite newer snapshot", () => {
-    upsertProviderQuota(quotaRow({ usedPercent: 55, observedAt: 2000 }));
-    upsertProviderQuota(quotaRow({ usedPercent: 10, observedAt: 1500 }));
+    expect(
+      upsertProviderQuota(quotaRow({ usedPercent: 55, observedAt: 2000 })),
+    ).toBe(true);
+    expect(
+      upsertProviderQuota(quotaRow({ usedPercent: 10, observedAt: 1500 })),
+    ).toBe(false);
     const quotas = listProviderQuotas();
     expect(quotas[0].usedPercent).toBe(55);
     expect(quotas[0].observedAt).toBe(2000);
@@ -282,5 +287,70 @@ describe("provider_quotas snapshots", () => {
       "anthropic:7d",
       "openai:requests",
     ]);
+  });
+
+  test("arbitrary window names cannot grow one account's snapshot set without bound", () => {
+    const now = Date.now();
+    for (let index = 0; index < 65; index++) {
+      upsertProviderQuota(
+        quotaRow({
+          window: `provider-window-${index}`,
+          observedAt: now + index,
+        }),
+      );
+    }
+
+    expect(listProviderQuotas()).toHaveLength(64);
+    expect(
+      upsertProviderQuota(
+        quotaRow({ window: "provider-window-0", observedAt: now + 100 }),
+      ),
+    ).toBe(true);
+    expect(listProviderQuotas()).toHaveLength(64);
+  });
+
+  test("aggregate quota storage cap preserves established identities", () => {
+    const now = Date.now();
+    const established = quotaRow({
+      account: "established-account",
+      window: "5h",
+      observedAt: now,
+    });
+    expect(upsertProviderQuota(established)).toBe(true);
+    for (let index = 0; index < MAX_PROVIDER_QUOTA_ROWS - 1; index++) {
+      upsertProviderQuota(
+        quotaRow({
+          account: index === 0 ? "expired-account" : `account-${index}`,
+          window: "5h",
+          observedAt: index === 0 ? now - 2 * QUOTA_STALE_FALLBACK_MS : now,
+          windowMinutes: index === 0 ? 1 : 300,
+          resetsAt: index === 0 ? now - 1 : now + 5 * 60_000,
+        }),
+      );
+    }
+
+    const refreshed = quotaRow({
+      account: "established-account",
+      window: "5h",
+      observedAt: now + 1000,
+    });
+    expect(upsertProviderQuota(refreshed)).toBe(true);
+    expect(
+      upsertProviderQuota(
+        quotaRow({
+          account: "overflow-account",
+          window: "5h",
+          observedAt: now + 2000,
+        }),
+      ),
+    ).toBe(true);
+
+    const quotas = listProviderQuotas();
+    expect(quotas).toHaveLength(MAX_PROVIDER_QUOTA_ROWS);
+    expect(
+      quotas.find((row) => row.account === "established-account")?.observedAt,
+    ).toBe(now + 1000);
+    expect(quotas.some((row) => row.account === "expired-account")).toBe(false);
+    expect(quotas.some((row) => row.account === "overflow-account")).toBe(true);
   });
 });

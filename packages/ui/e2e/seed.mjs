@@ -903,22 +903,8 @@ for (const [window, minutes, used, resetMs] of [
   });
 }
 
-// Per-provider budget (#1927): an 80% cap on Anthropic's weekly quota window.
-// The 5h/7d quota rows above also get implicit pace budgets.
-core.setKV(
-  "provider_budgets",
-  JSON.stringify([
-    {
-      provider: "anthropic",
-      auth_kind: "subscription",
-      account: "e2e-anth",
-      mode: "cap",
-      unit: "percent",
-      window: "7d",
-      amount: 80,
-    },
-  ]),
-);
+// Automatic pacing (#2045) is on by default for the subscription account
+// above; the 5h/7d rows give it something to evaluate.
 
 core.close();
 

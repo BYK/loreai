@@ -2,28 +2,24 @@
 import type { Component, JSX } from "solid-js";
 import { createSignal, For, onCleanup, Show } from "solid-js";
 
-import type { CostsSnapshot, ProviderBudgetInput } from "~/contracts";
+import type { CostsSnapshot, ProviderPacingInput } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
-import { Button } from "~/components/ui/button";
 import {
-  applyBudgetEditor,
-  budgetEditorState,
-  budgetsForCard,
-  CAP_FIELDS,
-  evenPacePercent,
-  PACE_WINDOWS,
-  paceFor,
-  paceStateText,
-  type BudgetEditorState,
   displayProvider,
+  effectivePacingState,
+  formatExtraGap,
   formatDuration,
+  formatRate,
   formatResetCountdown,
   groupProviderCards,
+  pacingForCard,
+  pacingStateText,
   quotaPercent,
   quotaStale,
   quotaWindowLabel,
-  type BudgetRow,
+  type PacingRow,
+  type PacingWindowRow,
   type ProviderCardModel,
   type QuotaRow,
 } from "~/lib/provider-quota";
@@ -31,7 +27,7 @@ import { StateCard } from "./StateCard";
 
 type Providers = CostsSnapshot["providers"];
 type Quotas = CostsSnapshot["quotas"];
-type Budgets = CostsSnapshot["provider_budgets"];
+type Pacing = CostsSnapshot["provider_pacing"];
 
 function count(value: number): string {
   return new Intl.NumberFormat().format(value);
@@ -66,15 +62,15 @@ function visibleQuotas(card: ProviderCardModel): QuotaRow[] {
 const QuotaLine: Component<{
   quota: QuotaRow;
   now: () => number;
-  pace: BudgetRow | null;
+  pacing: PacingWindowRow | null;
+  enabled: boolean;
 }> = (props) => {
   const percent = () => quotaPercent(props.quota);
   const label = () => quotaWindowLabel(props.quota);
   const stale = () => quotaStale(props.quota, props.now());
-  const evenPace = () => evenPacePercent(props.pace);
-  const paceState = () => paceStateText(props.pace, stale());
+  const pacing = () => (stale() ? null : props.pacing);
   const paceTone = () =>
-    (props.pace?.pressure ?? 0) > 0 && !stale() ? "text-danger" : "text-muted";
+    props.enabled && pacing()?.throttling ? "text-danger" : "text-muted";
   return (
     <div>
       <div class="flex justify-between gap-3 text-xs">
@@ -121,22 +117,29 @@ const QuotaLine: Component<{
             class={`h-full ${quotaTone(percent()!)}`}
             style={{ width: `${Math.min(100, percent()!)}%` }}
           />
-          <Show when={evenPace() !== null}>
-            <div
-              class="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-foreground/70"
-              style={{ left: `${evenPace()}%` }}
-              data-testid="pace-tick"
-              data-pace={evenPace()!.toFixed(1)}
-              title="Even pace"
-              aria-hidden="true"
-            />
-          </Show>
         </div>
       </Show>
-      <Show when={paceState()}>
-        <div class={`mt-1 text-[11px] ${paceTone()}`} data-testid="pace-state">
-          {paceState()}
-        </div>
+      <Show when={pacing()}>
+        {(w) => (
+          <>
+            <div
+              class="mt-1 flex justify-between gap-3 text-[11px] text-muted"
+              data-testid="pacing-rates"
+            >
+              <span>sustainable {formatRate(w().sustainable_rate)}</span>
+              <span>
+                current {formatRate(w().current_rate)}
+                {w().rate_source === "average" ? " (window avg)" : ""}
+              </span>
+            </div>
+            <div
+              class={`mt-0.5 text-[11px] ${paceTone()}`}
+              data-testid="pacing-state"
+            >
+              {pacingStateText(w(), props.enabled)}
+            </div>
+          </>
+        )}
       </Show>
       <div class="mt-1 text-[11px] text-muted">
         observed {formatWhen(props.quota.observed_at)}
@@ -145,252 +148,95 @@ const QuotaLine: Component<{
   );
 };
 
-function budgetLabel(budget: BudgetRow): string {
-  if (budget.mode === "pace") return `Pace · ${budget.window}`;
-  if (budget.mode === "off") return `Pace off · ${budget.window}`;
-  const unit =
-    budget.unit === "usd"
-      ? "USD"
-      : budget.unit === "tokens"
-        ? "Tokens"
-        : "Quota";
-  return `${unit} cap · ${budget.window}`;
-}
-
-function budgetValue(
-  budget: BudgetRow,
-  money: (usd: number) => string,
-): string {
-  if (budget.mode === "off") return "off";
-  if (budget.used === null) return "—";
-  if (budget.mode === "pace") {
-    return budget.target === null
-      ? `${budget.used.toFixed(0)}%`
-      : `${budget.used.toFixed(0)}% / ${budget.target.toFixed(0)}% pace`;
-  }
-  const amount = budget.amount ?? 0;
-  if (budget.unit === "usd") return `${money(budget.used)} / ${money(amount)}`;
-  if (budget.unit === "tokens") {
-    return `${count(budget.used)} / ${count(amount)}`;
-  }
-  return `${budget.used.toFixed(0)}% / ${amount.toFixed(0)}%`;
-}
-
-const BudgetLine: Component<{
-  budget: BudgetRow;
-  money: (usd: number) => string;
-}> = (props) => (
-  <div class="flex items-baseline justify-between gap-3 text-xs">
-    <span class="text-muted">{budgetLabel(props.budget)}</span>
-    <span
-      class={`tabular-nums ${props.budget.pressure >= 1 ? "text-danger" : ""}`}
-    >
-      {budgetValue(props.budget, props.money)}
-      {props.budget.stale ? " (stale)" : ""}
-    </span>
-  </div>
-);
-
 function showError(error: unknown): string {
   return isApiError(error) ? error.message : String(error);
 }
 
-const inputClass =
-  "h-8 w-20 rounded-md border border-line bg-bg px-2 text-xs tabular-nums";
-
-const BudgetEditor: Component<{
+const PacingControl: Component<{
   card: ProviderCardModel;
-  budgets: BudgetRow[];
-  onSave: (budgets: ProviderBudgetInput[]) => Promise<void>;
-  onClose: () => void;
+  pacing: PacingRow;
+  now: () => number;
+  onSetPacing?: (setting: ProviderPacingInput) => Promise<void>;
 }> = (props) => {
-  const [state, setState] = createSignal<BudgetEditorState>(
-    budgetEditorState(props.budgets, props.card),
-  );
-  const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const submit = async () => {
-    const next = applyBudgetEditor(props.budgets, props.card, state());
-    if (typeof next === "string") {
-      setError(next);
-      return;
-    }
+  const [error, setError] = createSignal("");
+  const effectivePacing = () => effectivePacingState(props.pacing, props.now());
+  const toggle = async () => {
+    const onSet = props.onSetPacing;
+    if (!onSet) return;
     setBusy(true);
     setError("");
     try {
-      await props.onSave(next);
-      props.onClose();
+      await onSet({
+        provider: props.card.provider,
+        account: props.card.account,
+        enabled: !props.pacing.enabled,
+      });
     } catch (reason) {
       setError(showError(reason));
     } finally {
       setBusy(false);
     }
   };
-  const sub = () => {
-    const current = state();
-    return current.kind === "subscription" ? current : null;
-  };
-  const key = () => {
-    const current = state();
-    return current.kind === "api_key" ? current : null;
-  };
   return (
-    <form
-      class="mt-3 space-y-3 border-t border-line pt-3 text-xs"
-      data-testid="budget-editor"
-      noValidate
-      onSubmit={(event) => {
-        event.preventDefault();
-        void submit();
-      }}
+    <div
+      class="mt-3 space-y-2 border-t border-line pt-3"
+      data-testid="pacing-control"
     >
-      <Show when={sub()}>
-        {(current) => (
-          <For each={PACE_WINDOWS}>
-            {(w) => (
-              <fieldset class="space-y-1.5">
-                <legend class="font-medium">
-                  {w === "5h" ? "5-hour window" : "Weekly window"}
-                </legend>
-                <div class="flex flex-wrap items-center gap-3">
-                  <label class="flex items-center gap-1.5">
-                    <input
-                      type="checkbox"
-                      checked={current().windows[w].pace}
-                      aria-label={`Pace the ${w} window`}
-                      onChange={(event) => {
-                        const checked = event.currentTarget.checked;
-                        setState((prev) =>
-                          prev.kind === "subscription"
-                            ? {
-                                ...prev,
-                                windows: {
-                                  ...prev.windows,
-                                  [w]: { ...prev.windows[w], pace: checked },
-                                },
-                              }
-                            : prev,
-                        );
-                      }}
-                    />
-                    Pace
-                  </label>
-                  <label class="flex items-center gap-1.5 text-muted">
-                    headroom
-                    <input
-                      class={inputClass}
-                      type="text"
-                      inputMode="decimal"
-                      disabled={!current().windows[w].pace}
-                      value={current().windows[w].headroom}
-                      aria-label={`Pace headroom for the ${w} window (points)`}
-                      onInput={(event) => {
-                        const value = event.currentTarget.value;
-                        setState((prev) =>
-                          prev.kind === "subscription"
-                            ? {
-                                ...prev,
-                                windows: {
-                                  ...prev.windows,
-                                  [w]: { ...prev.windows[w], headroom: value },
-                                },
-                              }
-                            : prev,
-                        );
-                      }}
-                    />
-                    pts
-                  </label>
-                  <label class="flex items-center gap-1.5 text-muted">
-                    cap
-                    <input
-                      class={inputClass}
-                      type="text"
-                      inputMode="decimal"
-                      placeholder="none"
-                      value={current().windows[w].cap}
-                      aria-label={`Quota cap for the ${w} window (%)`}
-                      onInput={(event) => {
-                        const value = event.currentTarget.value;
-                        setState((prev) =>
-                          prev.kind === "subscription"
-                            ? {
-                                ...prev,
-                                windows: {
-                                  ...prev.windows,
-                                  [w]: { ...prev.windows[w], cap: value },
-                                },
-                              }
-                            : prev,
-                        );
-                      }}
-                    />
-                    %
-                  </label>
-                </div>
-              </fieldset>
-            )}
-          </For>
-        )}
-      </Show>
-      <Show when={key()}>
-        {(current) => (
-          <div class="grid grid-cols-2 gap-2">
-            <For each={CAP_FIELDS}>
-              {(field) => (
-                <label class="flex items-center justify-between gap-2 text-muted">
-                  {field.label}
-                  <input
-                    class={inputClass}
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="none"
-                    value={current().caps[field.key]}
-                    aria-label={field.label}
-                    onInput={(event) => {
-                      const value = event.currentTarget.value;
-                      setState((prev) =>
-                        prev.kind === "api_key"
-                          ? {
-                              ...prev,
-                              caps: { ...prev.caps, [field.key]: value },
-                            }
-                          : prev,
-                      );
-                    }}
-                  />
-                </label>
-              )}
-            </For>
-          </div>
-        )}
-      </Show>
+      <div class="flex items-center justify-between gap-3 text-xs">
+        <span class="font-medium">Automatic pacing</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={props.pacing.enabled}
+          aria-label="Automatic pacing"
+          disabled={!props.onSetPacing || busy()}
+          class={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-line transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+            props.pacing.enabled ? "bg-accent" : "bg-soft"
+          }`}
+          onClick={() => void toggle()}
+        >
+          <span
+            class={`inline-block h-3.5 w-3.5 rounded-full bg-bg shadow transition-transform ${
+              props.pacing.enabled ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+      <Row label="Estimated extra request gap (informational)">
+        <span data-testid="pacing-extra-gap">
+          {props.pacing.enabled
+            ? formatExtraGap(effectivePacing().recommended_extra_gap_ms)
+            : "off"}
+        </span>
+      </Row>
+      <Row label="Quota-based curation pause">
+        <span
+          class={
+            props.pacing.enabled && effectivePacing().throttling
+              ? "text-danger"
+              : "text-muted"
+          }
+          data-testid="pacing-curation-state"
+        >
+          {props.pacing.enabled && effectivePacing().throttling
+            ? "active"
+            : "inactive"}
+        </span>
+      </Row>
+      <p class="text-[11px] text-muted">
+        {props.pacing.enabled
+          ? "Quota pressure pauses non-urgent background curation. "
+          : "Quota-based pauses for non-urgent background curation are off. "}
+        The gap estimate is informational only. Provider pacing never delays
+        user requests.
+      </p>
       <Show when={error()}>
-        <p class="text-danger" role="alert">
+        <p class="text-[11px] text-danger" role="alert">
           {error()}
         </p>
       </Show>
-      <div class="flex gap-2">
-        <Button
-          pending={busy()}
-          icon="save"
-          size="sm"
-          type="submit"
-          disabled={busy()}
-        >
-          {busy() ? "Saving…" : "Save budgets"}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          type="button"
-          disabled={busy()}
-          onClick={() => props.onClose()}
-        >
-          Cancel
-        </Button>
-      </div>
-    </form>
+    </div>
   );
 };
 
@@ -398,11 +244,9 @@ const ProviderCard: Component<{
   card: ProviderCardModel;
   money: (usd: number) => string;
   now: () => number;
-  budgets: BudgetRow[];
-  allBudgets: BudgetRow[];
-  onSaveBudgets?: (budgets: ProviderBudgetInput[]) => Promise<void>;
+  pacing: PacingRow | null;
+  onSetPacing?: (setting: ProviderPacingInput) => Promise<void>;
 }> = (props) => {
-  const [editing, setEditing] = createSignal(false);
   return (
     <section
       class="rounded-lg border border-line bg-bg p-4"
@@ -465,47 +309,26 @@ const ProviderCard: Component<{
               <QuotaLine
                 quota={quota}
                 now={props.now}
-                pace={paceFor(props.budgets, props.card, quota.window)}
+                pacing={
+                  props.pacing?.windows.find(
+                    (w) => w.window === quota.window,
+                  ) ?? null
+                }
+                enabled={props.pacing?.enabled ?? false}
               />
             )}
           </For>
         </div>
       </Show>
 
-      <Show when={props.budgets.length > 0}>
-        <div class="mt-3 space-y-2 border-t border-line pt-3">
-          <div class="text-[11px] font-medium uppercase tracking-wide text-muted">
-            Budgets
-          </div>
-          <For each={props.budgets}>
-            {(budget) => <BudgetLine budget={budget} money={props.money} />}
-          </For>
-        </div>
-      </Show>
-
-      <Show when={props.onSaveBudgets}>
-        {(onSave) => (
-          <Show
-            when={editing()}
-            fallback={
-              <div class="mt-3">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setEditing(true)}
-                >
-                  Edit budgets
-                </Button>
-              </div>
-            }
-          >
-            <BudgetEditor
-              card={props.card}
-              budgets={props.allBudgets}
-              onSave={onSave()}
-              onClose={() => setEditing(false)}
-            />
-          </Show>
+      <Show when={props.pacing}>
+        {(pacing) => (
+          <PacingControl
+            card={props.card}
+            pacing={pacing()}
+            now={props.now}
+            onSetPacing={props.onSetPacing}
+          />
         )}
       </Show>
     </section>
@@ -515,11 +338,11 @@ const ProviderCard: Component<{
 export const ProviderCards: Component<{
   providers: Providers;
   quotas: Quotas;
-  budgets?: Budgets;
+  pacing?: Pacing;
   money: (usd: number) => string;
   now?: () => number;
-  /** Present when budgets are editable (not hosted mode). */
-  onSaveBudgets?: (budgets: ProviderBudgetInput[]) => Promise<void>;
+  /** Present when pacing is switchable (not hosted mode). */
+  onSetPacing?: (setting: ProviderPacingInput) => Promise<void>;
 }> = (props) => {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 30_000);
@@ -551,9 +374,8 @@ export const ProviderCards: Component<{
                 card={card}
                 money={props.money}
                 now={now}
-                budgets={budgetsForCard(props.budgets ?? [], card)}
-                allBudgets={props.budgets ?? []}
-                onSaveBudgets={props.onSaveBudgets}
+                pacing={pacingForCard(props.pacing ?? [], card)}
+                onSetPacing={props.onSetPacing}
               />
             )}
           </For>

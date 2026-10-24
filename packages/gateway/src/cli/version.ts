@@ -12,7 +12,9 @@ declare const LORE_CLI_VERSION: string | undefined;
 function readVersionFromPackageJson(): string {
   try {
     const pkg = require("../../package.json") as { version?: string };
-    return pkg.version ?? "dev";
+    return pkg.version
+      ? `${pkg.version}${pkg.version.includes("+") ? "." : "+"}local.source`
+      : "dev";
   } catch {
     return "dev";
   }

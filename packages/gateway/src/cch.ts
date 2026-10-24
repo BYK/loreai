@@ -32,6 +32,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { log } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
+import { credentialTenantFingerprint, type AuthCredential } from "./auth";
 import { xxHash64 } from "./xxhash.ts";
 
 /**
@@ -218,12 +219,18 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.301": SEED_2_1_138,
   "2.1.302": SEED_2_1_138,
   "2.1.303": SEED_2_1_138,
+  "2.1.308": SEED_2_1_138,
+  "2.1.304": SEED_2_1_138,
+  "2.1.305": SEED_2_1_138,
+  "2.1.306": SEED_2_1_138,
+  "2.1.307": SEED_2_1_138,
+  "2.1.309": SEED_2_1_138,
   // Future versions: extract and add entries here.
-  // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
+  // Use `pnpm exec tsx scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.303";
+const WORKER_VERSION = "2.1.309";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
@@ -558,13 +565,30 @@ export function hasBillingHeader(system: string): boolean {
   return BILLING_HEADER_RE.test(system);
 }
 
-/** Sessions that use bearer-token auth and need billing headers on workers. */
-const sessionNeedsBilling = new Map<string, boolean>();
+/**
+ * Credentials that presented a Claude Code billing header in each session.
+ * Keep only opaque credential fingerprints; raw bearer tokens never enter this
+ * registry. The per-session cap makes repeated credential rotation bounded.
+ */
+const MAX_BILLING_CREDENTIALS_PER_SESSION = 16;
+const sessionNeedsBilling = new Map<string, Set<string>>();
+
+function hasBillingCredential(
+  sessionID: string,
+  credential: AuthCredential | null | undefined,
+): boolean {
+  if (credential?.scheme !== "bearer") return false;
+  return (
+    sessionNeedsBilling
+      .get(sessionID)
+      ?.has(credentialTenantFingerprint(credential)) ?? false
+  );
+}
 
 /**
  * Check if a system prompt contains a billing header and record the result
- * for this session. Called on each conversation turn. Returns true if the
- * session uses billing headers (bearer-token / Claude Code OAuth).
+ * for this credential in this session. Called on each conversation turn.
+ * Returns true only when a bearer credential presented the header.
  *
  * Sessions whose system prompts do not match the regex (API-key clients,
  * non-Claude-Code clients) leave their slot untouched — a subsequent turn
@@ -573,12 +597,23 @@ const sessionNeedsBilling = new Map<string, boolean>();
 export function captureBillingPrefix(
   sessionID: string,
   system: string,
+  credential: AuthCredential | null | undefined,
 ): boolean {
   const hasBilling = BILLING_HEADER_RE.test(system);
-  if (hasBilling) {
-    sessionNeedsBilling.set(sessionID, true);
+  if (!hasBilling || credential?.scheme !== "bearer") return false;
+
+  const fingerprint = credentialTenantFingerprint(credential);
+  const credentials = sessionNeedsBilling.get(sessionID) ?? new Set<string>();
+  // Never evict an established credential marker to admit a new credential.
+  if (
+    !credentials.has(fingerprint) &&
+    credentials.size >= MAX_BILLING_CREDENTIALS_PER_SESSION
+  ) {
+    return false;
   }
-  return hasBilling;
+  credentials.add(fingerprint);
+  sessionNeedsBilling.set(sessionID, credentials);
+  return true;
 }
 
 /**
@@ -595,9 +630,10 @@ export function captureBillingPrefix(
 export function buildBillingBlock(
   sessionID: string | undefined,
   userMessage: string,
+  credential: AuthCredential,
 ): { type: string; text: string } | null {
   if (!sessionID) return null;
-  if (!sessionNeedsBilling.get(sessionID)) return null;
+  if (!hasBillingCredential(sessionID, credential)) return null;
 
   const suffix = computeVersionSuffix(userMessage);
   return {
@@ -615,19 +651,18 @@ export function deleteBillingPrefix(sessionID: string): void {
 }
 
 /**
- * Whether a session is a Claude Code Anthropic OAuth session.
+ * Whether this credential presented a Claude Code billing header in the
+ * session. This identifies the worker request fingerprint; it does not prove
+ * that Anthropic accepted the credential as OAuth.
  *
- * True only when a Claude Code billing header was observed in the session's
- * system prompt (see `captureBillingPrefix`). This is the canonical signal
- * for "this bearer token is an Anthropic OAuth/subscription token" — a bearer
- * token for a non-Anthropic provider (OpenAI-protocol, MiniMax, vLLM, etc.)
- * never carries this header, so it is naturally excluded.
- *
- * Used to gate Anthropic-specific behavior (e.g. the OAuth usage/quota API)
- * to genuine Claude Code OAuth sessions only.
+ * Authentication classification uses a separately verified successful
+ * response from Anthropic's canonical API.
  */
-export function isClaudeCodeOAuthSession(sessionID: string): boolean {
-  return sessionNeedsBilling.get(sessionID) === true;
+export function isClaudeCodeOAuthSession(
+  sessionID: string,
+  credential: AuthCredential | null | undefined,
+): boolean {
+  return hasBillingCredential(sessionID, credential);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +722,7 @@ const sessionHeaderSnapshots = new Map<string, SessionHeaderSnapshot>();
 export function captureSessionHeaders(
   sessionID: string,
   rawHeaders: Record<string, string>,
+  credential?: AuthCredential | null,
 ): void {
   // Codex (ChatGPT) account/originator headers must be replayed on worker
   // calls to the `/codex/responses` backend. Capture them for ANY session
@@ -700,12 +736,13 @@ export function captureSessionHeaders(
   const hasCodexHeaders = !!(accountId || originator || openaiBeta);
 
   // Anthropic billing-header replay is gated to billing sessions (unchanged).
-  if (!sessionNeedsBilling.get(sessionID) && !hasCodexHeaders) return;
+  const hasBilling = hasBillingCredential(sessionID, credential);
+  if (!hasBilling && !hasCodexHeaders) return;
 
   const snapshot: SessionHeaderSnapshot =
     sessionHeaderSnapshots.get(sessionID) ?? {};
 
-  if (sessionNeedsBilling.get(sessionID)) {
+  if (hasBilling) {
     const beta = rawHeaders["anthropic-beta"] || rawHeaders["Anthropic-Beta"];
     if (beta) snapshot.anthropicBeta = beta;
 
@@ -752,9 +789,10 @@ export function workerUserAgent(sessionID: string | undefined): string {
 
 export function buildOAuthWorkerHeaders(
   sessionID: string | undefined,
+  credential: AuthCredential,
 ): Record<string, string> | null {
   if (!sessionID) return null;
-  if (!sessionNeedsBilling.get(sessionID)) return null;
+  if (!hasBillingCredential(sessionID, credential)) return null;
 
   const snapshot = sessionHeaderSnapshots.get(sessionID);
 

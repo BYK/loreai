@@ -25,6 +25,7 @@ describe("management route access control", () => {
   let wideListener: ServerHandle;
   let remotePeer: ServerHandle;
   let remoteManagementPeer: ServerHandle;
+  let tokenlessRemoteManagementPeer: ServerHandle;
   let mappedLoopbackPeer: ServerHandle;
 
   beforeAll(async () => {
@@ -44,6 +45,10 @@ describe("management route access control", () => {
       }),
       { peerAddressForRequest: () => "192.0.2.10" },
     );
+    tokenlessRemoteManagementPeer = await startServer(
+      makeConfig({ allowRemoteManagement: true }),
+      { peerAddressForRequest: () => "192.0.2.10" },
+    );
     mappedLoopbackPeer = await startServer(makeConfig(), {
       peerAddressForRequest: () => "::ffff:127.0.0.1",
     });
@@ -54,6 +59,7 @@ describe("management route access control", () => {
       wideListener.stop(),
       remotePeer.stop(),
       remoteManagementPeer.stop(),
+      tokenlessRemoteManagementPeer.stop(),
       mappedLoopbackPeer.stop(),
     ]);
   });
@@ -166,6 +172,84 @@ describe("management route access control", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual(expect.any(Array));
+  });
+
+  test("hides remote provider-pacing writes without a token before reading the body", async () => {
+    const rawResponse = await new Promise<string>((resolve, reject) => {
+      const socket = connect(tokenlessRemoteManagementPeer.port, "127.0.0.1");
+      let received = "";
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error("remote pacing denial waited for the request body"));
+      }, 2_000);
+      const finish = (): void => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(received);
+      };
+      socket.once("connect", () => {
+        socket.write(
+          "PUT /api/v1/costs/pacing HTTP/1.1\r\n" +
+            `Host: 127.0.0.1:${tokenlessRemoteManagementPeer.port}\r\n` +
+            "Content-Type: application/json\r\n" +
+            "Content-Length: 100000\r\n" +
+            "\r\n" +
+            "{",
+        );
+      });
+      socket.on("data", (chunk) => {
+        received += chunk.toString();
+        if (received.includes("\r\n\r\n")) finish();
+      });
+      socket.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      socket.once("close", () => {
+        if (received) finish();
+      });
+    });
+
+    expect(rawResponse).toContain("404 Not Found");
+    expect(rawResponse.toLowerCase()).toContain("connection: close");
+  });
+
+  test("requires the configured gateway token for remote pacing writes", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/costs/pacing"),
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${REMOTE_MANAGEMENT_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "anthropic",
+          account: "remote-pacing-access-test",
+          enabled: false,
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+  });
+
+  test("hides remote pacing preflights when no gateway token is configured", async () => {
+    const response = await fetch(
+      urlFor(tokenlessRemoteManagementPeer, "/api/v1/costs/pacing"),
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://labs.sheep-fir.ts.net",
+          "access-control-request-method": "PUT",
+          "access-control-request-headers": "authorization,content-type",
+        },
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
   });
 
   test.each([

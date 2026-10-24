@@ -113,7 +113,7 @@ import {
   deleteSessionCosts,
 } from "./cost-tracker";
 import { deleteBillingPrefix } from "./cch";
-import { isBackgroundBudgetPaused } from "./provider-budgets";
+import { isSessionCurationPacingPaused } from "./provider-budgets";
 import {
   maybeFetchQuota,
   isQuotaPaused,
@@ -698,14 +698,11 @@ export function startIdleScheduler(
       // (see isWorkerCreditPaused) so a credit top-up recovers automatically.
       if (isWorkerCreditPaused(sessionID)) continue;
 
-      // Skip background work for OAuth accounts near quota exhaustion, or
-      // when quota usage is ahead of pace / a cap is exhausted —
+      // Skip background work for OAuth accounts near quota exhaustion —
       // preserve remaining entitlement for user-facing conversation turns.
-      if (
-        isQuotaPaused(resolveAuth(sessionID)) ||
-        isBackgroundBudgetPaused(sessionID, state.lastUpstream)
-      )
-        continue;
+      // Subscription pacing never pauses distillation; it gates curation only
+      // (see the curation step of buildIdleWorkHandler).
+      if (isQuotaPaused(resolveAuth(sessionID))) continue;
 
       // Coalesce with any distillation/curation already in-flight OR queued for
       // this session. The synchronous distillation claim covers the global-queue
@@ -1279,7 +1276,13 @@ export function buildIdleWorkHandler(
 
     // 2. Curation — cost-aware frequency: on expensive worker models, curate
     //    less often (same multiplier as the inline path in pipeline.ts).
-    if (allowWorker && cfg.knowledge.enabled && cfg.curator.onIdle) {
+    //    Paused while the account's subscription pacing is throttling.
+    if (
+      allowWorker &&
+      cfg.knowledge.enabled &&
+      cfg.curator.onIdle &&
+      !isSessionCurationPacingPaused(sessionID, state.lastUpstream)
+    ) {
       try {
         const workerModelID = model?.modelID ?? "unknown";
         const modelInputCost =
