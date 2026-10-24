@@ -473,11 +473,24 @@ for (const theme of ["light", "dark"] as const) {
       exact: true,
     });
     await expect(panel).toBeVisible();
+    if (mobile)
+      await expect
+        .poll(async () => {
+          const box = (await panel.boundingBox())!;
+          return (
+            Math.abs(box.y + box.height - page.viewportSize()!.height) < 0.5
+          );
+        })
+        .toBe(true);
     const box = (await panel.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize()!.width);
     expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
     if (mobile) {
+      await expect(panel).toHaveAttribute("data-filter-presentation", "sheet");
+      expect(box.x).toBe(0);
+      expect(box.width).toBe(page.viewportSize()!.width);
+      expect(box.y + box.height).toBe(page.viewportSize()!.height);
       for (const button of await panel.getByRole("button").all()) {
         expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
       }
@@ -498,6 +511,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.screenshot({
       path: testInfo.outputPath(`knowledge-filters-${theme}.png`),
       fullPage: true,
+      scale: "css",
     });
     await page.keyboard.press("Escape");
     await expect(panel).toHaveCount(0);
@@ -542,6 +556,9 @@ for (const viewport of [
         return box.y >= 0 && box.y + box.height <= viewport.height;
       })
       .toBe(true);
+    await expect(
+      panel.getByRole("button", { name: "Apply filters" }),
+    ).toBeInViewport();
     await panel.getByRole("button", { name: /^Category/ }).click();
     await page.getByRole("option", { name: "Decisions", exact: true }).click();
     await panel.getByRole("button", { name: /^Scope/ }).click();
@@ -556,3 +573,147 @@ for (const viewport of [
     ).toBeFocused();
   });
 }
+
+test("knowledge filter presentation closes safely across breakpoints", async ({
+  page,
+}) => {
+  const { entry } = await seededReader(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const filters = page.getByRole("button", { name: "Filters", exact: true });
+  const panel = page.getByRole("dialog", {
+    name: "Knowledge filters",
+    exact: true,
+  });
+  await filters.click();
+  await panel.getByRole("button", { name: /^Category/ }).click();
+  await page.getByRole("option", { name: "Gotchas", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 851 });
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByTestId("context-toggle")).toBeFocused();
+  await page.getByTestId("context-toggle").click();
+  await filters.click();
+  await expect(panel).toHaveAttribute("data-filter-presentation", "sheet");
+  await expect(panel.getByRole("button", { name: /^Category/ })).toContainText(
+    "All categories",
+  );
+  await panel.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(filters).toBeFocused();
+  await filters.click();
+  await expect
+    .poll(async () => {
+      const box = (await panel.boundingBox())!;
+      return Math.abs(box.y + box.height - page.viewportSize()!.height) < 0.5;
+    })
+    .toBe(true);
+  await page.mouse.click(8, 8);
+  await expect(panel).toHaveCount(0);
+  await expect(filters).toBeFocused();
+  await expect(page.getByTestId("nav-drawer")).toHaveCount(0);
+  await filters.click();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(panel).toHaveCount(0);
+  await expect(filters).toBeFocused();
+  expect(new URL(page.url()).searchParams.has("category")).toBe(false);
+  await expect(page.getByTestId("knowledge-document")).toContainText(
+    entry.title,
+  );
+});
+
+test("mobile knowledge sheet respects reduced motion and keeps keyboard focus inside", async ({
+  page,
+}, testInfo) => {
+  test.skip(!testInfo.project.name.includes("mobile"));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await seededReader(page);
+  await page.getByTestId("context-toggle").click();
+  const filters = page.getByRole("button", { name: "Filters", exact: true });
+  await filters.click();
+  const panel = page.getByRole("dialog", {
+    name: "Knowledge filters",
+    exact: true,
+  });
+  await expect(panel).toHaveAttribute("data-filter-presentation", "sheet");
+  expect(
+    await panel.evaluate((element) => getComputedStyle(element).animationName),
+  ).toBe("none");
+  await panel.getByRole("button", { name: "Dismiss", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(panel.getByRole("button", { name: /^Category/ })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(
+    panel.getByRole("button", { name: "Dismiss", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(filters).toBeFocused();
+});
+
+for (const action of ["Cancel", "Apply filters", "Dismiss"]) {
+  test(`closing the mobile sheet with ${action} before resizing restores current focus`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.includes("mobile"));
+    await page.setViewportSize({ width: 390, height: 851 });
+    await seededReader(page);
+    await page.getByTestId("context-toggle").click();
+    const filters = page.getByRole("button", { name: "Filters", exact: true });
+    await filters.click();
+    const panel = page.getByRole("dialog", {
+      name: "Knowledge filters",
+      exact: true,
+    });
+    await panel.getByRole("button", { name: action, exact: true }).click();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await expect(panel).toHaveCount(0);
+    await expect(filters).toBeFocused();
+  });
+}
+
+test("nested knowledge filter options remain accessible after deferred modal updates", async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name.includes("mobile");
+  await page.setViewportSize({
+    width: mobile ? 568 : 1280,
+    height: mobile ? 320 : 800,
+  });
+  await seededReader(page);
+  const toggle = page.getByTestId("context-toggle");
+  if ((await toggle.getAttribute("aria-expanded")) === "false")
+    await toggle.click();
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
+  const panel = page.getByRole("dialog", {
+    name: "Knowledge filters",
+    exact: true,
+  });
+  for (const [label, count] of [
+    ["Category", 6],
+    ["Scope", 4],
+  ] as const) {
+    const trigger = panel.getByRole("button", {
+      name: new RegExp(`^${label}`),
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await trigger.click();
+      // Kobalte ariaHideOutside schedules its writes with a timeout and rAF.
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            setTimeout(
+              () =>
+                requestAnimationFrame(() =>
+                  requestAnimationFrame(() => resolve()),
+                ),
+              0,
+            ),
+          ),
+      );
+      await expect(page.getByRole("option")).toHaveCount(count);
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("listbox")).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    }
+  }
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+});

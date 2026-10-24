@@ -456,3 +456,10 @@
 .mobile-navigation-drawer[data-expanded] { animation: mobile-navigation-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 .mobile-navigation-drawer[data-closed] { animation: mobile-navigation-out 150ms ease-in; }
 @media (prefers-reduced-motion: reduce) { .mobile-navigation-drawer { animation: none; } }
+
+
+@keyframes knowledge-filter-sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes knowledge-filter-sheet-out { from { transform: translateY(0); } to { transform: translateY(100%); } }
+.knowledge-filter-sheet[data-expanded] { animation: knowledge-filter-sheet-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.knowledge-filter-sheet[data-closed] { animation: knowledge-filter-sheet-out 150ms ease-in; }
+@media (prefers-reduced-motion: reduce) { .knowledge-filter-sheet[data-expanded], .knowledge-filter-sheet[data-closed] { animation: none; } }

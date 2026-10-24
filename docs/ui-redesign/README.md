@@ -46,8 +46,12 @@ filter panel applies category and scope together, with explanations for project,
 shared, and global visibility. Applied filters appear as removable chips; clearing
 them preserves the selected entry and sort order. Both directions are available
 for updated/created date, title, and confidence. Existing multi-column sorts from
-the table remain intact. Filter and select panels scroll within the available
-viewport height, including 320×480 portrait and 568×320 landscape screens.
+the table remain intact. Desktop keeps its anchored popover. Below 768px, Filters
+opens a full-width bottom sheet with a backdrop, a 44px close control, scrollable
+fields, and a fixed action row with safe-area padding. Sheet motion follows the
+reduced-motion preference. Nested selectors use modal accessibility scopes, and
+closing/resizing restores focus to the current visible control. Short-screen
+coverage includes 320×480 portrait and 568×320 landscape viewports.
 
 Screenshots use the disposable database seeded by the UI browser tests.
 `responsive-layout.spec.ts` audits 23 routes at 1440, 390, and 320px in both

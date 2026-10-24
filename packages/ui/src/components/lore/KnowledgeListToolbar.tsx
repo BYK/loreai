@@ -1,6 +1,13 @@
 import type { Component } from "solid-js";
 import { A } from "@solidjs/router";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  Show,
+} from "solid-js";
 import type { KnowledgeQuery } from "~/contracts";
 import {
   KNOWLEDGE_CATEGORIES,
@@ -23,6 +30,12 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "~/components/ui/dialog";
 import { Icon } from "~/components/shell/Icon";
 
 const categoryLabels: Record<string, string> = {
@@ -73,6 +86,28 @@ export const KnowledgeListToolbar: Component<{
   const [search, setSearch] = createSignal(appliedSearch());
   createEffect(() => setSearch(appliedSearch()));
   const [open, setOpen] = createSignal(false);
+  const media = window.matchMedia?.("(min-width: 48rem)");
+  const [mobile, setMobile] = createSignal(media ? !media.matches : false);
+  let toolbar: HTMLElement | undefined;
+  const focusFilters = () => {
+    const trigger = toolbar?.querySelector<HTMLButtonElement>(
+      "[data-knowledge-filters-trigger]",
+    );
+    if (trigger?.getClientRects().length)
+      trigger.focus({ preventScroll: true });
+    else
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="context-toggle"]')
+        ?.focus({ preventScroll: true });
+  };
+  const changeLayout = () => {
+    const wasOpen = open();
+    setOpen(false);
+    setMobile(media ? !media.matches : false);
+    if (wasOpen) queueMicrotask(focusFilters);
+  };
+  media?.addEventListener("change", changeLayout);
+  onCleanup(() => media?.removeEventListener("change", changeLayout));
   const [category, setCategory] =
     createSignal<KnowledgeQuery["category"]>(null);
   const [scope, setScope] = createSignal<KnowledgeQuery["scope"]>(null);
@@ -119,8 +154,126 @@ export const KnowledgeListToolbar: Component<{
     });
   };
   const sortLabel = (value: string) => sorts[value] ?? "Custom sort";
+  const filterButtonContents = () => (
+    <>
+      <Icon name="filter" />
+      Filters
+      <Show when={active().length}>
+        <span
+          class="rounded bg-accent-soft px-1.5 text-[11px] tabular-nums text-accent-soft-text"
+          aria-label={`${active().length} active filters`}
+        >
+          {active().length}
+        </span>
+      </Show>
+    </>
+  );
+  const filterForm = (sheet: boolean) => (
+    <form
+      class={sheet ? "flex min-h-0 flex-1 flex-col" : undefined}
+      onSubmit={(event) => {
+        event.preventDefault();
+        setOpen(false);
+        props.onChange({
+          ...props.query,
+          category: category(),
+          scope: scope(),
+          cursor: null,
+        });
+      }}
+    >
+      <div
+        class={
+          sheet
+            ? "min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4"
+            : "space-y-4 p-4"
+        }
+      >
+        <div>
+          <Show
+            when={sheet}
+            fallback={<h2 class="text-sm font-semibold">Filter knowledge</h2>}
+          >
+            <DialogTitle class="pr-10 text-sm">Knowledge filters</DialogTitle>
+          </Show>
+          <p class="mt-1 text-xs leading-5 text-muted">
+            Narrow the list without leaving this entry.
+          </p>
+        </div>
+        <Select<NonNullable<KnowledgeQuery["category"]> | "">
+          modal
+          value={category() ?? ""}
+          options={categoryOptions}
+          placeholder="All categories"
+          onChange={(value) => setCategory(value || null)}
+          itemComponent={(item) => (
+            <SelectItem item={item.item} class="min-h-11 md:min-h-8">
+              {categoryLabels[item.item.rawValue] ?? "All categories"}
+            </SelectItem>
+          )}
+        >
+          <SelectLabel class="mb-1.5 block text-xs">Category</SelectLabel>
+          <SelectTrigger class="h-11 bg-bg text-sm md:h-9 md:text-xs">
+            <SelectValue<string>>
+              {(state) =>
+                categoryLabels[state.selectedOption()] ?? "All categories"
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
+        </Select>
+        <Select<NonNullable<KnowledgeQuery["scope"]> | "">
+          modal
+          value={scope() ?? ""}
+          options={scopeOptions}
+          placeholder="This project"
+          onChange={(value) => setScope(value || null)}
+          itemComponent={(item) => (
+            <SelectItem item={item.item} class="min-h-11 md:min-h-8">
+              {scopeLabels[item.item.rawValue]}
+            </SelectItem>
+          )}
+        >
+          <SelectLabel class="mb-1.5 block text-xs">Scope</SelectLabel>
+          <SelectTrigger class="h-11 bg-bg text-sm md:h-9 md:text-xs">
+            <SelectValue<string>>
+              {(state) => scopeLabels[state.selectedOption()]}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
+        </Select>
+        <p class="text-xs leading-5 text-muted">
+          {scopeDescriptions[scope() ?? ""]}
+        </p>
+      </div>
+      <div
+        class={
+          sheet
+            ? "flex shrink-0 justify-end gap-2 border-t border-line bg-soft px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+            : "flex justify-end gap-2 border-t border-line bg-soft px-4 py-3"
+        }
+      >
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          class="h-11 md:h-8"
+          onClick={() => setOpen(false)}
+        >
+          Cancel
+        </Button>
+        <Button type="submit" size="sm" class="h-11 md:h-8">
+          Apply filters
+        </Button>
+      </div>
+    </form>
+  );
+
   return (
     <header
+      ref={(element) => {
+        toolbar = element;
+      }}
       class="sticky top-0 z-10 border-b border-line bg-bg"
       data-testid="knowledge-list-toolbar"
     >
@@ -181,121 +334,61 @@ export const KnowledgeListToolbar: Component<{
           </Button>
         </form>
         <div class="flex min-w-0 items-center gap-2">
-          <Popover
-            modal
-            open={open()}
-            onOpenChange={changeOpen}
-            placement="bottom-start"
-            gutter={6}
-          >
-            <PopoverTrigger
-              as={Button}
-              variant="outline"
-              size="sm"
-              class="h-11 shrink-0 gap-1.5 px-2.5 md:h-8"
-              aria-label="Filters"
-            >
-              <Icon name="filter" />
-              Filters
-              <Show when={active().length}>
-                <span
-                  class="rounded bg-accent-soft px-1.5 text-[11px] tabular-nums text-accent-soft-text"
-                  aria-label={`${active().length} active filters`}
-                >
-                  {active().length}
-                </span>
-              </Show>
-            </PopoverTrigger>
-            <PopoverContent
-              aria-label="Knowledge filters"
-              class="max-h-[var(--kb-popper-content-available-height)] w-72 overflow-y-auto overscroll-contain"
-              data-testid="knowledge-filter-panel"
-            >
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  setOpen(false);
-                  props.onChange({
-                    ...props.query,
-                    category: category(),
-                    scope: scope(),
-                    cursor: null,
-                  });
-                }}
+          <Show
+            when={mobile()}
+            fallback={
+              <Popover
+                modal
+                open={open()}
+                onOpenChange={changeOpen}
+                placement="bottom-start"
+                gutter={6}
               >
-                <div class="space-y-4 p-4">
-                  <div>
-                    <h2 class="text-sm font-semibold">Filter knowledge</h2>
-                    <p class="mt-1 text-xs leading-5 text-muted">
-                      Narrow the list without leaving this entry.
-                    </p>
-                  </div>
-                  <Select<NonNullable<KnowledgeQuery["category"]> | "">
-                    value={category() ?? ""}
-                    options={categoryOptions}
-                    placeholder="All categories"
-                    onChange={(value) => setCategory(value || null)}
-                    itemComponent={(item) => (
-                      <SelectItem item={item.item} class="min-h-11 md:min-h-8">
-                        {categoryLabels[item.item.rawValue] ?? "All categories"}
-                      </SelectItem>
-                    )}
-                  >
-                    <SelectLabel class="mb-1.5 block text-xs">
-                      Category
-                    </SelectLabel>
-                    <SelectTrigger class="h-11 bg-bg text-sm md:h-9 md:text-xs">
-                      <SelectValue<string>>
-                        {(state) =>
-                          categoryLabels[state.selectedOption()] ??
-                          "All categories"
-                        }
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
-                  </Select>
-                  <Select<NonNullable<KnowledgeQuery["scope"]> | "">
-                    value={scope() ?? ""}
-                    options={scopeOptions}
-                    placeholder="This project"
-                    onChange={(value) => setScope(value || null)}
-                    itemComponent={(item) => (
-                      <SelectItem item={item.item} class="min-h-11 md:min-h-8">
-                        {scopeLabels[item.item.rawValue]}
-                      </SelectItem>
-                    )}
-                  >
-                    <SelectLabel class="mb-1.5 block text-xs">
-                      Scope
-                    </SelectLabel>
-                    <SelectTrigger class="h-11 bg-bg text-sm md:h-9 md:text-xs">
-                      <SelectValue<string>>
-                        {(state) => scopeLabels[state.selectedOption()]}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
-                  </Select>
-                  <p class="text-xs leading-5 text-muted">
-                    {scopeDescriptions[scope() ?? ""]}
-                  </p>
-                </div>
-                <div class="flex justify-end gap-2 border-t border-line bg-soft px-4 py-3">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    class="h-11 md:h-8"
-                    onClick={() => setOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" size="sm" class="h-11 md:h-8">
-                    Apply filters
-                  </Button>
-                </div>
-              </form>
-            </PopoverContent>
-          </Popover>
+                <PopoverTrigger
+                  as={Button}
+                  variant="outline"
+                  size="sm"
+                  class="h-11 shrink-0 gap-1.5 px-2.5 md:h-8"
+                  aria-label="Filters"
+                  data-knowledge-filters-trigger
+                >
+                  {filterButtonContents()}
+                </PopoverTrigger>
+                <PopoverContent
+                  aria-label="Knowledge filters"
+                  class="max-h-[var(--kb-popper-content-available-height)] w-72 overflow-y-auto overscroll-contain"
+                  data-testid="knowledge-filter-panel"
+                  data-filter-presentation="popover"
+                >
+                  {filterForm(false)}
+                </PopoverContent>
+              </Popover>
+            }
+          >
+            <Dialog open={open()} onOpenChange={changeOpen}>
+              <DialogTrigger
+                as={Button}
+                variant="outline"
+                size="sm"
+                class="h-11 shrink-0 gap-1.5 px-2.5 md:h-8"
+                aria-label="Filters"
+                data-knowledge-filters-trigger
+              >
+                {filterButtonContents()}
+              </DialogTrigger>
+              <DialogContent
+                onCloseAutoFocus={(event) => {
+                  event.preventDefault();
+                  queueMicrotask(focusFilters);
+                }}
+                data-testid="knowledge-filter-panel"
+                data-filter-presentation="sheet"
+                class="knowledge-filter-sheet bottom-0 left-0 top-auto flex max-h-[calc(100dvh-1rem)] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-b-none rounded-t-xl border-x-0 border-b-0 p-0 sm:p-0 [&>button]:right-2 [&>button]:top-2 [&>button]:size-11"
+              >
+                {filterForm(true)}
+              </DialogContent>
+            </Dialog>
+          </Show>
           <Select
             value={currentSort()}
             options={sortOptions()}
