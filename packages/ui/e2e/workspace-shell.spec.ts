@@ -1132,3 +1132,33 @@ for (const section of ["knowledge", "sessions"] as const) {
     await expect(toggle).toBeFocused();
   });
 }
+
+test("project pinning retains keyboard focus through regrouping", async ({
+  page,
+}) => {
+  await page.goto("/ui");
+  const picker = await openProjectPicker(page);
+  const initial = picker.getByTestId("nav-pin").first();
+  const name = (await initial.getAttribute("aria-label"))!.replace(/^Pin /, "");
+  await expect(initial).toHaveAttribute("aria-pressed", "false");
+  await initial.focus();
+  await page.keyboard.press("Enter");
+  const unpin = picker.getByRole("button", {
+    name: `Unpin ${name}`,
+    exact: true,
+  });
+  await expect(unpin).toBeFocused();
+  await expect(unpin).toBeInViewport();
+  await page.keyboard.press("ArrowDown");
+  await expect(picker.getByTestId("nav-project").nth(1)).toBeFocused();
+  await unpin.focus();
+  await page.keyboard.press("Enter");
+  const pin = picker.getByRole("button", { name: `Pin ${name}`, exact: true });
+  await expect(pin).toBeFocused();
+  await expect(pin).toBeInViewport();
+  await page.keyboard.press("ArrowDown");
+  await expect(picker.getByTestId("nav-project").nth(1)).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveCount(0);
+  await expect(page.getByTestId("project-picker-trigger")).toBeFocused();
+});

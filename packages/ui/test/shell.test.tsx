@@ -2307,6 +2307,29 @@ it("resizes the knowledge pane with the keyboard and remembers its width", async
   expect(handle).toHaveAttribute("aria-valuenow", "320");
 });
 
+it("keeps mobile detail mounted and measurable but inert while context is open", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  const doc = await screen.findByTestId("knowledge-document");
+  const main = pane("detail");
+  expect(main.style.gridColumn).toBe("1 / -1");
+  fireEvent.click(screen.getByTestId("context-toggle"));
+  expect(main.style.display).not.toBe("none");
+  expect(main.style.gridColumn).toBe("1 / -1");
+  expect(main).toHaveStyle({ visibility: "hidden" });
+  expect(main.inert).toBe(true);
+  expect(main).toHaveAttribute("aria-hidden", "true");
+  expect(screen.getByTestId("knowledge-document")).toBe(doc);
+  fireEvent.click(screen.getByTestId("context-toggle"));
+  expect(main.inert).toBe(false);
+  expect(main).not.toHaveAttribute("aria-hidden", "true");
+  expect(doc).toBeVisible();
+});
+
 it("focuses the reader without remounting the selected document", async () => {
   mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
   const doc = await screen.findByTestId("knowledge-document");

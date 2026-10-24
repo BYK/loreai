@@ -290,7 +290,15 @@ export const Shell: Component<ShellProps> = (props) => {
             <main
               data-pane="detail"
               class="col-start-3 row-start-1 min-h-0 min-w-0 overflow-y-auto bg-surface"
-              style={{ display: !wide() && open() ? "none" : undefined }}
+              inert={!wide() && open()}
+              aria-hidden={(!wide() && open()) || undefined}
+              // Keep virtual readers measurable while mobile context replaces
+              // them visually. A display:none/zero-width box loses row measurements
+              // and the reading position even though the component stays mounted.
+              style={{
+                "grid-column": !wide() ? "1 / -1" : undefined,
+                visibility: !wide() && open() ? "hidden" : undefined,
+              }}
             >
               {detail()}
             </main>

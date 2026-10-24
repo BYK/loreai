@@ -292,6 +292,100 @@ test.describe("session reader", () => {
     });
   }
 
+  for (const theme of ["light", "dark"] as const) {
+    test(`mobile context toggles preserve the transcript reading position in ${theme}`, async ({
+      page,
+    }, testInfo) => {
+      test.skip(
+        !testInfo.project.name.includes("mobile"),
+        "Mobile context replaces the reader visually.",
+      );
+      await page.addInitScript(
+        (choice) => localStorage.setItem("lore.ui.theme", choice),
+        theme,
+      );
+      await openReader(page);
+      await selectInRow(page, "needle-180 ", "needle-180");
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("a"))
+        .toBeTruthy();
+      const url = page.url();
+      // Reopen the actual deep link so the passage is framed after the
+      // selection panel and virtual row measurements have settled.
+      await page.reload();
+      await expectPassageOnScreen(page);
+      const scroll = page.getByTestId("session-scroll");
+      const size = await scroll.evaluate((el) => ({
+        width: el.clientWidth,
+        height: el.clientHeight,
+      }));
+      const offset = await scroll.evaluate((el) => el.scrollTop);
+      expect(offset).toBeGreaterThan(1000);
+      const target = rowWith(page, "needle-180 ");
+      const rowTop = async () => {
+        if ((await target.count()) !== 1) return null;
+        return target.evaluate((el) => el.getBoundingClientRect().top);
+      };
+      const before = await rowTop();
+      expect(before).not.toBeNull();
+      for (const close of ["toggle", "escape"] as const) {
+        await page.getByTestId("context-toggle").click();
+        await expect(page.getByTestId("context-pane")).toBeVisible();
+        await expect(page.locator('main[data-pane="detail"]')).toBeHidden();
+        await expect(page.locator('main[data-pane="detail"]')).toHaveAttribute(
+          "inert",
+          "",
+        );
+        await expect(page.locator('main[data-pane="detail"]')).toHaveAttribute(
+          "aria-hidden",
+          "true",
+        );
+        expect(
+          await scroll.evaluate((el) => ({
+            width: el.clientWidth,
+            height: el.clientHeight,
+          })),
+        ).toEqual(size);
+        // Let native ResizeObserver and virtualizer callbacks settle while
+        // browsing the context, rather than closing it in the same frame.
+        await page
+          .getByRole("searchbox", { name: "Filter session list" })
+          .fill("reader");
+        await page.evaluate(
+          () =>
+            new Promise<void>((resolve) => {
+              let frames = 0;
+              const step = () => {
+                if (++frames === 12) resolve();
+                else requestAnimationFrame(step);
+              };
+              requestAnimationFrame(step);
+            }),
+        );
+        if (close === "toggle")
+          await page.getByTestId("context-toggle").click();
+        else await page.getByTestId("context-session").first().press("Escape");
+        await expect(page.getByTestId("context-pane")).toBeHidden();
+        await expect(scroll).toBeVisible();
+        await expect(page.locator("mark.passage-target")).toBeVisible();
+        expect(page.url()).toBe(url);
+        await expect
+          .poll(async () =>
+            Math.abs((await scroll.evaluate((el) => el.scrollTop)) - offset),
+          )
+          .toBeLessThan(2);
+        await expect
+          .poll(async () => {
+            const top = await rowTop();
+            return top === null
+              ? Number.POSITIVE_INFINITY
+              : Math.abs(top - before!);
+          })
+          .toBeLessThan(2);
+      }
+    });
+  }
+
   test("a distillation is labelled compressed context, placed after its sources and never a search hit", async ({
     page,
   }) => {

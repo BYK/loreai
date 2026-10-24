@@ -31,6 +31,7 @@ export interface ProjectPickerProps {
 
 export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
   const [open, setOpen] = createSignal(false);
+  let content: HTMLDivElement | undefined;
   const [filter, setFilter] = createSignal("");
   const [showAll, setShowAll] = createSignal(false);
   const selected = () =>
@@ -66,7 +67,10 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
     ];
     if (!rows.length) return;
     event.preventDefault();
-    const current = rows.indexOf(document.activeElement as HTMLAnchorElement);
+    // A row's pin is a keyboard target too: continue from that project.
+    const current = rows.findIndex((row) =>
+      row.parentElement?.contains(document.activeElement),
+    );
     const next =
       current < 0
         ? event.key === "ArrowDown"
@@ -75,6 +79,28 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
         : (current + (event.key === "ArrowDown" ? 1 : -1) + rows.length) %
           rows.length;
     rows[next]?.focus();
+  };
+  const togglePin = (event: MouseEvent, id: string) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const focused = document.activeElement === button;
+    const panel = content;
+    pins().toggle(id);
+    if (!focused) return;
+    // Unpinning an older project can move it out of Recent. Keep the focused
+    // project visible so the same control remains reachable after regrouping.
+    if (sections().rest.some((project) => project.id === id)) setShowAll(true);
+    queueMicrotask(() => {
+      if (!open() || content !== panel || !panel?.isConnected) return;
+      const active = document.activeElement;
+      // Do not override focus the user moved elsewhere before this ran.
+      if (active !== document.body && active !== button && active?.isConnected)
+        return;
+      Array.from(
+        panel.querySelectorAll<HTMLButtonElement>("[data-project-pin]"),
+      )
+        .find((next) => next.dataset.projectPin === id)
+        ?.focus();
+    });
   };
   const row = (project: ProjectSummary, section: string) => {
     const name = () => project.name || project.path;
@@ -120,9 +146,10 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
             pinned() ? "opacity-100" : "[@media(hover:hover)]:opacity-0",
           )}
           data-testid="nav-pin"
+          data-project-pin={project.id}
           aria-pressed={pinned()}
           aria-label={`${pinned() ? "Unpin" : "Pin"} ${name()}`}
-          onClick={() => pins().toggle(project.id)}
+          onClick={(event) => togglePin(event, project.id)}
         >
           <Icon
             name="star"
@@ -132,12 +159,16 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
       </div>
     );
   };
-  const group = (name: string, projects: ProjectSummary[], section: string) => (
-    <Show when={projects.length}>
+  const ProjectGroup: Component<{
+    name: string;
+    projects: ProjectSummary[];
+    section: string;
+  }> = (group) => (
+    <Show when={group.projects.length}>
       <h4 class="px-2 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-muted">
-        {name}
+        {group.name}
       </h4>
-      <For each={projects}>{(p) => row(p, section)}</For>
+      <For each={group.projects}>{(p) => row(p, group.section)}</For>
     </Show>
   );
   return (
@@ -187,6 +218,9 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
         />
       </PopoverTrigger>
       <PopoverContent
+        ref={(element: HTMLDivElement) => {
+          content = element;
+        }}
         data-project-picker-content
         aria-label="Switch project"
         onEscapeKeyDown={(event) => {
@@ -245,8 +279,16 @@ export const ProjectPicker: Component<ProjectPickerProps> = (props) => {
                 when={sections().matches}
                 fallback={
                   <>
-                    {group("Pinned", sections().pinned, "pinned")}
-                    {group("Recent", sections().recent, "recent")}
+                    <ProjectGroup
+                      name="Pinned"
+                      projects={sections().pinned}
+                      section="pinned"
+                    />
+                    <ProjectGroup
+                      name="Recent"
+                      projects={sections().recent}
+                      section="recent"
+                    />
                     <Show when={sections().rest.length}>
                       <Button
                         variant="ghost"
