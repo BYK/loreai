@@ -365,6 +365,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             </p>
           </Show>
           <Button
+            pending={creating()}
             class="mt-3"
             type="submit"
             disabled={props.disabled || creating()}
@@ -571,7 +572,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             void updateDomain("request", requestOrgId());
           }}
         >
-          <div>
+          <div class="grid min-w-0 gap-3">
             <TextField class="text-sm" value={orgIdForRequest()}>
               <TextFieldLabel>
                 Organization ID for a join request
@@ -583,7 +584,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                 }
               />
             </TextField>
-            <TextField class="mt-2 text-sm" value={domain()} required>
+            <TextField class="text-sm" value={domain()} required>
               <TextFieldLabel>Verified email domain</TextFieldLabel>
               <TextFieldInput
                 class="bg-surface"
@@ -596,7 +597,7 @@ export const TeamParityActions: Component<Props> = (props) => {
                 (org) => org.id === selectedOrg(),
               )}
             >
-              <label class="mt-2 block text-sm">
+              <label class="block text-sm">
                 Claimed member role
                 <select
                   class="mt-1 h-9 rounded-md border border-line bg-surface px-2"
@@ -676,7 +677,11 @@ export const TeamParityActions: Component<Props> = (props) => {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={props.disabled || creating()}>
+              <Button
+                pending={creating()}
+                type="submit"
+                disabled={props.disabled || creating()}
+              >
                 {creating() ? "Creating…" : "Create team"}
               </Button>
             </DialogFooter>

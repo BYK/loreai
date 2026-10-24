@@ -313,7 +313,7 @@ export const ConflictsPage: Component = () => {
               <For each={data()?.conflicts ?? []}>
                 {(conflict) => (
                   <article
-                    class="rounded-lg border border-line bg-surface p-4"
+                    class="min-w-0 rounded-lg border border-line bg-surface p-4 [overflow-wrap:anywhere]"
                     data-testid="conflict-card"
                     data-conflict-id={conflict.id}
                   >
@@ -343,7 +343,7 @@ export const ConflictsPage: Component = () => {
                           your local snapshot as a new version.
                         </p>
                       </Show>
-                      <div class="mt-4 grid gap-3 md:grid-cols-2">
+                      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
                         <section class="min-w-0 rounded-md border border-line bg-bg p-3">
                           <h3 class="text-sm font-semibold">
                             Your discarded version

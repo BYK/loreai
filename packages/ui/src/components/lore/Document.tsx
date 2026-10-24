@@ -23,16 +23,29 @@ export interface Participant {
 export const DocHeader: Component<{
   crumb: readonly string[];
   title: string;
+  compact?: boolean;
+  class?: string;
   participants?: readonly Participant[];
   scope?: JSX.Element;
   trailing?: JSX.Element;
   children?: JSX.Element;
 }> = (props) => (
-  <header class="border-b border-line px-5 pb-3.5 pt-5 sm:px-7.5">
+  <header
+    class={cn(
+      "border-b border-line px-5 pb-3.5 pt-5 sm:px-7.5",
+      props.compact && "bg-surface px-6 py-5 sm:px-7",
+      props.class,
+    )}
+  >
     <div class="mb-2 truncate text-xs text-muted">
       {props.crumb.join(" / ")}
     </div>
-    <h1 class="mb-3 break-words text-[25px] leading-[1.2] font-semibold tracking-[-0.65px] [overflow-wrap:anywhere]">
+    <h1
+      class={cn(
+        "mb-3 break-words text-[25px] leading-[1.2] font-semibold tracking-[-0.65px] [overflow-wrap:anywhere]",
+        props.compact && "mb-2 text-[21px] leading-snug tracking-[-0.35px]",
+      )}
+    >
       {props.title}
     </h1>
     <div class="flex flex-wrap items-center gap-2 text-xs text-muted">

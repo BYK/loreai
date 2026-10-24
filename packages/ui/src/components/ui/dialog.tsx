@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 // Copied from Solid UI (MIT) — see ATTRIBUTION.md in this directory.
 import type { Component, ComponentProps, JSX, ValidComponent } from "solid-js";
 import { splitProps } from "solid-js";
@@ -54,26 +55,14 @@ const DialogContent = <T extends ValidComponent = "div">(
       <DialogOverlay />
       <DialogPrimitive.Content
         class={cn(
-          "fixed left-1/2 top-1/2 z-50 grid max-h-screen w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto border bg-surface p-6 text-text shadow-lg sm:rounded-lg",
+          "fixed left-1/2 top-1/2 z-50 grid grid-cols-1 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border bg-surface p-4 text-text shadow-lg sm:p-6",
           props.class,
         )}
         {...rest}
       >
         {props.children}
         <DialogPrimitive.CloseButton class="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="size-4"
-          >
-            <path d="M18 6l-12 12" />
-            <path d="M6 6l12 12" />
-          </svg>
+          <Icon name="close" />
           <span class="sr-only">Close</span>
         </DialogPrimitive.CloseButton>
       </DialogPrimitive.Content>
@@ -86,7 +75,7 @@ const DialogHeader: Component<ComponentProps<"div">> = (props) => {
   return (
     <div
       class={cn(
-        "flex flex-col space-y-1.5 text-center sm:text-left",
+        "flex min-w-0 flex-col space-y-1.5 pr-6 text-left",
         props.class,
       )}
       {...rest}
@@ -99,7 +88,7 @@ const DialogFooter: Component<ComponentProps<"div">> = (props) => {
   return (
     <div
       class={cn(
-        "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
         props.class,
       )}
       {...rest}
@@ -119,7 +108,7 @@ const DialogTitle = <T extends ValidComponent = "h2">(
   return (
     <DialogPrimitive.Title
       class={cn(
-        "text-lg font-semibold leading-none tracking-tight",
+        "break-words text-lg font-semibold leading-tight tracking-tight",
         props.class,
       )}
       {...rest}
@@ -138,7 +127,10 @@ const DialogDescription = <T extends ValidComponent = "p">(
   const [, rest] = splitProps(props as DialogDescriptionProps, ["class"]);
   return (
     <DialogPrimitive.Description
-      class={cn("text-sm text-muted-foreground", props.class)}
+      class={cn(
+        "break-words text-sm text-muted-foreground [overflow-wrap:anywhere]",
+        props.class,
+      )}
       {...rest}
     />
   );

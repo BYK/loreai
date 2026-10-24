@@ -260,14 +260,14 @@ export const PromotionsPage: Component = () => {
             Review knowledge proposed for your team.
           </p>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <div class="flex min-w-0 max-w-full flex-wrap gap-2">
           <Show when={teams().length > 1}>
-            <label class="flex flex-col gap-1 text-xs text-muted">
+            <label class="flex min-w-0 max-w-full flex-col gap-1 text-xs text-muted">
               Team
               <select
                 aria-label="Team"
                 data-testid="promotions-team"
-                class="h-9 rounded-md border border-line bg-surface px-2 text-sm text-text"
+                class="h-9 min-w-0 max-w-full rounded-md border border-line bg-surface px-2 text-sm text-text"
                 value={teamId()}
                 onChange={selectTeam}
               >
@@ -279,12 +279,12 @@ export const PromotionsPage: Component = () => {
               </select>
             </label>
           </Show>
-          <label class="flex flex-col gap-1 text-xs text-muted">
+          <label class="flex min-w-0 max-w-full flex-col gap-1 text-xs text-muted">
             Status
             <select
               aria-label="Status filter"
               data-testid="promotions-status"
-              class="h-9 rounded-md border border-line bg-surface px-2 text-sm text-text"
+              class="h-9 min-w-0 max-w-full rounded-md border border-line bg-surface px-2 text-sm text-text"
               value={filter()}
               onChange={selectFilter}
             >

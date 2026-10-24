@@ -11,11 +11,11 @@ export const PaneHead: Component<{
 }> = (props) => (
   <div
     class={cn(
-      "flex items-center justify-between gap-3 border-b border-line bg-chrome px-4.5 py-3.5 text-[13px] font-semibold",
+      "flex min-h-11 items-center justify-between gap-3 border-b border-line bg-bg px-4 py-2.5 text-[13px] font-semibold",
       props.class,
     )}
   >
-    <span class="truncate">{props.title}</span>
+    <span class="line-clamp-2 break-words leading-snug">{props.title}</span>
     <Show when={props.trailing}>
       <span class="flex-none text-muted">{props.trailing}</span>
     </Show>
@@ -42,12 +42,12 @@ export const ListRow: Component<ListRowProps> = (props) => (
     data-testid={props.testId}
     aria-current={props.selected ? "page" : undefined}
     class={cn(
-      "block border-b border-line px-4 py-4 text-sm text-text hover:bg-soft/70 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-      props.selected && "border-l-[3px] border-l-accent bg-soft pl-[13px]",
+      "block border-b border-line px-4 py-3 text-[13px] text-text hover:bg-soft/70 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+      props.selected && "border-l-2 border-l-accent bg-soft pl-3.5",
     )}
   >
-    <div class="mb-1 flex min-w-0 items-center gap-1.5 font-semibold">
-      <span class="truncate">{props.title}</span>
+    <div class="mb-1 flex min-w-0 items-center gap-1.5 font-medium">
+      <span class="line-clamp-2 break-words leading-snug">{props.title}</span>
       <Show when={props.badge}>
         <span
           class="shrink-0 rounded-sm bg-soft px-1 py-px text-[10px] font-normal text-muted"
@@ -59,11 +59,9 @@ export const ListRow: Component<ListRowProps> = (props) => (
       </Show>
     </div>
     <Show when={props.preview}>
-      <div class="mb-2 line-clamp-2 text-[13px] text-muted">
-        {props.preview}
-      </div>
+      <div class="mb-2 truncate text-xs text-muted">{props.preview}</div>
     </Show>
-    <div class="flex justify-between gap-3 text-[11px] text-muted">
+    <div class="flex justify-between gap-3 text-[10px] text-muted">
       <span class="truncate">{props.footLeft}</span>
       <span class="flex-none">{props.footRight}</span>
     </div>

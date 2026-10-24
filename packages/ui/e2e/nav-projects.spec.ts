@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openProjectPicker } from "./workspace-helpers";
 import { fuzzyRank } from "../src/lib/fuzzy";
 
 /**
@@ -9,12 +10,10 @@ import { fuzzyRank } from "../src/lib/fuzzy";
  * is non-empty.
  */
 
-const NAV = { name: "Workspace" } as const;
-
 test.describe("sidebar pinned / recent / filter", () => {
   test("pin persists across reload; unpin removes it", async ({ page }) => {
     await page.goto("/ui");
-    const nav = page.getByRole("navigation", NAV);
+    const nav = await openProjectPicker(page);
 
     const pin = nav.getByRole("button", { name: "Pin lore" });
     await pin.click();
@@ -24,6 +23,7 @@ test.describe("sidebar pinned / recent / filter", () => {
     await expect(nav.locator('[data-section="pinned"]')).toContainText("lore");
 
     await page.reload();
+    await openProjectPicker(page);
     await expect(nav.getByRole("button", { name: "Unpin lore" })).toBeVisible();
     await expect(nav.locator('[data-section="pinned"]')).toContainText("lore");
 
@@ -49,7 +49,7 @@ test.describe("sidebar pinned / recent / filter", () => {
     ]).length;
 
     await page.goto("/ui");
-    const nav = page.getByRole("navigation", NAV);
+    const nav = await openProjectPicker(page);
 
     const filter = nav.getByTestId("nav-project-filter");
     await filter.fill("arch");
@@ -70,7 +70,7 @@ test.describe("sidebar pinned / recent / filter", () => {
     page,
   }) => {
     await page.goto("/ui");
-    const nav = page.getByRole("navigation", NAV);
+    const nav = await openProjectPicker(page);
 
     const filter = nav.getByTestId("nav-project-filter");
     await filter.fill("archve");

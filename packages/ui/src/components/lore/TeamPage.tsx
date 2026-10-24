@@ -1,3 +1,4 @@
+import { createClipboard } from "~/lib/clipboard";
 import type { Component } from "solid-js";
 import {
   createEffect,
@@ -102,7 +103,7 @@ export const TeamPage: Component = () => {
   const [inviteReceipt, setInviteReceipt] =
     createSignal<TeamInviteReceipt | null>(null);
   const [inviteError, setInviteError] = createSignal("");
-  const [copyMessage, setCopyMessage] = createSignal("");
+  const clipboard = createClipboard(inviteReceipt);
   const [removeTarget, setRemoveTarget] = createSignal<TeamMember | null>(null);
   const [removeError, setRemoveError] = createSignal<MutationFailure | null>(
     null,
@@ -149,7 +150,7 @@ export const TeamPage: Component = () => {
     setInviteError("");
     setInviteEmail("");
     setOfflineInvite(false);
-    setCopyMessage("");
+    clipboard.reset();
     setActionError("");
     setReviewPolicyError(null);
     setStaleMemberId(null);
@@ -424,7 +425,7 @@ export const TeamPage: Component = () => {
     const epoch = actionEpoch;
     setBusy(true);
     setInviteError("");
-    setCopyMessage("");
+    clipboard.reset();
     try {
       const receipt = await ws.tracked(() =>
         ws.client.inviteTeamMember(current.team?.id ?? teamId(), {
@@ -574,18 +575,13 @@ export const TeamPage: Component = () => {
   const copyAcceptCommand = async () => {
     const receipt = inviteReceipt();
     if (!receipt) return;
-    try {
-      await navigator.clipboard.writeText(receipt.invite.accept_command);
-      setCopyMessage("Accept command copied.");
-    } catch {
-      setCopyMessage("Clipboard is unavailable; copy the command above.");
-    }
+    await clipboard.copy(receipt.invite.accept_command);
   };
 
   const closeInviteReceipt = (open: boolean) => {
     if (!open) {
       setInviteReceipt(null);
-      setCopyMessage("");
+      clipboard.reset();
     }
   };
 
@@ -629,11 +625,11 @@ export const TeamPage: Component = () => {
           </p>
         </div>
         <Show when={teams().length > 1}>
-          <label class="flex flex-col gap-1 text-xs text-muted">
+          <label class="flex w-full min-w-0 flex-col gap-1 text-xs text-muted sm:w-auto">
             Team
             <select
               aria-label="Team"
-              class="h-9 min-w-44 rounded-md border border-line bg-surface px-2 text-sm text-text"
+              class="h-9 w-full min-w-0 rounded-md border border-line bg-surface px-2 text-sm text-text"
               value={teamId()}
               onChange={(event) => void loadMembers(event.currentTarget.value)}
             >
@@ -768,7 +764,7 @@ export const TeamPage: Component = () => {
                   </p>
                 </Show>
                 <section class="mb-4 rounded-md border border-line bg-bg p-3">
-                  <label class="flex items-center gap-3 text-sm font-medium">
+                  <label class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium">
                     <input
                       type="checkbox"
                       role="switch"
@@ -792,7 +788,7 @@ export const TeamPage: Component = () => {
                       }}
                     />
                     Require review
-                    <span class="text-xs font-normal text-muted">
+                    <span class="w-full pl-7 text-xs font-normal text-muted sm:w-auto sm:pl-0">
                       {reviewPolicy() === "required"
                         ? "New proposals need approval."
                         : reviewPolicy() === "optional"
@@ -998,7 +994,7 @@ export const TeamPage: Component = () => {
                         <option value="editor">Editor</option>
                       </select>
                     </label>
-                    <label class="flex min-w-56 flex-1 flex-col gap-1 text-xs text-muted">
+                    <label class="flex w-full min-w-0 flex-col gap-1 text-xs text-muted sm:min-w-56 sm:flex-1">
                       Email (optional)
                       <input
                         aria-label="Invite email"
@@ -1011,7 +1007,7 @@ export const TeamPage: Component = () => {
                         }
                       />
                     </label>
-                    <label class="flex items-center gap-2 text-xs text-muted">
+                    <label class="flex min-h-9 items-center gap-2 text-xs text-muted">
                       <input
                         type="checkbox"
                         checked={offlineInvite()}
@@ -1023,6 +1019,7 @@ export const TeamPage: Component = () => {
                       Offline invite
                     </label>
                     <Button
+                      pending={busy()}
                       type="submit"
                       size="sm"
                       disabled={
@@ -1110,6 +1107,8 @@ export const TeamPage: Component = () => {
               Cancel
             </Button>
             <Button
+              pending={savingReviewPolicy()}
+              icon="save"
               disabled={
                 !canAct() ||
                 savingReviewPolicy() ||
@@ -1182,6 +1181,7 @@ export const TeamPage: Component = () => {
               Cancel
             </Button>
             <Button
+              pending={removing()}
               variant="destructive"
               disabled={
                 !canAct() ||
@@ -1232,15 +1232,24 @@ export const TeamPage: Component = () => {
                     ? "Invite email sent."
                     : "Share this command with the teammate securely."}
                 </p>
-                <Show when={copyMessage()}>
+                <Show when={clipboard.copied()}>
                   <p class="text-xs text-muted" role="status">
-                    {copyMessage()}
+                    Accept command copied.
                   </p>
+                </Show>
+                <Show when={clipboard.error()}>
+                  {(error) => (
+                    <p role="alert" class="text-xs text-danger">
+                      {error()}
+                    </p>
+                  )}
                 </Show>
                 <DialogFooter>
                   <Button
                     size="sm"
                     variant="outline"
+                    pending={clipboard.pending()}
+                    icon={clipboard.copied() ? "check" : "copy"}
                     onClick={() => void copyAcceptCommand()}
                   >
                     Copy accept command

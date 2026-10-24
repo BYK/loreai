@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 /**
  * Model usage page (#2026): distinct sessions per model per UTC day, read
  * from the assistant turns Lore stored — the same metric as Model Tides.
@@ -13,13 +14,7 @@ import { API_BASE, apiPath, isApiError } from "~/lib/api";
 import { fuzzyRank } from "~/lib/fuzzy";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
 import { errorStateFor } from "./ErrorState";
 import { ModelFlowChart, shortModelName } from "./ModelFlowChart";
@@ -267,9 +262,12 @@ export const ModelUsagePage: Component = () => {
     if (position < 0) return null;
     const key = sort()[position]!;
     return (
-      <span class="ml-1 text-muted" aria-hidden="true">
+      <span
+        class="ml-1 inline-flex items-center gap-0.5 text-muted"
+        aria-hidden="true"
+      >
         {sort().length > 1 ? `${position + 1} ` : ""}
-        {key.dir === "asc" ? "↑" : "↓"}
+        <Icon name={key.dir === "asc" ? "up" : "down"} class="size-3.5" />
       </span>
     );
   };
@@ -334,7 +332,10 @@ export const ModelUsagePage: Component = () => {
           <>
             <div class="mb-5 flex flex-wrap items-end gap-3">
               <div class="min-w-52">
-                <Select
+                <ResponsiveSelect
+                  label="Project"
+                  sheetTitle="Filter model usage by project"
+                  data-testid="project-select"
                   value={project() ?? "all"}
                   onChange={(value) =>
                     setProject(value === "all" ? null : value)
@@ -348,38 +349,16 @@ export const ModelUsagePage: Component = () => {
                       ].filter((id): id is string => !!id),
                     ),
                   ]}
-                  itemComponent={(props) => (
-                    <SelectItem item={props.item}>
-                      {props.item.rawValue === "all"
-                        ? "All projects"
-                        : (ws.projects
-                            .data()
-                            ?.find((p) => p.id === props.item.rawValue)?.name ??
-                          ws.projects
-                            .data()
-                            ?.find((p) => p.id === props.item.rawValue)?.path ??
-                          props.item.rawValue)}
-                    </SelectItem>
-                  )}
-                >
-                  <SelectTrigger
-                    aria-label="Project"
-                    class="h-9 w-52 text-xs"
-                    data-testid="project-select"
-                  >
-                    <SelectValue<string>>
-                      {(state) =>
-                        state.selectedOption() === "all"
-                          ? "All projects"
-                          : (ws.projects
-                              .data()
-                              ?.find((p) => p.id === state.selectedOption())
-                              ?.name ?? state.selectedOption())
-                      }
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent />
-                </Select>
+                  optionLabel={(value) =>
+                    value === "all"
+                      ? "All projects"
+                      : (ws.projects.data()?.find((p) => p.id === value)
+                          ?.name ??
+                        ws.projects.data()?.find((p) => p.id === value)?.path ??
+                        value)
+                  }
+                  triggerClass="h-9 w-52 text-xs"
+                />
               </div>
               <label class="flex items-center gap-1.5 text-xs text-muted">
                 From
@@ -409,7 +388,11 @@ export const ModelUsagePage: Component = () => {
                   }
                 />
               </label>
-              <div class="flex gap-1" role="group" aria-label="Date presets">
+              <div
+                class="flex flex-wrap gap-1"
+                role="group"
+                aria-label="Date presets"
+              >
                 <For each={PRESETS}>
                   {(preset) => (
                     <Button
@@ -469,9 +452,9 @@ export const ModelUsagePage: Component = () => {
                 />
 
                 <section class="mt-6">
-                  <div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+                  <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <h2 class="text-lg font-semibold">Totals</h2>
-                    <TextField class="w-64">
+                    <TextField class="w-full sm:w-64">
                       <TextFieldInput
                         aria-label="Filter models"
                         placeholder="Filter models"
@@ -486,7 +469,7 @@ export const ModelUsagePage: Component = () => {
                   </div>
                   <div class="overflow-x-auto rounded-lg border border-line">
                     <table class="w-full min-w-[640px] text-left text-xs">
-                      <caption class="mb-2 text-left text-[11px] text-muted">
+                      <caption class="border-b border-line px-3 py-2.5 text-left text-[11px] leading-5 text-muted">
                         Sorted by {sortCaption()}
                       </caption>
                       <thead class="bg-soft text-muted">

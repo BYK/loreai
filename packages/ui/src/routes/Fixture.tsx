@@ -43,7 +43,7 @@ import {
   MessageBlockView,
 } from "~/components/reader/SessionBlock";
 import { StateCard } from "~/components/lore/StateCard";
-import { ConnectionStatus } from "~/components/shell/Nav";
+import { ConnectionStatus } from "~/components/shell/ConnectionStatus";
 import { Shell } from "~/components/shell/Shell";
 import { Badge } from "~/components/ui/badge";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";

@@ -352,6 +352,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               </div>
               <Show when={status().linked}>
                 <Button
+                  pending={savingLink()}
                   class="mt-2"
                   size="sm"
                   variant="outline"
@@ -391,6 +392,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     </select>
                   </label>
                   <Button
+                    pending={savingLink()}
                     size="sm"
                     variant="outline"
                     data-testid="sharing-link-team"
@@ -496,6 +498,8 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               Cancel
             </Button>
             <Button
+              pending={savingPolicy()}
+              icon="save"
               size="sm"
               disabled={
                 savingPolicy() ||

@@ -388,7 +388,7 @@ export const BusyFixture: Component = () => {
 
   return (
     <div
-      class="flex h-[calc(100dvh-62px)] min-h-0 flex-col"
+      class="flex h-[calc(100dvh-48px)] min-h-0 flex-col"
       data-testid="busy-fixture"
       data-streaming={streaming() ? "true" : "false"}
     >

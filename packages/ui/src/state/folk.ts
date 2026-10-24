@@ -1,6 +1,7 @@
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 
 import type { ApiClient } from "~/lib/api";
+import type { AccountStatus } from "~/contracts";
 import { createLoader } from "~/lib/loader";
 
 /**
@@ -17,18 +18,22 @@ export function createFolkState({ client }: { client: ApiClient }) {
   const sync = createLoader(always, async (_key, signal) =>
     client.getSyncStatus(signal),
   );
-  const [teamsWanted, setTeamsWanted] = createSignal(false);
-  const teamIdentity = createMemo<string | null>((previous) => {
-    // A pending poll has not changed the account. Retain its options until
-    // the result confirms an identity change or a failure.
+  // Keep the last confirmed account during healthy background reads, including
+  // drawer remounts. A failed read invalidates it: clearing the loader's error
+  // for a retry must not revive its retained (now unverified) data.
+  const confirmedAccount = createMemo<AccountStatus | undefined>((previous) => {
+    if (account.error() !== undefined) return undefined;
     if (account.loading()) return previous;
-    if (account.error() !== undefined) return null;
-    const current = account.data();
+    return account.data();
+  });
+  const [teamsWanted, setTeamsWanted] = createSignal(false);
+  const teamIdentity = createMemo<string | null>(() => {
+    const current = confirmedAccount();
     if (current?.state === "anonymous") return "anonymous";
     return current?.signed_in && current.state === "signed_in" && current.user
       ? `user:${current.user.id}`
       : null;
-  }, null);
+  });
   const teams = createLoader(
     () => (teamsWanted() ? teamIdentity() : null),
     async (_key, signal) => client.getTeams(signal),
@@ -48,20 +53,48 @@ export function createFolkState({ client }: { client: ApiClient }) {
       window.removeEventListener("focus", refreshAccount);
     });
   });
+  const refresh = () => {
+    account.reload();
+    sync.reload();
+    if (teamsWanted()) teams.reload();
+    else setTeamsWanted(true);
+  };
+  // Navigation can unmount the account surface while a sync is in flight.
+  // Keep its guard and result on the workspace, alongside the status reads.
+  const [syncing, setSyncing] = createSignal(false);
+  const [syncError, setSyncError] = createSignal<string | null>(null);
+  const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
+  const runSync = async () => {
+    if (syncing()) return;
+    setSyncing(true);
+    setSyncError(null);
+    setSyncReceipt(null);
+    try {
+      const result = await client.runSync();
+      setSyncReceipt(
+        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
+      );
+      refresh();
+    } catch (error) {
+      setSyncError(error instanceof Error ? error.message : "Sync failed.");
+    } finally {
+      setSyncing(false);
+    }
+  };
   return {
     account,
+    confirmedAccount,
     sync,
     teams,
+    syncing,
+    syncError,
+    syncReceipt,
+    runSync,
     loadTeams() {
       if (!teamsWanted()) setTeamsWanted(true);
     },
     /** Re-read account, sync and (once requested) teams; current data stays visible. */
-    refresh() {
-      account.reload();
-      sync.reload();
-      if (teamsWanted()) teams.reload();
-      else setTeamsWanted(true);
-    },
+    refresh,
   };
 }
 

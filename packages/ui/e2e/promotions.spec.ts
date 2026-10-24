@@ -1,3 +1,4 @@
+import { openNavigation } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
@@ -67,18 +68,11 @@ test.describe("knowledge promotions", () => {
 
   test("the Promotions nav link is keyboard reachable and shows anonymous state", async ({
     page,
-  }, testInfo) => {
+  }) => {
     await page.goto("/ui");
-    const mobile = testInfo.project.name.startsWith("mobile");
-    if (mobile) {
-      await page.getByTestId("open-nav").click();
-    }
-    const navLink = mobile
-      ? page.getByTestId("nav-drawer").getByTestId("nav-promotions")
-      : page.getByTestId("nav-promotions").first();
-    const previousLink = mobile
-      ? page.getByTestId("nav-drawer").getByTestId("nav-contradictions")
-      : page.getByTestId("nav-contradictions");
+    await openNavigation(page);
+    const navLink = page.getByTestId("rail-promotions");
+    const previousLink = page.getByTestId("rail-contradictions");
     await expect(navLink).toBeVisible();
     await previousLink.focus();
     await page.keyboard.press("Tab");

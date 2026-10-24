@@ -1,3 +1,4 @@
+import { Icon } from "~/components/shell/Icon";
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -20,13 +21,7 @@ import { ListRow } from "./Panes";
 import { SharingPanel } from "./SharingPanel";
 import { StateCard } from "./StateCard";
 import { Button } from "../ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 
 export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
@@ -55,56 +50,30 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   };
   const recent = () => sessions.loader.data()?.items.slice(0, 5) ?? [];
   return (
-    <div class="mx-auto max-w-[940px] px-5 py-7 sm:px-7.5">
+    <div class="mx-auto max-w-[1040px] px-5 py-7 sm:px-8">
       <DocHeader
-        crumb={["Projects", props.project.name || props.project.path]}
+        compact
+        class="px-0 pt-0 sm:px-0"
+        crumb={["Projects", "Overview"]}
         title={props.project.name || props.project.path}
-      />
-      <section class="border-b border-line py-5">
-        <div class="eyebrow mb-2">Identity</div>
-        <div class="font-mono text-xs">{props.project.path}</div>
-        <Show
-          when={props.project.git_remote}
-          fallback={
-            <span class="mt-2 inline-block text-xs text-muted">
-              local path only (no remote recorded)
-            </span>
-          }
-        >
-          <div class="mt-2 text-xs text-muted">{props.project.git_remote}</div>
-          <Show
-            when={aliases().length > 0}
-            fallback={
-              <span class="mt-2 inline-block text-xs text-muted">
-                canonical
-              </span>
-            }
+      >
+        <div class="mt-4 flex flex-wrap gap-2">
+          <Button as={A} href={knowledgeListHref(props.project.id)} size="sm">
+            <Icon name="book" /> Browse knowledge (
+            {props.project.knowledge_count})
+          </Button>
+          <Button
+            as={A}
+            href={sessionsHref(props.project.id)}
+            variant="outline"
+            size="sm"
           >
-            <div class="mt-4 text-xs font-semibold">
-              Checkouts of the same repository
-            </div>
-            <ul class="mt-1 list-none space-y-1 p-0">
-              <li class="text-xs text-muted">This checkout</li>
-              <For each={aliases()}>
-                {(alias) => (
-                  <li>
-                    <A
-                      class="text-xs text-accent underline"
-                      data-testid="project-alias"
-                      href={projectHref(alias.id)}
-                    >
-                      {alias.name || alias.path}
-                    </A>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </Show>
-        </Show>
-      </section>
-      <ProjectActions project={props.project} />
+            Session history
+          </Button>
+        </div>
+      </DocHeader>
       <section data-testid="health" class="border-b border-line py-5">
-        <div class="mb-2 flex items-center justify-between">
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Memory health</div>
           <A
             class="text-xs text-accent underline"
@@ -114,7 +83,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             Review duplicates
           </A>
         </div>
-        <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+        <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4 [&>span]:rounded-lg [&>span]:border [&>span]:border-line [&>span]:bg-bg [&>span]:min-w-0 [&>span]:p-3 sm:[&>span]:p-4 [&>span]:font-medium [&>span]:tabular-nums">
           <span>{props.project.knowledge_count} knowledge</span>
           <span>{props.project.session_count} sessions</span>
           <span>{pluralize(props.project.message_count, "message")}</span>
@@ -127,22 +96,61 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </Show>
         </div>
       </section>
-      <SharingPanel projectId={props.project.id} />
+      <section class="py-5">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div class="eyebrow">Knowledge</div>
+        </div>
+        <form
+          role="search"
+          class="flex flex-wrap items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const data = new FormData(event.currentTarget);
+            const rawQ = data.get("q");
+            const q = typeof rawQ === "string" ? rawQ : "";
+            navigate(searchHref(props.project.id, q, scope()));
+          }}
+        >
+          <TextField class="w-full min-w-0 sm:w-auto sm:flex-1">
+            <TextFieldInput
+              name="q"
+              aria-label="Search project memory"
+              placeholder="Search this project"
+              class="h-11 md:h-10"
+            />
+          </TextField>
+          <ResponsiveSelect
+            label="Search scope"
+            sheetTitle="Search scope"
+            value={scope()}
+            onChange={(value) => setScope((value ?? "all") as RecallScope)}
+            options={["all", "session", "project", "knowledge"]}
+            triggerClass="h-10 w-28"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            class="h-11 flex-1 sm:flex-none md:h-10"
+          >
+            Search
+          </Button>
+        </form>
+      </section>
       <section class="border-b border-line py-5">
-        <div class="mb-3 flex items-center justify-between">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Recent sessions</div>
-          <div class="flex items-center gap-3">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
             <A
-              class="text-xs text-accent underline"
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
               href={importsHref(props.project.id)}
             >
-              Import history →
+              Import history <Icon name="chevron" class="size-3.5" />
             </A>
             <A
-              class="text-xs text-accent underline"
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
               href={sessionsHref(props.project.id)}
             >
-              All sessions →
+              All sessions <Icon name="chevron" class="size-3.5" />
             </A>
           </div>
         </div>
@@ -167,54 +175,52 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </Match>
         </Switch>
       </section>
-      <section class="py-5">
-        <div class="mb-3 flex items-center justify-between">
-          <div class="eyebrow">Knowledge</div>
-          <A
-            class="text-xs text-accent underline"
-            href={knowledgeListHref(props.project.id)}
-          >
-            Browse knowledge ({props.project.knowledge_count}) →
-          </A>
-        </div>
-        <form
-          role="search"
-          class="flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const data = new FormData(event.currentTarget);
-            const rawQ = data.get("q");
-            const q = typeof rawQ === "string" ? rawQ : "";
-            navigate(searchHref(props.project.id, q, scope()));
-          }}
+      <section class="border-b border-line py-5">
+        <div class="eyebrow mb-2">Identity</div>
+        <div class="break-all font-mono text-xs">{props.project.path}</div>
+        <Show
+          when={props.project.git_remote}
+          fallback={
+            <span class="mt-2 inline-block text-xs text-muted">
+              local path only (no remote recorded)
+            </span>
+          }
         >
-          <TextField class="min-w-0 flex-1">
-            <TextFieldInput
-              name="q"
-              aria-label="Search project memory"
-              placeholder="Search this project"
-            />
-          </TextField>
-          <Select
-            value={scope()}
-            onChange={setScope}
-            options={["all", "session", "project", "knowledge"]}
-            itemComponent={(item) => (
-              <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-            )}
+          <div class="mt-2 break-all text-xs text-muted">
+            {props.project.git_remote}
+          </div>
+          <Show
+            when={aliases().length > 0}
+            fallback={
+              <span class="mt-2 inline-block text-xs text-muted">
+                canonical
+              </span>
+            }
           >
-            <SelectTrigger aria-label="Search scope" class="h-10 w-28">
-              <SelectValue<string>>
-                {(state) => state.selectedOption()}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent />
-          </Select>
-          <Button type="submit" size="sm">
-            Search
-          </Button>
-        </form>
+            <div class="mt-4 text-xs font-semibold">
+              Checkouts of the same repository
+            </div>
+            <ul class="mt-1 list-none space-y-1 p-0">
+              <li class="text-xs text-muted">This checkout</li>
+              <For each={aliases()}>
+                {(alias) => (
+                  <li>
+                    <A
+                      class="break-all text-xs text-accent underline"
+                      data-testid="project-alias"
+                      href={projectHref(alias.id)}
+                    >
+                      {alias.name || alias.path}
+                    </A>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </Show>
       </section>
+      <ProjectActions project={props.project} />
+      <SharingPanel projectId={props.project.id} />
     </div>
   );
 };

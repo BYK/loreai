@@ -5,7 +5,7 @@
  * Storage is a JSON array of project ids in pin order (newest appended);
  * malformed or missing storage reads as []. Storage failures are swallowed
  * and pins still work in-memory. Pins are never pruned when a project
- * disappears from the list — Nav simply doesn't render unknown ids.
+ * disappears from the list — ProjectPicker simply doesn't render unknown ids.
  */
 import { createRoot, createSignal } from "solid-js";
 

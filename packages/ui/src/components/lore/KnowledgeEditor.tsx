@@ -838,7 +838,12 @@ export const KnowledgeEditor: Component<{
             </div>
           </Show>
           <div class="flex flex-wrap items-center gap-2">
-            <Button type="submit" disabled={saving() || !baseRevision()}>
+            <Button
+              pending={saving()}
+              icon="save"
+              type="submit"
+              disabled={saving() || !baseRevision()}
+            >
               {saving() ? "Saving…" : "Save"}
             </Button>
             <Button

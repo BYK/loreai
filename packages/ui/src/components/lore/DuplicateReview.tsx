@@ -601,7 +601,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       <For each={receipt.refused}>
         {(refused) => (
           <div
-            class="rounded-md border border-mark-edge/60 bg-mark/30 p-3"
+            class="rounded-md border border-line bg-soft p-3"
             data-testid="refused-group"
           >
             <p class="m-0 text-sm font-medium">
@@ -760,8 +760,8 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   };
 
   return (
-    <main
-      class="mx-auto max-w-[1240px] px-4 py-6 sm:px-7.5"
+    <section
+      class="mx-auto min-w-0 max-w-[1240px] px-4 py-6 sm:px-7.5 [overflow-wrap:anywhere]"
       data-testid="duplicate-review"
     >
       <header class="mb-5 border-b border-line pb-4">
@@ -808,7 +808,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
 
       <Show when={sharedTitleConflicts().length > 0}>
         <section
-          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-4"
+          class="mb-5 rounded-lg border border-line bg-soft px-4 py-4"
           aria-label="Shared title conflicts"
           data-testid="shared-title-conflicts"
         >
@@ -854,7 +854,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           <p
             class={`mb-4 rounded-md border px-3 py-2 text-sm ${
               notice().kind === "locked"
-                ? "border-mark-edge/60 bg-mark/30 text-gold"
+                ? "border-line bg-soft text-text"
                 : notice().kind === "error"
                   ? "border-danger/40 bg-danger/10 text-danger"
                   : "border-line bg-soft text-muted"
@@ -869,7 +869,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
 
       <Show when={pendingApplies().length > 0}>
         <section
-          class="mb-5 space-y-2 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-3"
+          class="mb-5 space-y-2 rounded-lg border border-line bg-soft px-4 py-3"
           aria-label="Pending apply operations"
           data-testid="pending-dedup-applies"
         >
@@ -971,7 +971,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
       </Show>
       <Show when={orphaned().length > 0}>
         <section
-          class="mb-5 rounded-lg border border-mark-edge/60 bg-mark/30 px-4 py-3"
+          class="mb-5 rounded-lg border border-line bg-soft px-4 py-3"
           data-testid="orphaned-marks"
         >
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -1008,8 +1008,8 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           </StateCard>
         </Match>
         <Match when={groups().length > 0}>
-          <div class="grid gap-5 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.7fr)]">
-            <nav aria-label="Duplicate groups" class="space-y-2">
+          <div class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(260px,0.72fr)_minmax(0,1.7fr)]">
+            <nav aria-label="Duplicate groups" class="min-w-0 space-y-2">
               <For each={groups()}>
                 {(group, index) => {
                   const reasons = () => [
@@ -1047,6 +1047,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                         </div>
                         <Badge
                           variant="teal"
+                          class="shrink-0 whitespace-nowrap"
                           aria-label={`Best match score ${score()}%`}
                           title={`Best match score ${score()}%`}
                         >
@@ -1113,7 +1114,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                     </div>
                   </div>
 
-                  <div class="grid gap-3 p-3 sm:grid-cols-2 sm:p-4">
+                  <div class="grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-4">
                     <For each={group().candidates}>
                       {(candidate, index) => {
                         const load = () =>
@@ -1137,10 +1138,10 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             data-testid="duplicate-candidate"
                           >
                             <div class="mb-3 flex items-start justify-between gap-2">
-                              <h2 class="break-words text-base font-semibold">
+                              <h2 class="min-w-0 flex-1 break-words text-base font-semibold">
                                 {current()?.title ?? candidate.title}
                               </h2>
-                              <Badge variant="outline">
+                              <Badge variant="outline" class="shrink-0">
                                 v{current()?.version ?? candidate.revision}
                               </Badge>
                             </div>
@@ -1166,7 +1167,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             <Show
                               when={!isRemoved()}
                               fallback={
-                                <p class="rounded border border-mark-edge/60 bg-mark/30 p-3 text-sm text-gold">
+                                <p class="rounded border border-line bg-soft p-3 text-sm text-muted">
                                   Removed since this scan
                                 </p>
                               }
@@ -1436,6 +1437,6 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
         onConfirm={() => void applyAccepted()}
         onCancel={() => setConfirmOpen(false)}
       />
-    </main>
+    </section>
   );
 };
