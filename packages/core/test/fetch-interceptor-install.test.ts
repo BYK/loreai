@@ -400,7 +400,10 @@ describe("context continuation", () => {
     cleanup = undefined;
   });
 
-  test("reuses the gateway boundary and retries once after a mismatch", async () => {
+  test.each([
+    "https://chatgpt.com/backend-api/codex/responses",
+    `${GATEWAY}/v1/codex/responses`,
+  ])("replays a stale boundary (%s)", async (url) => {
     const prefix = [{ type: "message", role: "user", content: "old" }];
     const suffix = { type: "message", role: "user", content: "new" };
     const oldBoundary = encodeContextBoundary({
@@ -460,14 +463,15 @@ describe("context continuation", () => {
       getHeaders: () => ({ "x-lore-session-id": "sess-boundary" }),
     });
 
-    const url = "https://chatgpt.com/backend-api/codex/responses";
     const firstInit = {
       method: "POST",
+      headers: { "x-lore-session-id": "sess-boundary" },
       body: JSON.stringify({ model: "gpt-5.6-codex", input: prefix }),
     };
     await (await fetch(url, firstInit)).text();
     const response = await fetch(url, {
       method: "POST",
+      headers: { "x-lore-session-id": "sess-boundary" },
       body: JSON.stringify({
         model: "gpt-5.6-codex",
         input: [...prefix, suffix],
@@ -571,61 +575,82 @@ describe("context continuation", () => {
     expect(calls[3].body.input).toEqual([first, second, third]);
   });
 
-  test.each([
-    {
-      name: "Anthropic",
-      url: "https://api.anthropic.com/v1/messages",
-      protocol: "anthropic" as const,
-      key: "messages" as const,
-      prefix: [
-        { role: "user", content: "old question" },
-        { role: "assistant", content: "old answer" },
-      ],
-      suffix: { role: "user", content: "new question" },
-      retainedItems: 0,
-    },
-    {
-      name: "OpenAI Chat",
-      url: "https://api.openai.com/v1/chat/completions",
-      protocol: "openai" as const,
-      key: "messages" as const,
-      prefix: [
-        { role: "system", content: "stable system" },
-        { role: "user", content: "old question" },
-        { role: "assistant", content: "old answer" },
-      ],
-      suffix: { role: "user", content: "new question" },
-      retainedItems: 1,
-    },
-    {
-      name: "OpenAI Responses",
-      url: "https://api.openai.com/v1/responses",
-      protocol: "openai-responses" as const,
-      key: "input" as const,
-      prefix: [
-        { type: "message", role: "user", content: "old question" },
-        { type: "message", role: "assistant", content: "old answer" },
-      ],
-      suffix: {
-        type: "message",
-        role: "user",
-        content: "new question",
+  test.each(
+    [
+      {
+        name: "Anthropic",
+        url: "https://api.anthropic.com/v1/messages",
+        protocol: "anthropic" as const,
+        key: "messages" as const,
+        prefix: [
+          { role: "user", content: "old question" },
+          { role: "assistant", content: "old answer" },
+        ],
+        suffix: { role: "user", content: "new question" },
+        retainedItems: 0,
       },
-      retainedItems: 0,
-    },
-    {
-      name: "Gemini",
-      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
-      protocol: "gemini" as const,
-      key: "contents" as const,
-      prefix: [
-        { role: "user", parts: [{ text: "old question" }] },
-        { role: "model", parts: [{ text: "old answer" }] },
-      ],
-      suffix: { role: "user", parts: [{ text: "new question" }] },
-      retainedItems: 0,
-    },
-  ])("elides the verified $name prefix", async (fixture) => {
+      {
+        name: "OpenAI Chat",
+        url: "https://api.openai.com/v1/chat/completions",
+        protocol: "openai" as const,
+        key: "messages" as const,
+        prefix: [
+          { role: "system", content: "stable system" },
+          { role: "user", content: "old question" },
+          { role: "assistant", content: "old answer" },
+        ],
+        suffix: { role: "user", content: "new question" },
+        retainedItems: 1,
+      },
+      {
+        name: "OpenAI Responses",
+        url: "https://api.openai.com/v1/responses",
+        protocol: "openai-responses" as const,
+        key: "input" as const,
+        prefix: [
+          { type: "message", role: "user", content: "old question" },
+          { type: "message", role: "assistant", content: "old answer" },
+        ],
+        suffix: {
+          type: "message",
+          role: "user",
+          content: "new question",
+        },
+        retainedItems: 0,
+      },
+      {
+        name: "Gemini",
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        protocol: "gemini" as const,
+        key: "contents" as const,
+        prefix: [
+          { role: "user", parts: [{ text: "old question" }] },
+          { role: "model", parts: [{ text: "old answer" }] },
+        ],
+        suffix: { role: "user", parts: [{ text: "new question" }] },
+        retainedItems: 0,
+      },
+      {
+        name: "Codex",
+        url: "https://chatgpt.com/backend-api/codex/responses",
+        protocol: "openai-codex" as const,
+        key: "input" as const,
+        prefix: [{ type: "message", role: "user", content: "old question" }],
+        suffix: { type: "message", role: "user", content: "new question" },
+        retainedItems: 0,
+      },
+    ].flatMap((fixture) => [
+      fixture,
+      {
+        ...fixture,
+        name: `direct gateway ${fixture.name}`,
+        url:
+          fixture.protocol === "openai-codex"
+            ? `${GATEWAY}/v1/codex/responses`
+            : `${GATEWAY}${new URL(fixture.url).pathname}`,
+      },
+    ]),
+  )("elides the verified $name prefix", async (fixture) => {
     const calls: Array<{ headers: Headers; body: Record<string, unknown> }> =
       [];
     const boundary = encodeContextBoundary({
@@ -661,6 +686,7 @@ describe("context continuation", () => {
     await (
       await fetch(fixture.url, {
         method: "POST",
+        headers: { "x-lore-session-id": `sess-${fixture.protocol}` },
         body: JSON.stringify({
           model: "model",
           [fixture.key]: fixture.prefix,
@@ -670,6 +696,7 @@ describe("context continuation", () => {
     await (
       await fetch(fixture.url, {
         method: "POST",
+        headers: { "x-lore-session-id": `sess-${fixture.protocol}` },
         body: JSON.stringify({
           model: "model",
           [fixture.key]: [...fixture.prefix, fixture.suffix],

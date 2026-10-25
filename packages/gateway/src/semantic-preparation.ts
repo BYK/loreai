@@ -18,6 +18,8 @@ import {
   SPECULATIVE_SOURCE_MAX_MESSAGES,
 } from "./speculative-source";
 import type { GatewayMessage, GatewayRequest } from "./translate/types";
+import { supportsContextBoundary } from "./context-boundary";
+import { detectHarness } from "./harness";
 
 type Stage =
   | "awaiting"
@@ -65,13 +67,29 @@ export class PreparationTiming {
     protocol: string;
     codex: boolean;
     streaming: boolean;
+    harness: string;
   };
-  constructor(request: Pick<GatewayRequest, "protocol" | "codex" | "stream">) {
+  constructor(
+    request: Pick<GatewayRequest, "protocol" | "codex" | "stream"> &
+      Partial<Pick<GatewayRequest, "rawHeaders" | "sourceInput">>,
+  ) {
+    const headers = request.rawHeaders ?? {};
     this.attributes = {
       protocol: request.protocol,
       codex: request.codex === true,
       streaming: request.stream,
+      harness: detectHarness(headers) ?? "unknown",
     };
+    // Emit before preparation so rejected suffixes remain in the denominator.
+    // Means of these 0/1 distributions give capability and suffix adoption.
+    this.metric(
+      "context_boundary_capable",
+      supportsContextBoundary(headers) ? 1 : 0,
+    );
+    this.metric(
+      "context_boundary_suffix",
+      request.sourceInput?.sourcePrefix ? 1 : 0,
+    );
   }
   measure<T>(stage: Stage, fn: () => T): T {
     const started = performance.now();
@@ -273,6 +291,11 @@ export async function prepareSemanticMessages(input: {
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
   if (input.sourcePrefix && (input.noStore || !input.protocol)) {
+    timing.metric("source_delta_unavailable", 1);
+    timing.metric(
+      `source_delta_unavailable_${input.noStore ? "disabled" : "protocol"}`,
+      1,
+    );
     throw new SourceDeltaUnavailableError(
       "A context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
     );
