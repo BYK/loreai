@@ -9,7 +9,7 @@ import {
 
 const STATUS_TONE: Record<ConnectionState, string> = {
   checking: "bg-muted",
-  reachable: "bg-accent",
+  reachable: "bg-green-600 dark:bg-green-400",
   unreachable: "bg-danger",
   unauthorized: "bg-gold",
 };
