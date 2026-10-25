@@ -731,15 +731,37 @@ async function fetchWithContextBoundary(
   pathname: string,
   config: FetchInterceptorConfig,
 ): Promise<Response> {
+  // Fetch consumes URL/options synchronously. A later retry must not observe
+  // an SDK reusing its URL or init object while the first response is pending.
+  const requestInput = input instanceof URL ? input.href : input;
+  const requestInit = { ...init };
   const prepared = prepareBoundaryRequest(
     headers,
     config.gatewayBase,
     pathname,
-    input,
-    init,
+    requestInput,
+    requestInit,
   );
+  // Only an attached suffix can need replay. Own mutable byte bodies at that
+  // point, preserving view offsets; strings already provide an immutable copy.
+  const body = requestInit.body;
+  const replayInit = prepared.attached
+    ? {
+        ...requestInit,
+        body:
+          body instanceof ArrayBuffer
+            ? body.slice(0)
+            : ArrayBuffer.isView(body)
+              ? new Uint8Array(
+                  body.buffer,
+                  body.byteOffset,
+                  body.byteLength,
+                ).slice()
+              : body,
+      }
+    : undefined;
   observeRequestHeaders(new Headers(prepared.init.headers), config);
-  let response = await originalFetch(input, prepared.init);
+  let response = await originalFetch(requestInput, prepared.init);
   if (
     prepared.attached &&
     prepared.boundaryKey &&
@@ -751,7 +773,10 @@ async function fetchWithContextBoundary(
     void response.body?.cancel().catch(() => {});
     const fullHeaders = new Headers(headers);
     fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
-    response = await originalFetch(input, { ...init, headers: fullHeaders });
+    response = await originalFetch(requestInput, {
+      ...replayInit,
+      headers: fullHeaders,
+    });
   }
   return updateContextBoundary(
     response,

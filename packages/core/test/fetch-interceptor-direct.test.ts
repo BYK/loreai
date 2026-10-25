@@ -242,6 +242,108 @@ test("publishes direct boundaries only at caller-visible EOF", async () => {
   );
 });
 
+test.each([
+  ["direct", "init"],
+  ["direct", "bytes"],
+  ["direct", "arraybuffer"],
+  ["direct", "url"],
+  ["rewritten", "init"],
+  ["rewritten", "bytes"],
+  ["rewritten", "arraybuffer"],
+  ["rewritten", "url"],
+])(
+  "replays the original dispatch after caller mutation (%s/%s)",
+  async (route, mutation) => {
+    const calls: Array<{
+      url: string;
+      method?: string;
+      credentials?: RequestCredentials;
+      signal?: AbortSignal | null;
+      headers: Headers;
+      body: string;
+    }> = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    globalThis.fetch = vi.fn<typeof fetch>(async (input, init) => {
+      const bytes = init?.body;
+      calls.push({
+        url: input instanceof URL ? input.href : String(input),
+        method: init?.method,
+        credentials: init?.credentials,
+        signal: init?.signal,
+        headers: new Headers(init?.headers),
+        body:
+          typeof bytes === "string"
+            ? bytes
+            : new TextDecoder().decode(bytes as Uint8Array),
+      });
+      if (calls.length === 2) {
+        await blocked;
+        return new Response("mismatch", {
+          status: 409,
+          headers: { "x-lore-context-boundary-mismatch": "true" },
+        });
+      }
+      return new Response("ok", {
+        headers: { "x-lore-context-boundary": boundary(prefix) },
+      });
+    });
+    install();
+    const destination = new URL(
+      route === "direct" ? url : "https://provider.example/v1/messages",
+    );
+    await (
+      await fetch(destination, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: "claude", messages: prefix }),
+      })
+    ).text();
+    const body = JSON.stringify({ model: "claude", messages: appended });
+    const bytes = new TextEncoder().encode(`padding${body}tail`);
+    const buffer = new TextEncoder().encode(body).buffer;
+    const signal = new AbortController().signal;
+    const init: RequestInit = {
+      method: "POST",
+      headers: { ...headers, authorization: "Bearer original" },
+      credentials: "omit",
+      signal,
+      body:
+        mutation === "bytes"
+          ? bytes.subarray(7, 7 + body.length)
+          : mutation === "arraybuffer"
+            ? buffer
+            : body,
+    };
+    const pending = fetch(destination, init);
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    if (mutation === "init") {
+      init.method = "PUT";
+      init.credentials = "include";
+      init.signal = new AbortController().signal;
+      init.body = "replacement body";
+      init.headers = { authorization: "Bearer replacement" };
+    } else if (mutation === "bytes") {
+      bytes.fill(120);
+    } else if (mutation === "arraybuffer") {
+      new Uint8Array(buffer).fill(120);
+    } else {
+      destination.href = "https://other-origin.example/v1/messages";
+    }
+    release();
+    await (await pending).text();
+    expect(calls).toHaveLength(3);
+    expect(calls[2].url).toBe(calls[1].url);
+    expect(calls[2].method).toBe("POST");
+    expect(calls[2].credentials).toBe("omit");
+    expect(calls[2].signal).toBe(signal);
+    expect(calls[2].headers.get("authorization")).toBe("Bearer original");
+    expect(calls[2].body).toBe(body);
+  },
+);
+
 test("direct continuation verifies generated histories and edits", async () => {
   await fc.assert(
     fc.asyncProperty(
