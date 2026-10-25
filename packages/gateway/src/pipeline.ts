@@ -22924,6 +22924,7 @@ async function handleConversationTurnPrepared(
       sessionID,
       budget: modelBudget,
       sourceWindow,
+      noStore: suppressTemporalStorage,
     });
   } catch (error) {
     if (!(error instanceof FullSourceRequired) || !sourceWindow) throw error;
@@ -22954,6 +22955,7 @@ async function handleConversationTurnPrepared(
       projectPath,
       sessionID,
       budget: modelBudget,
+      noStore: suppressTemporalStorage,
     });
   }
   // Transform stats ride along so postResponse can stamp them into the
