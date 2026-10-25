@@ -859,7 +859,9 @@ export function installFetchInterceptor(
       }
       return fetchWithContextBoundary(
         originalFetch,
-        input,
+        // Header getters may execute caller code. Reuse the URL validated
+        // above, while keeping one-shot Request bodies on their original input.
+        typeof input === "string" || input instanceof URL ? url : input,
         init,
         directHeaders,
         upstream.pathname,

@@ -159,6 +159,22 @@ test("leaves a direct request without an explicit session complete", async () =>
   ).toBeNull();
 });
 
+test("keeps the validated destination when a header getter mutates its URL", async () => {
+  const original = vi.fn<typeof fetch>(async () => new Response("ok"));
+  globalThis.fetch = original;
+  install();
+  const destination = new URL(url);
+  await fetch(destination, {
+    method: "POST",
+    get headers() {
+      destination.href = "https://other-origin.example/v1/messages";
+      return { ...headers, authorization: "Bearer original" };
+    },
+    body: JSON.stringify({ model: "claude", messages: prefix }),
+  });
+  expect(String(original.mock.calls[0][0])).toBe(url);
+});
+
 test.each(["request", "stream"])(
   "preserves one-shot direct bodies (%s)",
   async (kind) => {
