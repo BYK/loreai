@@ -1,7 +1,11 @@
 /** Best-effort upgrade notes. Remote text is bounded and rendered as plain terminal text. */
 import { stripVTControlCharacters } from "node:util";
 import { gt, lte, valid } from "semver";
-import { getGitHubHeaders, GITHUB_RELEASES_URL } from "./binary";
+import {
+  getGitHubHeaders,
+  GITHUB_RELEASES_URL,
+  isNightlyVersion,
+} from "./binary";
 import type { ReleaseChannel } from "./upgrade";
 
 const REPO = "https://github.com/BYK/loreai";
@@ -166,18 +170,29 @@ async function revision(version: string, signal: AbortSignal): Promise<string> {
   let data: unknown;
   if (timestamp) {
     const seconds = Number(timestamp);
-    const until = new Date((seconds + 1) * 1000).toISOString();
+    // GitHub includes commits at the cutoff; adding a second can select
+    // a different commit and reject a valid published nightly.
+    const until = new Date(seconds * 1000).toISOString();
     const commits = await json(
-      `/commits?sha=main&until=${encodeURIComponent(until)}&per_page=1`,
+      `/commits?sha=main&until=${encodeURIComponent(until)}&per_page=2`,
       signal,
     );
-    data = Array.isArray(commits) ? commits[0] : undefined;
-    const commit =
-      object(data) && object(data.commit) ? data.commit : undefined;
-    const date =
-      commit && object(commit.committer) ? commit.committer.date : undefined;
-    if (typeof date !== "string" || Date.parse(date) !== seconds * 1000)
-      throw new Error("Nightly commit cannot be identified");
+    if (!Array.isArray(commits) || commits.length > 2)
+      throw new Error("Invalid nightly commit list");
+    const matches = commits.filter((candidate) => {
+      const commit =
+        object(candidate) && object(candidate.commit)
+          ? candidate.commit
+          : undefined;
+      const date =
+        commit && object(commit.committer) ? commit.committer.date : undefined;
+      return typeof date === "string" && Date.parse(date) === seconds * 1000;
+    });
+    // Versions encode seconds, not SHAs. Same-second commits cannot be
+    // distinguished reliably, so offer a link rather than guess the range.
+    if (matches.length !== 1 || commits[0] !== matches[0])
+      throw new Error("Nightly commit cannot be identified uniquely");
+    data = matches[0];
   } else {
     data = await json(
       `/commits/${encodeURIComponent(version.replace(/^v/, ""))}`,
@@ -267,7 +282,7 @@ export async function fetchReleaseNotes(
     toVersion,
     entries: [],
     url:
-      channel === "stable" && !toVersion.includes("-dev.")
+      channel === "stable" && !isNightlyVersion(toVersion)
         ? `${REPO}/releases/tag/${encodeURIComponent(toVersion)}`
         : `${REPO}/commits/main`,
   };
@@ -282,8 +297,8 @@ export async function fetchReleaseNotes(
   const notes = { ...fallback, entries: [] };
   const work = (
     channel === "stable" &&
-    !fromVersion.includes("-dev.") &&
-    !toVersion.includes("-dev.")
+    !isNightlyVersion(fromVersion) &&
+    !isNightlyVersion(toVersion)
       ? stableNotes(notes, controller.signal)
       : nightlyNotes(notes, controller.signal)
   )

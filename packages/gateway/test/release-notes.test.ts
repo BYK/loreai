@@ -32,7 +32,7 @@ function nightlyFetch(
     const url = new URL(input);
     if (url.pathname.endsWith("/commits")) {
       const target =
-        url.searchParams.get("until") === "2023-11-14T22:30:01.000Z";
+        url.searchParams.get("until") === "2023-11-14T22:30:00.000Z";
       return Response.json([
         {
           sha: target ? toSha : fromSha,
@@ -161,6 +161,116 @@ describe("upgrade release notes", () => {
       "hidden",
     ])
       expect(output).not.toContain(hidden);
+  });
+
+  test("resolves nightlies exactly when another main commit lands one second later", async () => {
+    const adjacent = "c".repeat(40);
+    const commits: Record<string, { sha: string; date: string }> = {
+      "2023-11-14T22:13:20.000Z": {
+        sha: fromSha,
+        date: "2023-11-14T22:13:20Z",
+      },
+      "2023-11-14T22:13:21.000Z": {
+        sha: adjacent,
+        date: "2023-11-14T22:13:21Z",
+      },
+      "2023-11-14T22:30:00.000Z": { sha: toSha, date: "2023-11-14T22:30:00Z" },
+      "2023-11-14T22:30:01.000Z": {
+        sha: adjacent,
+        date: "2023-11-14T22:30:01Z",
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const url = new URL(input);
+        if (url.pathname.endsWith("/commits")) {
+          const commit = commits[url.searchParams.get("until")!];
+          if (!commit) throw new Error("Unexpected commit cutoff");
+          return Response.json([
+            { sha: commit.sha, commit: { committer: { date: commit.date } } },
+          ]);
+        }
+        expect(url.pathname).toBe(
+          `/repos/BYK/loreai/compare/${fromSha}...${toSha}`,
+        );
+        return Response.json({
+          status: "ahead",
+          total_commits: 1,
+          commits: [commit("fix: Include the actual nightly change")],
+        });
+      }),
+    );
+    const notes = (await fetchReleaseNotes(nightly))!;
+    expect(formatReleaseNotes(notes)).toContain(
+      "Include the actual nightly change",
+    );
+    expect(notes.url).toBe(
+      `https://github.com/BYK/loreai/compare/${fromSha}...${toSha}`,
+    );
+  });
+
+  test("does not guess a nightly revision when two commits share its timestamp", async () => {
+    const resolve = nightlyFetch();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const url = new URL(input);
+        if (
+          url.pathname.endsWith("/commits") &&
+          url.searchParams.get("until") === "2023-11-14T22:13:20.000Z"
+        ) {
+          const commits = [
+            {
+              sha: fromSha,
+              commit: { committer: { date: "2023-11-14T22:13:20Z" } },
+            },
+            {
+              sha: "c".repeat(40),
+              commit: { committer: { date: "2023-11-14T22:13:20Z" } },
+            },
+          ];
+          return Response.json(
+            url.searchParams.get("per_page") === "2"
+              ? commits
+              : commits.slice(0, 1),
+          );
+        }
+        return resolve(input);
+      }),
+    );
+    const notes = (await fetchReleaseNotes(nightly))!;
+    expect(notes.entries).toEqual([]);
+    expect(notes.url).toBe("https://github.com/BYK/loreai/commits/main");
+  });
+
+  test("accepts a unique nightly timestamp when the preceding commit is older", async () => {
+    const resolve = nightlyFetch();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const response = await resolve(input);
+        const url = new URL(input);
+        if (!url.pathname.endsWith("/commits")) return response;
+        const commits = await response.json();
+        const target =
+          url.searchParams.get("until") === "2023-11-14T22:30:00.000Z";
+        return Response.json([
+          ...commits,
+          {
+            sha: "c".repeat(40),
+            commit: {
+              committer: {
+                date: target ? "2023-11-14T22:29:59Z" : "2023-11-14T22:13:19Z",
+              },
+            },
+          },
+        ]);
+      }),
+    );
+    expect(formatReleaseNotes((await fetchReleaseNotes(nightly))!)).toContain(
+      "Add project picker (#123)",
+    );
   });
 
   test("paginates the exact nightly comparison", async () => {
