@@ -425,17 +425,19 @@ export async function prepareSemanticMessages(input: {
   );
   if (checkpoint)
     timing.measure("checkpoint_capture", () =>
-      checkpoint.capture(
-        raw,
-        loreMessages,
-        ids,
-        provenanceByMessageId,
-        reuse
-          ? {
-              rawLength: reuse.raw.length,
-              resolvedTokens: reuse.resolvedTokens,
-            }
-          : undefined,
+      tokenCache.runVisible(() =>
+        checkpoint.capture(
+          raw,
+          loreMessages,
+          ids,
+          provenanceByMessageId,
+          reuse
+            ? {
+                rawLength: reuse.raw.length,
+                resolvedTokens: reuse.resolvedTokens,
+              }
+            : undefined,
+        ),
       ),
     );
   input.signal?.throwIfAborted();

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Tokenizer } from "ai-tokenizer";
 import {
   close,
   db,
@@ -13,7 +14,7 @@ import {
   isCurrentDatabase,
   mergeProjectInternal,
 } from "../src/db";
-import { withTenant } from "../src/tenant";
+import { currentTenantId, withTenant } from "../src/tenant";
 import { clearProject, deleteSession } from "../src/data";
 import {
   SemanticTokenCache,
@@ -21,6 +22,8 @@ import {
   SEMANTIC_TOKEN_CACHE_MAX_SESSIONS,
 } from "../src/semantic-token-cache";
 import * as tokenize from "../src/tokenize";
+import * as log from "../src/log";
+import { decodeTokenCounts } from "../src/token-count-codec";
 
 const scope = {
   projectPath: "/test/token-cache",
@@ -44,17 +47,312 @@ function fill(s = scope) {
   return cache;
 }
 function payload() {
-  return (
+  const value = (
     db().query("SELECT payload FROM semantic_token_cache").get() as {
-      payload: string;
+      payload: string | Uint8Array;
     }
   ).payload;
+  if (typeof value === "string") return value;
+  const version = `${tokenize.TOKEN_ESTIMATE_CACHE_VERSION}:hidden-input-v1`;
+  const data = [
+    ...decodeTokenCounts(
+      value,
+      version,
+      SEMANTIC_TOKEN_CACHE_MAX_ENTRIES,
+      1_000_000,
+    )!,
+  ];
+  return JSON.stringify([
+    version,
+    data,
+    createHash("sha256").update(JSON.stringify(data)).digest("hex"),
+  ]);
 }
 beforeEach(() => {
   db().exec("DELETE FROM semantic_token_cache");
   parent();
 });
 afterEach(() => vi.restoreAllMocks());
+
+describe("exact visible-content counts", () => {
+  it.each(["local", "external"])(
+    "does not lazily read a recreated %s owner",
+    (kind) => {
+      const text = "same source bytes before and after recreation ".repeat(32);
+      const first = new SemanticTokenCache(scope);
+      first.runVisible(() => tokenize.estimateTokens(text));
+      first.persist();
+      const saved = db()
+        .query(
+          "SELECT project_id, payload FROM semantic_token_cache WHERE session_id = ?",
+        )
+        .get(scope.sessionID) as { project_id: string; payload: Uint8Array };
+      const pending = new SemanticTokenCache(scope);
+      if (kind === "local") {
+        deleteSession(scope.projectPath, scope.sessionID);
+        parent();
+        const successor = new SemanticTokenCache(scope);
+        successor.runVisible(() => tokenize.estimateTokens(text));
+        successor.persist();
+      } else {
+        const external = new DatabaseSync(process.env.LORE_DB_PATH!);
+        try {
+          external.exec("PRAGMA foreign_keys = ON");
+          external
+            .prepare("DELETE FROM semantic_token_cache WHERE session_id = ?")
+            .run(scope.sessionID);
+          external
+            .prepare("DELETE FROM session_state WHERE session_id = ?")
+            .run(scope.sessionID);
+          external
+            .prepare(
+              "INSERT INTO session_state (session_id, updated_at) VALUES (?, ?)",
+            )
+            .run(scope.sessionID, Date.now());
+          external
+            .prepare(
+              "INSERT INTO session_state_owners (session_id, tenant_id) VALUES (?, ?)",
+            )
+            .run(scope.sessionID, currentTenantId());
+          external
+            .prepare(
+              "INSERT INTO semantic_token_cache (project_id, session_id, payload, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .run(saved.project_id, scope.sessionID, saved.payload, Date.now());
+        } finally {
+          external.close();
+        }
+      }
+      const before = payload();
+      const count = vi.spyOn(Tokenizer.prototype, "count");
+      pending.runVisible(() => tokenize.estimateTokens(text));
+      expect(count).toHaveBeenCalledTimes(1);
+      expect(pending.visibleStats.hits).toBe(0);
+      pending.persist();
+      expect(payload()).toBe(before);
+    },
+  );
+
+  it("avoids loading a durable payload or hashing cheap short text", () => {
+    const populate = new SemanticTokenCache(scope);
+    populate.runVisible(() =>
+      tokenize.estimateTokens("long stored text ".repeat(100)),
+    );
+    populate.persist();
+    const queries: string[] = [];
+    const silent = { info() {}, warn() {}, error() {}, captureException() {} };
+    log.registerSink({
+      ...silent,
+      withDbSpan(sql, fn) {
+        queries.push(sql);
+        return fn();
+      },
+    });
+    try {
+      const count = vi.spyOn(Tokenizer.prototype, "count");
+      const cache = new SemanticTokenCache(scope);
+      cache.runVisible(() => {
+        tokenize.estimateTokens("cheap short text");
+        tokenize.estimateTokens("cheap short text");
+      });
+      cache.persist();
+      expect(count).toHaveBeenCalledTimes(2);
+      expect(
+        queries.some((sql) =>
+          sql.includes("SELECT payload FROM semantic_token_cache"),
+        ),
+      ).toBe(false);
+    } finally {
+      log.registerSink(silent);
+    }
+  });
+
+  it("does not rewrite an unchanged retained window on every turn", () => {
+    const retained = { ...scope, retainUnused: true };
+    const first = new SemanticTokenCache(retained);
+    first.runVisible(() =>
+      tokenize.estimateTokens("unchanged retained window".repeat(32)),
+    );
+    first.persist();
+    const next = new SemanticTokenCache(retained);
+    const before = db().query("SELECT total_changes() AS n").get();
+    next.runVisible(() =>
+      tokenize.estimateTokens("unchanged retained window".repeat(32)),
+    );
+    next.persist();
+    expect(db().query("SELECT total_changes() AS n").get()).toEqual(before);
+    next.runVisible(() =>
+      tokenize.estimateTokens("newly appended text".repeat(32)),
+    );
+    next.persist();
+    expect(db().query("SELECT total_changes() AS n").get()).not.toEqual(before);
+  });
+
+  it("keeps encoding-specific counts across reopen without retaining text", () => {
+    const text = "Private visible text Merhaba 🇹🇷 漢字 <|endoftext|>".repeat(
+      32,
+    );
+    const options = [{}, { modelID: "gpt-4o" }, { providerID: "anthropic" }];
+    const expected = options.map((opts) => tokenize.estimateTokens(text, opts));
+    const cache = new SemanticTokenCache(scope);
+    expect(
+      cache.runVisible(() =>
+        options.map((opts) => tokenize.estimateTokens(text, opts)),
+      ),
+    ).toEqual(expected);
+    expect(cache.visibleStats.misses).toBe(3);
+    cache.persist();
+    expect(payload()).not.toContain("Private visible text");
+    close();
+    const count = vi.spyOn(Tokenizer.prototype, "count");
+    const next = new SemanticTokenCache(scope);
+    expect(
+      next.runVisible(() =>
+        options.map((opts) => tokenize.estimateTokens(text, opts)),
+      ),
+    ).toEqual(expected);
+    expect(count).not.toHaveBeenCalled();
+    expect(next.visibleStats.hits).toBe(3);
+  });
+
+  it("keys the entire original string, including tails and lone surrogates", () => {
+    const cache = new SemanticTokenCache(scope);
+    const values = [
+      "a".repeat(512) + "old",
+      "a".repeat(512) + "new",
+      "\ud800".repeat(256),
+      "\ud801".repeat(256),
+      "\ufffd".repeat(256),
+    ];
+    for (const [i, text] of values.entries()) {
+      const compute = vi.fn(() => i + 1);
+      expect(cache.countTokens(text, "cl100k_base", compute)).toBe(i + 1);
+      expect(compute).toHaveBeenCalledTimes(1);
+      expect(cache.countTokens(text, "cl100k_base", compute)).toBe(i + 1);
+      expect(compute).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not add counts across BPE boundaries or reuse tokenizer failures", () => {
+    const cache = new SemanticTokenCache(scope);
+    const strings = [
+      "a".repeat(256),
+      "b".repeat(256),
+      "ab".repeat(256),
+      "a".repeat(300),
+    ];
+    const expected = strings.map((text) => tokenize.estimateTokens(text));
+    const count = vi.spyOn(Tokenizer.prototype, "count");
+    cache.runVisible(() => {
+      count.mockImplementationOnce(() => {
+        throw new Error("private tokenizer failure");
+      });
+      expect(tokenize.estimateTokens(strings[3])).toBe(
+        Math.ceil(strings[3].length / 3),
+      );
+      for (const [i, text] of strings.entries())
+        expect(tokenize.estimateTokens(text)).toBe(expected[i]);
+      expect(count).toHaveBeenCalledTimes(5);
+      count.mockClear();
+      for (const [i, text] of strings.entries())
+        expect(tokenize.estimateTokens(text)).toBe(expected[i]);
+      expect(count).not.toHaveBeenCalled();
+    });
+  });
+
+  it("preserves provenance counts and visible zero counts in the same envelope", () => {
+    const cache = new SemanticTokenCache(scope);
+    const hidden = cache.count(visible, provenance);
+    cache.countTokens("zero".repeat(128), "cl100k_base", () => 0);
+    cache.persist();
+    const next = new SemanticTokenCache(scope);
+    const count = vi.spyOn(Tokenizer.prototype, "count");
+    expect(next.count(visible, provenance)).toBe(hidden);
+    expect(
+      next.countTokens("zero".repeat(128), "cl100k_base", () => {
+        throw new Error("cache miss");
+      }),
+    ).toBe(0);
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it("scopes no-store reuse to one request and never retains durable content", () => {
+    const before = db().query("SELECT total_changes() AS n").get();
+    const count = vi.spyOn(Tokenizer.prototype, "count");
+    for (let request = 0; request < 2; request++) {
+      const cache = new SemanticTokenCache({ ...scope, noStore: true });
+      cache.runVisible(() => {
+        tokenize.estimateTokens("private no-store text".repeat(32));
+        tokenize.estimateTokens("private no-store text".repeat(32));
+      });
+      cache.persist();
+    }
+    expect(count).toHaveBeenCalledTimes(2);
+    expect(db().query("SELECT total_changes() AS n").get()).toEqual(before);
+  });
+
+  it("restores nested and asynchronous counting scopes without crossing tenants", async () => {
+    const first = new SemanticTokenCache({ ...scope, noStore: true });
+    const second = withTenant(
+      "other-tenant",
+      () => new SemanticTokenCache({ ...scope, noStore: true }),
+    );
+    const count = vi.spyOn(Tokenizer.prototype, "count");
+    await Promise.all([
+      first.runVisible(async () => {
+        tokenize.estimateTokens("same source".repeat(32));
+        await Promise.resolve();
+        tokenize.estimateTokens("same source".repeat(32));
+      }),
+      withTenant("other-tenant", () =>
+        second.runVisible(async () => {
+          tokenize.estimateTokens("same source".repeat(32));
+          await Promise.resolve();
+          tokenize.estimateTokens("same source".repeat(32));
+        }),
+      ),
+    ]);
+    expect(count).toHaveBeenCalledTimes(2);
+    withTenant("other-tenant", () =>
+      first.runVisible(() => tokenize.estimateTokens("same source".repeat(32))),
+    );
+    expect(count).toHaveBeenCalledTimes(3);
+    first.runVisible(() => {
+      expect(() =>
+        second.runVisible(() => {
+          throw new Error("nested");
+        }),
+      ).toThrow("nested");
+      tokenize.estimateTokens("same source".repeat(32));
+    });
+    expect(count).toHaveBeenCalledTimes(3);
+    tokenize.estimateTokens("same source".repeat(32));
+    expect(count).toHaveBeenCalledTimes(4);
+  });
+
+  it("bounds visible entries together with provenance and evicts safely", () => {
+    const cache = new SemanticTokenCache(scope);
+    const count = vi.spyOn(Tokenizer.prototype, "count").mockReturnValue(1);
+    cache.runVisible(() => {
+      for (let i = 0; i < SEMANTIC_TOKEN_CACHE_MAX_ENTRIES + 3; i++)
+        tokenize.estimateTokens(`text-${i}`.repeat(64));
+    });
+    cache.persist();
+    expect(JSON.parse(payload())[1]).toHaveLength(
+      SEMANTIC_TOKEN_CACHE_MAX_ENTRIES,
+    );
+    const next = new SemanticTokenCache(scope);
+    count.mockClear();
+    next.runVisible(() => {
+      tokenize.estimateTokens(
+        `text-${SEMANTIC_TOKEN_CACHE_MAX_ENTRIES + 2}`.repeat(64),
+      );
+      expect(count).not.toHaveBeenCalled();
+      tokenize.estimateTokens("text-0".repeat(64));
+      expect(count).toHaveBeenCalledTimes(1);
+    });
+  });
+});
 
 describe("exact derived provenance counts", () => {
   it("pins the persistent algorithm key to the installed tokenizer", () => {
