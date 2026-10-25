@@ -82,6 +82,60 @@ function seed(request: ReturnType<typeof semanticHistory>, restored = false) {
 }
 
 describe("semantic preparation", () => {
+  it.each([
+    [{}, "unknown", 0],
+    [{ originator: "pi", "x-lore-context-boundary-capability": "v1" }, "pi", 1],
+    [{ "x-lore-agent": "private-agent" }, "opencode", 0],
+    [{ "user-agent": "codex_cli_rs/secret" }, "codex", 0],
+    [{ "x-claude-code-session-id": "private-session" }, "claude-code", 0],
+    [
+      {
+        originator: "private-harness",
+        "x-lore-context-boundary-capability": "v2",
+      },
+      "unknown",
+      0,
+    ],
+    [{ "X-Lore-Context-Boundary": "opaque" }, "unknown", 1],
+  ] as const)(
+    "reports boundary adoption with fixed harness labels (%j)",
+    (headers, harness, capable) => {
+      vi.mocked(Sentry.isInitialized)
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(true);
+      const emit = vi.mocked(Sentry.metrics.distribution);
+      emit.mockClear();
+      const timing = new PreparationTiming({
+        protocol: "openai-responses",
+        stream: true,
+        rawHeaders: headers,
+        sourceInput: {
+          itemCount: 2,
+          inputDigest: "private-digest",
+          retainedItems: 0,
+          boundarySafe: true,
+          sourcePrefix: { messageCount: 4, sourceDigest: "private-digest" },
+        },
+      });
+      expect(timing.observations.context_boundary_capable).toBe(capable);
+      expect(timing.observations.context_boundary_suffix).toBe(1);
+      expect(emit).toHaveBeenCalledWith(
+        "lore.preparation.context_boundary_capable",
+        capable,
+        {
+          attributes: {
+            protocol: "openai-responses",
+            codex: false,
+            streaming: true,
+            harness,
+          },
+        },
+      );
+      expect(JSON.stringify(emit.mock.calls)).not.toContain("private-");
+      expect(JSON.stringify(emit.mock.calls)).not.toContain("secret");
+    },
+  );
+
   it.each([false, true])(
     "reports the failing preparation stage without exception content (async=%s)",
     async (asynchronous) => {
@@ -441,8 +495,8 @@ describe("semantic preparation", () => {
       expect(Number.isFinite(value)).toBe(true);
       expect(Object.keys(options?.attributes ?? {}).sort()).toEqual(
         name.endsWith("wall_ms") || name.endsWith("cpu_ms")
-          ? ["codex", "protocol", "stage", "streaming"]
-          : ["codex", "protocol", "streaming"],
+          ? ["codex", "harness", "protocol", "stage", "streaming"]
+          : ["codex", "harness", "protocol", "streaming"],
       );
       expect(JSON.stringify(options)).not.toContain(sessionID);
       expect(JSON.stringify(options)).not.toContain(projectPath);
