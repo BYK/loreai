@@ -28,6 +28,13 @@ export const SharingSync: Component<{
         detail: "Reading the account settings from this gateway.",
         command: null,
       };
+    if (folk.syncBlocker() === "gateway_access")
+      return {
+        title: "Restore browser access",
+        detail:
+          "This gateway refused the request. Reconnect this browser to the gateway, then try syncing again.",
+        command: null,
+      };
     if (account.state === "hosted")
       return {
         title: "Use a local gateway",

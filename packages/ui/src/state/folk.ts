@@ -74,7 +74,11 @@ export function createFolkState({ client }: { client: ApiClient }) {
   // Keep its guard and result on the workspace, alongside the status reads.
   const [syncing, setSyncing] = createSignal(false);
   const [syncBlocker, setSyncBlocker] = createSignal<
-    "encryption_locked" | "sync_disabled" | "unauthorized" | null
+    | "encryption_locked"
+    | "sync_disabled"
+    | "unauthorized"
+    | "gateway_access"
+    | null
   >(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
@@ -146,7 +150,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
       )
         setSyncBlocker(code);
       else if (isApiError(error) && error.kind === "unauthorized")
-        setSyncBlocker("unauthorized");
+        setSyncBlocker("gateway_access");
       setSyncError(error instanceof Error ? error.message : "Sync failed.");
     } finally {
       setSyncing(false);

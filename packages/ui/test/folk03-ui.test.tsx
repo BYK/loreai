@@ -2094,3 +2094,30 @@ it("uses a newer sync-disabled result instead of checking the setup step from a 
     "Enabled on this device",
   );
 });
+
+it.each([403, 404])(
+  "distinguishes a browser gateway denial (%s) from cloud sign-in",
+  async (status) => {
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        runSync: async () => {
+          throw new ApiError(
+            "unauthorized",
+            "/sync/run",
+            "Gateway refused this browser",
+            status,
+          );
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Gateway refused this browser",
+    );
+    expect(screen.queryByText("lore login")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Restore browser access" }),
+    ).toBeInTheDocument();
+  },
+);
