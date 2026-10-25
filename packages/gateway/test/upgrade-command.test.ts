@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { commandUpgrade } from "../src/cli/upgrade";
 import { VERSION } from "../src/cli/version";
 import { executeUpgrade, fetchLatestVersion } from "../src/cli/lib/upgrade";
@@ -59,9 +59,14 @@ vi.mock("../src/cli/upgrade-recovery", async (importOriginal) => {
 
 const originalExecutable = process.execPath;
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline test")));
+});
+
 afterEach(() => {
   process.execPath = originalExecutable;
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   for (const path of leftoverDirs.splice(0)) {
     rmSync(path, { recursive: true, force: true });
@@ -294,5 +299,131 @@ describe("upgrade command stale-receipt ordering", () => {
     );
     expect(executeUpgrade).not.toHaveBeenCalled();
     expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
+  });
+});
+
+describe("upgrade release notes", () => {
+  function downloadedBinary() {
+    vi.mocked(executeUpgrade).mockImplementation(async (...args) => {
+      const directory = args[5];
+      if (!directory) throw new Error("Missing download directory");
+      const path = join(directory.path, "lore.download");
+      writeFileSync(path, "new verified binary", { mode: 0o700 });
+      const output = vi.mocked(console.error).mock.calls.flat().join("\n");
+      expect(output).not.toContain("An upgrade feature");
+      return { tempBinaryPath: path };
+    });
+  }
+  function noteResponse() {
+    return Response.json([
+      {
+        tag_name: "0.42.0",
+        draft: false,
+        prerelease: false,
+        body: "### New Features\n- An upgrade feature",
+      },
+    ]);
+  }
+
+  test("prints notes after a successful replacement and receipt publication", async () => {
+    const fixture = receiptFixture(false);
+    vi.mocked(fetchLatestVersion).mockResolvedValue("0.42.0");
+    downloadedBinary();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(noteResponse()));
+    await commandUpgrade(["--channel", "stable"]);
+    expect(readFileSync(fixture.executable, "utf8")).toBe(
+      "new verified binary",
+    );
+    const output = vi.mocked(console.error).mock.calls.flat().join("\n");
+    expect(output).toContain("An upgrade feature");
+    expect(output.indexOf("Upgraded successfully")).toBeLessThan(
+      output.indexOf("An upgrade feature"),
+    );
+    expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
+  });
+
+  test("does not announce notes for a failed upgrade", async () => {
+    const fixture = receiptFixture(false);
+    vi.mocked(fetchLatestVersion).mockResolvedValue("0.42.0");
+    vi.mocked(executeUpgrade).mockRejectedValue(new Error("download failed"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(noteResponse()));
+    await expect(commandUpgrade(["--channel", "stable"])).rejects.toThrow(
+      "download failed",
+    );
+    expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
+    expect(vi.mocked(console.error).mock.calls.flat().join("\n")).not.toContain(
+      "An upgrade feature",
+    );
+  });
+
+  test("offline replacement makes no notes request", async () => {
+    const fixture = receiptFixture(false);
+    downloadedBinary();
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    await commandUpgrade(["--offline", "--version", "0.42.0"]);
+    expect(readFileSync(fixture.executable, "utf8")).toBe(
+      "new verified binary",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  test("a notes failure does not prevent a successful replacement", async () => {
+    const fixture = receiptFixture(false);
+    vi.mocked(fetchLatestVersion).mockResolvedValue("0.42.0");
+    downloadedBinary();
+    await commandUpgrade(["--channel", "stable"]);
+    expect(readFileSync(fixture.executable, "utf8")).toBe(
+      "new verified binary",
+    );
+    expect(vi.mocked(console.error).mock.calls.flat().join("\n")).toContain(
+      "Release notes: https://github.com/BYK/loreai/releases/tag/0.42.0",
+    );
+  });
+
+  test("forced reinstall of the same version makes no notes request", async () => {
+    receiptFixture(false);
+    vi.mocked(fetchLatestVersion).mockResolvedValue(VERSION);
+    downloadedBinary();
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    await commandUpgrade(["--force"]);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  test("check reports the feature titles between installed and target stable versions", async () => {
+    receiptFixture(false);
+    vi.mocked(fetchLatestVersion).mockResolvedValue("0.42.0");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json([
+          {
+            tag_name: "0.42.0",
+            draft: false,
+            prerelease: false,
+            body: "### New Features ✨\n- Search project memory (#123)\n### Internal Changes 🔧\n- Hide this implementation detail",
+          },
+          {
+            tag_name: "0.41.0",
+            draft: false,
+            prerelease: false,
+            body: "### Bug Fixes 🐛\n- Preserve reader position (#122)",
+          },
+          {
+            tag_name: VERSION,
+            draft: false,
+            prerelease: false,
+            body: "### New Features ✨\n- Already installed feature",
+          },
+        ]),
+      ),
+    );
+    await commandUpgrade(["--check", "--channel", "stable"]);
+    const output = vi.mocked(console.error).mock.calls.flat().join("\n");
+    expect(output).toContain("Search project memory (#123)");
+    expect(output).toContain("Preserve reader position (#122)");
+    expect(output).not.toContain("Already installed feature");
+    expect(output).not.toContain("Hide this implementation detail");
   });
 });

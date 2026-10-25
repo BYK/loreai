@@ -20,12 +20,13 @@
  *   -h, --help           Show subcommand help text
  *
  * Adapted from Sentry CLI's upgrade command — stripped of brew/npm
- * detection, setup spawning, release notes, and Sentry SDK telemetry.
+ * detection, setup spawning, and Sentry SDK telemetry.
  */
 
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VERSION } from "./version";
+import { fetchReleaseNotes, formatReleaseNotes } from "./lib/release-notes";
 import { hashBinaryFile, isDowngrade, installBinary } from "./lib/binary";
 import { UpgradeError } from "./lib/errors";
 import {
@@ -331,7 +332,20 @@ Examples:
       setReleaseChannel(channel);
     }
 
-    // --check: just report status
+    const releaseNotes = () =>
+      offline
+        ? Promise.resolve(null)
+        : fetchReleaseNotes({
+            channel,
+            fromVersion: VERSION,
+            toVersion: target,
+          });
+    const showNotes = async (pending: ReturnType<typeof releaseNotes>) => {
+      const notes = await pending;
+      if (notes) console.error(formatReleaseNotes(notes));
+    };
+
+    // --check: report status and changes without installing
     if (flags.check) {
       if (VERSION === target) {
         console.error(`[lore] Already up to date (${VERSION})`);
@@ -339,6 +353,7 @@ Examples:
         const direction = isDowngrade(VERSION, target) ? "Downgrade" : "Update";
         console.error(`[lore] ${direction} available: ${VERSION} -> ${target}`);
         console.error(`[lore] Run 'lore upgrade' to update.`);
+        await showNotes(releaseNotes());
       }
       if (offline) {
         console.error("[lore] (resolved from cache — network unavailable)");
@@ -389,6 +404,8 @@ Examples:
       upgradeExecutable,
       provenance.receiptPath,
     );
+    // Fetch in parallel with the binary download; notes have their own short deadline.
+    const notes = releaseNotes();
     try {
       // Download the new binary
       const downloadResult = await executeUpgrade(
@@ -494,6 +511,7 @@ Examples:
         `[lore] ${downgrade ? "Downgraded" : "Upgraded"} successfully: ${VERSION} -> ${target}`,
       );
       console.error(`[lore] Binary installed at: ${installedPath}`);
+      await showNotes(notes);
       if (offline) {
         console.error("[lore] (upgraded from cached patches)");
       }
