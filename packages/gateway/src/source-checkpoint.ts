@@ -322,6 +322,7 @@ export class SourceCheckpoint {
       if (!candidate) throw new SourceDeltaUnavailableError();
       if (crossesToolBoundary(candidate, input.messages)) {
         input.timing.metric("source_delta_unavailable", 1);
+        input.timing.metric("source_delta_unavailable_tool_boundary", 1);
         throw new SourceDeltaUnavailableError(
           "The request crosses a retained tool-call boundary; retrying with the full conversation.",
         );

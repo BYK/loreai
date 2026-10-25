@@ -23803,6 +23803,10 @@ async function handleConversationTurnPrepared(
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
     copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+    preparationTiming.metric(
+      "context_boundary_offered",
+      contextBoundaryHeader && response.ok ? 1 : 0,
+    );
     if (contextBoundaryHeader && response.ok) {
       response.headers.set(CONTEXT_BOUNDARY_HEADER, contextBoundaryHeader);
     }
