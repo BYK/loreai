@@ -1530,7 +1530,7 @@ describe("SharingPanel auto-share control", () => {
       "Team review: optional",
     );
     expect(screen.getByTestId("sharing-panel")).toHaveTextContent(
-      "New team knowledge in this project is shared with Acme on the next sync without review, because the team doesn't require review.",
+      "Your team’s review rules still apply.",
     );
     fireEvent.click(toggle);
     const dialog = await screen.findByTestId("sharing-policy-confirmation");
@@ -1773,6 +1773,12 @@ describe("SharingPanel team link control", () => {
     const unlink = await screen.findByRole("button", { name: "Unlink" });
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
+    const unlinkDialog = await screen.findByTestId(
+      "sharing-unlink-confirmation",
+    );
+    fireEvent.click(
+      within(unlinkDialog).getByRole("button", { name: "Unlink project" }),
+    );
     await waitFor(() =>
       expect(linkProjectToTeam).toHaveBeenNthCalledWith(
         2,
@@ -1782,4 +1788,309 @@ describe("SharingPanel team link control", () => {
       ),
     );
   });
+});
+
+describe("guided project sharing", () => {
+  const unlinked: SharingStatus = {
+    linked: false,
+    team: null,
+    policy: { effective: "manual", project_override: null, team_default: null },
+    auto_share: false,
+    review_required: null,
+    state: "not_linked",
+    detail: null,
+  };
+
+  it("shows the three steps and device-wide background sync beside the project", async () => {
+    const runSync = vi.fn<ApiClient["runSync"]>(async () => ({
+      pushed: 2,
+      pulled: 1,
+      conflicts: 0,
+      skipped: 0,
+    }));
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ runSync }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Connected to Acme" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Sharing setup")).toHaveTextContent(
+      "Connect team",
+    );
+    expect(screen.getByLabelText("Sharing setup")).toHaveTextContent(
+      "Choose sharing",
+    );
+    expect(screen.getByLabelText("Sharing setup")).toHaveTextContent(
+      "Keep in sync",
+    );
+    expect(screen.getByTestId("sharing-sync")).toHaveTextContent(
+      "Background sync is enabled",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
+    expect(
+      await screen.findByText("Sync complete: pushed 2, pulled 1."),
+    ).toBeInTheDocument();
+    expect(runSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires explicit unlink confirmation and allows cancelling without a write", async () => {
+    const linkProjectToTeam = vi.fn<ApiClient["linkProjectToTeam"]>(
+      async () => unlinked,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ linkProjectToTeam }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Unlink" }));
+    let dialog = await screen.findByTestId("sharing-unlink-confirmation");
+    expect(dialog).toHaveTextContent("copies already on teammates’ devices");
+    expect(linkProjectToTeam).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Keep connected" }),
+    );
+    expect(linkProjectToTeam).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
+    dialog = await screen.findByTestId("sharing-unlink-confirmation");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Unlink project" }),
+    );
+    await waitFor(() =>
+      expect(linkProjectToTeam).toHaveBeenCalledWith(
+        "project-1",
+        null,
+        "team-1",
+      ),
+    );
+  });
+
+  it("explains disabled sync with an actionable setup command", async () => {
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => ({
+          ...automaticSharing,
+          state: "degraded",
+          detail: "Sync is disabled",
+        }),
+        getSyncStatus: async () => ({
+          enabled: false,
+          state: "disabled",
+          pending_changes: null,
+        }),
+      }),
+    );
+    expect(await screen.findByText("lore sync enable")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sync now" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Check again" }),
+    ).toBeInTheDocument();
+  });
+
+  it("explains an empty team list instead of leaving an inert picker", async () => {
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => unlinked,
+        getTeams: async () => ({ hosted: false, teams: [] }),
+      }),
+    );
+    expect(
+      await screen.findByRole("link", { name: "Find or create a team" }),
+    ).toHaveAttribute("href", "/ui/team");
+    expect(
+      screen.queryByRole("combobox", { name: "Link to team" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not allow connecting a viewer-only team", async () => {
+    const linkProjectToTeam = vi.fn<ApiClient["linkProjectToTeam"]>(
+      async () => automaticSharing,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => unlinked,
+        getTeams: async () => ({
+          hosted: false,
+          teams: [{ ...teams.teams[0]!, role: "viewer" }],
+        }),
+        linkProjectToTeam,
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "An editor or admin can connect this project to a team.",
+      ),
+    ).toBeInTheDocument();
+    expect(linkProjectToTeam).not.toHaveBeenCalled();
+  });
+
+  it("explains the consequence of turning automatic sharing off", async () => {
+    mount(() => <SharingPanel projectId="project-1" />, clientWith({}));
+    fireEvent.click(
+      await screen.findByRole("switch", { name: "Share automatically" }),
+    );
+    const dialog = await screen.findByTestId("sharing-policy-confirmation");
+    expect(dialog).toHaveTextContent(
+      "You’ll choose which new entries to propose",
+    );
+  });
+});
+
+describe("sharing sync status recovery", () => {
+  it("does not revive a stale enabled status while a failed read is retrying", async () => {
+    const pending = deferred<Awaited<ReturnType<ApiClient["getSyncStatus"]>>>();
+    const getSyncStatus = vi
+      .fn<ApiClient["getSyncStatus"]>()
+      .mockResolvedValueOnce({
+        enabled: true,
+        state: "idle",
+        pending_changes: 2,
+      })
+      .mockRejectedValueOnce(false)
+      .mockImplementationOnce(() => pending.promise);
+    const Harness = () => {
+      const ws = useWorkspace();
+      return (
+        <>
+          <SharingPanel projectId="project-1" />
+          <button onClick={() => ws.state.folk.refresh()}>
+            Refresh sync status
+          </button>
+        </>
+      );
+    };
+    mount(Harness, clientWith({ getSyncStatus }));
+    await screen.findByRole("heading", { name: "Background sync is enabled" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh sync status" }),
+    );
+    await screen.findByRole("heading", { name: "Sync status unavailable" });
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(getSyncStatus).toHaveBeenCalledTimes(3));
+    expect(
+      screen.queryByRole("button", { name: "Sync now" }),
+    ).not.toBeInTheDocument();
+    pending.resolve({ enabled: true, state: "idle", pending_changes: 0 });
+    await screen.findByRole("button", { name: "Sync now" });
+  });
+});
+
+describe("sharing consent and locked device recovery", () => {
+  const unlinked: SharingStatus = {
+    linked: false,
+    team: null,
+    policy: { effective: "manual", project_override: null, team_default: null },
+    auto_share: false,
+    review_required: null,
+    state: "not_linked",
+    detail: null,
+  };
+  it("connecting does not silently opt into automatic proposals", async () => {
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>();
+    const linkProjectToTeam = vi.fn<ApiClient["linkProjectToTeam"]>(
+      async () => manualSharing,
+    );
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({
+        getProjectSharing: async () => unlinked,
+        linkProjectToTeam,
+        setProjectAutoShare,
+      }),
+    );
+    const picker = await screen.findByRole("combobox", {
+      name: "Link to team",
+    });
+    expect(screen.getByTestId("sharing-panel")).toHaveTextContent(
+      "New entries stay private",
+    );
+    expect(linkProjectToTeam).not.toHaveBeenCalled();
+    fireEvent.change(picker, { target: { value: "team-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
+    expect(
+      await screen.findByRole("switch", { name: "Share automatically" }),
+    ).not.toBeChecked();
+    expect(setProjectAutoShare).not.toHaveBeenCalled();
+  });
+
+  it("offers encryption unlock and retry when an enabled unlinked device cannot sync", async () => {
+    const runSync = vi
+      .fn<ApiClient["runSync"]>()
+      .mockRejectedValueOnce(
+        new ApiError(
+          "http",
+          "/sync/run",
+          "Unlock encryption before syncing.",
+          409,
+          "encryption_locked",
+        ),
+      )
+      .mockResolvedValueOnce({
+        pushed: 1,
+        pulled: 0,
+        conflicts: 0,
+        skipped: 0,
+      });
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ getProjectSharing: async () => unlinked, runSync }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Unlock sync on this device",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("lore sync enable")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try sync again" }));
+    expect(
+      await screen.findByText("Sync complete: pushed 1, pulled 0."),
+    ).toBeInTheDocument();
+    expect(runSync).toHaveBeenCalledTimes(2);
+  });
+});
+
+it("explains how to restart an already-running hosted gateway", async () => {
+  mount(
+    () => <SharingPanel projectId="project-1" />,
+    clientWith({
+      getAccount: async () => ({
+        signed_in: false,
+        user: null,
+        provider: null,
+        expires_at: null,
+        state: "hosted",
+      }),
+    }),
+  );
+  expect(
+    await screen.findByText("lore stop && lore start --local --bg"),
+  ).toBeInTheDocument();
+  expect(screen.getByTestId("sharing-sync")).toHaveTextContent("Ctrl+C");
+});
+
+it("uses a newer sync-disabled result instead of checking the setup step from a stale status read", async () => {
+  mount(
+    () => <SharingPanel projectId="project-1" />,
+    clientWith({
+      runSync: async () => {
+        throw new ApiError(
+          "http",
+          "/sync/run",
+          "Enable sync before running it.",
+          409,
+          "sync_disabled",
+        );
+      },
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  await screen.findByRole("heading", { name: "Enable background sync" });
+  expect(screen.getByLabelText("Sharing setup")).not.toHaveTextContent(
+    "Enabled on this device",
+  );
 });

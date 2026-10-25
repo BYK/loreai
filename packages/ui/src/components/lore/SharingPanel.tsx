@@ -18,6 +18,8 @@ import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
 
 import { Button } from "../ui/button";
+import { Icon } from "~/components/shell/Icon";
+import { SharingSync } from "./SharingSync";
 import { requiresMutationReload } from "./mutation-errors";
 import {
   Dialog,
@@ -41,21 +43,6 @@ type PolicyMutationFailure = { cause: unknown; message: string };
 function teamLabel(status: SharingStatus): string {
   if (!status.team) return "No team";
   return status.team.name ?? "Unnamed team";
-}
-
-function explanation(status: SharingStatus): string {
-  switch (status.state) {
-    case "not_linked":
-      return "This project is not linked to a team; no one else sees its knowledge.";
-    case "linked":
-      return status.policy.effective === "auto"
-        ? "New knowledge is shared with the team automatically."
-        : "New knowledge waits for review before it is shared with the team.";
-    case "locked":
-      return "Team content stays on this device until encryption is unlocked with `lore sync enable`.";
-    case "degraded":
-      return "Team content is not syncing until this is resolved.";
-  }
 }
 
 /** Project sharing status, policy and team link controls. */
@@ -87,6 +74,19 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     contextAvailable() &&
     !sharing.loading() &&
     sharing.error() === undefined;
+  const hasSignedAccount = () => {
+    const current = folk.confirmedAccount();
+    return (
+      current?.signed_in === true &&
+      current.state === "signed_in" &&
+      current.user !== null
+    );
+  };
+  const backgroundReady = () =>
+    hasSignedAccount() &&
+    folk.confirmedSync()?.enabled === true &&
+    folk.sync.error() === undefined &&
+    !folk.syncBlocker();
   const signedAccountReady = () =>
     statusReady() &&
     folk.account.data()?.signed_in === true &&
@@ -98,6 +98,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   );
   const [receipt, setReceipt] = createSignal<SharingStatus>();
   const [confirmAutoShare, setConfirmAutoShare] = createSignal(false);
+  const [confirmUnlink, setConfirmUnlink] = createSignal(false);
   const [nextAutoShare, setNextAutoShare] = createSignal(false);
   const [savingPolicy, setSavingPolicy] = createSignal(false);
   const [policyError, setPolicyError] =
@@ -114,8 +115,25 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     selectedTeam() !== "" &&
     !folk.teams.loading() &&
     folk.teams.error() === undefined &&
-    teams().some((team) => team.id === selectedTeam());
+    teams().some(
+      (team) => team.id === selectedTeam() && team.role !== "viewer",
+    );
   const shownStatus = () => receipt() ?? sharing.data();
+  const writableTeams = () => teams().filter((team) => team.role !== "viewer");
+  const linkedTeam = () =>
+    teams().find((team) => team.id === shownStatus()?.team?.id);
+  const busy = () => savingPolicy() || savingLink();
+  const refresh = () => {
+    reload();
+    folk.refresh();
+  };
+  createEffect(
+    on(
+      () => shownStatus()?.team?.id,
+      () => setConfirmUnlink(false),
+    ),
+  );
+
   let actionEpoch = 0;
   onCleanup(() => {
     actionEpoch++;
@@ -130,6 +148,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       setPolicyError(null);
       setLinkError(null);
       setConfirmAutoShare(false);
+      setConfirmUnlink(false);
       setSelectedTeam("");
       setLinkSuccess("");
     }),
@@ -140,7 +159,10 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     }),
   );
   createEffect(() => {
-    if (selectedTeam() && !teams().some((team) => team.id === selectedTeam()))
+    if (
+      selectedTeam() &&
+      !writableTeams().some((team) => team.id === selectedTeam())
+    )
       setSelectedTeam("");
   });
   const reload = () => {
@@ -159,7 +181,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   };
   const updateAutoShare = async () => {
     const current = shownStatus();
-    if (!current || !current.linked || savingPolicy() || !statusReady()) {
+    if (!current || !current.linked || busy() || !statusReady()) {
       return;
     }
     const owner = accountId();
@@ -204,7 +226,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     const current = shownStatus();
     if (
       !current ||
-      savingLink() ||
+      busy() ||
       !statusReady() ||
       (scopeId !== null && !selectedTeamValid())
     )
@@ -234,6 +256,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
         return;
       }
       setReceipt(updated);
+      setConfirmUnlink(false);
       setSelectedTeam("");
       setLinkSuccess(scopeId ? "Project linked to team." : "Project unlinked.");
       ws.state.folk.refresh();
@@ -261,192 +284,495 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     return isApiError(error) && error.kind === "unauthorized";
   };
   return (
-    <section data-testid="sharing-panel" class="border-b border-line py-5">
-      <div class="eyebrow mb-2">Sharing</div>
+    <section
+      data-testid="sharing-panel"
+      class="my-5 overflow-hidden rounded-xl border border-line bg-surface"
+    >
       <Switch
         fallback={
-          <StateCard kind="loading" title="Loading sharing status" compact />
+          <div class="p-5">
+            <StateCard kind="loading" title="Loading sharing status" compact />
+          </div>
         }
       >
         <Match when={shownStatus()}>
           {(status) => (
-            <div
-              class="space-y-1.5 text-sm"
-              data-sharing-state={status().state}
-            >
-              <div class="flex flex-wrap items-center gap-2">
-                <span data-testid="sharing-summary">
-                  {STATE_LABEL[status().state]} · {teamLabel(status())} ·
-                  policy: {status().policy.effective}
-                </span>
-              </div>
-              <Show when={status().detail}>
-                {(detail) => (
-                  <div data-testid="sharing-detail" class="font-medium">
-                    {detail()}
-                  </div>
-                )}
-              </Show>
-              <div class="text-[13px] text-muted">{explanation(status())}</div>
-              <Show when={status().linked}>
-                <p class="text-xs text-muted" data-testid="sharing-team-review">
-                  Team review:{" "}
-                  {status().review_required === true
-                    ? "required"
-                    : status().review_required === false
-                      ? "optional"
-                      : "unavailable"}
-                </p>
-                <label class="mt-2 flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    aria-label="Share automatically"
-                    data-testid="sharing-auto-share"
-                    checked={status().auto_share}
-                    disabled={savingPolicy() || !statusReady()}
-                    onChange={(event) => {
-                      const next = event.currentTarget.checked;
-                      event.currentTarget.checked = status().auto_share;
-                      setNextAutoShare(next);
-                      setPolicyError(null);
-                      setConfirmAutoShare(true);
-                    }}
-                  />
-                  <span>
-                    Share automatically
-                    <span class="mt-1 block text-xs text-muted">
-                      {status().review_required === false
-                        ? `New team knowledge in this project is shared with ${teamLabel(status())} on the next sync without review, because the team doesn't require review.`
-                        : `New team knowledge in this project is sent to ${teamLabel(status())} as review requests on the next sync.`}
-                    </span>
+            <div data-sharing-state={status().state}>
+              <div class="border-b border-line px-4 py-5 sm:px-5">
+                <div class="flex items-start gap-3">
+                  <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-soft-text">
+                    <Icon name="users" class="size-5" />
                   </span>
-                </label>
-              </Show>
-              <Show when={policyError() && !confirmAutoShare()}>
-                <p class="mt-2 text-sm text-danger" role="alert">
-                  {errorText()}
-                </p>
-              </Show>
-              <Show
-                when={
-                  !confirmAutoShare() &&
-                  policyError() &&
-                  requiresMutationReload(policyError()?.cause)
-                }
-              >
-                <Button
-                  class="mt-2"
-                  size="sm"
-                  variant="outline"
-                  data-testid="sharing-reload-policy"
-                  onClick={reload}
-                >
-                  Reload status
-                </Button>
-              </Show>
-              <div data-testid="sharing-policy" class="text-xs text-muted">
-                Promotion policy {status().policy.effective} · project override{" "}
-                {status().policy.project_override ?? "none"} · team default{" "}
-                {status().policy.team_default ?? "none"}
-              </div>
-              <Show when={status().linked}>
-                <Button
-                  pending={savingLink()}
-                  class="mt-2"
-                  size="sm"
-                  variant="outline"
-                  data-testid="sharing-unlink-team"
-                  disabled={savingLink() || !statusReady()}
-                  onClick={() => void updateProjectLink(null)}
-                >
-                  {savingLink() ? "Unlinking…" : "Unlink"}
-                </Button>
-              </Show>
-              <Show when={!status().linked}>
-                <div class="mt-2 flex flex-wrap items-end gap-2">
-                  <label class="text-sm">
-                    Link to team
-                    <select
-                      class="mt-1 block h-9 rounded-md border border-line bg-surface px-2"
-                      aria-label="Link to team"
-                      data-testid="sharing-team-picker"
-                      value={selectedTeam()}
-                      onChange={(event) =>
-                        setSelectedTeam(event.currentTarget.value)
-                      }
-                    >
-                      <option value="" selected={!selectedTeam()}>
-                        Choose a team
-                      </option>
-                      <For each={teams()}>
-                        {(team) => (
-                          <option
-                            value={team.id}
-                            selected={selectedTeam() === team.id}
-                          >
-                            {team.name ?? team.id}
-                          </option>
-                        )}
-                      </For>
-                    </select>
-                  </label>
-                  <Button
-                    pending={savingLink()}
-                    size="sm"
-                    variant="outline"
-                    data-testid="sharing-link-team"
-                    disabled={savingLink() || !selectedTeamValid()}
-                    onClick={() => void updateProjectLink(selectedTeam())}
-                  >
-                    {savingLink() ? "Linking…" : "Link to team"}
-                  </Button>
+                  <div class="min-w-0 flex-1">
+                    <div class="eyebrow mb-1">Team memory</div>
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <h2 class="max-w-full min-w-0 text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">
+                        {status().linked
+                          ? `Connected to ${teamLabel(status())}`
+                          : "Share knowledge with your team"}
+                      </h2>
+                      <span class="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs text-muted">
+                        <Icon
+                          name={status().linked ? "link" : "lock"}
+                          class="size-3"
+                        />
+                        {status().linked ? "Team connected" : "Not connected"}
+                      </span>
+                    </div>
+                    <p class="mt-1.5 max-w-xl text-sm leading-relaxed text-muted">
+                      {status().linked
+                        ? "Choose what you share. Lore takes care of moving it between devices."
+                        : "Connect this project, choose how knowledge is shared, and keep your team in the loop."}
+                    </p>
+                  </div>
                 </div>
-              </Show>
-              <Show when={linkSuccess()}>
-                <p class="mt-2 text-sm text-muted" role="status">
-                  {linkSuccess()}
-                </p>
-              </Show>
-              <Show when={linkError()}>
-                <p class="mt-2 text-sm text-danger" role="alert">
-                  {linkErrorText()}
-                </p>
-              </Show>
-              <Show
-                when={linkError() && requiresMutationReload(linkError()?.cause)}
-              >
-                <Button
-                  class="mt-2"
-                  size="sm"
-                  variant="outline"
-                  data-testid="sharing-reload-link"
-                  onClick={reload}
+                <ol
+                  aria-label="Sharing setup"
+                  class="mt-5 grid list-none grid-cols-3 gap-2 p-0"
                 >
-                  Reload status
-                </Button>
-              </Show>
+                  <For
+                    each={[
+                      {
+                        label: "Connect team",
+                        detail: status().linked
+                          ? teamLabel(status())
+                          : "Choose a team",
+                        done: status().linked,
+                      },
+                      {
+                        label: "Choose sharing",
+                        detail: status().linked
+                          ? status().auto_share
+                            ? "Automatic"
+                            : "You choose"
+                          : "Stay in control",
+                        done: status().linked,
+                      },
+                      {
+                        label: "Keep in sync",
+                        detail:
+                          status().state === "linked" && backgroundReady()
+                            ? "Enabled on this device"
+                            : "Check setup",
+                        done:
+                          status().state === "linked" &&
+                          backgroundReady() === true,
+                      },
+                    ]}
+                  >
+                    {(step, index) => (
+                      <li class="min-w-0 rounded-lg border border-line bg-bg/50 px-2.5 py-3 sm:px-3">
+                        <span class="mb-2 flex size-5 items-center justify-center rounded-full bg-soft text-[11px] font-semibold text-accent">
+                          {step.done ? (
+                            <Icon name="check" class="size-3" />
+                          ) : (
+                            index() + 1
+                          )}
+                        </span>
+                        <span class="block text-xs font-medium sm:text-sm">
+                          {step.label}
+                        </span>
+                        <span class="mt-1 block truncate text-[11px] text-muted sm:text-xs">
+                          {step.detail}
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </div>
+              <div class="space-y-4 px-4 py-4 sm:px-5">
+                <Show when={sharing.error() !== undefined}>
+                  <p role="alert" class="text-sm text-danger">
+                    Sharing status could not be refreshed.{" "}
+                    <Button
+                      variant="link"
+                      size="sm"
+                      class="h-11 md:h-9"
+                      onClick={refresh}
+                    >
+                      Try again
+                    </Button>
+                  </p>
+                </Show>
+                <Show
+                  when={status().linked}
+                  fallback={
+                    <Switch>
+                      <Match when={!hasSignedAccount()}>
+                        <p class="text-sm text-muted">
+                          Your project’s sharing settings are kept while account
+                          access is restored.
+                        </p>
+                      </Match>
+                      <Match
+                        when={
+                          folk.teams.data() === undefined &&
+                          folk.teams.error() === undefined
+                        }
+                      >
+                        <p class="text-sm text-muted">Finding your teams…</p>
+                      </Match>
+                      <Match when={folk.teams.error() !== undefined}>
+                        <div>
+                          <p class="text-sm text-muted">
+                            Your teams could not be loaded.
+                          </p>
+                          <Button
+                            size="sm"
+                            class="h-11 md:h-9"
+                            variant="outline"
+                            onClick={refresh}
+                          >
+                            Retry teams
+                          </Button>
+                        </div>
+                      </Match>
+                      <Match when={teams().length === 0}>
+                        <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-bg/50 p-3">
+                          <div>
+                            <h3 class="text-sm font-medium">
+                              Find your people
+                            </h3>
+                            <p class="mt-1 text-xs text-muted">
+                              Join an existing team or create one to start
+                              sharing.
+                            </p>
+                          </div>
+                          <Button
+                            as="a"
+                            href="/ui/team"
+                            size="sm"
+                            class="h-11 md:h-9"
+                            variant="outline"
+                            icon="users"
+                          >
+                            Find or create a team
+                          </Button>
+                        </div>
+                      </Match>
+                      <Match when={writableTeams().length === 0}>
+                        <p class="text-sm text-muted">
+                          An editor or admin can connect this project to a team.
+                        </p>
+                      </Match>
+                      <Match when={true}>
+                        <div class="flex flex-wrap items-end gap-3">
+                          <label class="min-w-0 flex-1 text-sm font-medium">
+                            Connect to a team
+                            <select
+                              class="mt-2 block h-11 w-full min-w-0 rounded-md border border-line bg-bg px-3 text-sm"
+                              aria-label="Link to team"
+                              data-testid="sharing-team-picker"
+                              value={selectedTeam()}
+                              disabled={busy() || !signedAccountReady()}
+                              onChange={(event) =>
+                                setSelectedTeam(event.currentTarget.value)
+                              }
+                            >
+                              <option value="" selected={!selectedTeam()}>
+                                Choose a team
+                              </option>
+                              <For each={writableTeams()}>
+                                {(team) => (
+                                  <option
+                                    value={team.id}
+                                    selected={selectedTeam() === team.id}
+                                  >
+                                    {team.name ?? "Unnamed team"}
+                                  </option>
+                                )}
+                              </For>
+                            </select>
+                          </label>
+                          <Button
+                            class="h-11"
+                            pending={savingLink()}
+                            icon="link"
+                            data-testid="sharing-link-team"
+                            disabled={busy() || !selectedTeamValid()}
+                            onClick={() =>
+                              void updateProjectLink(selectedTeam())
+                            }
+                          >
+                            {savingLink() ? "Linking…" : "Link to team"}
+                          </Button>
+                        </div>
+                        <p class="text-xs leading-relaxed text-muted">
+                          {status().policy.project_override === "auto"
+                            ? "Your saved automatic-sharing preference will apply to this team. The team’s review rules still apply."
+                            : "Connecting chooses where to share. New entries stay private until you propose them and any required review is complete."}
+                        </p>
+                      </Match>
+                    </Switch>
+                  }
+                >
+                  <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex min-w-0 items-center gap-2.5">
+                      <span class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-soft text-sm font-semibold text-muted">
+                        {teamLabel(status()).slice(0, 1).toUpperCase()}
+                      </span>
+                      <div class="min-w-0">
+                        <p class="truncate text-sm font-medium">
+                          {teamLabel(status())}
+                        </p>
+                        <p class="text-xs text-muted">
+                          {linkedTeam()
+                            ? `${linkedTeam()!.member_count} members · ${linkedTeam()!.role}`
+                            : "Project team"}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-11 md:h-9"
+                      data-testid="sharing-unlink-team"
+                      disabled={busy() || !statusReady()}
+                      onClick={() => {
+                        setLinkError(null);
+                        setConfirmUnlink(true);
+                      }}
+                    >
+                      Unlink
+                    </Button>
+                  </div>
+                  <div class="rounded-lg border border-line p-3.5 sm:p-4">
+                    <label class="flex cursor-pointer items-start gap-3">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        aria-label="Share automatically"
+                        data-testid="sharing-auto-share"
+                        class="peer sr-only"
+                        checked={status().auto_share}
+                        disabled={busy() || !statusReady()}
+                        onChange={(event) => {
+                          const next = event.currentTarget.checked;
+                          event.currentTarget.checked = status().auto_share;
+                          setNextAutoShare(next);
+                          setPolicyError(null);
+                          setConfirmAutoShare(true);
+                        }}
+                      />
+                      <span
+                        aria-hidden="true"
+                        class="relative mt-0.5 h-6 w-10 shrink-0 rounded-full bg-line peer-checked:bg-accent peer-checked:[&>span]:translate-x-4 peer-focus-visible:[&>span]:transition-none peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-disabled:opacity-50"
+                      >
+                        <span class="absolute left-1 top-1 size-4 rounded-full bg-surface shadow-sm motion-safe:transition-transform motion-safe:duration-150" />
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block text-sm font-medium">
+                          Share automatically
+                        </span>
+                        <span class="mt-1 block text-xs leading-relaxed text-muted">
+                          {status().auto_share
+                            ? "New team knowledge is proposed automatically. Your team’s review rules still apply."
+                            : "You choose which entries to propose. Turn this on to propose new team knowledge automatically."}
+                        </span>
+                      </span>
+                    </label>
+                    <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-muted">
+                      <span
+                        class="inline-flex items-center gap-1.5"
+                        data-testid="sharing-team-review"
+                      >
+                        <Icon name="lock" class="size-3" />
+                        Team review:{" "}
+                        {status().review_required === true
+                          ? "required"
+                          : status().review_required === false
+                            ? "optional"
+                            : "unavailable"}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        {status().auto_share ? "New entries" : "You propose"} →{" "}
+                        {status().review_required === false
+                          ? "Shared on the next sync"
+                          : "Review → Shared after approval"}
+                      </span>
+                    </div>
+                  </div>
+                </Show>
+                <Show when={linkSuccess()}>
+                  <p
+                    class="flex items-center gap-2 text-sm text-accent"
+                    role="status"
+                  >
+                    <Icon name="check" />
+                    {linkSuccess()}
+                  </p>
+                </Show>
+                <Show when={policyError() && !confirmAutoShare()}>
+                  <p class="text-sm text-danger" role="alert">
+                    {errorText()}
+                  </p>
+                </Show>
+                <Show
+                  when={
+                    !confirmAutoShare() &&
+                    policyError() &&
+                    requiresMutationReload(policyError()?.cause)
+                  }
+                >
+                  <Button
+                    size="sm"
+                    class="h-11 md:h-9"
+                    variant="outline"
+                    data-testid="sharing-reload-policy"
+                    onClick={reload}
+                  >
+                    Reload status
+                  </Button>
+                </Show>
+                <Show when={linkError() && !confirmUnlink()}>
+                  <p class="text-sm text-danger" role="alert">
+                    {linkErrorText()}
+                  </p>
+                </Show>
+                <Show
+                  when={
+                    !confirmUnlink() &&
+                    linkError() &&
+                    requiresMutationReload(linkError()?.cause)
+                  }
+                >
+                  <Button
+                    size="sm"
+                    class="h-11 md:h-9"
+                    variant="outline"
+                    data-testid="sharing-reload-link"
+                    onClick={reload}
+                  >
+                    Reload status
+                  </Button>
+                </Show>
+              </div>
+              <SharingSync
+                status={status()}
+                ready={statusReady()}
+                busy={busy()}
+                onRefresh={refresh}
+              />
+              <details class="border-t border-line px-4 py-3 text-xs text-muted sm:px-5">
+                <summary class="cursor-pointer select-none hover:text-text">
+                  Sharing details
+                </summary>
+                <div class="mt-2 space-y-1 leading-relaxed">
+                  <p data-testid="sharing-summary">
+                    {STATE_LABEL[status().state]} · {teamLabel(status())} ·
+                    policy: {status().policy.effective}
+                  </p>
+                  <p data-testid="sharing-policy">
+                    Project preference:{" "}
+                    {status().policy.project_override ?? "none"} · team default:{" "}
+                    {status().policy.team_default ?? "none"}
+                  </p>
+                  <Show when={status().detail}>
+                    <p data-testid="sharing-detail">{status().detail}</p>
+                  </Show>
+                </div>
+              </details>
             </div>
           )}
         </Match>
         <Match when={hidden()}>
-          <StateCard kind="locked" title="Sharing status hidden" compact>
-            This gateway does not expose sharing status to this browser.
-          </StateCard>
+          <div class="p-5">
+            <StateCard kind="locked" title="Sharing status hidden" compact>
+              This gateway does not expose sharing status to this browser.
+            </StateCard>
+          </div>
         </Match>
         <Match when={sharing.error() !== undefined}>
-          <StateCard
-            kind="empty"
-            title="Sharing status not available"
-            compact
-            action={
-              <Button variant="outline" size="sm" onClick={reload}>
-                Retry
-              </Button>
-            }
-          />
+          <div class="p-5">
+            <StateCard
+              kind="empty"
+              title="Sharing status not available"
+              compact
+              action={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-11 md:h-9"
+                  onClick={refresh}
+                >
+                  Retry
+                </Button>
+              }
+            />
+          </div>
         </Match>
       </Switch>
+      <Dialog
+        open={confirmUnlink()}
+        onOpenChange={(open) => {
+          if (!savingLink()) setConfirmUnlink(open);
+        }}
+      >
+        <DialogContent data-testid="sharing-unlink-confirmation">
+          <DialogHeader>
+            <DialogTitle>
+              Unlink from{" "}
+              {shownStatus() ? teamLabel(shownStatus()!) : "this team"}?
+            </DialogTitle>
+            <DialogDescription>
+              This stops future sharing from this project. It does not remove
+              copies already on teammates’ devices. Your team membership and
+              local memory stay unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          <Show when={linkError()}>
+            <p
+              role="alert"
+              class="text-sm text-danger"
+              tabIndex={-1}
+              ref={(element) => queueMicrotask(() => element.focus())}
+            >
+              {linkErrorText()}
+            </p>
+          </Show>
+          <Show
+            when={linkError() && requiresMutationReload(linkError()?.cause)}
+          >
+            <Button
+              size="sm"
+              class="h-11 md:h-9"
+              variant="outline"
+              onClick={() => {
+                setConfirmUnlink(false);
+                reload();
+              }}
+            >
+              Reload status
+            </Button>
+          </Show>
+          <DialogFooter>
+            <Button
+              size="sm"
+              class="h-11 md:h-9"
+              variant="outline"
+              disabled={savingLink()}
+              onClick={() => setConfirmUnlink(false)}
+            >
+              Keep connected
+            </Button>
+            <Button
+              size="sm"
+              class="h-11 md:h-9"
+              variant="destructive"
+              pending={savingLink()}
+              disabled={
+                busy() ||
+                !statusReady() ||
+                (!!linkError() && requiresMutationReload(linkError()?.cause))
+              }
+              onClick={() => void updateProjectLink(null)}
+            >
+              {savingLink() ? "Unlinking…" : "Unlink project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={confirmAutoShare()} onOpenChange={closeAutoShareDialog}>
         <DialogContent data-testid="sharing-policy-confirmation">
           <DialogHeader>
@@ -456,9 +782,11 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                 : "Turn off automatic sharing?"}
             </DialogTitle>
             <DialogDescription>
-              {shownStatus()?.review_required === false
-                ? `New team knowledge in this project is shared with ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} on the next sync without review, because the team doesn't require review.`
-                : `New team knowledge in this project is sent to ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} as review requests on the next sync.`}
+              {!nextAutoShare()
+                ? "You’ll choose which new entries to propose. Copies already shared with the team are not removed."
+                : shownStatus()?.review_required === false
+                  ? `New team knowledge in this project is shared with ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} on the next sync without review, because the team doesn't require review.`
+                  : `New team knowledge in this project is sent to ${shownStatus() ? teamLabel(shownStatus()!) : "the team"} as review requests on the next sync.`}
             </DialogDescription>
           </DialogHeader>
           <Show when={confirmAutoShare() && policyError()}>
@@ -481,6 +809,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           >
             <Button
               size="sm"
+              class="h-11 md:h-9"
               variant="outline"
               data-testid="sharing-reload-policy"
               onClick={reloadAfterSharingError}
@@ -491,6 +820,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           <DialogFooter>
             <Button
               size="sm"
+              class="h-11 md:h-9"
               variant="outline"
               disabled={savingPolicy()}
               onClick={() => setConfirmAutoShare(false)}
@@ -501,6 +831,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               pending={savingPolicy()}
               icon="save"
               size="sm"
+              class="h-11 md:h-9"
               disabled={
                 savingPolicy() ||
                 !statusReady() ||

@@ -785,6 +785,9 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.getByRole("button", { name: "Link to team" }).click();
     await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
     await page.getByRole("button", { name: "Unlink" }).click();
+    await page
+      .getByRole("button", { name: "Unlink project", exact: true })
+      .click();
     await expect(page.getByTestId("sharing-summary")).toContainText(
       "Not linked",
     );

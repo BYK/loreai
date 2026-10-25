@@ -1,7 +1,14 @@
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+} from "solid-js";
 
-import type { ApiClient } from "~/lib/api";
-import type { AccountStatus } from "~/contracts";
+import { isApiError, type ApiClient } from "~/lib/api";
+import type { AccountStatus, SyncRunReceipt, SyncStatus } from "~/contracts";
 import { createLoader } from "~/lib/loader";
 
 /**
@@ -18,6 +25,10 @@ export function createFolkState({ client }: { client: ApiClient }) {
   const sync = createLoader(always, async (_key, signal) =>
     client.getSyncStatus(signal),
   );
+  const confirmedSync = createMemo<SyncStatus | undefined>((previous) => {
+    if (sync.error() !== undefined) return undefined;
+    return sync.loading() ? previous : sync.data();
+  });
   // Keep the last confirmed account during healthy background reads, including
   // drawer remounts. A failed read invalidates it: clearing the loader's error
   // for a retry must not revive its retained (now unverified) data.
@@ -62,20 +73,80 @@ export function createFolkState({ client }: { client: ApiClient }) {
   // Navigation can unmount the account surface while a sync is in flight.
   // Keep its guard and result on the workspace, alongside the status reads.
   const [syncing, setSyncing] = createSignal(false);
+  const [syncBlocker, setSyncBlocker] = createSignal<
+    "encryption_locked" | "sync_disabled" | "unauthorized" | null
+  >(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
+  const [syncResult, setSyncResult] = createSignal<SyncRunReceipt | null>(null);
+  const syncAttention = createMemo(() => {
+    const result = syncResult();
+    return (
+      !!result &&
+      (result.conflicts > 0 || result.skipped > 0 || !!result.quotaHit)
+    );
+  });
+  let syncGeneration = 0;
+  const syncOwner = createMemo(() => {
+    const current = confirmedAccount();
+    return current?.signed_in && current.state === "signed_in"
+      ? (current.user?.id ?? null)
+      : null;
+  });
+  createEffect(
+    on(syncOwner, () => {
+      syncGeneration++;
+      setSyncReceipt(null);
+      setSyncError(null);
+      setSyncResult(null);
+      setSyncBlocker(null);
+    }),
+  );
+  onCleanup(() => {
+    syncGeneration++;
+  });
   const runSync = async () => {
     if (syncing()) return;
+    const generation = syncGeneration;
     setSyncing(true);
+    setSyncResult(null);
+    setSyncBlocker(null);
     setSyncError(null);
     setSyncReceipt(null);
     try {
       const result = await client.runSync();
+      if (generation !== syncGeneration) return;
+      if (result.notAuthed) {
+        setSyncBlocker("unauthorized");
+        setSyncError("Sign in again before syncing.");
+        refresh();
+        return;
+      }
+      setSyncResult(result);
+      const issues = [
+        result.conflicts > 0
+          ? `${result.conflicts} ${result.conflicts === 1 ? "conflict needs" : "conflicts need"} review`
+          : null,
+        result.skipped > 0
+          ? `${result.skipped} ${result.skipped === 1 ? "change" : "changes"} skipped`
+          : null,
+        result.quotaHit ? "Uploads paused by your sync quota" : null,
+      ].filter(Boolean);
       setSyncReceipt(
-        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
+        `${issues.length ? "Sync needs attention" : "Sync complete"}: pushed ${result.pushed}, pulled ${result.pulled}.${issues.length ? ` ${issues.join(". ")}.` : ""}`,
       );
       refresh();
     } catch (error) {
+      if (generation !== syncGeneration) return;
+      const code = isApiError(error) ? error.code : null;
+      if (
+        code === "encryption_locked" ||
+        code === "sync_disabled" ||
+        code === "unauthorized"
+      )
+        setSyncBlocker(code);
+      else if (isApiError(error) && error.kind === "unauthorized")
+        setSyncBlocker("unauthorized");
       setSyncError(error instanceof Error ? error.message : "Sync failed.");
     } finally {
       setSyncing(false);
@@ -84,11 +155,15 @@ export function createFolkState({ client }: { client: ApiClient }) {
   return {
     account,
     confirmedAccount,
+    confirmedSync,
     sync,
     teams,
     syncing,
     syncError,
+    syncBlocker,
     syncReceipt,
+    syncResult,
+    syncAttention,
     runSync,
     loadTeams() {
       if (!teamsWanted()) setTeamsWanted(true);

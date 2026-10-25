@@ -72,6 +72,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </Button>
         </div>
       </DocHeader>
+      <SharingPanel projectId={props.project.id} />
       <section data-testid="health" class="border-b border-line py-5">
         <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div class="eyebrow">Memory health</div>
@@ -220,7 +221,6 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         </Show>
       </section>
       <ProjectActions project={props.project} />
-      <SharingPanel projectId={props.project.id} />
     </div>
   );
 };

@@ -285,6 +285,9 @@ describe("SharingPanel account polling", () => {
     const unlink = await screen.findByTestId("sharing-unlink-team");
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Unlink project" }),
+    );
     await waitFor(() =>
       expect(linkProjectToTeam).toHaveBeenCalledWith("p-1", null, "team-a"),
     );
@@ -417,12 +420,28 @@ describe("SharingPanel account polling", () => {
             ? { hosted: false, teams: [] }
             : sharingTeams,
       });
-      const picker = await chooseSharingTeam();
+      await chooseSharingTeam();
       changed = true;
       fireEvent.click(screen.getByText("Refresh account and teams"));
-      await waitFor(() => expect(picker).toHaveValue(""));
-      expect(screen.getByTestId("sharing-link-team")).toBeDisabled();
-      fireEvent.click(screen.getByTestId("sharing-link-team"));
+      // Lost access replaces the picker with setup guidance; a new account
+      // gets a fresh empty picker. Neither surface can submit the old team.
+      await waitFor(() =>
+        expect(screen.getByTestId("sharing-account-owner")).toHaveAttribute(
+          "data-loading",
+          "false",
+        ),
+      );
+      await waitFor(() =>
+        expect(
+          screen
+            .queryAllByTestId<HTMLSelectElement>("sharing-team-picker")
+            .map((picker) => picker.value),
+        ).not.toContain("team-a"),
+      );
+      for (const button of screen.queryAllByTestId("sharing-link-team")) {
+        expect(button).toBeDisabled();
+        fireEvent.click(button);
+      }
       expect(linkProjectToTeam).not.toHaveBeenCalled();
     },
   );

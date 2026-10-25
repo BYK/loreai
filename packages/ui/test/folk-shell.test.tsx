@@ -198,9 +198,12 @@ describe("Folk shell status", () => {
     fireEvent.click(await screen.findByTestId("folk-status"));
     fireEvent.click(await screen.findByTestId("sync-now"));
     expect(
-      await screen.findByText("Sync complete: pushed 2, pulled 3.", {
-        exact: true,
-      }),
+      await screen.findByText(
+        "Sync needs attention: pushed 2, pulled 3. 1 change skipped.",
+        {
+          exact: true,
+        },
+      ),
     ).toBeInTheDocument();
     expect(runSync).toHaveBeenCalledTimes(1);
   });
@@ -904,4 +907,65 @@ it("retains a pending sync and its receipt across mobile drawer remounts", async
     await screen.findByText("Sync complete: pushed 2, pulled 3."),
   ).toBeVisible();
   vi.unstubAllGlobals();
+});
+
+it("does not describe a quota-paused sync as complete", async () => {
+  mount(
+    client({
+      getAccount: async () => ({
+        signed_in: true,
+        user: { id: "user-1", email: null, display_name: "Ada" },
+        provider: "github",
+        expires_at: null,
+        state: "signed_in",
+      }),
+      getSyncStatus: async () => IDLE,
+      runSync: async () => ({
+        pushed: 0,
+        pulled: 2,
+        conflicts: 1,
+        skipped: 3,
+        quotaHit: { table: "knowledge", message: "Quota reached" },
+      }),
+    }),
+  );
+  fireEvent.click(await screen.findByTestId("folk-status"));
+  fireEvent.click(await screen.findByTestId("sync-now"));
+  expect(
+    await screen.findByText(/Uploads paused by your sync quota/),
+  ).toHaveTextContent("1 conflict needs review");
+  expect(screen.queryByText(/Sync complete:/)).not.toBeInTheDocument();
+});
+
+it("forgets an in-flight sync receipt after the account changes", async () => {
+  let owner = "owner-a";
+  let resolveSync!: (result: Awaited<ReturnType<ApiClient["runSync"]>>) => void;
+  mount(
+    client({
+      getAccount: async () => ({
+        signed_in: true,
+        user: { id: owner, email: null, display_name: owner },
+        provider: "github",
+        expires_at: null,
+        state: "signed_in",
+      }),
+      getSyncStatus: async () => IDLE,
+      runSync: () =>
+        new Promise((resolve) => {
+          resolveSync = resolve;
+        }),
+    }),
+  );
+  const badge = await screen.findByTestId("folk-status");
+  fireEvent.click(badge);
+  fireEvent.click(await screen.findByTestId("sync-now"));
+  owner = "owner-b";
+  fireEvent.click(badge);
+  fireEvent.click(badge);
+  await waitFor(() =>
+    expect(screen.getByTestId("folk-account")).toHaveTextContent("owner-b"),
+  );
+  resolveSync({ pushed: 99, pulled: 88, conflicts: 0, skipped: 0 });
+  await waitFor(() => expect(screen.getByTestId("sync-now")).toBeEnabled());
+  expect(screen.queryByText(/pushed 99/)).not.toBeInTheDocument();
 });
