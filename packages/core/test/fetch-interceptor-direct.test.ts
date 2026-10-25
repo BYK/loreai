@@ -34,6 +34,14 @@ function install() {
   return getHeaders;
 }
 
+function requestURL(input: RequestInfo | URL): string {
+  return typeof input === "string"
+    ? input
+    : input instanceof URL
+      ? input.href
+      : input.url;
+}
+
 async function send(items: unknown[], extra: RequestInit = {}) {
   return fetch(url, {
     method: "POST",
@@ -172,7 +180,7 @@ test("keeps the validated destination when a header getter mutates its URL", asy
     },
     body: JSON.stringify({ model: "claude", messages: prefix }),
   });
-  expect(String(original.mock.calls[0][0])).toBe(url);
+  expect(requestURL(original.mock.calls[0][0])).toBe(url);
 });
 
 test.each(["request", "stream"])(
@@ -285,7 +293,7 @@ test.each([
     globalThis.fetch = vi.fn<typeof fetch>(async (input, init) => {
       const bytes = init?.body;
       calls.push({
-        url: input instanceof URL ? input.href : String(input),
+        url: requestURL(input),
         method: init?.method,
         credentials: init?.credentials,
         signal: init?.signal,
