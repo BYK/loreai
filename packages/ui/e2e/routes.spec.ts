@@ -1,3 +1,4 @@
+import { setWorkspaceTheme } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 async function fixtureIds(page: Page) {
@@ -26,7 +27,7 @@ test.describe("production route deep links", () => {
   }) => {
     const { project, entry, session, entity } = await fixtureIds(page);
     const routes = [
-      ["/ui", "Memory connected", "welcome"],
+      ["/ui", "Choose a project", "welcome"],
       [`/ui/projects/${project.id}`, project.name, "health"],
       [`/ui/projects/${project.id}/knowledge`, entry.title, "text"],
       [
@@ -53,7 +54,7 @@ test.describe("production route deep links", () => {
       await page.goto(path);
       const target =
         kind === "welcome"
-          ? page.getByTestId("connection-status")
+          ? page.getByRole("heading", { name: "Choose a project", exact: true })
           : kind === "health"
             ? page
                 .locator("main:visible")
@@ -104,34 +105,82 @@ test.describe("production route deep links", () => {
     }
   });
 
-  test("light and dark themes change the rendered token background", async ({
-    page,
-  }) => {
-    const { project, entry, session, entity } = await fixtureIds(page);
-    const paths = [
-      ["/ui", "connection-status"],
-      [`/ui/projects/${project.id}`, "health"],
-      [`/ui/projects/${project.id}/knowledge`, "knowledge-row"],
-      [`/ui/projects/${project.id}/duplicates`, "duplicate-review"],
-      [
+  // Each page gets its own deadline: opening account/navigation layers twice
+  // per route must not consume one shared timeout for the entire workspace.
+  const themeRoutes: Array<{
+    name: string;
+    path: (ids: Awaited<ReturnType<typeof fixtureIds>>) => string;
+    marker: string;
+    kind?: "text";
+  }> = [
+    {
+      name: "project directory",
+      path: () => "/ui",
+      marker: "project-directory",
+    },
+    {
+      name: "project overview",
+      path: ({ project }) => `/ui/projects/${project.id}`,
+      marker: "health",
+    },
+    {
+      name: "knowledge table",
+      path: ({ project }) => `/ui/projects/${project.id}/knowledge`,
+      marker: "knowledge-row",
+    },
+    {
+      name: "duplicate review",
+      path: ({ project }) => `/ui/projects/${project.id}/duplicates`,
+      marker: "duplicate-review",
+    },
+    {
+      name: "project knowledge reader",
+      path: ({ project, entry }) =>
         `/ui/projects/${project.id}/knowledge/${entry.id}`,
-        "knowledge-document",
-      ],
-      [`/ui/projects/${project.id}/sessions`, session.session_id, "text"],
-      [
+      marker: "knowledge-document",
+    },
+    {
+      name: "session list",
+      path: ({ project }) => `/ui/projects/${project.id}/sessions`,
+      marker: "Sessions",
+      kind: "text",
+    },
+    {
+      name: "session reader",
+      path: ({ project, session }) =>
         `/ui/projects/${project.id}/sessions/${session.session_id}`,
-        "session-rows",
-      ],
-      [`/ui/projects/${project.id}/search?q=SQLite`, "Recall Results", "text"],
-      [`/ui/knowledge/${entry.id}`, "knowledge-document"],
-      ["/ui/entities", "entities-page"],
-      [`/ui/entities/${entity.id}`, "entity-page"],
-      ["/ui/contradictions", "contradictions-page"],
-      ["/ui/warming", "warming-page"],
-      ["/ui/costs", "costs-page"],
-    ] as const;
-    for (const [path, marker, kind = "testid"] of paths) {
-      await page.goto(path);
+      marker: "session-rows",
+    },
+    {
+      name: "project search",
+      path: ({ project }) => `/ui/projects/${project.id}/search?q=SQLite`,
+      marker: "Recall Results",
+      kind: "text",
+    },
+    {
+      name: "workspace knowledge reader",
+      path: ({ entry }) => `/ui/knowledge/${entry.id}`,
+      marker: "knowledge-document",
+    },
+    { name: "entities", path: () => "/ui/entities", marker: "entities-page" },
+    {
+      name: "entity details",
+      path: ({ entity }) => `/ui/entities/${entity.id}`,
+      marker: "entity-page",
+    },
+    {
+      name: "contradictions",
+      path: () => "/ui/contradictions",
+      marker: "contradictions-page",
+    },
+    { name: "warming", path: () => "/ui/warming", marker: "warming-page" },
+    { name: "costs", path: () => "/ui/costs", marker: "costs-page" },
+  ];
+  for (const { name, path, marker, kind } of themeRoutes) {
+    test(`light and dark themes change the rendered background on ${name}`, async ({
+      page,
+    }) => {
+      await page.goto(path(await fixtureIds(page)));
       const target =
         kind === "text"
           ? page
@@ -140,14 +189,14 @@ test.describe("production route deep links", () => {
               .first()
           : page.getByTestId(marker).first();
       await expect(target).toBeVisible();
-      await page.getByTestId("theme-light").click();
+      await setWorkspaceTheme(page, "light");
       const light = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
           document.querySelector("[data-pane='detail']") ?? document.body,
         ).backgroundColor,
       }));
-      await page.getByTestId("theme-dark").click();
+      await setWorkspaceTheme(page, "dark");
       const dark = await page.evaluate(() => ({
         dark: document.documentElement.classList.contains("dark"),
         background: getComputedStyle(
@@ -157,6 +206,6 @@ test.describe("production route deep links", () => {
       expect(light.dark).toBe(false);
       expect(dark.dark).toBe(true);
       expect(dark.background).not.toBe(light.background);
-    }
-  });
+    });
+  }
 });

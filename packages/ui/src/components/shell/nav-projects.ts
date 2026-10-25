@@ -1,6 +1,6 @@
 /**
  * Sidebar project sectioning (#1918): Pinned / Recent / filter / All.
- * Pure logic — `Nav` renders what this returns.
+ * Pure logic — `ProjectPicker` renders what this returns.
  */
 import type { ProjectSummary } from "~/contracts";
 import { fuzzyRank, normalizeFuzzy, FUZZY_MIN_QUERY } from "~/lib/fuzzy";

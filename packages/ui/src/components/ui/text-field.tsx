@@ -19,7 +19,7 @@ const TextField = <T extends ValidComponent = "div">(
   const [local, others] = splitProps(props as TextFieldRootProps, ["class"]);
   return (
     <TextFieldPrimitive.Root
-      class={cn("flex flex-col gap-1", local.class)}
+      class={cn("flex min-w-0 flex-col gap-1", local.class)}
       {...others}
     />
   );
@@ -43,7 +43,7 @@ type TextFieldInputProps<T extends ValidComponent = "input"> =
 
 const textFieldInputClass = (className?: string) =>
   cn(
-    "flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[invalid]:border-destructive data-[invalid]:text-destructive",
+    "flex h-10 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[invalid]:border-destructive data-[invalid]:text-destructive",
     className,
   );
 

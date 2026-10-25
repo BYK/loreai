@@ -1,4 +1,6 @@
+import { expectGatewayReachable } from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
+import { openProjectPicker, openAccountMenu } from "./workspace-helpers";
 
 const FUTURE_ACTIONS = [
   "Save note",
@@ -13,14 +15,13 @@ test.describe("real data browsing", () => {
     page,
   }) => {
     await page.goto("/ui");
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
 
     // `/` shows the navigation pane on every breakpoint (no list pane yet).
-    const nav = page.getByRole("navigation", { name: "Workspace" });
-    const project = nav.getByTestId("nav-project").filter({ hasText: "lore" });
+    const nav = await openProjectPicker(page);
+    const project = nav.getByTestId("nav-project").filter({
+      has: page.locator("[data-project-label]", { hasText: /^lore$/ }),
+    });
     await expect(project).toBeVisible();
     await project.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
@@ -49,6 +50,7 @@ test.describe("real data browsing", () => {
     expect(detail.ok()).toBe(true);
     expect((await detail.json()).id).toBe(knowledgeId);
 
+    await doc.getByText("More actions", { exact: true }).click();
     for (const label of FUTURE_ACTIONS) {
       const button = doc.getByRole("button", { name: new RegExp(`^${label}`) });
       await expect(button).toBeDisabled();
@@ -88,10 +90,7 @@ test.describe("real data browsing", () => {
   }) => {
     await page.goto("/ui/knowledge/does-not-exist");
     await expect(page.getByText("Knowledge entry not found")).toBeVisible();
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
   });
 
   test("search entry opens workspace-wide knowledge search", async ({
@@ -117,6 +116,7 @@ test.describe("real data browsing", () => {
     page,
   }) => {
     await page.goto("/ui");
+    await openAccountMenu(page);
     const html = page.locator("html");
     await expect(page.getByTestId("theme-toggle")).toHaveAttribute(
       "data-theme-choice",
@@ -127,6 +127,7 @@ test.describe("real data browsing", () => {
     await expect(html).toHaveClass(/dark/);
     await page.reload();
     await expect(html).toHaveClass(/dark/);
+    await openAccountMenu(page);
     await expect(page.getByTestId("theme-dark")).toHaveAttribute(
       "aria-pressed",
       "true",
@@ -165,9 +166,6 @@ test.describe("real data browsing", () => {
     expect(headers["content-encoding"]).toBe("br");
     expect(headers["vary"]).toMatch(/accept-encoding/i);
     // The page actually booted from the encoded script.
-    await expect(page.getByTestId("connection-status")).toHaveAttribute(
-      "data-connection",
-      "reachable",
-    );
+    await expectGatewayReachable(page);
   });
 });

@@ -116,7 +116,7 @@ export const WarmingPage: Component = () => {
         {(data) => (
           <>
             <section class="mb-5 flex flex-wrap items-center gap-4 rounded-lg border border-line bg-bg p-4">
-              <div class="min-w-0 flex-1">
+              <div class="w-full min-w-0 sm:w-auto sm:flex-1">
                 <div class="text-sm font-semibold">
                   Cache warming is{" "}
                   <span class={data().enabled ? "text-accent" : "text-danger"}>
@@ -132,6 +132,8 @@ export const WarmingPage: Component = () => {
                 </p>
               </div>
               <Button
+                pending={busy() === "enabled"}
+                icon="save"
                 size="sm"
                 disabled={!data().can_toggle || busy() === "enabled"}
                 onClick={() =>
@@ -198,6 +200,7 @@ export const WarmingPage: Component = () => {
                     </p>
                   </div>
                   <Button
+                    pending={busy() === "reset"}
                     size="sm"
                     variant="outline"
                     disabled={!data().can_edit || busy() === "reset"}
@@ -234,7 +237,7 @@ export const WarmingPage: Component = () => {
             </Show>
 
             <section class="mb-7">
-              <div class="mb-3 flex items-end justify-between gap-3">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 class="text-lg font-semibold">Live sessions</h2>
                   <p class="text-xs text-muted">
@@ -410,7 +413,7 @@ export const WarmingPage: Component = () => {
                               return (
                                 <div class="flex min-w-0 flex-1 flex-col items-center justify-end">
                                   <div
-                                    class="w-full rounded-t bg-accent"
+                                    class="w-full rounded-t bg-chart-accent"
                                     title={`${label}: ${count}`}
                                     style={{
                                       height: `${Math.max(2, (count / max) * 64)}px`,

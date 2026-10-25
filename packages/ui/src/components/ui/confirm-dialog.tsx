@@ -61,7 +61,8 @@ export const ConfirmDialog: Component<{
         </Button>
         <Button
           variant={props.destructive ? "destructive" : "default"}
-          disabled={props.pending || props.confirmDisabled}
+          pending={props.pending}
+          disabled={props.confirmDisabled}
           data-testid={props.confirmTestId}
           onClick={props.onConfirm}
         >

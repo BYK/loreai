@@ -117,7 +117,7 @@ export const CostsPage: Component = () => {
                           {day.cost > 0 ? formatMoney(day.cost) : ""}
                         </div>
                         <div
-                          class="w-full max-w-8 rounded-t bg-accent"
+                          class="w-full max-w-8 rounded-t bg-chart-accent"
                           style={{
                             height: `${Math.max(2, (day.cost / dailyMax()) * 78)}px`,
                           }}
@@ -195,7 +195,7 @@ export const CostsPage: Component = () => {
             </section>
 
             <section class="mb-7">
-              <div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 class="text-lg font-semibold">Per-session costs</h2>
                   <p class="text-xs text-muted">

@@ -1,3 +1,4 @@
+import { expectCurrentNavigation } from "./workspace-helpers";
 import { expect, test, type Page } from "@playwright/test";
 
 const PAGE = "/ui/model-usage";
@@ -13,12 +14,11 @@ function modelCells(page: Page) {
 }
 
 test.describe("model usage page", () => {
-  test("nav, chart, totals table, sorting and export", async ({ page }) => {
+  test("nav, chart, totals table, sorting and export", async ({
+    page,
+  }, testInfo) => {
     await page.goto(PAGE);
-    await expect(page.getByTestId("nav-model-usage")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    await expectCurrentNavigation(page, "rail-model-usage");
     await expect(page.locator("svg.flow-svg")).toBeVisible();
     await expect(page.getByTestId("chart-status")).toContainText(
       "8 active session-days",
@@ -34,6 +34,14 @@ test.describe("model usage page", () => {
     await expect(
       page.locator("table tbody tr").nth(0).locator("td").nth(2),
     ).toHaveText("4");
+
+    await page
+      .getByRole("heading", { name: "Totals", exact: true })
+      .scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: testInfo.outputPath("model-usage-spacing.png"),
+      fullPage: true,
+    });
 
     // Click the Model header: Model becomes primary sort, ascending.
     await page.getByRole("button", { name: "Sort by Model" }).click();

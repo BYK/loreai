@@ -82,12 +82,25 @@ function withoutGatewayRecallBrand(tool: GatewayTool): GatewayTool {
 // Description decoration is gateway-owned. Brand only exact contracts before
 // decoration so matching names or client-supplied ownership flags never grant
 // the private marker/replay path.
+// Provider-facing schemas omit root combinators for compatibility; the shared
+// argument parser enforces the query/id/ids requirement at execution.
+const RECALL_GATEWAY_INPUT_SCHEMA = Object.fromEntries(
+  Object.entries(RECALL_TOOL_INPUT_SCHEMA).filter(
+    ([keyword]) =>
+      keyword !== "anyOf" &&
+      keyword !== "oneOf" &&
+      keyword !== "allOf" &&
+      keyword !== "not" &&
+      keyword !== "if",
+  ),
+);
+
 /** Gateway representation of the shared recall tool contract. */
 export const RECALL_GATEWAY_TOOL = brandGatewayRecallTool({
   name: CORE_RECALL_TOOL_NAME,
   description: RECALL_TOOL_DESCRIPTION,
   gatewayOwned: true,
-  inputSchema: RECALL_TOOL_INPUT_SCHEMA,
+  inputSchema: RECALL_GATEWAY_INPUT_SCHEMA,
 });
 
 export const RECALL_TOOL_NAME = CORE_RECALL_TOOL_NAME;

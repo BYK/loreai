@@ -16,6 +16,7 @@
  */
 import { asString, log } from "@loreai/core";
 import { isDeepStrictEqual } from "node:util";
+import { createCopilotItemIdentityNormalizer } from "./copilot-item-identity";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -2074,6 +2075,16 @@ export async function accumulateResponsesSSEStream(
     opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES,
     DEFAULT_MAX_SSE_FRAMES,
   );
+  const pinOutputItemIdentity = createCopilotItemIdentityNormalizer(
+    maxSparseIndex,
+    (acc, id) =>
+      acc.itemIndexById.has(id) ||
+      acc.callIndexById.has(id) ||
+      acc.effectiveToolIndexById.has(id),
+    (acc, id, index) => {
+      acc.itemIndexById.set(id, index);
+    },
+  );
 
   if (!response.body) {
     throw new Error("Response has no body");
@@ -2109,11 +2120,15 @@ export async function accumulateResponsesSSEStream(
       if (opts.validation && !isRecord(parsed)) {
         throw new Error("malformed Responses stream event");
       }
+      const itemIdentityPinned =
+        opts.pinResponseId && pinOutputItemIdentity(state, event, parsed);
       const identityPinned =
         opts.pinResponseId &&
         pinResponsesLifecycleIdentity(state, event, parsed);
       const publicData =
-        identityPinned && opts.onValidatedEvent ? JSON.stringify(parsed) : data;
+        (identityPinned || itemIdentityPinned) && opts.onValidatedEvent
+          ? JSON.stringify(parsed)
+          : data;
       if (
         opts.onSemanticContent &&
         responsesEventHasSemanticContent(event, parsed)

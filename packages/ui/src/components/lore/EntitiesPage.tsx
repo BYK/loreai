@@ -21,13 +21,7 @@ import { useWorkspace } from "~/routes/workspace";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { errorStateFor } from "./ErrorState";
 import { ListRow } from "./Panes";
 import { StateCard } from "./StateCard";
@@ -186,37 +180,39 @@ const RebuildCard: Component = () => {
 };
 
 const RebuildResults: Component<{ result: EntityRebuildResult }> = (props) => (
-  <table
-    class="mt-3 w-full text-left text-[12px]"
-    data-testid="rebuild-results"
-  >
-    <thead>
-      <tr class="text-muted">
-        <th class="py-1 pr-3 font-medium">Project</th>
-        <th class="py-1 pr-3 font-medium">Detected</th>
-        <th class="py-1 pr-3 font-medium">People</th>
-        <th class="py-1 pr-3 font-medium">Orgs</th>
-        <th class="py-1 pr-3 font-medium">Other</th>
-        <th class="py-1 pr-3 font-medium">Relations</th>
-        <th class="py-1 font-medium">Dedup merged</th>
-      </tr>
-    </thead>
-    <tbody>
-      <For each={props.result.results}>
-        {(row) => (
-          <tr class="border-t border-line">
-            <td class="truncate py-1 pr-3">{row.projectPath}</td>
-            <td class="py-1 pr-3">{row.detected}</td>
-            <td class="py-1 pr-3">{row.personsCreated}</td>
-            <td class="py-1 pr-3">{row.orgsCreated}</td>
-            <td class="py-1 pr-3">{row.otherCreated}</td>
-            <td class="py-1 pr-3">{row.relationsCreated}</td>
-            <td class="py-1">{row.dedupMerged}</td>
-          </tr>
-        )}
-      </For>
-    </tbody>
-  </table>
+  <div class="mt-3 overflow-x-auto">
+    <table
+      class="w-full min-w-[640px] text-left text-xs"
+      data-testid="rebuild-results"
+    >
+      <thead>
+        <tr class="text-muted">
+          <th class="py-1 pr-3 font-medium">Project</th>
+          <th class="py-1 pr-3 font-medium">Detected</th>
+          <th class="py-1 pr-3 font-medium">People</th>
+          <th class="py-1 pr-3 font-medium">Orgs</th>
+          <th class="py-1 pr-3 font-medium">Other</th>
+          <th class="py-1 pr-3 font-medium">Relations</th>
+          <th class="py-1 font-medium">Dedup merged</th>
+        </tr>
+      </thead>
+      <tbody>
+        <For each={props.result.results}>
+          {(row) => (
+            <tr class="border-t border-line">
+              <td class="truncate py-1 pr-3">{row.projectPath}</td>
+              <td class="py-1 pr-3">{row.detected}</td>
+              <td class="py-1 pr-3">{row.personsCreated}</td>
+              <td class="py-1 pr-3">{row.orgsCreated}</td>
+              <td class="py-1 pr-3">{row.otherCreated}</td>
+              <td class="py-1 pr-3">{row.relationsCreated}</td>
+              <td class="py-1">{row.dedupMerged}</td>
+            </tr>
+          )}
+        </For>
+      </tbody>
+    </table>
+  </div>
 );
 
 export const EntitiesPage: Component = () => {
@@ -273,21 +269,14 @@ export const EntitiesPage: Component = () => {
       </p>
 
       <div class="mb-4 flex items-center gap-2">
-        <Select
+        <ResponsiveSelect
+          label="Entity type"
+          sheetTitle="Filter by entity type"
           value={typeFilter() ?? "all"}
-          onChange={(v) => setType(v)}
+          onChange={setType}
           options={["all", ...ENTITY_TYPES]}
-          itemComponent={(item) => (
-            <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
-          )}
-        >
-          <SelectTrigger aria-label="Entity type" class="h-10 w-36">
-            <SelectValue<string>>
-              {(state) => state.selectedOption()}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent />
-        </Select>
+          triggerClass="h-10 w-36"
+        />
         <Show when={list.loader.data()}>
           {(page) => (
             <span class="text-xs text-muted">

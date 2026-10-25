@@ -28,6 +28,55 @@ afterEach(async () => {
 });
 
 describe("upstream fetch diagnostics", () => {
+  it("logs a Copilot rejection code without logging the provider message", async () => {
+    const messages: string[] = [];
+    log.registerSink({
+      info: (message) => messages.push(message),
+      warn: (message) => messages.push(message),
+      error: (message) => messages.push(message),
+      captureException: vi.fn(),
+    });
+    mockUpstreamFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "unsupported_api_for_model",
+            message: "PRIVATE model not supported",
+          },
+        }),
+        { status: 400 },
+      ),
+    );
+
+    const response = await handleRequest(
+      {
+        protocol: "openai",
+        model: "gemini-test",
+        system: "You are a coding assistant.",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+        ],
+        tools: [],
+        stream: false,
+        maxTokens: 64,
+        metadata: {},
+        rawHeaders: {
+          "x-lore-provider": "github-copilot",
+          "x-lore-agent": "coder",
+          "x-lore-project": DIAGNOSTICS_PROJECT,
+          authorization: "Bearer PRIVATE_CREDENTIAL",
+        },
+      },
+      loadConfig(),
+    );
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(messages.join("\n")).toContain(
+      "code=unsupported_api_for_model hints=unsupported,model",
+    );
+    expect(messages.join("\n")).not.toContain("PRIVATE");
+  });
+
   it.each([
     [
       "abort errors",

@@ -1,3 +1,10 @@
+import {
+  openAccountMenu,
+  setWorkspaceTheme,
+  openNavigation,
+  closeNavigation,
+  expectNavigationAvailable,
+} from "./workspace-helpers";
 import { expect, test } from "@playwright/test";
 
 function focusName(page: import("@playwright/test").Page) {
@@ -11,69 +18,57 @@ function focusName(page: import("@playwright/test").Page) {
       .closest("[data-testid]")
       ?.getAttribute("data-testid");
     if (closestTestId?.startsWith("theme-")) return closestTestId;
-    if (active.matches('[data-testid="nav-projects"]')) return "nav-projects";
+    if (active.matches('[data-testid="rail-projects"]')) return "rail-projects";
     if (active.matches('[data-testid="nav-project"]')) return "nav-project";
     return active.getAttribute("aria-label") ?? active.tagName.toLowerCase();
   });
 }
 
 test.describe("keyboard navigation and focus-visible affordances", () => {
-  test("shell tab order follows the app bar then workspace navigation", async ({
+  test("shell controls are keyboard reachable in the redesigned workspace", async ({
     page,
   }) => {
     await page.goto("/ui");
-    const expected = [
-      "logo",
-      "search",
-      "Account and sync: Not signed in",
-      "theme-system",
-      "theme-light",
-      "theme-dark",
-      (await page.getByTestId("open-nav").isVisible())
-        ? "Open navigation"
-        : "nav-projects",
-    ];
-    const actual: string[] = [];
-    for (let i = 0; i < expected.length; i++) {
+    const seen: string[] = [];
+    for (let i = 0; i < 32; i++) {
       await page.keyboard.press("Tab");
-      actual.push(await focusName(page));
+      seen.push(await focusName(page));
     }
-    expect(actual).toEqual(expected);
+    expect(seen.some((name) => name.startsWith("Switch project:"))).toBe(true);
+    expect(seen).toContain("search");
+    if (await page.getByTestId("mobile-menu-trigger").isVisible()) {
+      expect(seen).toContain("Open navigation menu");
+      await openNavigation(page);
+      await page.getByTestId("folk-status").focus();
+      expect(await focusName(page)).toMatch(/^Account and sync:/);
+    } else
+      expect(seen.some((name) => name.startsWith("Account and sync:"))).toBe(
+        true,
+      );
+    expect(seen).not.toContain("theme-light");
   });
 
-  test("mobile navigation traps focus and Escape returns it to the opener", async ({
+  test("context Escape returns focus to the toolbar with the rail still reachable", async ({
     page,
   }) => {
     const projects = await (await page.request.get("/api/v1/projects")).json();
-    const lore = projects.find(
-      (item: { name: string }) => item.name === "lore",
-    );
-    const scratch = projects.find(
-      (item: { name: string }) => item.name === "scratch",
-    );
-    await page.goto(`/ui/projects/${lore.id}/knowledge`);
-    test.skip(
-      !(await page.getByTestId("open-nav").isVisible()),
-      "mobile navigation is only rendered in the mobile project",
-    );
-    const opener = page.getByTestId("open-nav");
-    await opener.focus();
-    await opener.press("Enter");
-    const drawer = page.getByTestId("nav-drawer");
-    await expect(drawer).toBeVisible();
-    await expect.poll(() => focusName(page)).not.toBe("open-nav");
-    await page.keyboard.press("Escape");
-    await expect(drawer).toHaveCount(0);
-    await expect(opener).toBeFocused();
-
-    await opener.press("Enter");
-    await expect(drawer).toBeVisible();
-    await drawer
-      .getByTestId("nav-project")
-      .filter({ hasText: "scratch" })
-      .click();
-    await expect(page).toHaveURL(`/ui/projects/${scratch.id}`);
-    await expect(page.getByTestId("open-nav")).toBeFocused();
+    const project = projects.find((p: { name: string }) => p.name === "lore");
+    const entries = await (
+      await page.request.get(`/api/v1/projects/${project.id}/knowledge`)
+    ).json();
+    await page.goto(`/ui/projects/${project.id}/knowledge/${entries[0].id}`);
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const link = page
+      .getByTestId("context-pane")
+      .getByTestId("knowledge-row")
+      .first();
+    await link.focus();
+    await link.press("Escape");
+    await expect(page.getByTestId("context-pane")).toBeHidden();
+    await expect(toggle).toBeFocused();
+    await expectNavigationAvailable(page);
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({
@@ -97,10 +92,10 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
   });
 
   for (const [path, navId, marker] of [
-    ["/ui/entities", "nav-entities", "entities-page"],
-    ["/ui/contradictions", "nav-contradictions", "contradictions-page"],
-    ["/ui/team", "nav-team", "team-page"],
-    ["/ui/conflicts", "nav-conflicts", "conflicts-page"],
+    ["/ui/entities", "rail-entities", "entities-page"],
+    ["/ui/contradictions", "rail-contradictions", "contradictions-page"],
+    ["/ui/team", "rail-team", "team-page"],
+    ["/ui/conflicts", "rail-conflicts", "conflicts-page"],
   ] as const) {
     test(`shell keyboard navigation reaches ${navId} content`, async ({
       page,
@@ -109,7 +104,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         testInfo.project.name.includes("mobile"),
         "desktop shell has persistent navigation",
       );
-      if (navId === "nav-team") {
+      if (navId === "rail-team") {
         await page.route("**/api/v1/account", (route) =>
           route.fulfill({
             json: {
@@ -181,7 +176,13 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       }
       await page.goto(path);
       await expect(page.getByTestId(marker)).toBeVisible();
-      await page.getByTestId("theme-dark").click();
+      await setWorkspaceTheme(page, "dark");
+      const toggle = page.getByTestId("context-toggle");
+      if (
+        (await toggle.count()) &&
+        (await toggle.getAttribute("aria-expanded")) === "false"
+      )
+        await toggle.click();
       const nav = page.getByTestId(navId);
       await nav.focus();
       await expect(nav).toBeFocused();
@@ -219,9 +220,10 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         (item: { name: string }) => item.name === "lore",
       );
       await page.goto(`/ui/projects/${project.id}/sessions/e2e-reader`);
+      await openAccountMenu(page);
       await page.getByTestId(`theme-${choice}`).click();
       await page.getByTestId(`theme-${choice}`).focus();
-      await page.keyboard.press("Tab");
+      await page.keyboard.press("Shift+Tab");
       await expect
         .poll(() =>
           page.evaluate(() => {
@@ -232,6 +234,13 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
           }),
         )
         .not.toBe("none/none");
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("folk-status-panel")).toHaveCount(0);
+      await expect(page.getByTestId("folk-status")).toBeFocused();
+      await closeNavigation(page);
+      // Establish keyboard modality before choosing a row: Tab may scroll the
+      // reader and unmount the virtualized row that was previously visible.
+      await page.keyboard.press("Tab");
       // Rows outside the viewport are unmounted; focus a visible one — the
       // landed reader mounts overscan rows beyond the viewport edge (#1923).
       const visibleRowKey = () =>
@@ -247,7 +256,6 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       await expect.poll(visibleRowKey).toBeTruthy();
       const rowKey = await visibleRowKey();
       const row = page.locator(`[data-row-key="${rowKey}"]`);
-      await page.keyboard.press("Tab");
       await row.focus();
       const rowRing = await row.evaluate((el) => {
         const style = getComputedStyle(el);
@@ -261,3 +269,29 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     });
   }
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`desktop rail links and account retain visible keyboard focus in ${theme}`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.addInitScript(
+      (choice) => localStorage.setItem("lore.ui.theme", choice),
+      theme,
+    );
+    await page.goto("/ui/");
+    await expect(page.getByTestId("icon-rail")).toBeVisible();
+    await page.keyboard.press("Tab");
+    for (const id of ["rail-projects", "rail-knowledge", "folk-status"]) {
+      const control = page.getByTestId(id);
+      await control.focus();
+      await expect(control).toBeFocused();
+      const focus = await control.evaluate((element) => ({
+        visible: element.matches(":focus-visible"),
+        shadow: getComputedStyle(element).boxShadow,
+      }));
+      expect(focus.visible).toBe(true);
+      expect(focus.shadow).not.toBe("none");
+    }
+  });
+}

@@ -42,7 +42,7 @@ const ContradictionRow: Component<{
   onDecision: (decision: ContradictionDecision) => void;
 }> = (props) => (
   <article
-    class="rounded-lg border border-line bg-surface p-4"
+    class="min-w-0 rounded-lg border border-line bg-surface p-4 [overflow-wrap:anywhere]"
     data-testid="contradiction-row"
   >
     <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">

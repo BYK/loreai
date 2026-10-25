@@ -1699,6 +1699,50 @@ describe("streamResponsesRecallAware", () => {
     ]);
   });
 
+  test("logs the specific output identity check without exposing provider values", async () => {
+    const messages: string[] = [];
+    log.registerSink({
+      ...silentLogSink,
+      info: (message) => messages.push(message),
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_diagnostic", "gpt-test"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "PRIVATE_original",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "PRIVATE_changed",
+            role: "assistant",
+            status: "completed",
+            content: [],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+    await drain(client);
+    expect(messages).toContain(
+      "responses-validation check=output_identity_changed",
+    );
+    expect(messages.join("\n")).not.toContain("PRIVATE");
+  });
+
   test("does not report arbitrary protocol diagnostics", () => {
     const samples: PrincipalProtocolFailureSample[] = [];
     setPrincipalProtocolFailureHook((sample) => samples.push(sample));

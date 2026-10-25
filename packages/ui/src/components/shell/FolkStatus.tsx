@@ -1,12 +1,26 @@
+import { createClipboard } from "~/lib/clipboard";
 import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import * as PopoverPrimitive from "@kobalte/core/popover";
 
-import type { AccountStatus } from "~/contracts";
-import { formatWhen } from "~/lib/format";
 import { summarizeFolkStatus, type FolkTone } from "~/lib/folk-status";
 import { cn } from "~/lib/utils";
+import { Avatar } from "~/components/lore/Avatar";
+import { Icon } from "./Icon";
+import { ThemeToggle } from "./Appearance";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "~/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "~/components/ui/dialog";
 import { useWorkspace } from "~/routes/workspace";
 
 const DOT: Record<FolkTone, string> = {
@@ -16,195 +30,378 @@ const DOT: Record<FolkTone, string> = {
   danger: "bg-danger",
 };
 
-function accountName(account: AccountStatus): string {
-  return (
-    account.user?.display_name ?? account.user?.email ?? account.user?.id ?? ""
-  );
-}
-
-function expiresLabel(account: AccountStatus): string | null {
-  if (!account.expires_at) return null;
-  const at = Date.parse(account.expires_at);
-  if (Number.isNaN(at)) return null;
-  return `access token ${at <= Date.now() ? "expired" : "expires"} ${formatWhen(at)}`;
-}
-
 /**
  * Shell account/sync badge with an explicit, single-flight sync action.
  */
-export const FolkStatus: Component = () => {
+export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const ws = useWorkspace();
   const folk = ws.state.folk;
-  const [syncing, setSyncing] = createSignal(false);
-  const [syncError, setSyncError] = createSignal<string | null>(null);
-  const [syncReceipt, setSyncReceipt] = createSignal<string | null>(null);
-  const runSync = async () => {
-    if (syncing()) return;
-    setSyncing(true);
-    setSyncError(null);
-    setSyncReceipt(null);
-    try {
-      const result = await ws.client.runSync();
-      setSyncReceipt(
-        `Sync complete: pushed ${result.pushed}, pulled ${result.pulled}.`,
-      );
-      folk.refresh();
-    } catch (error) {
-      setSyncError(error instanceof Error ? error.message : "Sync failed.");
-    } finally {
-      setSyncing(false);
-    }
+  let trigger: HTMLButtonElement | undefined;
+  const [open, setOpen] = createSignal(false);
+  const [tooltipOpen, setTooltipOpen] = createSignal(false);
+  const [dialog, setDialog] = createSignal(false);
+  const clipboard = createClipboard(dialog);
+  const account = () =>
+    ws.connection.state() === "reachable" ? folk.confirmedAccount() : undefined;
+  const user = () => {
+    const current = account();
+    return current?.signed_in && current.state === "signed_in"
+      ? current.user
+      : null;
   };
+  const canSignIn = () =>
+    account()?.state === "anonymous" || account()?.state === "expired";
+  const name = () =>
+    user()?.display_name ||
+    user()?.email ||
+    user()?.id ||
+    (summary().state === "anonymous" ? "Anonymous" : summary().label);
+  const initials = () =>
+    name()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part[0])
+      .slice(0, 2)
+      .join("")
+      .toUpperCase();
+  const showSignIn = () => {
+    clipboard.reset();
+    setDialog(true);
+    setOpen(false);
+  };
+  const { syncing, syncError, syncReceipt, runSync } = folk;
   const summary = createMemo(() =>
     summarizeFolkStatus({
       connection: ws.connection.state(),
-      account: folk.account.data(),
+      account: account(),
       accountError: folk.account.error(),
       sync: folk.sync.data(),
       syncError: folk.sync.error(),
     }),
   );
-  return (
-    <PopoverPrimitive.Root
-      gutter={6}
-      placement="bottom-end"
-      onOpenChange={(open) => {
-        if (open) folk.refresh();
-      }}
-    >
-      <PopoverPrimitive.Trigger
-        data-testid="folk-status"
-        data-folk-state={summary().state}
-        aria-label={`Account and sync: ${summary().label}`}
-        class="inline-flex h-8 max-w-[220px] items-center gap-2 rounded-md border border-line bg-chrome px-2.5 text-[13px] text-muted hover:text-heading focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+  const ProfileIdentity: Component<{ interactive?: boolean }> = (props) => (
+    <>
+      <Show
+        when={user()}
+        fallback={
+          <span class="flex size-10 shrink-0 items-center justify-center rounded-full bg-soft text-muted">
+            <Icon name="user" />
+          </span>
+        }
       >
+        <Avatar label={initials()} class="size-10 shrink-0 rounded-full" />
+      </Show>
+      <span class="min-w-0 flex-1">
         <span
-          aria-hidden="true"
-          class={cn("size-2 flex-none rounded-full", DOT[summary().tone])}
-        />
-        <span class="hidden truncate sm:inline">{summary().label}</span>
-      </PopoverPrimitive.Trigger>
-      <PopoverPrimitive.Portal>
-        <PopoverPrimitive.Content
-          data-testid="folk-status-panel"
-          class="z-50 w-[min(320px,calc(100vw-24px))] rounded-lg border border-line bg-surface p-4 text-sm text-text shadow-lg focus-visible:outline-hidden"
+          data-testid={user() ? "folk-account" : undefined}
+          class="block truncate font-semibold text-heading"
         >
-          <PopoverPrimitive.Title class="font-semibold text-heading">
-            Account & sync
-          </PopoverPrimitive.Title>
-          <PopoverPrimitive.Description
-            class="mt-1 text-[13px] text-muted"
-            data-testid="folk-status-detail"
-          >
-            {summary().detail}
-          </PopoverPrimitive.Description>
-
-          <Show when={folk.account.data()}>
-            {(account) => (
-              <Show when={account().user}>
-                <div class="mt-3 border-t border-line pt-3">
-                  <div class="eyebrow mb-1">Account</div>
-                  <div data-testid="folk-account" class="truncate">
-                    {accountName(account())}
-                  </div>
-                  <div class="text-xs text-muted">
-                    <Show when={account().provider}>
-                      {(provider) => <span>via {provider()} · </span>}
-                    </Show>
-                    {expiresLabel(account()) ?? "no expiry recorded"}
-                  </div>
-                </div>
-              </Show>
+          {name()}
+        </span>
+        <span class="block text-xs font-normal text-muted">
+          {props.interactive ? "Sign in to Lore" : summary().label}
+        </span>
+        <Show when={user() && account()?.provider}>
+          {(provider) => (
+            <span class="block text-xs font-normal text-muted">
+              via {provider()}
+            </span>
+          )}
+        </Show>
+      </span>
+    </>
+  );
+  return (
+    <>
+      <PopoverPrimitive.Root
+        open={open()}
+        modal={props.inDrawer ?? false}
+        gutter={props.inDrawer ? 8 : 10}
+        sameWidth={props.inDrawer}
+        placement={props.inDrawer ? "top-start" : "right-end"}
+        slide
+        overflowPadding={12}
+        onOpenChange={(value) => {
+          setTooltipOpen(false);
+          setOpen(value);
+          if (value) folk.refresh();
+        }}
+      >
+        <Tooltip
+          open={tooltipOpen() && !props.inDrawer && !open() && !dialog()}
+          onOpenChange={setTooltipOpen}
+          disabled={props.inDrawer || open() || dialog()}
+        >
+          <TooltipTrigger
+            as={PopoverPrimitive.Trigger}
+            ref={(element: HTMLButtonElement) => {
+              trigger = element;
+            }}
+            data-testid="folk-status"
+            data-workspace-navigation-open={open() || dialog() ? "" : undefined}
+            data-folk-state={summary().state}
+            aria-label={`Account and sync: ${summary().label}${user() ? `, ${name()}` : ""}`}
+            class={cn(
+              props.inDrawer
+                ? "flex min-h-14 w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-text outline-none hover:bg-soft focus-visible:ring-2 focus-visible:ring-ring"
+                : "rail-action relative rounded-full",
             )}
-          </Show>
-
-          <div class="mt-3 border-t border-line pt-3">
-            <div class="flex items-center justify-between gap-3">
-              <div class="eyebrow">Sync</div>
-              <Show when={folk.sync.data()?.enabled}>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  data-testid="sync-now"
-                  disabled={syncing()}
-                  onClick={() => void runSync()}
-                  class="h-auto px-2 py-1"
+          >
+            <span class="relative flex shrink-0 items-center justify-center">
+              <Show
+                when={user()}
+                fallback={
+                  <span
+                    data-testid="anonymous-avatar"
+                    class={cn(
+                      "flex items-center justify-center rounded-full bg-soft text-muted",
+                      props.inDrawer ? "size-10" : "size-8",
+                    )}
+                  >
+                    <Icon name="user" class="size-[19px]" />
+                  </span>
+                }
+              >
+                <span
+                  data-testid="account-avatar"
+                  role="img"
+                  aria-label={`Signed in as ${name()}`}
                 >
-                  {syncing() ? "Syncing…" : "Sync now"}
-                </Button>
+                  <Avatar
+                    label={initials()}
+                    class={cn(
+                      "rounded-full",
+                      props.inDrawer ? "size-10" : "size-8",
+                    )}
+                  />
+                </span>
               </Show>
-            </div>
-            <Show when={syncReceipt()}>
-              {(receipt) => (
-                <p class="mt-2 text-xs text-muted" role="status">
-                  {receipt()}
-                </p>
-              )}
+              <span
+                aria-hidden="true"
+                class={cn(
+                  "absolute bottom-0 right-0 size-2 rounded-full border-2 border-nav",
+                  DOT[summary().tone],
+                )}
+              />
+            </span>
+            <Show when={props.inDrawer}>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-semibold text-heading">
+                  {name()}
+                </span>
+                <span class="block truncate text-xs text-muted">
+                  Account &amp; preferences
+                </span>
+              </span>
+              <Icon
+                name="chevron"
+                class={cn(
+                  "size-4 text-muted",
+                  open() ? "rotate-90" : "-rotate-90",
+                )}
+              />
             </Show>
-            <Show when={syncError()}>
+          </TooltipTrigger>
+          <TooltipContent>
+            {user() ? name() : "Account & preferences"}
+          </TooltipContent>
+        </Tooltip>
+        <PopoverPrimitive.Portal>
+          <PopoverPrimitive.Content
+            data-testid="folk-status-panel"
+            data-workspace-navigation-layer=""
+            onCloseAutoFocus={(event) => {
+              if (dialog()) event.preventDefault();
+            }}
+            class={cn(
+              "z-50 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface p-3 text-sm text-text shadow-xl focus-visible:outline-hidden",
+              props.inDrawer
+                ? "max-h-[calc(100dvh-144px)] w-[var(--kb-popper-anchor-width)] max-w-[calc(100vw-24px)]"
+                : "max-h-[calc(100dvh-24px)] w-[min(288px,calc(100vw-76px))]",
+            )}
+          >
+            <PopoverPrimitive.Title class="sr-only">
+              Account & preferences
+            </PopoverPrimitive.Title>
+            <Show
+              when={canSignIn()}
+              fallback={
+                <div class="flex items-center gap-3 px-2 py-2">
+                  <ProfileIdentity />
+                </div>
+              }
+            >
+              <Button
+                variant="ghost"
+                class="h-auto min-h-16 w-full justify-start gap-3 px-2 py-2 text-left"
+                aria-label="Sign in to Lore"
+                aria-haspopup="dialog"
+                data-testid="account-profile-sign-in"
+                onClick={showSignIn}
+              >
+                <ProfileIdentity interactive />
+                <Icon name="chevron" class="ml-auto shrink-0 text-muted" />
+              </Button>
+            </Show>
+            <div class="my-2 border-t border-line" />
+            <section
+              class="flex items-center justify-between gap-3 px-2 py-2"
+              aria-label="Appearance"
+            >
+              <span class="text-xs text-muted">Theme</span>
+              <ThemeToggle compact touch={props.inDrawer} />
+            </section>
+            <PopoverPrimitive.Description
+              class={cn(
+                "text-xs text-muted",
+                ["anonymous", "checking", "sync_on"].includes(summary().state)
+                  ? "sr-only"
+                  : "mt-2 border-t border-line px-2 pt-3",
+              )}
+              data-testid="folk-status-detail"
+            >
+              {summary().detail}
+            </PopoverPrimitive.Description>
+            <Show
+              when={
+                (account()?.signed_in && folk.sync.data()?.enabled) ||
+                syncReceipt() ||
+                syncError()
+              }
+            >
+              <div class="mt-3 border-t border-line pt-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="eyebrow">Sync</div>
+                  <Show when={folk.sync.data()?.enabled}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="sync-now"
+                      pending={syncing()}
+                      icon="refresh"
+                      onClick={() => void runSync()}
+                      class={cn(
+                        "h-auto px-2 py-1",
+                        props.inDrawer && "min-h-11 px-3",
+                      )}
+                    >
+                      {syncing() ? "Syncing…" : "Sync now"}
+                    </Button>
+                  </Show>
+                </div>
+                <Show when={syncReceipt()}>
+                  {(receipt) => (
+                    <p class="mt-2 text-xs text-muted" role="status">
+                      {receipt()}
+                    </p>
+                  )}
+                </Show>
+                <Show when={syncError()}>
+                  {(error) => (
+                    <p class="mt-2 text-xs text-danger" role="alert">
+                      {error()}
+                    </p>
+                  )}
+                </Show>
+              </div>
+            </Show>
+
+            <Show
+              when={
+                user() &&
+                ((folk.teams.data()?.teams.length ?? 0) > 0 ||
+                  folk.teams.error() !== undefined)
+              }
+            >
+              <div class="mt-2 border-t border-line px-2 pt-3">
+                <div class="mb-2 text-xs text-muted">Teams</div>
+                <Show
+                  when={folk.teams.error() === undefined}
+                  fallback={
+                    <p class="text-xs text-muted">Teams unavailable.</p>
+                  }
+                >
+                  <ul class="list-none space-y-2 p-0" data-testid="folk-teams">
+                    <For each={folk.teams.data()?.teams}>
+                      {(team) => (
+                        <li class="flex justify-between gap-3 text-xs">
+                          <span class="truncate">
+                            {team.name ?? "Unnamed team"}
+                          </span>
+                          <span class="flex-none text-muted">
+                            {team.role} · {team.member_count}{" "}
+                            {team.member_count === 1 ? "member" : "members"}
+                          </span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </Show>
+              </div>
+            </Show>
+          </PopoverPrimitive.Content>
+        </PopoverPrimitive.Portal>
+      </PopoverPrimitive.Root>
+      <Dialog
+        open={dialog()}
+        onOpenChange={(value) => {
+          if (!value) setDialog(false);
+        }}
+      >
+        <DialogContent
+          data-workspace-navigation-layer=""
+          class="max-w-sm rounded-lg"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            trigger?.focus({ preventScroll: true });
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Sign in to Lore</DialogTitle>
+            <DialogDescription>
+              Sign in through the Lore CLI on the machine running your gateway.
+            </DialogDescription>
+          </DialogHeader>
+          <div class="space-y-3 text-sm">
+            <Show when={account()?.state === "hosted"}>
+              <p class="text-muted">
+                This gateway is running in hosted mode. For local account
+                access, restart it with <code>lore start --local</code>, then
+                sign in.
+              </p>
+            </Show>
+            <p>
+              Run this command in your terminal and follow the sign-in prompts:
+            </p>
+            <pre class="select-text rounded-md border border-line bg-chrome px-3 py-3">
+              <code>lore login</code>
+            </pre>
+            <Button
+              variant="outline"
+              size="sm"
+              pending={clipboard.pending()}
+              icon={clipboard.copied() ? "check" : "copy"}
+              onClick={() => void clipboard.copy("lore login")}
+            >
+              {clipboard.copied() ? "Copied command" : "Copy command"}
+            </Button>
+            <p class="text-xs text-muted" role="status">
+              {clipboard.copied() ? "Command copied to clipboard" : ""}
+            </p>
+            <Show when={clipboard.error()}>
               {(error) => (
-                <p class="mt-2 text-xs text-danger" role="alert">
+                <p role="alert" class="text-xs text-danger">
                   {error()}
                 </p>
               )}
             </Show>
+            <p class="text-xs text-muted">
+              Return here after signing in. Your account updates automatically.
+            </p>
           </div>
-
-          <div class="mt-3 border-t border-line pt-3">
-            <div class="eyebrow mb-1">Teams</div>
-            <Switch
-              fallback={
-                <div class="text-xs text-muted">
-                  {folk.account.loading()
-                    ? "Checking account…"
-                    : folk.teams.loading()
-                      ? "Loading teams…"
-                      : "Teams unavailable."}
-                </div>
-              }
-            >
-              <Match when={folk.teams.data()}>
-                {(list) => (
-                  <Show
-                    when={list().teams.length > 0}
-                    fallback={
-                      <div class="text-xs text-muted">
-                        No team memberships are known on this device.
-                      </div>
-                    }
-                  >
-                    <ul
-                      class="list-none space-y-1 p-0"
-                      data-testid="folk-teams"
-                    >
-                      <For each={list().teams}>
-                        {(team) => (
-                          <li class="flex justify-between gap-3 text-xs">
-                            <span class="truncate">
-                              {team.name ?? "Unnamed team"}
-                            </span>
-                            <span class="flex-none text-muted">
-                              {team.role} · {team.member_count}{" "}
-                              {team.member_count === 1 ? "member" : "members"}
-                            </span>
-                          </li>
-                        )}
-                      </For>
-                    </ul>
-                  </Show>
-                )}
-              </Match>
-              <Match when={folk.teams.error() !== undefined}>
-                <div class="text-xs text-muted">Teams unavailable.</div>
-              </Match>
-            </Switch>
-          </div>
-          <p class="mt-3 text-xs text-muted">
-            Sign-in and sync enablement use the <code>lore</code> CLI.
-          </p>
-        </PopoverPrimitive.Content>
-      </PopoverPrimitive.Portal>
-    </PopoverPrimitive.Root>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 };

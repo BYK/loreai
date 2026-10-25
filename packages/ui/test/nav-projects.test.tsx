@@ -4,10 +4,10 @@
  * `pins` localStorage store.
  */
 import { MemoryRouter, Route } from "@solidjs/router";
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Nav } from "~/components/shell/Nav";
+import { ProjectPicker } from "~/components/shell/ProjectPicker";
 import { byRecency, sectionProjects } from "~/components/shell/nav-projects";
 import type { ProjectSummary } from "~/contracts";
 import { closeLoreDb, resetCache } from "~/db";
@@ -41,31 +41,35 @@ function renderNav(
   projects: ProjectSummary[],
   activeProjectId: string | null = null,
 ) {
-  return render(() => (
+  const result = render(() => (
     <MemoryRouter>
       <Route
         path="*"
         component={() => (
           <ConnectionContext.Provider value={createConnectionStore()}>
-            <Nav
+            <ProjectPicker
               projects={projects}
               loading={false}
               error={undefined}
               activeProjectId={activeProjectId}
-              totalKnowledge={null}
             />
           </ConnectionContext.Provider>
         )}
       />
     </MemoryRouter>
   ));
+  fireEvent.click(screen.getByRole("button", { name: /switch project/i }));
+  return result;
 }
 
 /** Labels of all project rows under a given data-section. */
 function sectionLabels(section: string): string[] {
   return [
     ...document.querySelectorAll<HTMLElement>(`[data-section="${section}"]`),
-  ].map((el) => el.textContent ?? "");
+  ].map(
+    (el) =>
+      `${el.querySelector("[data-project-label]")?.textContent ?? ""}${el.querySelector("[data-project-count]")?.textContent ?? ""}`,
+  );
 }
 
 beforeEach(async () => {
@@ -139,6 +143,90 @@ describe("Nav project sections", () => {
     expect(localStorage.getItem(PINNED_PROJECTS_STORAGE_KEY)).toBe("[]");
   });
 
+  it("keeps focus on a toggled pin across groups and continues arrow navigation", async () => {
+    renderNav(SEVEN);
+    const filter = await screen.findByTestId("nav-project-filter");
+    const pin = screen.getByRole("button", { name: "Pin echo" });
+    pin.focus();
+    fireEvent.click(pin);
+    const unpin = screen.getByRole("button", { name: "Unpin echo" });
+    await waitFor(() => expect(unpin).toHaveFocus());
+    expect(screen.getByTestId("nav-project-filter")).toBe(filter);
+    fireEvent.keyDown(unpin, { key: "ArrowDown" });
+    expect(screen.getByRole("link", { name: /charlie/ })).toHaveFocus();
+    unpin.focus();
+    fireEvent.click(unpin);
+    const again = screen.getByRole("button", { name: "Pin echo" });
+    await waitFor(() => expect(again).toHaveFocus());
+    fireEvent.keyDown(again, { key: "ArrowDown" });
+    expect(screen.getByRole("link", { name: /foxtrot/ })).toHaveFocus();
+  });
+
+  it("keeps unrelated project rows mounted and focused when pins change", async () => {
+    renderNav(SEVEN);
+    const alpha = screen.getByRole("link", { name: /alpha/ });
+    alpha.focus();
+    pins().toggle("echo");
+    expect(alpha.isConnected).toBe(true);
+    expect(alpha).toHaveFocus();
+    expect(screen.getByRole("link", { name: /alpha/ })).toBe(alpha);
+  });
+
+  it("reveals a focused unpinned project when it moves into collapsed All projects", async () => {
+    pins().toggle("golf");
+    renderNav(SEVEN);
+    const unpin = screen.getByRole("button", { name: "Unpin golf" });
+    unpin.focus();
+    fireEvent.click(unpin);
+    expect(screen.getByTestId("nav-all-projects")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    const pin = screen.getByRole("button", { name: "Pin golf" });
+    await waitFor(() => expect(pin).toHaveFocus());
+    fireEvent.keyDown(pin, { key: "ArrowUp" });
+    expect(screen.getByRole("link", { name: /delta/ })).toHaveFocus();
+  });
+
+  it("retains the same focused pin while filtering", async () => {
+    renderNav(SEVEN);
+    fireEvent.input(screen.getByTestId("nav-project-filter"), {
+      target: { value: "echo" },
+    });
+    const pin = screen.getByRole("button", { name: "Pin echo" });
+    pin.focus();
+    fireEvent.click(pin);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Unpin echo" })).toHaveFocus(),
+    );
+    expect(pin.isConnected).toBe(true);
+    expect(screen.getByRole("button", { name: "Unpin echo" })).toBe(pin);
+  });
+
+  it("does not override newer filter focus after a pin moves", async () => {
+    renderNav(SEVEN);
+    const pin = screen.getByRole("button", { name: "Pin echo" });
+    const filter = screen.getByTestId("nav-project-filter");
+    pin.focus();
+    fireEvent.click(pin);
+    filter.focus();
+    await Promise.resolve();
+    expect(filter).toHaveFocus();
+  });
+
+  it("does not restore pin focus after the picker closes", async () => {
+    renderNav(SEVEN);
+    const trigger = screen.getByRole("button", { name: /switch project/i });
+    const pin = screen.getByRole("button", { name: "Pin echo" });
+    pin.focus();
+    fireEvent.click(pin);
+    fireEvent.click(trigger);
+    await waitFor(() =>
+      expect(screen.queryByTestId("nav-project-filter")).toBeNull(),
+    );
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("pins survive an IndexedDB cache reset", async () => {
     const { IDBFactory } = await import("./idb-globals");
     pins().toggle("echo");
@@ -209,7 +297,7 @@ describe("Nav project sections", () => {
 
     expect(screen.queryByRole("heading", { name: "Matches" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Pinned" })).toBeInTheDocument();
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
   });
 
   it("keeps the active project visible while All projects is collapsed", async () => {
@@ -224,10 +312,10 @@ describe("Nav project sections", () => {
     );
   });
 
-  it("no filter box and no All button with ≤5 projects and no pins", async () => {
+  it("keeps picker search available with a small project list and no All button", async () => {
     renderNav(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
-    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
     expect(screen.queryByTestId("nav-all-projects")).toBeNull();
     expect(sectionLabels("recent")).toEqual(["alpha0", "bravo0", "delta0"]);
   });

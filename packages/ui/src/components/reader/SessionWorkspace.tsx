@@ -31,7 +31,7 @@ export const SessionWorkspace: Component<{
     <Tabs
       value={tab()}
       onChange={setTab}
-      class="flex h-[calc(100dvh-62px)] min-h-0 flex-col overflow-hidden lg:grid lg:h-auto lg:grid-cols-[minmax(0,1fr)_340px]"
+      class="flex h-[calc(100dvh-48px)] min-h-0 flex-col overflow-hidden lg:grid lg:h-auto lg:grid-cols-[minmax(0,1fr)_340px]"
     >
       <TabsList
         aria-label="Session panes"
@@ -77,7 +77,7 @@ export const SessionWorkspace: Component<{
         role={desktop() ? "presentation" : "tabpanel"}
         tabIndex={desktop() ? -1 : 0}
         aria-labelledby={desktop() ? "" : "session-tab-context"}
-        class="mt-0 min-h-0 flex-1 overflow-y-auto lg:h-[calc(100dvh-62px)]"
+        class="mt-0 min-h-0 flex-1 overflow-y-auto lg:h-[calc(100dvh-48px)]"
       >
         <aside
           data-pane="context"

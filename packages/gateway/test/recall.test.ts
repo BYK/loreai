@@ -202,11 +202,11 @@ describe("RECALL_GATEWAY_TOOL", () => {
     expect(props).toHaveProperty("ids");
     expect(props).toHaveProperty("detailOffset");
     expect(props).toHaveProperty("detailLimit");
-    expect(schema.anyOf).toEqual([
-      { required: ["query"] },
-      { required: ["id"] },
-      { required: ["ids"] },
-    ]);
+    // Root combinators are rejected upstream (Copilot Gemini: 400
+    // invalid_request_body); recall input is validated at execution instead.
+    for (const keyword of ["anyOf", "oneOf", "allOf", "not", "if"]) {
+      expect(schema).not.toHaveProperty(keyword);
+    }
     expect(schema).not.toHaveProperty("required");
     expect(schema.additionalProperties).toBe(false);
   });
@@ -548,7 +548,15 @@ describe("hasGatewayRecallTool", () => {
 describe("shared recall tool contract", () => {
   test("gateway injection uses the core schema without adapter-specific drift", () => {
     expect(RECALL_GATEWAY_TOOL.name).toBe(RECALL_TOOL_NAME);
-    expect(RECALL_GATEWAY_TOOL.inputSchema).toEqual(RECALL_TOOL_INPUT_SCHEMA);
+    const expectedSchema: Record<string, unknown> = {
+      ...RECALL_TOOL_INPUT_SCHEMA,
+    };
+    // Providers reject root schema combinators; execution still uses the full
+    // shared parser contract.
+    for (const keyword of ["anyOf", "oneOf", "allOf", "not", "if"]) {
+      delete expectedSchema[keyword];
+    }
+    expect(RECALL_GATEWAY_TOOL.inputSchema).toEqual(expectedSchema);
   });
 });
 

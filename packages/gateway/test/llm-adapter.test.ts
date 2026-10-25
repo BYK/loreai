@@ -520,6 +520,17 @@ describe("resolveWorkerProtocol", () => {
     expect(resolveWorkerProtocol("anthropic", "openai")).toBe("openai");
   });
 
+  test("Copilot Claude sessions keep non-Claude workers off /v1/messages", () => {
+    // A native Copilot Claude session records "anthropic", but Copilot's
+    // Messages endpoint rejects other models (400 detail=model).
+    expect(
+      resolveWorkerProtocol("github-copilot", "anthropic", "kimi-k3"),
+    ).toBe("openai");
+    expect(
+      resolveWorkerProtocol("github-copilot", "anthropic", "claude-haiku-5.5"),
+    ).toBe("anthropic");
+  });
+
   test("explicit 'openai-responses' is preserved for providers that support it", () => {
     // Real api.openai.com natively speaks /v1/responses — its route table
     // declares `protocol: "openai-responses"` (config.ts:573-578). An
