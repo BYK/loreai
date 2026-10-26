@@ -36,7 +36,11 @@ test.describe("production route deep links", () => {
         "duplicate-review",
       ],
       [`/ui/projects/${project.id}/knowledge/${entry.id}`, entry.title, "text"],
-      [`/ui/projects/${project.id}/sessions`, session.session_id, "text"],
+      [
+        `/ui/projects/${project.id}/sessions`,
+        session.session_id,
+        "session-list",
+      ],
       [
         `/ui/projects/${project.id}/sessions/${session.session_id}`,
         "Session history",
@@ -52,6 +56,18 @@ test.describe("production route deep links", () => {
     ] as const;
     for (const [path, text, kind] of routes) {
       await page.goto(path);
+      const sessionLink = page.locator(
+        `a[href$="/sessions/${encodeURIComponent(session.session_id)}"]`,
+      );
+      const processing = sessionLink.locator("..").locator("details");
+      const revealSessionId = async () => {
+        if (kind !== "session-list") return;
+        await expect(sessionLink).toBeVisible();
+        await expect(processing).not.toHaveAttribute("open");
+        await expect(processing.getByText(text, { exact: true })).toBeHidden();
+        await processing.locator("summary").click();
+      };
+      await revealSessionId();
       const target =
         kind === "welcome"
           ? page.getByRole("heading", { name: "Choose a project", exact: true })
@@ -62,22 +78,24 @@ test.describe("production route deep links", () => {
                 .first()
             : kind === "session"
               ? page.getByLabel("Session history")
-              : kind === "entities"
-                ? page.getByTestId("entities-page")
-                : kind === "entity-detail"
-                  ? page.getByTestId("entity-page")
-                  : kind === "contradictions"
-                    ? page.getByTestId("contradictions-page")
-                    : kind === "duplicate-review"
-                      ? page.getByTestId("duplicate-review")
-                      : kind === "warming"
-                        ? page.getByTestId("warming-page")
-                        : kind === "costs"
-                          ? page.getByTestId("costs-page")
-                          : page
-                              .locator("main:visible")
-                              .getByText(text, { exact: false })
-                              .first();
+              : kind === "session-list"
+                ? processing.getByText(text, { exact: true })
+                : kind === "entities"
+                  ? page.getByTestId("entities-page")
+                  : kind === "entity-detail"
+                    ? page.getByTestId("entity-page")
+                    : kind === "contradictions"
+                      ? page.getByTestId("contradictions-page")
+                      : kind === "duplicate-review"
+                        ? page.getByTestId("duplicate-review")
+                        : kind === "warming"
+                          ? page.getByTestId("warming-page")
+                          : kind === "costs"
+                            ? page.getByTestId("costs-page")
+                            : page
+                                .locator("main:visible")
+                                .getByText(text, { exact: false })
+                                .first();
       await expect(target).toBeVisible();
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);
@@ -87,6 +105,7 @@ test.describe("production route deep links", () => {
       const before = page.url();
       await page.reload();
       await expect(page).toHaveURL(before);
+      await revealSessionId();
       await expect(target).toBeVisible();
       if (kind === "session") {
         await expect(target).toHaveAttribute("aria-label", text);

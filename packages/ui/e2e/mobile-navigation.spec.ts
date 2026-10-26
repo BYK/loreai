@@ -44,6 +44,11 @@ for (const width of [320, 390, 767]) {
     await nav.getByTestId("rail-model-usage").click();
     await expect(page).toHaveURL("/ui/model-usage");
     await expect(drawer).toHaveCount(0);
+    const totals = page.locator("summary").filter({ hasText: "Model totals" });
+    await expect(totals).toBeVisible();
+    await expect(totals.locator("..")).not.toHaveAttribute("open");
+    await expect(page.getByTestId("model-filter")).toBeHidden();
+    await totals.click();
     await expect(page.getByTestId("model-filter")).toBeVisible();
     await openNavigation(page);
     await page.getByTestId("rail-model-usage").focus();
