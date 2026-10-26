@@ -722,15 +722,6 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     </div>
                   </div>
                 </Show>
-                <Show when={linkSuccess()}>
-                  <p
-                    class="flex items-center gap-2 text-sm text-accent"
-                    role="status"
-                  >
-                    <Icon name="check" />
-                    {linkSuccess()}
-                  </p>
-                </Show>
                 <Show when={policyError() && !confirmAutoShare()}>
                   <p class="text-sm text-danger" role="alert">
                     {errorText()}
@@ -835,6 +826,21 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           </div>
         </Match>
       </Switch>
+      <p
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        class={
+          linkSuccess()
+            ? "flex items-center gap-2 px-4 pb-4 text-sm text-accent sm:px-5"
+            : "sr-only"
+        }
+      >
+        <Show when={linkSuccess()}>
+          <Icon name="check" />
+          {linkSuccess()}
+        </Show>
+      </p>
       <Dialog
         open={confirmUnlink()}
         onOpenChange={(open) => {

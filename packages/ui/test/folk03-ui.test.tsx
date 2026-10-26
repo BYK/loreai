@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@solidjs/testing-library";
-import type { JSX } from "solid-js";
+import { createSignal, type JSX } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -1936,6 +1936,7 @@ describe("SharingPanel auto-share control", () => {
       name: "Manage sharing",
     });
     await waitFor(() => expect(manage).toHaveFocus());
+    expect(screen.getByText("Project linked to team.")).toBeVisible();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled(),
     );
@@ -2314,7 +2315,7 @@ describe("SharingPanel auto-share control", () => {
 });
 
 describe("SharingPanel team link control", () => {
-  it("links and unlinks with the expected current team revision", async () => {
+  it("keeps a persistent visible link and unlink status while configured settings collapse", async () => {
     const unlinked: SharingStatus = {
       ...manualSharing,
       linked: false,
@@ -2344,6 +2345,11 @@ describe("SharingPanel team link control", () => {
     const picker = await screen.findByRole("combobox", {
       name: "Link to team",
     });
+    const panel = screen.getByTestId("sharing-panel");
+    const receipt = within(panel).getByRole("status");
+    expect(receipt).toBeEmptyDOMElement();
+    expect(receipt).toHaveAttribute("aria-live", "polite");
+    expect(receipt).toHaveAttribute("aria-atomic", "true");
     fireEvent.change(picker, { target: { value: "team-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
     await waitFor(() =>
@@ -2355,9 +2361,15 @@ describe("SharingPanel team link control", () => {
       ),
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Manage sharing" }),
-    );
+    const manage = await screen.findByRole("button", {
+      name: "Manage sharing",
+    });
+    expect(manage).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("Sharing setup")).not.toBeVisible();
+    expect(within(panel).getByRole("status")).toBe(receipt);
+    expect(receipt).toHaveTextContent("Project linked to team.");
+    expect(receipt).toBeVisible();
+    fireEvent.click(manage);
     const unlink = await screen.findByRole("button", { name: "Unlink" });
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
@@ -2375,7 +2387,111 @@ describe("SharingPanel team link control", () => {
         "team-1",
       ),
     );
+    await waitFor(() => expect(receipt).toHaveTextContent("Project unlinked."));
+    expect(within(panel).getByRole("status")).toBe(receipt);
+    expect(receipt).toBeVisible();
   });
+
+  it.each(["account", "project"] as const)(
+    "clears completed receipts and ignores late link success after a %s change",
+    async (context) => {
+      const unlinked: SharingStatus = {
+        ...manualSharing,
+        linked: false,
+        team: null,
+        state: "not_linked",
+      };
+      let currentAccount = account;
+      const pendingLink = deferred<SharingStatus>();
+      const linkProjectToTeam = vi
+        .fn<ApiClient["linkProjectToTeam"]>()
+        .mockResolvedValueOnce(manualSharing)
+        .mockImplementation(() => pendingLink.promise);
+      const getProjectSharing = vi.fn<ApiClient["getProjectSharing"]>(
+        async () => unlinked,
+      );
+      mount(
+        () => {
+          const ws = useWorkspace();
+          const [projectId, setProjectId] = createSignal("project-1");
+          return (
+            <>
+              <button
+                onClick={() => {
+                  if (context === "project")
+                    setProjectId((current) =>
+                      current === "project-1" ? "project-2" : "project-1",
+                    );
+                  else {
+                    currentAccount =
+                      currentAccount.user?.id === account.user?.id
+                        ? {
+                            ...account,
+                            user: {
+                              id: "other-user",
+                              email: null,
+                              display_name: "Other",
+                            },
+                          }
+                        : account;
+                    ws.state.folk.refresh();
+                  }
+                }}
+              >
+                Change context
+              </button>
+              <SharingPanel projectId={projectId()} />
+            </>
+          );
+        },
+        clientWith({
+          getAccount: async () => currentAccount,
+          getProjectSharing,
+          linkProjectToTeam,
+        }),
+      );
+      const panel = screen.getByTestId("sharing-panel");
+      const picker = await screen.findByRole("combobox", {
+        name: "Link to team",
+      });
+      const receipt = within(panel).getByRole("status");
+      fireEvent.change(picker, {
+        target: { value: "team-1" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
+      await waitFor(() =>
+        expect(receipt).toHaveTextContent("Project linked to team."),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Change context" }));
+      await waitFor(() => expect(receipt).toBeEmptyDOMElement());
+      expect(receipt).toBeInTheDocument();
+      fireEvent.change(
+        await screen.findByRole("combobox", { name: "Link to team" }),
+        {
+          target: { value: "team-1" },
+        },
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
+      await waitFor(() => expect(linkProjectToTeam).toHaveBeenCalledTimes(2));
+      // Move away again before the pending mutation settles.
+      const readsBeforeChange = getProjectSharing.mock.calls.length;
+      fireEvent.click(screen.getByRole("button", { name: "Change context" }));
+      await waitFor(() =>
+        expect(getProjectSharing.mock.calls.length).toBeGreaterThan(
+          readsBeforeChange,
+        ),
+      );
+      pendingLink.resolve(manualSharing);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("combobox", { name: "Link to team" }),
+        ).toBeEnabled(),
+      );
+      expect(receipt).toBeEmptyDOMElement();
+      expect(within(panel).getByRole("status")).toBe(receipt);
+      expect(screen.getByLabelText("Sharing setup")).toBeVisible();
+    },
+  );
 });
 
 describe("guided project sharing", () => {

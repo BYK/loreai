@@ -814,6 +814,13 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
     await expect(page.getByTestId("sharing-team-picker")).toBeVisible();
+    const panel = page.getByTestId("sharing-panel");
+    const receipt = panel.getByRole("status");
+    await expect(receipt).toHaveCount(1);
+    await expect(receipt).toBeEmpty();
+    await expect(receipt).toHaveAttribute("aria-live", "polite");
+    await expect(receipt).toHaveAttribute("aria-atomic", "true");
+    const receiptElement = await receipt.elementHandle();
     await page
       .getByRole("combobox", { name: "Link to team" })
       .selectOption("team-1");
@@ -822,6 +829,20 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(
       page.getByRole("button", { name: "Manage sharing" }),
     ).toBeFocused();
+    await expect(
+      page.getByRole("button", { name: "Manage sharing" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      panel.getByRole("switch", { name: "Share automatically" }),
+    ).toHaveCount(0);
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveText("Project linked to team.");
+    expect(
+      await receipt.evaluate(
+        (element, original) => element === original,
+        receiptElement,
+      ),
+    ).toBe(true);
     await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
     await page.getByRole("button", { name: "Manage sharing" }).click();
     await page.getByRole("button", { name: "Unlink" }).click();
@@ -831,6 +852,14 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(page.getByTestId("sharing-summary")).toContainText(
       "Not linked",
     );
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveText("Project unlinked.");
+    expect(
+      await receipt.evaluate(
+        (element, original) => element === original,
+        receiptElement,
+      ),
+    ).toBe(true);
     expect(linkCalls).toEqual([
       { scope_id: "team-1", expected_scope_id: null },
       { scope_id: null, expected_scope_id: "team-1" },
