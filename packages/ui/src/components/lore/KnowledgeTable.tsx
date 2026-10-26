@@ -465,7 +465,9 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                                 </span>
                                 <span>{scopeOf(row.original)}</span>
                                 <Show when={props.showProject}>
-                                  <span>{projectLabel(row.original)}</span>
+                                  <span class="min-w-0 max-w-full [overflow-wrap:anywhere]">
+                                    {projectLabel(row.original)}
+                                  </span>
                                 </Show>
                                 <span class="md:hidden">
                                   {formatWhen(
