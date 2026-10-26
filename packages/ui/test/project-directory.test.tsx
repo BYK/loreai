@@ -4,7 +4,13 @@ import {
   createMemoryHistory,
   useLocation,
 } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 import type { ProjectSummary } from "~/contracts";
 import { ProjectDirectory } from "~/components/lore/ProjectDirectory";
@@ -63,8 +69,8 @@ describe("directoryProjects", () => {
     ];
     expect(
       ids(
-        directoryProjects(rows, " release ", "recent").repositories[0]!
-          .projects,
+        directoryProjects(rows, " release ", "recent").repositories[0]
+          ?.projects ?? [],
       ),
     ).toEqual(["older"]);
     expect(
@@ -154,6 +160,28 @@ function mount(
 }
 
 describe("ProjectDirectory", () => {
+  it("lays out repository groups once while keeping every checkout reachable", () => {
+    mount([
+      project("single", { git_remote: "remote-one" }),
+      project("new", { git_remote: "remote-two", last_activity: 10 }),
+      project("older", { git_remote: "remote-two", last_activity: 1 }),
+    ]);
+    const groups = screen.getByRole("list", { name: "Repository groups" });
+    expect(groups.children).toHaveLength(2);
+    const single = groups.querySelector('[data-repository="remote-one"]');
+    const multiple = groups.querySelector('[data-repository="remote-two"]');
+    expect(single).toBeInTheDocument();
+    expect(multiple).toBeInTheDocument();
+    expect(
+      within(single as HTMLElement).getByTestId("project-card"),
+    ).toHaveAttribute("href", "/projects/single");
+    expect(
+      within(multiple as HTMLElement)
+        .getAllByTestId("project-card")
+        .map((link) => link.getAttribute("href")),
+    ).toEqual(["/projects/new", "/projects/older"]);
+  });
+
   it("keeps each checkout link and restores URL filter/sort state", async () => {
     mount(
       [

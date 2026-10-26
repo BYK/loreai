@@ -34,6 +34,9 @@ status. Do not merge this PR.
    separates unattributed records, and supports Recent activity, Name and
    Knowledge count sorts. Grouping is presentation only: no merging/deleting,
    no grouping merely by display name, and every project keeps its own link.
+   Render repository groups in one grid, one card per remote; show multiple
+   checkout links as compact rows within the card. A singleton remote must not
+   consume an otherwise empty full grid row.
 
 ## Constraints
 

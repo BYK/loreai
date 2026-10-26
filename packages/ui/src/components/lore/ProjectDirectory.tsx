@@ -40,45 +40,61 @@ export const ProjectDirectory: Component<{
     ) +
     groups().local.length +
     groups().unattributed.length;
+  const projectLink = (
+    project: ProjectSummary,
+    compact = false,
+    remote?: string,
+  ) => (
+    <A
+      data-testid="project-card"
+      href={
+        props.sessionsMode ? sessionsHref(project.id) : projectHref(project.id)
+      }
+      class={
+        compact
+          ? "group block min-w-0 border-t border-line px-4 py-3 outline-none hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          : "group flex h-full min-h-36 flex-col rounded-lg border border-line bg-bg p-4 outline-none hover:border-accent/50 hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-ring"
+      }
+    >
+      <Show when={remote}>
+        <div class="mb-3 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
+          {remote}
+        </div>
+      </Show>
+      <div class="mb-2 flex min-w-0 items-start gap-2.5">
+        <Show when={!compact}>
+          <Icon name="folder" class="mt-0.5 shrink-0 text-accent" />
+        </Show>
+        <span class="min-w-0 text-sm font-semibold text-heading [overflow-wrap:anywhere]">
+          {project.name || project.path}
+        </span>
+        <Icon
+          name="chevron"
+          class="ml-auto mt-0.5 size-3.5 shrink-0 text-muted"
+        />
+      </div>
+      <div
+        class={`${compact ? "mb-2" : "mb-4"} font-mono text-[11px] text-muted [overflow-wrap:anywhere]`}
+      >
+        {project.path}
+      </div>
+      <div
+        class={`${compact ? "" : "mt-auto border-t border-line pt-3"} flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted`}
+      >
+        <span>
+          {`${project.knowledge_count} ${project.knowledge_count === 1 ? "entry" : "entries"}`}{" "}
+          · {pluralize(project.session_count, "session")}
+        </span>
+        <Show when={project.last_activity}>
+          <span>{formatWhen(project.last_activity)}</span>
+        </Show>
+      </div>
+    </A>
+  );
   const cards = (projects: readonly ProjectSummary[]) => (
     <ul class="grid list-none gap-3 p-0 sm:grid-cols-2 xl:grid-cols-3">
       <For each={projects}>
-        {(project) => (
-          <li class="min-w-0">
-            <A
-              data-testid="project-card"
-              href={
-                props.sessionsMode
-                  ? sessionsHref(project.id)
-                  : projectHref(project.id)
-              }
-              class="group flex h-full min-h-32 flex-col rounded-lg border border-line bg-bg p-4 outline-none hover:border-accent/50 hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <div class="mb-2 flex min-w-0 items-start gap-2.5">
-                <Icon name="folder" class="mt-0.5 shrink-0 text-accent" />
-                <span class="min-w-0 text-sm font-semibold text-heading [overflow-wrap:anywhere]">
-                  {project.name || project.path}
-                </span>
-                <Icon
-                  name="chevron"
-                  class="ml-auto mt-0.5 size-3.5 shrink-0 text-muted"
-                />
-              </div>
-              <div class="mb-4 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
-                {project.path}
-              </div>
-              <div class="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3 text-[11px] text-muted">
-                <span>
-                  {`${project.knowledge_count} ${project.knowledge_count === 1 ? "entry" : "entries"}`}{" "}
-                  · {pluralize(project.session_count, "session")}
-                </span>
-                <Show when={project.last_activity}>
-                  <span>{formatWhen(project.last_activity)}</span>
-                </Show>
-              </div>
-            </A>
-          </li>
-        )}
+        {(project) => <li class="min-w-0">{projectLink(project)}</li>}
       </For>
     </ul>
   );
@@ -182,18 +198,48 @@ export const ProjectDirectory: Component<{
                     Checkouts with the same recorded remote appear together.
                     Each keeps its own memory.
                   </p>
-                  <div class="space-y-5">
+                  <ul
+                    aria-label="Repository groups"
+                    class="grid list-none items-start gap-3 p-0 sm:grid-cols-2 xl:grid-cols-3"
+                  >
                     <For each={groups().repositories}>
                       {(group) => (
-                        <section class="min-w-0" aria-label={group.remote}>
-                          <h3 class="mb-2 font-mono text-xs text-muted [overflow-wrap:anywhere]">
-                            {group.remote}
-                          </h3>
-                          {cards(group.projects)}
-                        </section>
+                        <li
+                          class="min-w-0 self-stretch"
+                          data-repository={group.remote}
+                        >
+                          <Show
+                            when={group.projects.length === 1}
+                            fallback={
+                              <section
+                                aria-label={group.remote}
+                                class="h-full overflow-hidden rounded-lg border border-line bg-bg"
+                              >
+                                <div class="px-4 py-3">
+                                  <h3 class="font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
+                                    {group.remote}
+                                  </h3>
+                                  <p class="mt-1 text-xs text-muted">
+                                    {group.projects.length} recorded checkouts
+                                  </p>
+                                </div>
+                                <For each={group.projects}>
+                                  {(project) => projectLink(project, true)}
+                                </For>
+                              </section>
+                            }
+                          >
+                            {group.projects[0] &&
+                              projectLink(
+                                group.projects[0],
+                                false,
+                                group.remote,
+                              )}
+                          </Show>
+                        </li>
                       )}
                     </For>
-                  </div>
+                  </ul>
                 </section>
               </Show>
               <Show when={groups().local.length}>

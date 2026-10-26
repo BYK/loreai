@@ -41,6 +41,8 @@ existing component public props stay compatible.
   older-child filter matches, sort determinism/nonmutation and unattributed records.
 - [ ] Implement group-by-exact-nonempty-recorded-remote, local/unattributed sections,
   three usable sorts, and individual checkout links. No data merging/count invention.
+  Repository groups share one grid with one card per remote and compact checkout
+  rows inside each multi-checkout card; singleton groups do not get empty grid rows.
 - [ ] Make knowledge title/content dominate the table width; readable two-line
   previews, compact metadata, real entry links supporting modified clicks, retain
   keyboard selection and paging. Remove production FutureActionRow calls in both
