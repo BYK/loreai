@@ -884,7 +884,7 @@ export function finalizeResponsesAcc(
       content.push({
         type: "tool_use",
         id: raw.call_id,
-        name: responsesToolName(raw),
+        name: responsesToolName(raw, "response"),
         input: raw.input,
         raw,
       });
@@ -943,7 +943,7 @@ export function finalizeResponsesAcc(
       content.push({
         type: "tool_use",
         id: item.callId || item.id,
-        name: raw ? responsesToolName(raw) : item.name,
+        name: raw ? responsesToolName(raw, "response") : item.name,
         input,
         ...(raw?.namespace !== undefined ? { raw } : {}),
       });

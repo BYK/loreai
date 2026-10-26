@@ -17176,7 +17176,7 @@ export function accumulateResponsesNonStreamJSON(
         content.push({
           type: "tool_use",
           id,
-          name: responsesToolName(item),
+          name: responsesToolName(item, "response"),
           input,
           ...(item.type === "custom_tool_call" || item.namespace !== undefined
             ? { raw: item }

@@ -760,7 +760,7 @@ function createInputItemsBuilder(): {
       const toolUseBlock: GatewayContentBlock = {
         type: "tool_use",
         id: asString(raw.call_id ?? raw.id),
-        name: responsesToolName(raw),
+        name: responsesToolName(raw, "request"),
         input: custom ? raw.input : parseArguments(raw.arguments),
       };
       const provenanceBlock: GatewayContentBlock = {

@@ -28,13 +28,21 @@ export function nativeResponsesEnvelope(
   return copy;
 }
 
-export function responsesToolName(raw: Record<string, unknown>): string {
+export function responsesToolName(
+  raw: Record<string, unknown>,
+  source: "request" | "response",
+): string {
   if (
     typeof raw.name !== "string" ||
     (raw.namespace !== undefined &&
       (typeof raw.namespace !== "string" || !raw.namespace))
-  )
-    throw new InvalidCrossProviderRequestError();
+  ) {
+    // Only client input failures are HTTP 400. Malformed provider output must
+    // follow the upstream failure path, including buffered meta responses.
+    throw source === "request"
+      ? new InvalidCrossProviderRequestError()
+      : new Error("malformed Responses response tool name");
+  }
   return typeof raw.namespace === "string"
     ? `${raw.namespace}.${raw.name}`
     : raw.name;
