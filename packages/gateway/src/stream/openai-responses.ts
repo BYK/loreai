@@ -36,6 +36,7 @@ import {
   safeTokenSum,
   validateResponsesUsage,
 } from "../usage-validation";
+import { responsesToolName } from "../translate/responses-native";
 import { appendCodexRateLimitEvent } from "../codex-rate-limits";
 
 // ---------------------------------------------------------------------------
@@ -413,6 +414,16 @@ export function responsesDoneItemMatchesAdded(
       return false;
     }
     ignored.add("arguments");
+  }
+  if (added.type === "custom_tool_call") {
+    if (
+      typeof done.input !== "string" ||
+      (added.input !== undefined &&
+        (typeof added.input !== "string" ||
+          !done.input.startsWith(added.input)))
+    )
+      return false;
+    ignored.add("input");
   }
   if (added.type === "message") {
     if (!sparseTextPartsExtend(done.content, added.content)) return false;
@@ -852,9 +863,33 @@ export function finalizeResponsesAcc(
   state: ResponsesAccState,
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
-  const sortedIndices = Array.from(state.items.keys()).sort((a, b) => a - b);
+  const sortedIndices = Array.from(
+    new Set([
+      ...state.items.keys(),
+      ...Array.from(state.rawItems)
+        .filter(([, item]) => item.type === "custom_tool_call")
+        .map(([index]) => index),
+    ]),
+  ).sort((a, b) => a - b);
 
   for (const index of sortedIndices) {
+    const raw = state.rawItems.get(index);
+    if (raw?.type === "custom_tool_call") {
+      if (
+        typeof raw.input !== "string" ||
+        typeof raw.call_id !== "string" ||
+        typeof raw.name !== "string"
+      )
+        malformedResponsesEvent();
+      content.push({
+        type: "tool_use",
+        id: raw.call_id,
+        name: responsesToolName(raw),
+        input: raw.input,
+        raw,
+      });
+      continue;
+    }
     const item = state.items.get(index);
     if (!item) continue;
     if (item.type === "text") {
@@ -908,8 +943,9 @@ export function finalizeResponsesAcc(
       content.push({
         type: "tool_use",
         id: item.callId || item.id,
-        name: item.name,
+        name: raw ? responsesToolName(raw) : item.name,
         input,
+        ...(raw?.namespace !== undefined ? { raw } : {}),
       });
     }
   }
@@ -1286,7 +1322,8 @@ function responsesEventHasSemanticContent(
     event === "response.output_item.done"
   ) {
     const item = isRecord(parsed.item) ? parsed.item : undefined;
-    if (item?.type === "function_call") return true;
+    if (item?.type === "function_call" || item?.type === "custom_tool_call")
+      return true;
     if (item?.type === "message" && Array.isArray(item.content)) {
       return item.content.some(
         (part) =>

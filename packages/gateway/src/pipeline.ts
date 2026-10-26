@@ -273,6 +273,11 @@ import {
   buildOpenAIResponsesResponse,
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
+import { isImplicitChatGPTResponses } from "./codex-routing";
+import {
+  responsesToolName,
+  restoreNativeResponsesToolEnvelopes,
+} from "./translate/responses-native";
 import { InvalidCrossProviderRequestError } from "./translate/errors";
 import {
   responsesValidationCheck,
@@ -3252,7 +3257,13 @@ export function coalesceAdjacentAssistants(
   const merged: GatewayMessage[] = [];
   for (const m of messages) {
     const last = merged[merged.length - 1];
-    if (last && last.role === "assistant" && m.role === "assistant") {
+    if (
+      last &&
+      last.role === "assistant" &&
+      m.role === "assistant" &&
+      !last.responsesSourceRange &&
+      !m.responsesSourceRange
+    ) {
       // The knowledge-delta closer (`*🧠 Refreshed memory*`) must ALWAYS stay
       // as a separate assistant message — never coalesced into a real
       // assistant response. A harness would otherwise render the closer inline
@@ -8028,6 +8039,7 @@ function captureLegacyGlobalAuth(
     return undefined;
   }
   const route = resolveRequestUpstreamRoute(req, config);
+  if (route.providerID === "openai-codex") return undefined;
   const providerID =
     route.effectiveProtocol === "anthropic"
       ? "anthropic"
@@ -8073,7 +8085,12 @@ function resolveRequestUpstreamRoute(
       "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
     );
   }
-  let providerID = providerHeader;
+  let providerID =
+    providerHeader ??
+    (req.protocol === "openai-responses" &&
+    isImplicitChatGPTResponses(req.rawHeaders, config)
+      ? "openai-codex"
+      : undefined);
   let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
   if (!providerRoute && providerID) {
     // Explicit request routing is cache-only. An unknown untrusted provider
@@ -8206,6 +8223,12 @@ function assertCrossProviderRequestControls(
   effectiveProtocol: EffectiveUpstreamProtocol,
 ): void {
   const extras = req.extras;
+  if (
+    effectiveProtocol !== "openai-responses" &&
+    (req.tools.some((tool) => tool.responsesNative !== undefined) ||
+      extras?.nativeInstructionPrefix?.itemPositions)
+  )
+    throw new InvalidCrossProviderRequestError();
   if (
     ((req.protocol === "openai" && effectiveProtocol !== "openai") ||
       (req.protocol === "openai-responses" &&
@@ -8458,7 +8481,7 @@ async function forwardToUpstream(
       ? req.extras?.nativeInstructionPrefix
       : undefined;
   if (
-    nativeInstructions?.hasLateItems ||
+    (nativeInstructions?.hasLateItems && !nativeInstructions.itemPositions) ||
     (req.protocol === "openai" &&
       req.extras?.nativeChatInstructionPrefix?.hasLateItems) ||
     (effectiveProtocol !== "openai-responses" &&
@@ -10897,7 +10920,8 @@ export function streamResponsesRecallAware(
     const rawItem = acc.rawItems.get(outputIndex);
     if (
       rawItem?.type !== "function_call" ||
-      rawItem.name !== RECALL_TOOL_NAME
+      rawItem.name !== RECALL_TOOL_NAME ||
+      rawItem.namespace !== undefined
     ) {
       return false;
     }
@@ -11262,6 +11286,7 @@ export function streamResponsesRecallAware(
       if (
         item.type === "function_call" &&
         item.name === RECALL_TOOL_NAME &&
+        item.namespace === undefined &&
         item.status !== undefined &&
         item.status !== "in_progress" &&
         item.status !== "completed"
@@ -11765,6 +11790,7 @@ export function streamResponsesRecallAware(
           }
           if (
             item.name === RECALL_TOOL_NAME &&
+            item.namespace === undefined &&
             item?.status !== undefined &&
             item.status !== "completed"
           ) {
@@ -14013,7 +14039,9 @@ export function streamResponsesRecallAware(
                 event === "response.output_item.done") &&
               (parsed.item as Record<string, unknown> | undefined)?.type ===
                 "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+              (parsed.item as Record<string, unknown>).name ===
+                RECALL_TOOL_NAME &&
+              (parsed.item as Record<string, unknown>).namespace === undefined
             ) {
               recallDetected = true;
             }
@@ -14053,7 +14081,8 @@ export function streamResponsesRecallAware(
               (index, item) => {
                 if (
                   item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
+                  item.name !== RECALL_TOOL_NAME ||
+                  item.namespace !== undefined
                 ) {
                   return;
                 }
@@ -14090,12 +14119,17 @@ export function streamResponsesRecallAware(
             ) {
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
+                item?.type === "function_call" &&
+                item?.name === "recall" &&
+                item.namespace === undefined;
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
                 resolvingRecallTool = true;
-              } else if (item?.type === "function_call") {
+              } else if (
+                item?.type === "function_call" ||
+                item?.type === "custom_tool_call"
+              ) {
                 if (
                   event === "response.output_item.added" &&
                   opts.validation === "codex" &&
@@ -14251,7 +14285,9 @@ export function streamResponsesRecallAware(
                     !Array.isArray(item) &&
                     (item as Record<string, unknown>).type ===
                       "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                    (item as Record<string, unknown>).name ===
+                      RECALL_TOOL_NAME &&
+                    (item as Record<string, unknown>).namespace === undefined,
                 )
               ) {
                 recallDetected = true;
@@ -14264,6 +14300,7 @@ export function streamResponsesRecallAware(
                     if (
                       item.type !== "function_call" ||
                       item.name !== RECALL_TOOL_NAME ||
+                      item.namespace !== undefined ||
                       (!recallIndices.has(outputIndex) &&
                         !unresolvedToolIndices.has(outputIndex))
                     ) {
@@ -14276,8 +14313,15 @@ export function streamResponsesRecallAware(
                     promoteDeferredCandidate(outputIndex);
                   },
                   (outputIndex, item) => {
-                    if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
+                    if (
+                      item.type !== "function_call" &&
+                      item.type !== "custom_tool_call"
+                    )
+                      return;
+                    if (
+                      item.name === RECALL_TOOL_NAME &&
+                      item.namespace === undefined
+                    ) {
                       collectCompletedRecall(
                         state,
                         outputIndex,
@@ -14838,11 +14882,15 @@ export function streamResponsesRecallAware(
                               | undefined;
                             if (
                               item?.type === "function_call" &&
-                              item.name === RECALL_TOOL_NAME
+                              item.name === RECALL_TOOL_NAME &&
+                              item.namespace === undefined
                             ) {
                               contRecallIndices.add(ci);
                               resolvingRecallTool = true;
-                            } else if (item?.type === "function_call") {
+                            } else if (
+                              item?.type === "function_call" ||
+                              item?.type === "custom_tool_call"
+                            ) {
                               if (
                                 ce === "response.output_item.added" &&
                                 opts.validation === "codex" &&
@@ -14983,7 +15031,8 @@ export function streamResponsesRecallAware(
                                 (outputIndex, item) => {
                                   if (
                                     item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
+                                    item.name !== RECALL_TOOL_NAME ||
+                                    item.namespace !== undefined
                                   ) {
                                     return;
                                   }
@@ -14993,8 +15042,15 @@ export function streamResponsesRecallAware(
                                   promoteContinuationCandidate(outputIndex);
                                 },
                                 (outputIndex, item) => {
-                                  if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
+                                  if (
+                                    item.type !== "function_call" &&
+                                    item.type !== "custom_tool_call"
+                                  )
+                                    return;
+                                  if (
+                                    item.name === RECALL_TOOL_NAME &&
+                                    item.namespace === undefined
+                                  ) {
                                     collectCompletedRecall(
                                       contState,
                                       outputIndex,
@@ -16136,7 +16192,8 @@ export function streamResponsesRecallAware(
           failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
             (item) =>
               item.type !== "function_call" ||
-              (item.name !== RECALL_TOOL_NAME &&
+              ((item.name !== RECALL_TOOL_NAME ||
+                item.namespace !== undefined) &&
                 ![item.id, item.call_id].some(
                   (identity) =>
                     typeof identity === "string" &&
@@ -17094,9 +17151,17 @@ export function accumulateResponsesNonStreamJSON(
             }
           }
         }
-      } else if (item.type === "function_call") {
-        let input: unknown = {};
-        if (typeof item.arguments === "string") {
+      } else if (
+        item.type === "function_call" ||
+        item.type === "custom_tool_call"
+      ) {
+        let input: unknown = item.type === "custom_tool_call" ? item.input : {};
+        if (item.type === "custom_tool_call" && typeof item.input !== "string")
+          throw new Error("malformed Responses custom tool input");
+        if (
+          item.type === "function_call" &&
+          typeof item.arguments === "string"
+        ) {
           try {
             input = JSON.parse(item.arguments);
           } catch {
@@ -17111,8 +17176,11 @@ export function accumulateResponsesNonStreamJSON(
         content.push({
           type: "tool_use",
           id,
-          name: asString(item.name),
+          name: responsesToolName(item),
           input,
+          ...(item.type === "custom_tool_call" || item.namespace !== undefined
+            ? { raw: item }
+            : {}),
         });
       }
     }
@@ -17412,6 +17480,7 @@ export function recordCacheTurnUsage(
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
   endSpan?: () => void,
+  request?: Pick<GatewayRequest, "messages" | "tools">,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -17421,8 +17490,21 @@ export function recordCacheTurnUsage(
   // body to analyze); left undefined when the body is missing so the
   // recordCacheUsage call below falls through to the legacy "count it"
   // behavior on the rare no-body path.
+  // Native envelopes carry opaque metadata and tool declarations. Prefix
+  // diagnostics export values and field paths, so omit their raw bodies and
+  // clear any comparison retained by an earlier turn. Usage accounting below
+  // still consumes the provider's numeric cache counters.
+  const nativeRequest =
+    request?.messages.some(
+      (message) => message.responsesSourceRange !== undefined,
+    ) || request?.tools.some((tool) => tool.responsesNative !== undefined);
+  if (nativeRequest) {
+    sessionState.cacheAnalytics.lastRequestBody = null;
+    sessionState.cacheAnalytics.lastNormalizedBody = null;
+    sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+  }
   let bustCause: CacheBustCause | undefined;
-  if (requestBody) {
+  if (requestBody && !nativeRequest) {
     // Read the unified cache strategy so the cache-analytics warn path can
     // skip the dramatic-drop alert for cool-* sessions (those strategies
     // explicitly chose to let the prefix go cold; the alert is just noise).
@@ -17690,6 +17772,7 @@ function postResponseForTenant(
       suppressTemporalStorage ? undefined : requestBody,
       genAiSpan,
       endSpan,
+      req,
     );
     // Admin credentials are authorized at dispatch time and never retained in
     // session snapshots. The idle warmer still receives gateway-global extras,
@@ -25219,7 +25302,10 @@ export function loreMessagesToGateway(
     string,
     Pick<
       GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
+      | "content"
+      | "provenanceContent"
+      | "provenancePositions"
+      | "responsesSourceRange"
     >
   > = new Map(),
   allowProvenance = true,
@@ -25348,6 +25434,10 @@ export function loreMessagesToGateway(
 
     const message: GatewayMessage = { role: msg.info.role, content };
     let candidate = provenanceByMessageId.get(msg.info.id);
+    if (candidate?.responsesSourceRange) {
+      message.responsesSourceRange = candidate.responsesSourceRange;
+      restoreNativeResponsesToolEnvelopes(message, candidate);
+    }
     const userNativeProvenance =
       allowNativeUserProvenance &&
       msg.info.role === "user" &&
@@ -25448,7 +25538,9 @@ export function loreMessagesToGateway(
           block.type === "opaque" &&
           block.responsesItem === true &&
           block.requestOnly !== true &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       );
     const provenance =
       allowProvenance ||
@@ -26287,7 +26379,8 @@ async function handleRequestInner(
       assertCrossProviderProvenance(req, route.effectiveProtocol);
       if (
         req.extras?.nativeChatInstructionPrefix?.hasLateItems ||
-        req.extras?.nativeInstructionPrefix?.hasLateItems
+        (req.extras?.nativeInstructionPrefix?.hasLateItems &&
+          !req.extras.nativeInstructionPrefix.itemPositions)
       ) {
         throw new InvalidCrossProviderRequestError();
       }
