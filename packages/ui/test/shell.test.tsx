@@ -755,25 +755,14 @@ describe("shell: project navigation and real-data path", () => {
     expect(row).toHaveAttribute("aria-current", "page");
   });
 
-  it("renders the future actions disabled with the exact wording", async () => {
+  it("offers the real knowledge actions without roadmap placeholders", async () => {
     mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
     const doc = await screen.findByTestId("knowledge-document");
-    const buttons = within(doc).getAllByRole("button", {
-      name: /not available yet/,
-    });
     expect(
-      buttons.map((b) => b.textContent?.replace(NOT_AVAILABLE_YET, "").trim()),
-    ).toEqual([
-      "Save note",
-      "Ask agent",
-      "Explore separately",
-      "Start with selected context",
-      "Share finding",
-    ]);
-    for (const button of buttons) {
-      expect(button).toBeDisabled();
-      expect(button).toHaveTextContent(NOT_AVAILABLE_YET);
-    }
+      within(doc).queryAllByRole("button", { name: /not available yet/ }),
+    ).toHaveLength(0);
+    expect(within(doc).getByText("Source & details")).toBeInTheDocument();
+    expect(within(doc).getByText("History")).toBeInTheDocument();
   });
 
   it("does not interpret entry content as HTML", async () => {
@@ -1092,9 +1081,9 @@ describe("shell: workspace knowledge and search", () => {
     ).toBeInTheDocument();
     await screen.findAllByTestId("knowledge-row");
     const table = screen.getByRole("table");
-    expect(within(table).getAllByText("Lore workspace")).toHaveLength(2);
-    expect(within(table).getByText("/home/me/empty")).toBeInTheDocument();
-    expect(within(table).getByText("No project")).toBeInTheDocument();
+    expect(within(table).getAllByText("Lore workspace")).toHaveLength(4);
+    expect(within(table).getAllByText("/home/me/empty")[0]).toBeInTheDocument();
+    expect(within(table).getAllByText("No project")[0]).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", { name: "Primary navigation" });
     const allKnowledge = within(nav).getByTestId("rail-knowledge");
@@ -2004,6 +1993,7 @@ describe("shell: search entry, theme and fixture", () => {
       addEventListener: (_: string, cb: (e: { matches: boolean }) => void) => {
         if (query === "(prefers-color-scheme: dark)") onChange = cb;
       },
+      removeEventListener: vi.fn(),
     }));
     resetThemeStoreForTests();
     mount("/", fakeClient());
@@ -2361,9 +2351,11 @@ it("filters project cards and can recover from an empty result", async () => {
   await screen.findAllByTestId("project-card");
   const filter = screen.getByRole("textbox", { name: "Filter project cards" });
   fireEvent.input(filter, { target: { value: "not-a-project" } });
-  expect(screen.getByText("No projects match")).toBeInTheDocument();
+  expect(await screen.findByText("No projects match")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Clear project filter" }));
-  expect(screen.getAllByTestId("project-card")).toHaveLength(2);
+  await waitFor(() =>
+    expect(screen.getAllByTestId("project-card")).toHaveLength(2),
+  );
 });
 
 it("restores context focus at narrow breakpoints without stealing reader input focus", async () => {

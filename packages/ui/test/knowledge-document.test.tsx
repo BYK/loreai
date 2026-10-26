@@ -159,6 +159,17 @@ describe("authorOf", () => {
 });
 
 describe("KnowledgeDocument", () => {
+  it("keeps provenance and history without advertising unavailable actions", () => {
+    renderDocument();
+    expect(screen.getByTestId("trust-section")).toBeInTheDocument();
+    expect(screen.getByText("History")).toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("button", {
+        name: /Ask agent|Save note|Explore separately|Start with selected context|Share finding/,
+      }),
+    ).toHaveLength(0);
+  });
+
   it("renders content before the trust and history sections", () => {
     const view = renderDocument();
     const article = view.getByTestId("knowledge-document");

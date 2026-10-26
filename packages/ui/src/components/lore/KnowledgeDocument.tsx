@@ -25,7 +25,6 @@ import type { KnowledgeVersionHistory } from "~/contracts";
 import { errorStateFor } from "./ErrorState";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
-import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
 import { KnowledgeFiles } from "./KnowledgeFiles";
 import { RetainedSummary } from "./RetainedSummary";
 import { VersionHistory } from "./VersionHistory";
@@ -420,18 +419,10 @@ export const KnowledgeDocument: Component<{
           </dl>
         </details>
 
-        <details class="mt-6 border-t border-line pt-4">
-          <summary class="cursor-pointer text-xs font-medium text-muted">
-            More actions
-          </summary>
-          <div class="pt-3">
-            <p class="m-0 text-xs text-muted">
-              Edits and deletions are revision-checked; restores create a new
-              version.
-            </p>
-            <FutureActionRow actions={FUTURE_ACTIONS} primary="Ask agent" />
-          </div>
-        </details>
+        <p class="mt-6 border-t border-line pt-4 text-xs text-muted">
+          Edits and deletions are revision-checked; restores create a new
+          version.
+        </p>
       </div>
     </article>
   );

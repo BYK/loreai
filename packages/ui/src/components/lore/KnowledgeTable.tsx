@@ -1,7 +1,7 @@
 import { Icon } from "~/components/shell/Icon";
 import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 import {
   createColumnHelper,
   createTable,
@@ -21,7 +21,7 @@ import {
   KNOWLEDGE_SCOPES,
 } from "~/contracts";
 import { knowledgeListHref, knowledgeHref } from "~/lib/href";
-import { formatConfidence, formatWhen, previewOf } from "~/lib/format";
+import { formatConfidence, formatWhen } from "~/lib/format";
 import { StaleBadge } from "./StaleBadge";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
@@ -121,6 +121,28 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
       props.query.scope ||
       props.extraFiltersActive
     );
+  const columnClass = (id: string) =>
+    id === "title"
+      ? ""
+      : id === "category"
+        ? "hidden w-24 md:table-cell"
+        : id === "scope"
+          ? "hidden w-20 xl:table-cell"
+          : id === "project"
+            ? "hidden w-28 xl:table-cell"
+            : id === "confidence"
+              ? "hidden w-24 lg:table-cell"
+              : "hidden w-24 md:table-cell";
+  const scopeOf = (row: KnowledgeTableRow) =>
+    row.project_id == null ||
+    row.cross_project === true ||
+    row.cross_project === 1
+      ? "shared"
+      : "project";
+  const projectLabel = (row: KnowledgeTableRow) =>
+    row.project_id == null
+      ? "No project"
+      : (row.project_name ?? "Unknown project");
   const columns = helper.columns([
     helper.accessor("title", { header: "title" }),
     helper.accessor("category", { header: "category" }),
@@ -291,7 +313,17 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                 </Button>
               ) : undefined
             }
-          />
+          >
+            {filtersActive() ? (
+              "Try fewer filters or clear them to browse all available entries."
+            ) : (
+              <>
+                Open a terminal in a project, run <code>lore run</code>, and use
+                the launched agent. Knowledge appears as captured conversations
+                are distilled.
+              </>
+            )}
+          </StateCard>
         </Match>
         <Match when={page()}>
           <table
@@ -320,14 +352,7 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                         ].includes(id);
                         return (
                           <th
-                            class={`px-2 py-2 font-semibold ${
-                              id === "scope" ||
-                              id === "project" ||
-                              id === "confidence" ||
-                              id === "updated"
-                                ? "hidden sm:table-cell"
-                                : ""
-                            }`}
+                            class={`px-2 py-2 font-semibold ${columnClass(id)}`}
                             aria-sort={sortable ? ariaSort(id) : undefined}
                           >
                             {sortable ? (
@@ -372,9 +397,26 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                     aria-selected={
                       row.original.id === props.selectedId ? "true" : undefined
                     }
-                    class="h-11 cursor-pointer border-b border-line hover:bg-soft"
-                    onClick={() => navigate(entryHref(row.original.id))}
+                    class="cursor-pointer border-b border-line align-top hover:bg-soft focus-visible:outline-2 focus-visible:outline-ring"
+                    onClick={(event) => {
+                      if (
+                        event.defaultPrevented ||
+                        event.button !== 0 ||
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey ||
+                        event.target.closest("a")
+                      )
+                        return;
+                      navigate(entryHref(row.original.id));
+                    }}
                     onKeyDown={(event) => {
+                      if (
+                        event.target.closest("a") &&
+                        (event.key === "Enter" || event.key === " ")
+                      )
+                        return;
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
                         navigate(entryHref(row.original.id));
@@ -390,23 +432,17 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                     <For each={row.getAllCells()}>
                       {(cell) => (
                         <td
-                          class={`px-2 py-2 ${
-                            cell.column.id === "title" ? "max-w-0" : ""
-                          } ${
-                            cell.column.id === "scope" ||
-                            cell.column.id === "project" ||
-                            cell.column.id === "confidence" ||
-                            cell.column.id === "updated"
-                              ? "hidden sm:table-cell"
-                              : ""
-                          }`}
+                          class={`px-2 py-3 ${cell.column.id === "title" ? "max-w-0" : "text-[11px] text-muted"} ${columnClass(cell.column.id)}`}
                         >
                           {cell.column.id === "title" ? (
                             <>
                               <span class="flex min-w-0 items-center gap-1.5 font-semibold">
-                                <span class="truncate">
+                                <A
+                                  href={entryHref(row.original.id)}
+                                  class="min-w-0 text-sm leading-5 text-heading [overflow-wrap:anywhere] hover:text-accent hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                                >
                                   {row.original.title}
-                                </span>
+                                </A>
                                 <Show when={row.original.match === "fuzzy"}>
                                   <span
                                     data-testid="knowledge-match-fuzzy"
@@ -417,30 +453,41 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                                   </span>
                                 </Show>
                               </span>
-                              <div class="block truncate font-normal text-muted">
-                                {previewOf(row.original.content)}
+                              <div class="mt-1 line-clamp-2 text-[13px] font-normal leading-5 text-muted [overflow-wrap:anywhere]">
+                                {row.original.content
+                                  .replace(/\s+/g, " ")
+                                  .trim()
+                                  .slice(0, 400)}
+                              </div>
+                              <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted xl:hidden">
+                                <span class="md:hidden">
+                                  <Badge>{row.original.category}</Badge>
+                                </span>
+                                <span>{scopeOf(row.original)}</span>
+                                <Show when={props.showProject}>
+                                  <span>{projectLabel(row.original)}</span>
+                                </Show>
+                                <span class="md:hidden">
+                                  {formatWhen(
+                                    row.original.updated_at ??
+                                      row.original.created_at,
+                                  )}
+                                </span>
                               </div>
                             </>
                           ) : cell.column.id === "category" ? (
                             <Badge>{row.original.category}</Badge>
                           ) : cell.column.id === "scope" ? (
-                            row.original.project_id == null ||
-                            row.original.cross_project === true ||
-                            row.original.cross_project === 1 ? (
-                              "shared"
-                            ) : (
-                              "project"
-                            )
+                            scopeOf(row.original)
                           ) : cell.column.id === "project" ? (
-                            row.original.project_id == null ? (
-                              "No project"
-                            ) : (
-                              (row.original.project_name ?? "Unknown project")
-                            )
+                            <span class="line-clamp-2 [overflow-wrap:anywhere]">
+                              {projectLabel(row.original)}
+                            </span>
                           ) : cell.column.id === "confidence" ? (
                             <>
-                              {formatConfidence(row.original.confidence)}{" "}
-                              <span class="text-muted">recorded</span>
+                              <span title="Recorded confidence">
+                                {formatConfidence(row.original.confidence)}
+                              </span>
                             </>
                           ) : (
                             formatWhen(

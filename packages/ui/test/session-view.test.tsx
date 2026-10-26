@@ -1,6 +1,6 @@
 /**
  * `SessionView` in jsdom: deep-link resolution states, selection panel with
- * live copy + disabled discussion actions, older-history loading (incl. the
+ * live copy actions, older-history loading (incl. the
  * deep-link search through older pages), and keyboard focus/selection.
  *
  * jsdom has no layout, so the viewport (`offsetHeight`) and row rects are
@@ -407,7 +407,7 @@ describe("SessionView: deep links", () => {
 });
 
 describe("SessionView: selection panel", () => {
-  it("selecting a passage publishes the anchor, copies with source, and shows disabled actions", async () => {
+  it("selecting a passage publishes the anchor, copies with source, and offers only implemented actions", async () => {
     const { changes, clipboard } = mount();
     await tick();
     const rich = document.querySelector<HTMLElement>(
@@ -429,8 +429,9 @@ describe("SessionView: selection panel", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0]).toContain("m.spec-u1");
     for (const label of FUTURE_ACTIONS) {
-      const button = screen.getByRole("button", { name: new RegExp(label) });
-      expect(button).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: new RegExp(label) }),
+      ).toBeNull();
     }
 
     fireEvent.click(screen.getByTestId("copy-with-source"));

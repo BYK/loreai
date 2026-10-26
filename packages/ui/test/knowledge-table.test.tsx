@@ -86,6 +86,7 @@ function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
             <>
               <KnowledgeTable projectId="p-1" query={query()} page={page} />
               <output data-testid="route-search">{location.search}</output>
+              <output data-testid="route-path">{location.pathname}</output>
             </>
           );
         }}
@@ -96,6 +97,41 @@ function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
 }
 
 describe("KnowledgeTable", () => {
+  it("offers real entry links and leaves modified clicks to the browser", async () => {
+    mountRoutedTable({ ...defaultQuery, q: "sqlite" });
+    const link = screen.getByRole("link", { name: entry.title });
+    expect(link).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/k-1?q=sqlite",
+    );
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      button: 0,
+    });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(false);
+    expect(screen.getByTestId("route-path")).toHaveTextContent(
+      "/projects/p-1/knowledge",
+    );
+    fireEvent.click(link);
+    await waitFor(() =>
+      expect(screen.getByTestId("route-path")).toHaveTextContent(
+        "/projects/p-1/knowledge/k-1",
+      ),
+    );
+  });
+
+  it("keeps multiline entry content available in its reading preview", () => {
+    mount([
+      { ...entry, content: "First line.\nSecond line with useful context." },
+    ]);
+    expect(
+      screen.getByText("First line. Second line with useful context."),
+    ).toBeInTheDocument();
+  });
+
   it("renders server-provided order and escapes entry text", () => {
     mount();
     expect(screen.getByText("<img onerror><script>")).toBeInTheDocument();
@@ -447,14 +483,14 @@ describe("KnowledgeTable", () => {
     expect(
       screen.getByRole("columnheader", { name: "project" }),
     ).not.toHaveAttribute("aria-sort");
-    expect(screen.getByText("Lore")).toBeInTheDocument();
-    const sharedRow = screen.getByText("No project").closest("tr");
+    expect(screen.getAllByText("Lore")[0]).toBeInTheDocument();
+    const sharedRow = screen.getAllByText("No project")[0]?.closest("tr");
     if (!sharedRow) throw new Error("Missing shared knowledge row");
     expect(sharedRow).toHaveTextContent("shared");
     expect(sharedRow).toHaveTextContent("No project");
     const crossProjectRow = screen
-      .getByText("Scratch", { exact: true })
-      .closest("tr");
+      .getAllByText("Scratch", { exact: true })[0]
+      ?.closest("tr");
     if (!crossProjectRow)
       throw new Error("Missing cross-project knowledge row");
     expect(crossProjectRow).toHaveTextContent("shared");
