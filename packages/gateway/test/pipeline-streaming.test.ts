@@ -11454,55 +11454,76 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("rejects malformed completed JSON on same-protocol Responses meta passthrough", async () => {
-    setUpstreamInterceptor(
-      async () =>
-        new Response(
-          JSON.stringify({
-            id: "resp_meta_malformed_function",
-            model: "gpt-5.6-sol",
-            status: "completed",
-            output: [
-              {
-                type: "function_call",
-                id: "fc_meta_malformed",
-                call_id: "call_meta_malformed",
-                arguments: "{}",
-              },
-            ],
-            usage: { input_tokens: 10, output_tokens: 2 },
-          }),
-          { headers: { "content-type": "application/json" } },
-        ),
-    );
-
-    try {
-      const response = await handleRequest(
+  it.each(
+    ["function_call", "custom_tool_call"].flatMap((type) =>
+      [
+        { defect: "missing name", identity: {} },
+        { defect: "non-string name", identity: { name: 7 } },
         {
-          protocol: "openai-responses",
-          model: "gpt-5.6-sol",
-          system: "title this",
-          messages: [
-            { role: "user", content: [{ type: "text", text: "title" }] },
-          ],
-          tools: [],
-          stream: false,
-          maxTokens: 32,
-          metadata: {},
-          rawHeaders: {
-            authorization: "Bearer test-key",
-            "x-lore-agent": "title",
-            "x-lore-provider": "openai",
-          },
+          defect: "empty namespace",
+          identity: { name: "exec", namespace: "" },
         },
-        loadLocalConfig(),
+        {
+          defect: "non-string namespace",
+          identity: { name: "exec", namespace: 7 },
+        },
+      ].map(({ defect, identity }) => ({ type, defect, identity })),
+    ),
+  )(
+    "rejects malformed completed JSON on same-protocol Responses meta passthrough ($type, $defect)",
+    async ({ type, identity }) => {
+      setUpstreamInterceptor(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: "resp_meta_malformed_function",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type,
+                  id: "fc_meta_malformed",
+                  call_id: "call_meta_malformed",
+                  ...(type === "custom_tool_call"
+                    ? { input: "echo hello" }
+                    : { arguments: "{}" }),
+                  ...identity,
+                },
+              ],
+              usage: { input_tokens: 10, output_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
       );
-      expect(response.status).toBe(502);
-      expect(await response.text()).toContain("Gateway request failed");
-    } finally {
-      setUpstreamInterceptor(undefined);
-    }
-  });
+
+      try {
+        const response = await handleRequest(
+          {
+            protocol: "openai-responses",
+            model: "gpt-5.6-sol",
+            system: "title this",
+            messages: [
+              { role: "user", content: [{ type: "text", text: "title" }] },
+            ],
+            tools: [],
+            stream: false,
+            maxTokens: 32,
+            metadata: {},
+            rawHeaders: {
+              authorization: "Bearer test-key",
+              "x-lore-agent": "title",
+              "x-lore-provider": "openai",
+            },
+          },
+          loadLocalConfig(),
+        );
+        expect(response.status).toBe(502);
+        expect(await response.text()).toContain("Gateway request failed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+      }
+    },
+  );
 
   it.each(["openai-responses", "gemini"] as const)(
     "strictly translates an open-tail Anthropic meta stream to %s",

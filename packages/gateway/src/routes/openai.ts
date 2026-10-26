@@ -1,3 +1,4 @@
+import { isImplicitChatGPTResponses } from "../codex-routing";
 /**
  * OpenAI-shaped protocols:
  *   POST /v1/chat/completions, /chat/completions → Chat Completions
@@ -54,13 +55,19 @@ export async function handleOpenAIResponses(
 ): Promise<Response> {
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = await parseOpenAIResponsesRequestChunks(
+    const headers = headersToRecord(req.headers);
+    const parse =
+      isImplicitChatGPTResponses(headers, config) ||
+      headers["x-lore-provider"] === "openai-codex"
+        ? parseOpenAICodexRequestChunks
+        : parseOpenAIResponsesRequestChunks;
+    gatewayReq = await parse(
       decodedRequestChunks(
         req,
         req.signal,
         requestBodyLimitsForConfig(config, "openai-responses"),
       ),
-      headersToRecord(req.headers),
+      headers,
     );
     gatewayReq.signal = req.signal;
   } catch (e) {

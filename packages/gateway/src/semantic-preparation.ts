@@ -240,13 +240,22 @@ export function responsesProvenanceByMessageId(
   loreMessages: LoreMessageWithParts[],
 ): ReadonlyMap<
   string,
-  Pick<GatewayMessage, "content" | "provenanceContent" | "provenancePositions">
+  Pick<
+    GatewayMessage,
+    | "content"
+    | "provenanceContent"
+    | "provenancePositions"
+    | "responsesSourceRange"
+  >
 > {
   const result = new Map<
     string,
     Pick<
       GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
+      | "content"
+      | "provenanceContent"
+      | "provenancePositions"
+      | "responsesSourceRange"
     >
   >();
   for (let i = 0; i < loreMessages.length; i++) {
@@ -256,6 +265,9 @@ export function responsesProvenanceByMessageId(
         content: original.content,
         provenanceContent: original.provenanceContent,
         provenancePositions: original.provenancePositions,
+        ...(original.responsesSourceRange
+          ? { responsesSourceRange: original.responsesSourceRange }
+          : {}),
       });
   }
   return result;
@@ -290,7 +302,15 @@ export async function prepareSemanticMessages(input: {
   const started = performance.now();
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
-  if (input.sourcePrefix && (input.noStore || !input.protocol)) {
+  // Native context ordinals and private metadata are request-local. Neither
+  // durable checkpoints nor speculative source caches may retain these envelopes.
+  const nativeSource = input.messages.some(
+    (message) => message.responsesSourceRange !== undefined,
+  );
+  if (
+    input.sourcePrefix &&
+    (input.noStore || !input.protocol || nativeSource)
+  ) {
     timing.metric("source_delta_unavailable", 1);
     timing.metric(
       `source_delta_unavailable_${input.noStore ? "disabled" : "protocol"}`,
@@ -301,7 +321,11 @@ export async function prepareSemanticMessages(input: {
     );
   }
   const speculative =
-    input.protocol && !input.noStore && !input.sourcePrefix && !input.forceFull
+    input.protocol &&
+    !input.noStore &&
+    !input.sourcePrefix &&
+    !input.forceFull &&
+    !nativeSource
       ? findSpeculativeSource({
           sessionID: input.sessionID,
           projectPath: input.projectPath,
@@ -310,7 +334,7 @@ export async function prepareSemanticMessages(input: {
         })
       : undefined;
   const checkpoint =
-    input.protocol && !input.noStore
+    input.protocol && !input.noStore && !nativeSource
       ? new SourceCheckpoint({
           ...input,
           protocol: input.checkpointProtocol ?? input.protocol,
