@@ -63,3 +63,19 @@
 - [x] Obtain a final whole-branch adversarial correctness review and separate scoped security review. Resolve confirmed findings with failing-first regression and scoped re-review; preserve prior exact validation limits for the unchanged backend.
 - [x] Capture actual fictional-data frontend screenshots covering all six changes in light/dark and relevant narrow layouts. Inspect every image; ensure no incidental tooltip, incorrect disclosure state, clipping or real data. Update README and PR description to describe final full behavior with current screenshots; clearly distinguish any retained prior comparison captures.
 - [x] Commit documentation/evidence links, push existing branch, upload screenshots, verify hosted head, ready state, gallery URLs and current CI/review findings. Do not merge. Preserve useful reports outside scratch and clean this plan workspace when complete.
+
+### Task 4: Post-publication sharing receipt accessibility
+
+**Files:** SharingPanel.tsx, existing folk03 unit/browser tests.
+
+- [x] Reproduce Seer PRRT_kwDORU1hfc6wOrNU: successful signed-in/background-sync link hides its live confirmation when settings become compact.
+- [x] Keep one stable polite/atomic status region outside hidden settings; preserve compactness, focus, ownership guards and all mutations. Cover link/unlink visibility, same region identity and stale-owner/project clearing.
+- [x] Run focused RED/GREEN and production desktop/mobile cases, obtain scoped correctness/security review; capture actual visible receipt, push same PR, refresh description/CI/thread state.
+
+### Task 5: Completed hosted browser feedback
+
+**Files:** Existing hostile-content, mobile-navigation, project-actions and routes browser specs.
+
+- [x] Reproduce the completed hosted run's eleven failures. Update assertions for intentional disclosures and title-first session links while preserving security, navigation, movement and reload checks.
+- [x] Run all production desktop/mobile browser specs against disposable seeded data. Obtain scoped review for changed assertions; preserve assertion budgets and safety checks.
+- [x] Publish the reviewed changes with the final screenshot update. Report coverage's pre-test dependency download timeout separately; do not change production code to conceal infrastructure failures.

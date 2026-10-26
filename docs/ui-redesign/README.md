@@ -178,6 +178,9 @@ shows current desktop/mobile layouts and labeled comparisons against earlier rev
 Screenshots use fictional API fixtures with actual frontend code. The latest reading and
 recovery comparison baseline is commit `82675158`; earlier full-PR comparisons are labeled
 separately in the PR. Browser suites use a disposable seeded database.
+The final sharing capture also verifies that a link confirmation remains visible
+when settings collapse, with keyboard focus returned to Manage sharing. The live
+region stays mounted and clears confirmations when the account or project changes.
 `responsive-layout.spec.ts` audits 24 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,
 live palette propagation, and independent chart colors on desktop and mobile.
