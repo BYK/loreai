@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRecallScope, RECALL_SCOPES } from "~/contracts";
+import { parseRecallScope, RECALL_SCOPES } from "../../ui/src/contracts/recall";
 
 describe("recall URL scope", () => {
   it.each(RECALL_SCOPES)("preserves the supported raw value %s", (scope) => {

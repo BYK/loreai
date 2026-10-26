@@ -336,14 +336,19 @@ export const PromotionsPage: Component = () => {
           </StateCard>
         </Match>
         <Match when={pageState() === "no_team"}>
-          <StateCard kind="empty" title="No team memberships">
+          <StateCard
+            kind="empty"
+            title="No team memberships"
+            action={
+              <A
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                href="/team?section=settings"
+              >
+                Open team settings
+              </A>
+            }
+          >
             Join a team before reviewing proposal requests.
-            <A
-              class="mt-3 inline-block text-accent underline"
-              href="/team?section=settings"
-            >
-              Open team settings
-            </A>
           </StateCard>
         </Match>
         <Match when={pageState() === "ready"}>
@@ -375,14 +380,19 @@ export const PromotionsPage: Component = () => {
                 <Show
                   when={result().requests.length > 0}
                   fallback={
-                    <StateCard kind="empty" title="No proposals in this view">
+                    <StateCard
+                      kind="empty"
+                      title="No proposals in this view"
+                      action={
+                        <A
+                          class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                          href="/knowledge"
+                        >
+                          Browse knowledge
+                        </A>
+                      }
+                    >
                       No proposals match the selected team and status.
-                      <A
-                        class="mt-3 inline-block text-accent underline"
-                        href="/knowledge"
-                      >
-                        Browse knowledge
-                      </A>
                     </StateCard>
                   }
                 >

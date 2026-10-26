@@ -282,15 +282,20 @@ export const ContradictionsPage: Component = () => {
           {errorStateFor(error(), "Contradictions", () => void load())}
         </Match>
         <Match when={data()?.total === 0}>
-          <StateCard kind="empty" title="No open contradictions">
+          <StateCard
+            kind="empty"
+            title="No open contradictions"
+            action={
+              <A
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                href="/knowledge"
+              >
+                Browse knowledge
+              </A>
+            }
+          >
             New pairs appear here only after the gateway has recorded a likely
             conflict for you to review.
-            <A
-              class="mt-3 inline-block text-accent underline"
-              href="/knowledge"
-            >
-              Browse knowledge
-            </A>
           </StateCard>
         </Match>
         <Match when={data()}>

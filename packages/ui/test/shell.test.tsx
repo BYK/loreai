@@ -2695,3 +2695,54 @@ it.each([
     );
   },
 );
+
+it("updates every rail destination and group when compact mode changes without reloading", async () => {
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  await screen.findByTestId("knowledge-document");
+  const rail = screen.getByTestId("icon-rail");
+  const destinations = [
+    ...rail.querySelectorAll<HTMLAnchorElement>("a[data-testid]"),
+  ].map((link) => ({
+    id: link.dataset.testid!,
+    label: link.getAttribute("aria-label")!,
+    href: link.getAttribute("href")!,
+  }));
+  expect(destinations.length).toBeGreaterThan(10);
+  for (const compact of [true, false, true, false]) {
+    fireEvent.click(screen.getByTestId("navigation-compact-toggle"));
+    for (const { id, label, href } of destinations) {
+      const link = screen.getByTestId(id);
+      expect(link).toHaveAttribute("href", href);
+      expect(link).toHaveAttribute("aria-label", label);
+      expect(link.textContent).toBe(compact ? "" : label);
+      if (compact) {
+        link.focus();
+        expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+        expect(link).toHaveAttribute(
+          "aria-describedby",
+          screen.getByRole("tooltip").id,
+        );
+        fireEvent.keyDown(link, { key: "Escape" });
+        link.blur();
+        await waitFor(() =>
+          expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+        );
+      }
+    }
+    for (const group of [
+      "Project tools",
+      "Knowledge tools",
+      "Collaboration",
+      "Operations",
+    ]) {
+      if (compact)
+        expect(
+          within(rail).getByRole("separator", { name: group }),
+        ).toBeInTheDocument();
+      else
+        expect(
+          within(rail).getByText(group, { exact: true }),
+        ).toBeInTheDocument();
+    }
+  }
+});

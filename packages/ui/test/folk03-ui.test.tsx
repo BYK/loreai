@@ -1169,6 +1169,26 @@ describe("TeamPage", () => {
 });
 
 describe("ConflictsPage", () => {
+  it("separates empty conflict recovery from its explanation", async () => {
+    mount(
+      () => <ConflictsPage />,
+      clientWith({
+        listSyncConflicts: async () => ({
+          available: true,
+          complete: true,
+          conflicts: [],
+        }),
+      }),
+    );
+    const action = await screen.findByRole("link", {
+      name: "Browse knowledge",
+    });
+    expect(action).toHaveAttribute("href", "/knowledge");
+    expect(action.parentElement).not.toHaveTextContent(
+      "No replaced local versions",
+    );
+  });
+
   it("confirms local recovery and updates from the recovery receipt", async () => {
     const keepSyncConflictLocal = vi.fn<ApiClient["keepSyncConflictLocal"]>(
       async () => ({

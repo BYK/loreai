@@ -103,7 +103,7 @@ export const SearchResults: Component<{
             title="Type a query to search this project's memory"
             action={
               <A
-                class="text-accent underline"
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
                 href={knowledgeListHref(props.project.id)}
               >
                 Browse project knowledge
@@ -128,7 +128,7 @@ export const SearchResults: Component<{
             title="No results"
             action={
               <A
-                class="text-accent underline"
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
                 href={knowledgeListHref(props.project.id)}
               >
                 Browse project knowledge

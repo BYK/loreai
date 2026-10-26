@@ -436,6 +436,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                       type="button"
                       size="sm"
                       variant="outline"
+                      class="h-11 md:h-9"
                       ref={(element) => {
                         manageSharingButton = element;
                       }}

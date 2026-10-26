@@ -128,3 +128,37 @@ test.describe("knowledge table routes", () => {
     ).toHaveAttribute("href", /\/knowledge\//);
   });
 });
+
+for (const width of [800, 700, 320]) {
+  test(`responsive knowledge sorting stays usable at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    const projectId = await loreProjectId(page);
+    await page.goto(
+      `/ui/projects/${projectId}/knowledge?category=gotcha&sort=title%3Adesc%2Ccreated_at%3Aasc%2Cconfidence%3Aasc`,
+    );
+    // Include headers and their responsive equivalents: at least one visible,
+    // keyboard-operable control for each server sort must survive every width.
+    for (const label of ["Confidence", "Updated", "Title"]) {
+      const control = page
+        .getByRole("button", { name: new RegExp(`Sort by ${label}`) })
+        .filter({ visible: true })
+        .first();
+      await expect(control).toBeVisible();
+      await control.focus();
+      await expect(control).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page).toHaveURL(
+        new RegExp(
+          `category=gotcha.*sort=${label === "Confidence" ? "confidence%3Adesc%2Ctitle%3Adesc%2Ccreated_at%3Aasc" : label === "Updated" ? "updated_at%3Adesc%2Cconfidence%3Adesc%2Ctitle%3Adesc" : "title%3Aasc%2Cupdated_at%3Adesc%2Cconfidence%3Adesc"}`,
+        ),
+      );
+    }
+    const size = await page
+      .locator("main")
+      .evaluate((el) => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+    expect(size.scroll).toBeLessThanOrEqual(size.client + 1);
+  });
+}

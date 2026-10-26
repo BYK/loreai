@@ -284,6 +284,31 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
         {filter("scope", KNOWLEDGE_SCOPES, "Any scope")}
         {props.extraFilters}
       </div>
+      <div
+        role="group"
+        aria-label="Additional knowledge sorting"
+        class="mb-3 flex flex-wrap items-center gap-2 lg:hidden"
+      >
+        <span class="text-xs text-muted">Sort:</span>
+        <For each={["confidence", "updated"]}>
+          {(id) => (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class={id === "updated" ? "h-11 md:hidden" : "h-11 md:h-9"}
+              aria-label={sortButtonLabel(id)}
+              onClick={() => {
+                const field = sortFieldOf(id);
+                if (field) clickSort(field);
+              }}
+            >
+              {id === "confidence" ? "Confidence" : "Updated"}
+              {sortIndicator(sortFieldOf(id)!)}
+            </Button>
+          )}
+        </For>
+      </div>
       <Show when={props.page.loader.stale()}>
         <StaleBadge
           status={{

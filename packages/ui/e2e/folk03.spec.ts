@@ -1,5 +1,5 @@
 import { openAccountMenu, themeColor } from "./workspace-helpers";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Locator } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
   const response = await page.request.get("/api/v1/projects");
@@ -1024,5 +1024,211 @@ for (const theme of ["light", "dark"] as const) {
         });
       }
     }
+  });
+}
+
+async function expectMobileAction(action: Locator, width: number) {
+  await expect(action).toBeVisible();
+  await action.scrollIntoViewIfNeeded();
+  const box = (await action.boundingBox())!;
+  expect.soft(box.height, await action.innerText()).toBeGreaterThanOrEqual(44);
+  expect.soft(box.width, await action.innerText()).toBeGreaterThanOrEqual(44);
+  expect.soft(box.x).toBeGreaterThanOrEqual(0);
+  expect.soft(box.x + box.width).toBeLessThanOrEqual(width);
+  await expect(action).toBeInViewport();
+}
+
+for (const width of [320, 390]) {
+  test(`new team and sharing actions have mobile targets at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.goto("/ui/team");
+    const invite = page.getByRole("button", {
+      name: "Invite teammate",
+      exact: true,
+    });
+    await expectMobileAction(invite, width);
+    await invite.click();
+    await expect(page).toHaveURL(/section=invitations/);
+    const project = await projectByName(page, "lore");
+    await page.route(`**/api/v1/projects/${project.id}/sharing`, (route) =>
+      route.fulfill({
+        json: {
+          linked: true,
+          team: { id: "team-1", name: "Acme e2e" },
+          policy: {
+            effective: "manual",
+            project_override: "manual",
+            team_default: "auto",
+          },
+          auto_share: false,
+          review_required: false,
+          state: "linked",
+          detail: null,
+        },
+      }),
+    );
+    await page.goto(`/ui/projects/${project.id}`);
+    const manage = page.getByRole("button", {
+      name: "Manage sharing",
+      exact: true,
+    });
+    await expectMobileAction(manage, width);
+    await manage.click();
+    const hide = page.getByRole("button", {
+      name: "Hide sharing settings",
+      exact: true,
+    });
+    await expectMobileAction(hide, width);
+    await hide.click();
+    await expect(manage).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test(`new recovery actions have mobile targets at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    const project = await projectByName(page, "lore");
+    for (const suffix of ["knowledge", "sessions"]) {
+      await page.route(
+        `**/api/v1/projects/${project.id}/${suffix}?*`,
+        (route) =>
+          route.fulfill({
+            status: 503,
+            json: { error: "temporarily unavailable" },
+          }),
+      );
+    }
+    await page.goto(`/ui/projects/${project.id}`);
+    for (const label of ["Retry knowledge", "Retry sessions"]) {
+      await expectMobileAction(
+        page.getByRole("button", { name: label, exact: true }),
+        width,
+      );
+    }
+    await page.route("**/api/v1/entities?*", (route) =>
+      route.fulfill({ json: { entities: [], next_cursor: null, total: 0 } }),
+    );
+    await page.goto("/ui/entities?type=person");
+    const clearEntities = page.getByRole("button", {
+      name: "Clear entity filter",
+      exact: true,
+    });
+    await expectMobileAction(clearEntities, width);
+    await clearEntities.click();
+    await expect(page).toHaveURL(/\/ui\/entities$/);
+    await page.unroute(`**/api/v1/projects/${project.id}/sessions?*`);
+    await page.route(`**/api/v1/projects/${project.id}/sessions?*`, (route) =>
+      route.fulfill({ json: { items: [], next_cursor: null } }),
+    );
+    await page.goto(
+      `/ui/projects/${project.id}/sessions/e2e-reader?a=example&q=missing&cursor=old`,
+    );
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const clearSessions = page.getByRole("button", {
+      name: "Clear filter",
+      exact: true,
+    });
+    await expectMobileAction(clearSessions, width);
+    await clearSessions.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/sessions/e2e-reader\\?a=example$`),
+    );
+    await page.goto(`/ui/projects/${project.id}/search`);
+    await expectMobileAction(
+      page.getByRole("link", { name: "Browse project knowledge", exact: true }),
+      width,
+    );
+    await page.route("**/api/v1/recall?*", (route) =>
+      route.fulfill({
+        json: {
+          query: "missing",
+          scope: "all",
+          projectPath: "/tmp/lore",
+          result: "No results found for this query.",
+        },
+      }),
+    );
+    await page.goto(`/ui/projects/${project.id}/search?q=missing`);
+    await expectMobileAction(
+      page.getByRole("link", { name: "Browse project knowledge", exact: true }),
+      width,
+    );
+  });
+}
+
+for (const width of [1280, 320, 390]) {
+  test(`empty review recovery is separated and reachable at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.route("**/api/v1/promotions?*", (route) =>
+      route.fulfill({ json: { remote: "ok", requests: [], complete: true } }),
+    );
+    await page.route("**/api/v1/sync/conflicts", (route) =>
+      route.fulfill({
+        json: { available: true, complete: true, conflicts: [] },
+      }),
+    );
+    await page.route("**/api/v1/contradictions", (route) =>
+      route.fulfill({ json: { contradictions: [], total: 0 } }),
+    );
+    for (const [path, sentence] of [
+      ["promotions", "No proposals match the selected team and status."],
+      [
+        "conflicts",
+        "No replaced local versions are available in this view. Versions recorded by local sync appear here for review.",
+      ],
+      [
+        "contradictions",
+        "New pairs appear here only after the gateway has recorded a likely conflict for you to review.",
+      ],
+    ]) {
+      await page.goto(`/ui/${path}`);
+      const action = page.getByRole("link", {
+        name: "Browse knowledge",
+        exact: true,
+      });
+      const prose = page.getByText(sentence!, { exact: true });
+      await expect(prose).toBeVisible();
+      const actionBox = (await action.boundingBox())!;
+      const proseBox = (await prose.boundingBox())!;
+      expect
+        .soft(actionBox.y)
+        .toBeGreaterThanOrEqual(proseBox.y + proseBox.height + 8);
+      if (width < 768) await expectMobileAction(action, width);
+      await expect(action).toHaveAttribute("href", "/ui/knowledge");
+    }
+    await page.route("**/api/v1/teams", (route) =>
+      route.fulfill({ json: { hosted: false, teams: [] } }),
+    );
+    await page.goto("/ui/promotions");
+    const action = page.getByRole("link", {
+      name: "Open team settings",
+      exact: true,
+    });
+    const prose = page.getByText(
+      "Join a team before reviewing proposal requests.",
+      { exact: true },
+    );
+    await expect(prose).toBeVisible();
+    expect
+      .soft((await action.boundingBox())!.y)
+      .toBeGreaterThanOrEqual(
+        (await prose.boundingBox())!.y +
+          (await prose.boundingBox())!.height +
+          8,
+      );
+    if (width < 768) await expectMobileAction(action, width);
+    await action.click();
+    await expect(page).toHaveURL(/\/ui\/team\?section=settings$/);
   });
 }

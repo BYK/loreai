@@ -306,6 +306,7 @@ export const EntitiesPage: Component = () => {
                 <Button
                   size="sm"
                   variant="outline"
+                  class="h-11 md:h-9"
                   onClick={() => setType(null)}
                 >
                   Clear entity filter

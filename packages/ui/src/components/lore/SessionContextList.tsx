@@ -108,6 +108,7 @@ export const SessionContextList: Component<{
                 type="button"
                 variant="link"
                 size="sm"
+                class="h-11 md:h-9"
                 onClick={() => setParams({ q: undefined, cursor: undefined })}
               >
                 Clear filter

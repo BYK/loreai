@@ -309,6 +309,19 @@ describe("PromotionPanel", () => {
 });
 
 describe("PromotionsPage", () => {
+  it("separates no-team recovery from its explanation", async () => {
+    renderPage(
+      clientWith({ getTeams: async () => ({ hosted: false, teams: [] }) }),
+    );
+    const action = await screen.findByRole("link", {
+      name: "Open team settings",
+    });
+    expect(action).toHaveAttribute("href", "/team?section=settings");
+    expect(action.parentElement).not.toHaveTextContent(
+      "Join a team before reviewing proposal requests.",
+    );
+  });
+
   it("scopes an empty proposal queue to the current view and offers useful content", async () => {
     renderPage(
       clientWith({
@@ -321,6 +334,9 @@ describe("PromotionsPage", () => {
     expect(
       screen.getByRole("heading", { name: "Team proposals" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Browse knowledge" }).parentElement,
+    ).not.toHaveTextContent(/No proposals match|New pairs appear/);
     expect(
       screen.getByRole("link", { name: "Browse knowledge" }),
     ).toHaveAttribute("href", "/knowledge");

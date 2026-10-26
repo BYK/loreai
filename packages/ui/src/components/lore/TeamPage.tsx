@@ -652,6 +652,7 @@ export const TeamPage: Component = () => {
         <Show when={pageState() === "ready"}>
           <Button
             type="button"
+            class="h-11 md:h-10"
             onClick={openInvitations}
             disabled={!canAct() || members()?.actions.invite !== "available"}
           >

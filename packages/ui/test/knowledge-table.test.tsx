@@ -4,7 +4,13 @@ import {
   createMemoryHistory,
   useLocation,
 } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
@@ -97,6 +103,53 @@ function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
 }
 
 describe("KnowledgeTable", () => {
+  it("responsive sort controls preserve filters and stacked directions while resetting pagination", async () => {
+    mountRoutedTable({
+      ...defaultQuery,
+      q: "sqlite",
+      category: "gotcha",
+      scope: "project",
+      cursor: "next",
+      sort: [
+        { field: "title", dir: "desc" },
+        { field: "created_at", dir: "asc" },
+        { field: "confidence", dir: "asc" },
+      ],
+    });
+    const sorting = within(
+      screen.getByRole("group", { name: "Additional knowledge sorting" }),
+    );
+    fireEvent.click(
+      sorting.getByRole("button", { name: /Sort by Confidence/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=confidence%3Adesc%2Ctitle%3Adesc%2Ccreated_at%3Aasc",
+      ),
+    );
+    fireEvent.click(
+      sorting.getByRole("button", { name: /Sort by Confidence/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=confidence%3Aasc%2Ctitle%3Adesc%2Ccreated_at%3Aasc",
+      ),
+    );
+    fireEvent.click(sorting.getByRole("button", { name: /Sort by Updated/ }));
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=updated_at%3Adesc%2Cconfidence%3Aasc%2Ctitle%3Adesc",
+      ),
+    );
+    expect(screen.getByTestId("route-path")).toHaveTextContent(
+      "/projects/p-1/knowledge",
+    );
+    expect(screen.getByRole("link", { name: entry.title })).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/k-1?q=sqlite&category=gotcha&scope=project&sort=updated_at%3Adesc%2Cconfidence%3Aasc%2Ctitle%3Adesc",
+    );
+  });
+
   it("offers real entry links and leaves modified clicks to the browser", async () => {
     mountRoutedTable({ ...defaultQuery, q: "sqlite" });
     const link = screen.getByRole("link", { name: entry.title });
@@ -157,7 +210,7 @@ describe("KnowledgeTable", () => {
       screen.getByRole("textbox", { name: "Filter this list" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 1, descending",
       }),
     ).toBeInTheDocument();
@@ -202,19 +255,19 @@ describe("KnowledgeTable", () => {
       ],
     });
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Title, level 1, ascending",
       }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Confidence, level 2, descending",
       }),
     ).toBeInTheDocument();
-    const titleHeader = screen
+    const titleHeader = within(screen.getByRole("table"))
       .getByRole("button", { name: "Sort by Title, level 1, ascending" })
       .closest("th");
-    const confidenceHeader = screen
+    const confidenceHeader = within(screen.getByRole("table"))
       .getByRole("button", {
         name: "Sort by Confidence, level 2, descending",
       })
@@ -252,8 +305,10 @@ describe("KnowledgeTable", () => {
 
   it("provides tabbable sortable column headers with a primary aria-sort", () => {
     mount();
-    const title = screen.getByRole("button", { name: "Sort by Title" });
-    const updated = screen.getByRole("button", {
+    const title = within(screen.getByRole("table")).getByRole("button", {
+      name: "Sort by Title",
+    });
+    const updated = within(screen.getByRole("table")).getByRole("button", {
       name: "Sort by Updated, level 1, descending",
     });
     expect(title).toHaveAttribute("type", "button");
@@ -300,14 +355,18 @@ describe("KnowledgeTable", () => {
 
   it("stacks, toggles, removes, and caps header sorts while clearing cursors", async () => {
     const first = mountRoutedTable({ ...defaultQuery, cursor: "next" });
-    fireEvent.click(screen.getByRole("button", { name: "Sort by Confidence" }));
+    fireEvent.click(
+      within(screen.getByRole("table")).getByRole("button", {
+        name: "Sort by Confidence",
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?sort=confidence%3Adesc%2Cupdated_at%3Adesc",
       ),
     );
     fireEvent.click(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 2, descending",
       }),
     );
@@ -317,7 +376,7 @@ describe("KnowledgeTable", () => {
       ),
     );
     fireEvent.click(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 1, descending",
       }),
     );
@@ -337,7 +396,9 @@ describe("KnowledgeTable", () => {
       ],
     });
     fireEvent.click(
-      screen.getAllByRole("button", { name: "Sort by Title" })[0]!,
+      within(screen.getByRole("table")).getAllByRole("button", {
+        name: "Sort by Title",
+      })[0]!,
     );
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
@@ -503,6 +564,19 @@ describe("KnowledgeTable", () => {
     if (!firstRow) throw new Error("Expected a knowledge table row");
     fireEvent.click(firstRow);
     expect(entryRoute).toHaveBeenCalledWith("k-1", query);
+    fireEvent.click(
+      within(
+        screen.getByRole("group", { name: "Additional knowledge sorting" }),
+      ).getByRole("button", { name: "Sort by Confidence" }),
+    );
+    expect(routes.list).toHaveBeenCalledWith({
+      ...query,
+      sort: [
+        { field: "confidence", dir: "desc" },
+        { field: "updated_at", dir: "desc" },
+      ],
+      cursor: null,
+    });
   });
 
   it("counts extra filters in the empty state and clears to the route default", () => {

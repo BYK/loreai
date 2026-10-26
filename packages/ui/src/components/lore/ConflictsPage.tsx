@@ -308,15 +308,20 @@ export const ConflictsPage: Component = () => {
           <Show
             when={(data()?.conflicts.length ?? 0) > 0}
             fallback={
-              <StateCard kind="empty" title="No sync conflicts">
+              <StateCard
+                kind="empty"
+                title="No sync conflicts"
+                action={
+                  <A
+                    class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                    href="/knowledge"
+                  >
+                    Browse knowledge
+                  </A>
+                }
+              >
                 No replaced local versions are available in this view. Versions
                 recorded by local sync appear here for review.
-                <A
-                  class="mt-3 inline-block text-accent underline"
-                  href="/knowledge"
-                >
-                  Browse knowledge
-                </A>
               </StateCard>
             }
           >

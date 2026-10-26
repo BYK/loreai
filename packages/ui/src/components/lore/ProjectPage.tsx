@@ -152,6 +152,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                 <Button
                   size="sm"
                   variant="outline"
+                  class="h-11 md:h-9"
                   onClick={knowledge.loader.reload}
                 >
                   Retry knowledge
@@ -211,6 +212,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                   type="button"
                   size="sm"
                   variant="outline"
+                  class="h-11 md:h-9"
                   onClick={sessions.loader.reload}
                 >
                   Retry sessions

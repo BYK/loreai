@@ -286,6 +286,9 @@ describe("ContradictionsPage", () => {
       screen.getByRole("heading", { name: "Conflicting instructions" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("link", { name: "Browse knowledge" }).parentElement,
+    ).not.toHaveTextContent(/No proposals match|New pairs appear/);
+    expect(
       screen.getByRole("link", { name: "Browse knowledge" }),
     ).toHaveAttribute("href", "/ui/knowledge");
   });

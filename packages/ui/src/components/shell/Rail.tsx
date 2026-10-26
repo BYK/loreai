@@ -52,8 +52,31 @@ export const Rail: Component<{
     id: string,
     active: () => boolean,
     scope: string,
-  ) =>
-    labeled() ? (
+  ) => (
+    <Show
+      when={labeled()}
+      fallback={
+        <Tooltip>
+          <TooltipTrigger
+            as={NavigationLink}
+            href={href}
+            aria-label={label}
+            data-testid={id}
+            current={active()}
+            class={cn(
+              "rail-action",
+              active() && "bg-accent-soft text-accent-soft-text",
+            )}
+          >
+            <Icon name={icon} class="size-[18px]" />
+          </TooltipTrigger>
+          <TooltipContent>
+            <span class="font-medium">{label}</span>
+            <span class="ml-2 text-muted">{scope}</span>
+          </TooltipContent>
+        </Tooltip>
+      }
+    >
       <NavigationLink
         href={href}
         aria-label={label}
@@ -67,37 +90,22 @@ export const Rail: Component<{
         <Icon name={icon} class="size-[18px]" />
         <span class="min-w-0">{label}</span>
       </NavigationLink>
-    ) : (
-      <Tooltip>
-        <TooltipTrigger
-          as={NavigationLink}
-          href={href}
+    </Show>
+  );
+  const groupLabel = (label: string) => (
+    <Show
+      when={labeled()}
+      fallback={
+        <div
+          class="my-1 h-px min-h-px w-5 bg-line"
+          role="separator"
           aria-label={label}
-          data-testid={id}
-          current={active()}
-          class={cn(
-            "rail-action",
-            active() && "bg-accent-soft text-accent-soft-text",
-          )}
-        >
-          <Icon name={icon} class="size-[18px]" />
-        </TooltipTrigger>
-        <TooltipContent>
-          <span class="font-medium">{label}</span>
-          <span class="ml-2 text-muted">{scope}</span>
-        </TooltipContent>
-      </Tooltip>
-    );
-  const groupLabel = (label: string) =>
-    labeled() ? (
+        />
+      }
+    >
       <div class="mt-4 px-3 pb-1 text-xs font-medium text-muted">{label}</div>
-    ) : (
-      <div
-        class="my-1 h-px min-h-px w-5 bg-line"
-        role="separator"
-        aria-label={label}
-      />
-    );
+    </Show>
+  );
   return (
     <nav
       aria-label="Primary navigation"
