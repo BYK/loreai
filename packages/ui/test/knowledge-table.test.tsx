@@ -154,7 +154,7 @@ describe("KnowledgeTable", () => {
     mount();
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Knowledge search" }),
+      screen.getByRole("textbox", { name: "Filter this list" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", {
@@ -172,7 +172,9 @@ describe("KnowledgeTable", () => {
       button: 0,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("option", { name: /^project$/ }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: /^Project-only$/ }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?scope=project",
@@ -183,7 +185,9 @@ describe("KnowledgeTable", () => {
       button: 0,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("option", { name: /^Any scope$/ }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: /^This project$/ }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search").textContent).toBe(""),
     );
@@ -373,7 +377,7 @@ describe("KnowledgeTable", () => {
 
   it("keeps the search form available for cursor-reset navigation", () => {
     mount([entry], { ...defaultQuery, cursor: "next" });
-    const input = screen.getByRole("textbox", { name: "Knowledge search" });
+    const input = screen.getByRole("textbox", { name: "Filter this list" });
     expect(input).toHaveValue("");
     fireEvent.input(input, { target: { value: "sqlite" } });
     expect(input).toHaveValue("sqlite");

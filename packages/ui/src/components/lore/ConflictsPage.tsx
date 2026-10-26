@@ -1,3 +1,5 @@
+import { A } from "@solidjs/router";
+import { REVIEW_DESTINATIONS } from "~/components/shell/navigation";
 import type { Component } from "solid-js";
 import { createSignal, For, Match, onMount, Show, Switch } from "solid-js";
 
@@ -212,9 +214,11 @@ export const ConflictsPage: Component = () => {
     <section class="p-4 sm:p-6" data-testid="conflicts-page">
       <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 class="text-[25px] font-semibold">Sync conflicts</h1>
+          <h1 class="text-[25px] font-semibold">
+            {REVIEW_DESTINATIONS.recovery.label}
+          </h1>
           <p class="mt-1 text-sm text-muted">
-            Review local knowledge versions replaced by cloud sync.
+            {REVIEW_DESTINATIONS.recovery.description}
           </p>
         </div>
         <Button
@@ -305,7 +309,14 @@ export const ConflictsPage: Component = () => {
             when={(data()?.conflicts.length ?? 0) > 0}
             fallback={
               <StateCard kind="empty" title="No sync conflicts">
-                Conflicts created by local sync will appear here.
+                No replaced local versions are available in this view. Versions
+                recorded by local sync appear here for review.
+                <A
+                  class="mt-3 inline-block text-accent underline"
+                  href="/knowledge"
+                >
+                  Browse knowledge
+                </A>
               </StateCard>
             }
           >

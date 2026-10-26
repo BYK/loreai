@@ -272,7 +272,7 @@ describe("ProjectPage", () => {
       </MemoryRouter>
     ));
     expect(
-      screen.getByRole("textbox", { name: "Search project memory" }),
+      screen.getByRole("textbox", { name: "Search this project's memory" }),
     ).toBeInTheDocument();
   });
 
@@ -298,7 +298,9 @@ describe("ProjectPage", () => {
         pointerType: "mouse",
       },
     );
-    fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Knowledge and memory files" }),
+    );
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() =>
       expect(history.get()).toBe("/projects/p-1/search?scope=knowledge"),

@@ -296,9 +296,26 @@ export const EntitiesPage: Component = () => {
           <StateCard kind="loading" title="Loading entities" />
         </Match>
         <Match when={rows()?.length === 0}>
-          <StateCard kind="empty" title="No entities yet">
-            Entities appear after conversations are distilled.{" "}
-            <Show when={typeFilter()}>No entities of this type.</Show>
+          <StateCard
+            kind="empty"
+            title={
+              typeFilter() ? "No entities match this filter" : "No entities yet"
+            }
+            action={
+              typeFilter() ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setType(null)}
+                >
+                  Clear entity filter
+                </Button>
+              ) : undefined
+            }
+          >
+            {typeFilter()
+              ? "Clear the type filter to browse available entities."
+              : "Entities appear after conversations are distilled."}
           </StateCard>
         </Match>
         <Match when={rows()}>

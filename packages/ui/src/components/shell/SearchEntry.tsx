@@ -1,3 +1,7 @@
+import {
+  PROJECT_MEMORY_SEARCH_LABEL,
+  WORKSPACE_KNOWLEDGE_SEARCH_LABEL,
+} from "~/lib/search-labels";
 import type { Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { searchHref, workspaceSearchHref } from "~/lib/href";
@@ -28,18 +32,26 @@ export const SearchEntry: Component<{
       <Icon name="search" class="ml-2.5 hidden size-3.5 md:block" />
       <input
         name="q"
-        aria-label="Search"
+        aria-label={
+          props.searchProjectId
+            ? PROJECT_MEMORY_SEARCH_LABEL
+            : WORKSPACE_KNOWLEDGE_SEARCH_LABEL
+        }
         placeholder={
           props.searchProjectId
-            ? "Search this project's memory…"
-            : "Search all knowledge…"
+            ? `${PROJECT_MEMORY_SEARCH_LABEL}…`
+            : `${WORKSPACE_KNOWLEDGE_SEARCH_LABEL}…`
         }
         class="hidden h-full min-w-0 flex-1 bg-transparent px-2.5 text-xs outline-none md:block"
       />
       <button
         type="submit"
         data-testid="search-entry"
-        aria-label="Search"
+        aria-label={
+          props.searchProjectId
+            ? PROJECT_MEMORY_SEARCH_LABEL
+            : WORKSPACE_KNOWLEDGE_SEARCH_LABEL
+        }
         class="size-8 md:hidden"
       >
         <Icon name="search" class="mx-auto size-3.5" />

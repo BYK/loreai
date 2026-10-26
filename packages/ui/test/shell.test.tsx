@@ -493,7 +493,7 @@ describe("shell: project navigation and real-data path", () => {
         "knowledge",
         "/projects/p-lore/knowledge/k-sqlite",
         "textbox",
-        "Filter knowledge list",
+        "Filter this list",
       ],
       [
         "sessions",
@@ -653,7 +653,7 @@ describe("shell: project navigation and real-data path", () => {
     mount("/projects/p-lore/knowledge?q=Keep", fakeClient());
     expect(await screen.findAllByTestId("knowledge-row")).toHaveLength(2);
     expect(
-      screen.getByRole("textbox", { name: "Knowledge search" }),
+      screen.getByRole("textbox", { name: "Filter this list" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Recall Results")).toBeNull();
   });
@@ -1205,7 +1205,9 @@ describe("shell: workspace knowledge and search", () => {
     const { history } = mount("/search?q=SQLite", client);
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Search all knowledge" }),
+      within(screen.getByRole("main")).getByRole("textbox", {
+        name: "Search knowledge across projects",
+      }),
     ).toHaveValue("SQLite");
     expect(await screen.findByTestId("search-hit")).toHaveAttribute(
       "href",
@@ -1219,7 +1221,7 @@ describe("shell: workspace knowledge and search", () => {
     );
     expect(
       screen.getByText(
-        "Knowledge only — sessions and distillations are searched per project.",
+        "Knowledge only. Search a project's memory to include its conversations and summaries.",
       ),
     ).toBeInTheDocument();
     expect(searchOpts[0]).toEqual(
@@ -1939,8 +1941,13 @@ describe("shell: search entry, theme and fixture", () => {
 
   it("submits a workspace search from the header", async () => {
     const { history } = mount("/", fakeClient());
-    const input = screen.getByRole("textbox", { name: "Search" });
-    expect(input).toHaveAttribute("placeholder", "Search all knowledge…");
+    const input = screen.getByRole("textbox", {
+      name: "Search knowledge across projects",
+    });
+    expect(input).toHaveAttribute(
+      "placeholder",
+      "Search knowledge across projects…",
+    );
     fireEvent.input(input, { target: { value: "SQLite" } });
     const form = input.closest("form");
     if (!form) throw new Error("workspace search form missing");
@@ -2251,7 +2258,7 @@ describe("Knowledge reader toolbar", () => {
     );
     await screen.findByTestId("knowledge-document");
     const search = screen.getByRole("textbox", {
-      name: "Filter knowledge list",
+      name: "Filter this list",
     });
     fireEvent.input(search, { target: { value: "SQLite" } });
     fireEvent.submit(search.closest("form")!);
@@ -2378,7 +2385,9 @@ it("restores context focus at narrow breakpoints without stealing reader input f
   await waitFor(() =>
     expect(screen.getByTestId("context-toggle")).toHaveFocus(),
   );
-  const search = screen.getByRole("textbox", { name: "Search" });
+  const search = screen.getByRole("textbox", {
+    name: "Search this project's memory",
+  });
   search.focus();
   media.matches = true;
   for (const listener of listeners) listener({ matches: true });
@@ -2398,7 +2407,7 @@ it("keeps scoped recall searches on their route without mounting hidden reader f
     "/projects/p-lore/search?q=SQLite&scope=knowledge",
   );
   expect(
-    screen.queryByRole("textbox", { name: "Filter knowledge list" }),
+    screen.queryByRole("textbox", { name: "Filter this list" }),
   ).toBeNull();
   expect(
     screen.getByRole("textbox", { name: "Search query" }),
@@ -2433,7 +2442,7 @@ it("keeps narrow context open after reader filter submissions", async () => {
   );
   await screen.findByTestId("knowledge-document");
   fireEvent.click(screen.getByRole("button", { name: "Expand context pane" }));
-  const input = screen.getByRole("textbox", { name: "Filter knowledge list" });
+  const input = screen.getByRole("textbox", { name: "Filter this list" });
   fireEvent.input(input, { target: { value: "SQLite" } });
   fireEvent.submit(input.closest("form")!);
   await waitFor(() => expect(history.get()).toContain("q=SQLite"));
@@ -2492,10 +2501,10 @@ it("uses rail destinations consistently and exposes workspace tools directly", a
   );
   for (const name of [
     "Entities",
-    "Contradictions",
-    "Promotions",
+    "Conflicting instructions",
+    "Team proposals",
     "Team",
-    "Conflicts",
+    "Sync recovery",
     "Cache warming",
     "Cost intelligence",
     "Model usage",
@@ -2592,4 +2601,58 @@ it("restores toolbar focus when a narrow reader context opens the full table", a
   await waitFor(() =>
     expect(screen.getByTestId("project-picker-trigger")).toHaveFocus(),
   );
+});
+
+it("defaults to labeled navigation and persists compact mode independently of context", async () => {
+  const first = mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  await screen.findByTestId("knowledge-document");
+  expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
+  const toggle = screen.getByRole("button", { name: "Use compact navigation" });
+  toggle.focus();
+  fireEvent.click(toggle);
+  expect(screen.getByTestId("rail-projects")).not.toHaveTextContent("Projects");
+  expect(document.activeElement).toBe(
+    screen.getByRole("button", { name: "Show navigation labels" }),
+  );
+  expect(localStorage.getItem("lore.ui.navigationCompact")).toBe("true");
+  expect(localStorage.getItem("lore.ui.sidebarCollapsed")).toBeNull();
+  first.unmount();
+  mount("/", fakeClient());
+  expect(
+    screen.getByRole("button", { name: "Show navigation labels" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+it.each([null, "broken", "false"])(
+  "uses labeled navigation for missing or invalid preference %s",
+  (value) => {
+    if (value !== null)
+      localStorage.setItem("lore.ui.navigationCompact", value);
+    mount("/", fakeClient());
+    expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
+  },
+);
+
+it("keeps navigation usable when storage reads and writes are blocked", () => {
+  const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+    throw new Error("blocked");
+  });
+  const write = vi
+    .spyOn(Storage.prototype, "setItem")
+    .mockImplementation(() => {
+      throw new Error("blocked");
+    });
+  try {
+    mount("/", fakeClient());
+    expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use compact navigation" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Show navigation labels" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  } finally {
+    read.mockRestore();
+    write.mockRestore();
+  }
 });

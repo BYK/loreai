@@ -1,3 +1,5 @@
+import { A } from "@solidjs/router";
+import { REVIEW_DESTINATIONS } from "~/components/shell/navigation";
 import type { Component } from "solid-js";
 import { createSignal, For, Match, onMount, Show, Switch } from "solid-js";
 import {
@@ -255,9 +257,11 @@ export const PromotionsPage: Component = () => {
     <section class="p-4 sm:p-6" data-testid="promotions-page">
       <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 class="text-[25px] font-semibold">Promotions</h1>
+          <h1 class="text-[25px] font-semibold">
+            {REVIEW_DESTINATIONS.proposals.label}
+          </h1>
           <p class="mt-1 text-sm text-muted">
-            Review knowledge proposed for your team.
+            {REVIEW_DESTINATIONS.proposals.description}
           </p>
         </div>
         <div class="flex min-w-0 max-w-full flex-wrap gap-2">
@@ -333,7 +337,13 @@ export const PromotionsPage: Component = () => {
         </Match>
         <Match when={pageState() === "no_team"}>
           <StateCard kind="empty" title="No team memberships">
-            Join a team before reviewing promotion requests.
+            Join a team before reviewing proposal requests.
+            <A
+              class="mt-3 inline-block text-accent underline"
+              href="/team?section=settings"
+            >
+              Open team settings
+            </A>
           </StateCard>
         </Match>
         <Match when={pageState() === "ready"}>
@@ -365,8 +375,14 @@ export const PromotionsPage: Component = () => {
                 <Show
                   when={result().requests.length > 0}
                   fallback={
-                    <StateCard kind="empty" title="No promotion requests">
-                      New team proposals will appear here.
+                    <StateCard kind="empty" title="No proposals in this view">
+                      No proposals match the selected team and status.
+                      <A
+                        class="mt-3 inline-block text-accent underline"
+                        href="/knowledge"
+                      >
+                        Browse knowledge
+                      </A>
                     </StateCard>
                   }
                 >

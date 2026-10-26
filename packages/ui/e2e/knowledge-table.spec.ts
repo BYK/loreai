@@ -34,7 +34,7 @@ test.describe("knowledge table routes", () => {
   test("knowledge q filters stay on the table view", async ({ page }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     await search.fill("SQLite");
     await search.press("Enter");
     await expect(page).toHaveURL(/\/knowledge\?q=SQLite/);
@@ -47,7 +47,7 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     // Typo of the seeded "Use cursor pagination" title.
     await search.fill("curosr pagin");
     await search.press("Enter");
@@ -69,7 +69,7 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     await search.fill("cursor pagination");
     await search.press("Enter");
     const row = page
@@ -114,7 +114,9 @@ test.describe("knowledge table routes", () => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/search?q=SQLite`);
     await page.getByRole("button", { name: "Search scope" }).click();
-    await page.getByRole("option", { name: "knowledge" }).click();
+    await page
+      .getByRole("option", { name: "Knowledge and memory files" })
+      .click();
     await page
       .getByRole("search")
       .getByRole("button", { name: "Search", exact: true })

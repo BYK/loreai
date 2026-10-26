@@ -74,10 +74,10 @@ test.describe("cross-project knowledge", () => {
     await expect(
       table.getByText("scratch", { exact: true }).first(),
     ).toHaveText("scratch");
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     const searchButton = page
       .getByRole("search")
-      .getByRole("button", { name: "Search", exact: true });
+      .getByRole("button", { name: "Filter", exact: true });
     for (const title of [
       "Shared: prefer inert rendering",
       "Shared-only evidence review seed alpha",
@@ -167,11 +167,15 @@ test.describe("cross-project knowledge", () => {
     await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
 
     await page.getByRole("button", { name: /^scope\b/ }).click();
-    await page.getByRole("option", { name: "project", exact: true }).click();
+    await page
+      .getByRole("option", { name: "Project-only", exact: true })
+      .click();
     await expect(page).toHaveURL("/ui/knowledge?scope=project");
 
     await page.getByRole("button", { name: /^scope\b/ }).click();
-    await page.getByRole("option", { name: "Any scope", exact: true }).click();
+    await page
+      .getByRole("option", { name: "All knowledge", exact: true })
+      .click();
     await expect(page).toHaveURL("/ui/knowledge");
     await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
     await page.reload();
@@ -293,9 +297,9 @@ test.describe("cross-project knowledge", () => {
     test.skip(testInfo.project.name !== "desktop-chromium");
     await page.goto("/ui/knowledge");
     const controls = [
-      page.getByRole("textbox", { name: "Knowledge search" }),
+      page.getByRole("textbox", { name: "Filter this list" }),
       page.getByRole("search").getByRole("button", {
-        name: "Search",
+        name: "Filter",
         exact: true,
       }),
       page.getByRole("button", { name: "category" }),

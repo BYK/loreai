@@ -36,12 +36,22 @@ Destructive states retain their red tokens.
 
 ## Layout and verification
 
-Desktop retains the icon rail and collapsible context pane. Below 768px, a
+Desktop opens with labeled navigation. The Compact navigation button switches to
+icons and persists this optional preference separately from context-pane collapse.
+Missing, invalid or blocked browser storage keeps navigation usable, defaulting to
+labels. Desktop account controls keep their popover; compact mode does not change
+the mobile drawer or context-pane behavior. Below 768px, a
 logo-free toolbar button opens a labeled sliding drawer and the document uses
 the full viewport width. The mobile account row is fully tappable, its panel
 aligns with the drawer, and theme controls have 44px touch targets.
 
-The knowledge reader keeps search above a compact Filters/sort row. A labeled
+Knowledge tables give titles and two-line content previews most of the width;
+category, visibility, dates and confidence remain available. The project directory
+groups checkouts only when they share a nonempty recorded git remote. Each checkout
+keeps its own destination; unattributed projects stay separate. Recent activity,
+Name and Knowledge count sorts are presentation controls, not project merges.
+
+The knowledge reader keeps Filter this list above a compact Filters/sort row. A labeled
 filter panel applies category and scope together, with explanations for project,
 shared, and global visibility. Desktop shows applied filters as removable chips;
 clearing them preserves the selected entry and sort order. On mobile, chips are hidden
@@ -67,6 +77,35 @@ project selection. Desktop dropdowns keep their existing layout.
 `BottomSheetContent` centralizes motion, safe areas, and scrolling, while the shared responsive overlay restores focus when a menu closes
 or changes presentation across the breakpoint. The searchable project switcher
 and controls already inside dialogs retain their specialized interactions.
+
+## Search and everyday workflows
+
+Filter this list narrows the current knowledge table or reader list. Its visibility
+choices (This project, Project-only, Shared knowledge and Project + shared) are
+independent of recall scopes. Workspace tables name their broader coverage.
+Search this project's memory uses recall; Search knowledge across projects searches
+stored knowledge only, and directs users to project memory for conversations and
+summaries. Readable recall labels preserve their raw query values:
+
+| Query value | Label | Coverage |
+| --- | --- | --- |
+| `all` | All memory | Project memory plus other-project knowledge/repository discovery |
+| `session` | Conversation history | Messages and summaries across project sessions; this UI selects no session |
+| `project` | Project memory | Conversations, summaries, visible knowledge/entities and recorded memory files |
+| `knowledge` | Knowledge and memory files | Visible knowledge and recorded memory files, without conversations or entities |
+
+Search results identify their submitted scope, and empty search/filter views offer
+browse or reset actions. Navigation and review headings use Team proposals,
+Conflicting instructions and Sync recovery while keeping the existing routes.
+Review queues describe the current view rather than claiming all work is complete.
+
+Project overviews lead with recent knowledge and sessions. Configured sharing uses
+a compact summary with an expansion control; incomplete or blocked setup remains
+visible. Sync labels distinguish configuration, running, completion and blocked
+states without inventing a last-success time. Count-derived information is labeled
+Memory summary. Team management starts with Members and Invite teammate, with
+Invitations and Settings sections retaining account/discovery tools. Knowledge and
+session readers expose implemented actions; roadmap placeholders are removed.
 
 ## Not-found recovery
 
@@ -96,9 +135,8 @@ search controls, dialog close buttons, and loading/empty/locked/error states.
 
 ## Screenshot comparison
 
-[PR #2094](https://github.com/BYK/loreai/pull/2094) contains the complete
-before/after gallery for desktop and mobile in both themes, including navigation,
-readers, tables, account controls, dialogs, and the new selection sheets.
+The accompanying PR contains before/after comparisons for desktop and mobile in
+both themes, including navigation, readers, tables, overview and team workflows.
 Screenshots are attached to the PR rather than committed as build artifacts.
 
 Screenshots use the disposable database seeded by the UI browser tests.

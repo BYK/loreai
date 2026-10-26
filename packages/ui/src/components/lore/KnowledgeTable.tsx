@@ -1,3 +1,5 @@
+import { knowledgeVisibilityLabel } from "~/lib/knowledge-visibility";
+import { LIST_FILTER_LABEL } from "~/lib/search-labels";
 import { Icon } from "~/components/shell/Icon";
 import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
@@ -230,15 +232,23 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     <ResponsiveSelect
       label={name}
       sheetTitle={
-        name === "category" ? "Knowledge category" : "Knowledge scope"
+        name === "category" ? "Knowledge category" : "Knowledge visibility"
       }
       value={props.query[name] ?? null}
       onChange={(value) =>
         go({ ...props.query, [name]: (value || null) as never, cursor: null })
       }
       options={["", ...options]}
-      placeholder={placeholder}
-      optionLabel={(value) => value || placeholder}
+      placeholder={
+        name === "scope"
+          ? knowledgeVisibilityLabel("", props.showProject)
+          : placeholder
+      }
+      optionLabel={(value) =>
+        name === "scope"
+          ? knowledgeVisibilityLabel(value, props.showProject)
+          : value || placeholder
+      }
       triggerClass="h-9 min-w-32 text-xs"
     />
   );
@@ -261,13 +271,13 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
             <TextFieldInput
               name="q"
               value={props.query.q}
-              aria-label="Knowledge search"
-              placeholder="Filter knowledge"
+              aria-label={LIST_FILTER_LABEL}
+              placeholder={LIST_FILTER_LABEL}
               class="h-11 text-base md:h-9 md:text-xs"
             />
           </TextField>
           <Button type="submit" size="sm" class="h-11 md:h-9">
-            Search
+            Filter
           </Button>
         </form>
         {filter("category", KNOWLEDGE_CATEGORIES, "All categories")}

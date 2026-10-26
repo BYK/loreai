@@ -51,6 +51,25 @@ function mount(client: ApiClient, path = "/entities") {
 }
 
 describe("EntitiesPage", () => {
+  it("clears an empty type filter to return to available entities", async () => {
+    const listEntities = vi
+      .fn<ApiClient["listEntities"]>()
+      .mockResolvedValue({ entities: [], next_cursor: null, total: 0 });
+    mount(clientWith({ listEntities }), "/entities?type=person");
+    expect(
+      await screen.findByText("No entities match this filter"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear entity filter" }),
+    );
+    await waitFor(() =>
+      expect(listEntities).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: null, page: null }),
+        expect.anything(),
+      ),
+    );
+  });
+
   it("shows a loading state then the list", async () => {
     let resolve: ((v: unknown) => void) | undefined;
     const client = clientWith({

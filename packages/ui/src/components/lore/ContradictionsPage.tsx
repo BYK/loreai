@@ -1,3 +1,4 @@
+import { REVIEW_DESTINATIONS } from "~/components/shell/navigation";
 import type { Component } from "solid-js";
 import {
   createMemo,
@@ -245,11 +246,13 @@ export const ContradictionsPage: Component = () => {
     <div class="mx-auto max-w-4xl p-5 sm:p-8" data-testid="contradictions-page">
       <header class="mb-6">
         <p class="eyebrow">Memory review</p>
-        <h1 class="mt-1 text-2xl font-semibold">Contradictions</h1>
+        <h1 class="mt-1 text-2xl font-semibold">
+          {REVIEW_DESTINATIONS.instructions.label}
+        </h1>
         <p class="mt-2 max-w-2xl text-sm text-muted">
-          These knowledge entries give opposing instructions. Lore never merges
-          or removes either entry automatically; choose which rule to keep, or
-          keep both and dismiss the pair.
+          {REVIEW_DESTINATIONS.instructions.description} Lore never merges or
+          removes either entry automatically; choose which rule to keep, or keep
+          both and dismiss the pair.
         </p>
       </header>
 
@@ -282,6 +285,12 @@ export const ContradictionsPage: Component = () => {
           <StateCard kind="empty" title="No open contradictions">
             New pairs appear here only after the gateway has recorded a likely
             conflict for you to review.
+            <A
+              class="mt-3 inline-block text-accent underline"
+              href="/knowledge"
+            >
+              Browse knowledge
+            </A>
           </StateCard>
         </Match>
         <Match when={data()}>

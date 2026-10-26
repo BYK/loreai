@@ -1,3 +1,9 @@
+import { RECALL_SCOPES } from "~/contracts";
+import {
+  PROJECT_MEMORY_SEARCH_LABEL,
+  RECALL_SCOPE_DETAILS,
+  recallScopeLabel,
+} from "~/lib/search-labels";
 import { Icon } from "~/components/shell/Icon";
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createSignal } from "solid-js";
@@ -234,7 +240,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       </section>
       <section class="py-5">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div class="eyebrow">Knowledge</div>
+          <h2 class="eyebrow">{PROJECT_MEMORY_SEARCH_LABEL}</h2>
         </div>
         <form
           role="search"
@@ -250,8 +256,8 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           <TextField class="w-full min-w-0 sm:w-auto sm:flex-1">
             <TextFieldInput
               name="q"
-              aria-label="Search project memory"
-              placeholder="Search this project"
+              aria-label={PROJECT_MEMORY_SEARCH_LABEL}
+              placeholder={PROJECT_MEMORY_SEARCH_LABEL}
               class="h-11 md:h-10"
             />
           </TextField>
@@ -260,8 +266,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             sheetTitle="Search scope"
             value={scope()}
             onChange={(value) => setScope((value ?? "all") as RecallScope)}
-            options={["all", "session", "project", "knowledge"]}
-            triggerClass="h-10 w-28"
+            options={RECALL_SCOPES}
+            optionLabel={recallScopeLabel}
+            triggerClass="h-11 w-full sm:w-60 md:h-10"
           />
           <Button
             type="submit"
@@ -271,6 +278,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             Search
           </Button>
         </form>
+        <p class="mt-2 text-xs text-muted">
+          {RECALL_SCOPE_DETAILS[scope()].description}
+        </p>
       </section>
       <section class="border-b border-line py-5">
         <div class="eyebrow mb-2">Identity</div>

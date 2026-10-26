@@ -107,7 +107,9 @@ test.describe("real data browsing", () => {
       });
     await expect(page).toHaveURL("/ui/search?q=SQLite");
     await expect(
-      page.getByRole("textbox", { name: "Search all knowledge" }),
+      page
+        .getByRole("main")
+        .getByRole("textbox", { name: "Search knowledge across projects" }),
     ).toHaveValue("SQLite");
     await expect(page.getByTestId("search-hit").first()).toBeVisible();
   });

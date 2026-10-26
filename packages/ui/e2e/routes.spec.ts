@@ -46,7 +46,7 @@ test.describe("production route deep links", () => {
       [`/ui/knowledge/${entry.id}`, entry.title, "text"],
       ["/ui/entities", "People, projects & things", "entities"],
       [`/ui/entities/${entity.id}`, "Ada Lovelace", "entity-detail"],
-      ["/ui/contradictions", "Contradictions", "contradictions"],
+      ["/ui/contradictions", "Conflicting instructions", "contradictions"],
       ["/ui/warming", "Cache warming", "warming"],
       ["/ui/costs", "Cost intelligence", "costs"],
     ] as const;

@@ -92,7 +92,7 @@ test("context collapse preserves the permanent rail, picker, document and deskto
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
   }
   await toggle.click();
-  const input = page.getByRole("textbox", { name: "Filter knowledge list" });
+  const input = page.getByRole("textbox", { name: "Filter this list" });
   await input.fill("SQLite");
   await input.press("Enter");
   await expect(page).toHaveURL(
@@ -498,7 +498,7 @@ test("knowledge filters combine, dismiss and clear without losing the reader or 
       .click();
   }
   await expect(
-    toolbar.getByRole("textbox", { name: "Filter knowledge list" }),
+    toolbar.getByRole("textbox", { name: "Filter this list" }),
   ).toHaveValue("");
   await expect(page).toHaveURL(
     `${readerPath}?sort=${encodeURIComponent(customSort)}`,
@@ -970,7 +970,7 @@ test("knowledge table and search scope share mobile selection sheets", async ({
   for (const [label, title, value] of [
     ["category", "Knowledge category", "decision"],
     ["project", "Filter by project", "lore"],
-    ["scope", "Knowledge scope", "project"],
+    ["scope", "Knowledge visibility", "Project-only"],
   ] as const) {
     const trigger = page.getByRole("button", {
       name: new RegExp(`^${label}\\b`),
@@ -987,7 +987,13 @@ test("knowledge table and search scope share mobile selection sheets", async ({
     }
     await expect
       .poll(() => new URL(page.url()).searchParams.get(label))
-      .toBe(label === "project" ? project.id : value);
+      .toBe(
+        label === "project"
+          ? project.id
+          : label === "scope"
+            ? "project"
+            : value,
+      );
     expect(new URL(page.url()).searchParams.get("q")).toBe("SQLite");
     expect(new URL(page.url()).searchParams.get("sort")).toBe("title:asc");
   }
@@ -1006,7 +1012,9 @@ test("knowledge table and search scope share mobile selection sheets", async ({
   if (mobile)
     await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
   else await expect(sheet).toHaveCount(0);
-  await page.getByRole("option", { name: "knowledge", exact: true }).click();
+  await page
+    .getByRole("option", { name: "Knowledge and memory files", exact: true })
+    .click();
   expect(new URL(page.url()).searchParams.get("scope")).toBe("all");
   await page
     .getByRole("search")
@@ -1060,9 +1068,10 @@ test("workspace selectors use sheets on mobile and preserve desktop dropdowns", 
 
   await page.goto(`/ui/projects/${project.id}`);
   await page
-    .getByRole("textbox", { name: "Search project memory" })
+    .getByRole("main")
+    .getByRole("textbox", { name: "Search this project's memory" })
     .fill("SQLite");
-  await choose("Search scope", "Search scope", "knowledge");
+  await choose("Search scope", "Search scope", "Knowledge and memory files");
   await expect(page).toHaveURL(`/ui/projects/${project.id}`);
   await page
     .getByRole("search")
@@ -1106,9 +1115,7 @@ for (const section of ["knowledge", "sessions"] as const) {
       section === "sessions" ? "searchbox" : "textbox",
       {
         name:
-          section === "sessions"
-            ? "Filter session list"
-            : "Filter knowledge list",
+          section === "sessions" ? "Filter session list" : "Filter this list",
       },
     );
     await input.fill("SQLite");
