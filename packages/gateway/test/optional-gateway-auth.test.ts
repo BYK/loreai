@@ -19,6 +19,7 @@ describe.each([
         hosts: ["127.0.0.1"],
         ...mode,
         allowRemoteManagement: true,
+        managementOrigins: ["http://labs.sheep-fir.ts.net:3207"],
         gatewayAuthToken: undefined,
       },
       { peerAddressForRequest: () => "100.69.65.126" },

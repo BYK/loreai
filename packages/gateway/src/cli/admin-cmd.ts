@@ -109,8 +109,9 @@ export async function commandAdmin(
       }
       console.log(`Set ${prof[0].email} (personal) tier → ${tier}.`);
     }
-  } catch (e) {
-    console.error(`lore admin: ${(e as Error).message}`);
+  } catch {
+    // Provider bodies and transport exceptions may contain privileged keys.
+    console.error("lore admin: Account service unavailable. Please try again.");
     process.exitCode = 1;
   }
 }

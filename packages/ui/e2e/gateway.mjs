@@ -7,6 +7,7 @@
  *
  * Env:
  *   LORE_E2E_PORT   port to listen on (default 7995)
+ *   LORE_E2E_MODE   local, remote, or hosted deployment (default local)
  *
  * Requires `pnpm --filter @loreai/core build` and
  * `pnpm --filter @loreai/gateway bundle` to have run.
@@ -22,6 +23,10 @@ import { brotliDecompressSync } from "node:zlib";
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
 const port = Number(process.env.LORE_E2E_PORT ?? 7995);
+const mode = process.env.LORE_E2E_MODE ?? "local";
+if (!["local", "remote", "hosted"].includes(mode)) {
+  throw new Error("LORE_E2E_MODE must be local, remote, or hosted");
+}
 
 // A tiny local Model Tides stub so the upload e2e exercises the real
 // consented-upload flow end to end without touching the network. Implements
@@ -136,6 +141,8 @@ const env = {
   LORE_DB_PATH: join(dataHome, "lore.db"),
   LORE_LISTEN_PORT: String(port),
   LORE_LISTEN_HOST: "127.0.0.1",
+  LORE_HOSTED_MODE: mode === "hosted" ? "1" : "0",
+  LORE_REMOTE_GATEWAY: mode === "local" ? "0" : "1",
   LORE_BATCH_DISABLED: "1",
   LORE_MODEL_TIDES_ENDPOINT: `${stubBase}/api/contributions`,
   HF_HUB_OFFLINE: "1",
@@ -161,7 +168,11 @@ await new Promise((resolve, reject) => {
 
 const child = spawn(
   process.execPath,
-  [join(repoRoot, "packages/gateway/dist/bin.cjs"), "start", "--local"],
+  [
+    join(repoRoot, "packages/gateway/dist/bin.cjs"),
+    "start",
+    ...(mode === "local" ? ["--local"] : []),
+  ],
   { env, cwd: dataHome, stdio: "inherit" },
 );
 

@@ -2,53 +2,49 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createGatewayRecallClient } from "../src/recall-gateway-client";
 
 describe("native recall gateway client", () => {
-  test("binds gateway access credentials and their absence to the exact observed turn", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init: RequestInit) => {
-        const headers = new Headers(init.headers);
-        return Response.json({
-          result: headers.get("x-lore-gateway-token") ?? "keyless",
-        });
-      }),
-    );
-    const client = createGatewayRecallClient("https://gateway.example");
-    const context = {
-      projectPath: "/project",
-      sessionID: "session",
-      providerID: "anthropic",
-    };
-    const observe = (turnID: string, token?: string) =>
-      client.observeRequestHeaders(
-        new Headers({
-          "x-lore-project": context.projectPath,
-          "x-lore-session-id": context.sessionID,
-          "x-lore-provider": context.providerID,
-          "x-lore-native-turn-id": turnID,
-          "x-api-key": "same-provider-key",
-          ...(token ? { "x-lore-gateway-token": token } : {}),
-        }),
+  test.each([
+    ["absent", [undefined, undefined]],
+    ["stale", ["legacy-a", "legacy-a"]],
+    ["removed", ["legacy-a", undefined]],
+    ["added", [undefined, "legacy-a"]],
+    ["changed", ["legacy-a", "legacy-b"]],
+  ])(
+    "ignores %s legacy gateway tokens within an authenticated turn",
+    async (_label, tokens) => {
+      const fetch = vi.fn(async () =>
+        Response.json({ result: "gateway memory" }),
       );
-    observe("a", "access-a");
-    observe("b", "access-b");
-    observe("none");
-    for (const [turnID, expected] of [
-      ["a", "access-a"],
-      ["b", "access-b"],
-      ["none", "keyless"],
-    ])
-      expect(
-        await client.execute({ query: "memory" }, { ...context, turnID }),
-      ).toBe(expected);
-    observe("a", "access-b");
-    expect(
-      await client.execute({ query: "memory" }, { ...context, turnID: "a" }),
-    ).toContain("unavailable");
-    observe("b");
-    expect(
-      await client.execute({ query: "memory" }, { ...context, turnID: "b" }),
-    ).toContain("unavailable");
-  });
+      vi.stubGlobal("fetch", fetch);
+      const client = createGatewayRecallClient("https://gateway.example");
+      const context = {
+        projectPath: "/project",
+        sessionID: "session",
+        providerID: "anthropic",
+        turnID: "turn",
+      };
+      for (const token of tokens)
+        client.observeRequestHeaders(
+          new Headers({
+            "x-lore-project": context.projectPath,
+            "x-lore-session-id": context.sessionID,
+            "x-lore-provider": context.providerID,
+            "x-lore-native-turn-id": context.turnID,
+            "x-api-key": "same-provider-key",
+            ...(token ? { "x-lore-gateway-token": token } : {}),
+          }),
+        );
+      expect(await client.execute({ query: "memory" }, context)).toBe(
+        "gateway memory",
+      );
+      expect(fetch).toHaveBeenCalledOnce();
+      const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+      expect(url).toBe("https://gateway.example/v1/recall");
+      expect(init?.redirect).toBe("error");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-api-key")).toBe("same-provider-key");
+      expect(headers.get("x-lore-gateway-token")).toBeNull();
+    },
+  );
   test("accepts a sole nameless observation only for an exact verified turn", async () => {
     vi.stubGlobal(
       "fetch",
@@ -242,9 +238,9 @@ describe("native recall gateway client", () => {
       requests.map((request) => new Headers(request.headers).get("x-api-key")),
     ).toEqual(["key-a", "key-b", "key-c"]);
     expect(requests[0]).toMatchObject({ redirect: "error" });
-    expect(new Headers(requests[0].headers).get("x-lore-gateway-token")).toBe(
-      "access",
-    );
+    expect(
+      new Headers(requests[0].headers).get("x-lore-gateway-token"),
+    ).toBeNull();
     observe("/project-a", "session-a", "key-b");
     expect(await call("/project-a", "session-a")).toContain("unavailable");
     expect(await call("/project-unknown", "session-a")).toContain(

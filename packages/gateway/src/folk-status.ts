@@ -13,10 +13,9 @@
  * effects. Credentials (access/refresh/provider tokens) are never read into
  * a response — only the identity fields of the session projection are.
  *
- * Hosted / remote-gateway mode: cloud sync is installation-global and
- * single-account (see `syncData.isLocalSyncContext`), so tenant-scoped
- * requests must not see the operator's identity or memberships. Those
- * requests answer "anonymous / disabled" without touching `team_config`.
+ * The management account belongs to the installation's operator in every
+ * deployment mode. Model-request tenants must never see that account: they
+ * answer "anonymous / disabled" without touching `team_config`.
  */
 
 import {
@@ -125,8 +124,10 @@ type SafeSession = {
 };
 
 /** Project the persisted session down to identity fields only — never tokens. */
-function safeSession(config: GatewayConfig): SafeSession | null {
-  if (folkUnavailable(config)) return null;
+function safeSession(): SafeSession | null {
+  // Hosting changes filesystem/routing policy, not the management account.
+  // Installation-global credentials must never cross into model tenant scope.
+  if (!syncData.isLocalSyncContext()) return null;
   const s = loadPersistedSession();
   if (!s) return null;
   return {
@@ -151,17 +152,17 @@ function asPolicy(v: string | null | undefined): PromotionPolicy | null {
 // ---------------------------------------------------------------------------
 
 export function accountStatus(
-  config: GatewayConfig,
+  _config: GatewayConfig,
   nowMs = Date.now(),
 ): AccountStatus {
-  const s = safeSession(config);
+  const s = safeSession();
   if (!s) {
     return {
       signed_in: false,
       user: null,
       provider: null,
       expires_at: null,
-      state: folkUnavailable(config) ? "hosted" : "anonymous",
+      state: syncData.isLocalSyncContext() ? "anonymous" : "hosted",
     };
   }
   const expired = isExpired(s, nowMs);
@@ -186,7 +187,7 @@ export function teamsStatus(config: GatewayConfig): {
   teams: TeamStatus[];
 } {
   const hosted = requestIsHosted(config);
-  const s = hosted ? null : safeSession(config);
+  const s = hosted ? null : safeSession();
   if (!s) return { hosted, teams: [] };
   const rows = db()
     .query(
@@ -265,7 +266,7 @@ export function sharingStatus(
 
   const team = { id: scopeId, name: scope?.name ?? null };
   const reviewRequired = teamDefault !== "auto";
-  const s = safeSession(config);
+  const s = safeSession();
   let detail: string | null = null;
   if (!s) detail = "Not signed in; team content cannot sync";
   else if (isExpired(s, nowMs)) detail = "Account session expired";

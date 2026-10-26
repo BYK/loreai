@@ -19,8 +19,9 @@ vi.mock("@supabase/supabase-js", () => ({
   },
 }));
 
-import { db, syncData } from "@loreai/core";
+import { db, syncData, withTenant } from "@loreai/core";
 import { startSessionRefreshScheduler } from "../src/session-refresh";
+import * as sessionStore from "../src/supabase";
 import {
   clearProviderTokenCache,
   clearSession,
@@ -154,6 +155,44 @@ describe("background account refresh", () => {
   });
   afterEach(() => vi.useRealTimers());
 
+  test.each(
+    [
+      { hostedMode: false, remoteGateway: false },
+      { hostedMode: true, remoteGateway: false },
+      { hostedMode: false, remoteGateway: true },
+    ].flatMap((mode) =>
+      ["startup", "interval"].map((phase) => ({ mode, phase })),
+    ),
+  )(
+    "a throwing $phase session read retries safely in $mode",
+    async ({ mode, phase }) => {
+      persistSession({ ...SAMPLE, expires_at: 1 });
+      h.auth.refreshSession.mockResolvedValue({
+        data: { session: fakeSupabaseSession() },
+        error: null,
+      });
+      const read = vi.spyOn(sessionStore, "loadPersistedSession");
+      const stop = startSessionRefreshScheduler(mode);
+      try {
+        if (phase === "interval") {
+          read.mockReturnValueOnce(null);
+          await vi.advanceTimersByTimeAsync(1);
+        }
+        read.mockImplementationOnce(() => {
+          throw new Error("private-refresh-read-sentinel");
+        });
+        await vi.advanceTimersByTimeAsync(phase === "startup" ? 1 : 30_000);
+        expect(h.auth.refreshSession).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(h.auth.refreshSession).toHaveBeenCalledOnce();
+        expect(loadPersistedSession()?.refresh_token).toBe("rt-2");
+      } finally {
+        read.mockRestore();
+        await stop();
+      }
+    },
+  );
+
   test("refreshes before expiry even with sync disabled, then keeps fresh credentials", async () => {
     syncData.disableSync();
     persistSession({
@@ -206,13 +245,31 @@ describe("background account refresh", () => {
   test.each([
     { hostedMode: true, remoteGateway: false },
     { hostedMode: false, remoteGateway: true },
-  ])("never refreshes the operator's account in %j", async (mode) => {
+  ])("refreshes the installation account in %j", async (mode) => {
     persistSession({ ...SAMPLE, expires_at: 1 });
+    h.auth.refreshSession.mockResolvedValue({
+      data: { session: fakeSupabaseSession() },
+      error: null,
+    });
     const stop = startSessionRefreshScheduler(mode);
     await vi.advanceTimersByTimeAsync(90_000);
     await stop();
+    expect(h.auth.refreshSession).toHaveBeenCalledTimes(1);
+    expect(loadPersistedSession()?.access_token).toBe("at-2");
+  });
+
+  test("a model tenant cannot acquire operator refresh ownership", async () => {
+    persistSession({ ...SAMPLE, expires_at: 1 });
+    await withTenant("fixture-model-tenant", async () => {
+      const stop = startSessionRefreshScheduler({
+        hostedMode: true,
+        remoteGateway: true,
+      });
+      await vi.advanceTimersByTimeAsync(90_000);
+      await stop();
+    });
     expect(h.auth.refreshSession).not.toHaveBeenCalled();
-    expect(loadPersistedSession()?.access_token).toBe("at-1");
+    expect(loadPersistedSession()?.refresh_token).toBe(SAMPLE.refresh_token);
   });
 
   test("stopping cancels an in-flight response and prevents late token persistence", async () => {
@@ -237,7 +294,7 @@ describe("background account refresh", () => {
     expect(h.auth.refreshSession).toHaveBeenCalledTimes(1);
   });
 
-  test("shutdown cancels a restore started by an on-demand caller before the scheduler joined", async () => {
+  test("stopping a joining scheduler preserves the live on-demand owner's restore", async () => {
     persistSession({ ...SAMPLE, expires_at: 1 });
     let finish!: (value: unknown) => void;
     h.auth.refreshSession.mockImplementation(
@@ -257,10 +314,11 @@ describe("background account refresh", () => {
     });
     await vi.advanceTimersByTimeAsync(1);
     const stopped = stop();
-    finish({ data: { session: fakeSupabaseSession() }, error: null });
     await stopped;
-    expect(await demandOutcome).toBe("cancelled");
-    expect(loadPersistedSession()?.access_token).toBe("at-1");
+    finish({ data: { session: fakeSupabaseSession() }, error: null });
+    expect(await demandOutcome).toBe("saved");
+    expect(loadPersistedSession()?.access_token).toBe("at-2");
+    expect(h.auth.refreshSession).toHaveBeenCalledTimes(1);
   });
 });
 

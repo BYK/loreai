@@ -7,11 +7,11 @@
  * Shared by the Hono middleware in `app.ts` and the raw `upgrade` listener in
  * `server.ts` so both paths enforce exactly the same policy.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { PROVIDER_AUTH_HEADER_NAMES } from "./auth";
 import { transferResponseCompletionCallback } from "./response-completion";
+import type { GatewayConfig } from "./config";
 
 // ---------------------------------------------------------------------------
 // Browser-origin policy
@@ -178,67 +178,52 @@ export function hiddenManagementResponse(): Response {
   });
 }
 
-function rawHeaderCount(
-  rawHeaders: readonly string[] | undefined,
-  target: string,
-): number {
-  if (!rawHeaders) return 1;
-  let count = 0;
-  for (let index = 0; index < rawHeaders.length; index += 2) {
-    if (rawHeaders[index]?.toLowerCase() === target) count++;
-  }
-  return count;
+/** Shared, body-independent policy for normal HTTP and raw HTTP upgrades. */
+export function managementAccessDecision(
+  req: Request,
+  peerAddress: string | undefined,
+  config: Pick<
+    GatewayConfig,
+    "allowRemoteManagement" | "hosts" | "managementOrigins"
+  >,
+): { allowed: boolean; origin: string | null } {
+  const remotePeer = !isLoopbackAddress(peerAddress);
+  if (remotePeer && !config.allowRemoteManagement)
+    return { allowed: false, origin: null };
+  const origin = managementCorsOrigin(
+    req,
+    config.allowRemoteManagement,
+    peerAddress,
+    config.hosts,
+    config.managementOrigins,
+  );
+  if (origin === false) return { allowed: false, origin: null };
+  return {
+    allowed: !(
+      remotePeer &&
+      isGatewayOperatorMutation(req.method, new URL(req.url).pathname)
+    ),
+    origin,
+  };
 }
 
-export function singleRawHeaderValue(
-  rawHeaders: readonly string[],
-  target: string,
-): string | null {
-  let value: string | null = null;
-  for (let index = 0; index < rawHeaders.length; index += 2) {
-    if (rawHeaders[index]?.toLowerCase() !== target) continue;
-    if (value !== null) return null;
-    value = rawHeaders[index + 1] ?? "";
-  }
-  return value;
-}
-
-export function constantTimeTokenMatches(
-  actual: string,
-  expected: string,
-): boolean {
-  const digest = (value: string): Buffer =>
-    createHash("sha256")
-      .update("lore.gateway-access.v1\0")
-      .update(value)
-      .digest();
-  return timingSafeEqual(digest(actual), digest(expected));
-}
-
-export function gatewayAccessMatches(
-  headers: Headers,
-  expected: string,
-  rawHeaders?: readonly string[],
-): boolean {
-  if (rawHeaderCount(rawHeaders, GATEWAY_AUTH_HEADER) !== 1) return false;
-  const actual = rawHeaders
-    ? singleRawHeaderValue(rawHeaders, GATEWAY_AUTH_HEADER)
-    : headers.get(GATEWAY_AUTH_HEADER);
-  return actual !== null && constantTimeTokenMatches(actual, expected);
-}
-
-/** Validate the single configured token at the remote management boundary. */
-export function managementBearerMatches(
-  headers: Headers,
-  expected: string,
-  rawHeaders?: readonly string[],
-): boolean {
-  if (rawHeaderCount(rawHeaders, "authorization") !== 1) return false;
-  const authorization = rawHeaders
-    ? singleRawHeaderValue(rawHeaders, "authorization")
-    : headers.get("authorization");
-  const match = /^Bearer ([\x21-\x2b\x2d-\x7e]+)$/i.exec(authorization ?? "");
-  return match !== null && constantTimeTokenMatches(match[1] ?? "", expected);
+function isGatewayOperatorMutation(method: string, path: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS")
+    return false;
+  // These mutations consume the installation operator's credentials/filesystem;
+  // remote management access never grants that separate operator authority.
+  return (
+    path === "/api/v1/teams" ||
+    path.startsWith("/api/v1/teams/") ||
+    /^\/api\/v1\/orgs\/[^/]+\/domains(?:\/|$)/.test(path) ||
+    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path) ||
+    (method === "POST" &&
+      (path === "/api/v1/sync/run" ||
+        /^\/api\/v1\/knowledge\/[^/]+\/promote$/.test(path) ||
+        /^\/api\/v1\/promotions\/[^/]+\/(?:approve|reject|withdraw)$/.test(
+          path,
+        )))
+  );
 }
 
 export function hasRawConflictingProviderAuth(
@@ -281,10 +266,40 @@ export function managementCorsOrigin(
   req: Request,
   allowRemoteManagement: boolean,
   peerAddress: string | undefined,
+  listenerHosts: readonly string[] = [],
+  managementOrigins: readonly string[] = [],
 ): string | null | false {
   const origin = req.headers.get("origin");
-  if (!origin) return null;
   try {
+    const host = req.headers.get("host") ?? new URL(req.url).host;
+    // Host and Origin are caller-controlled. Matching each other never makes
+    // either trusted, even on a remote socket with management opted in.
+    if (!host || /[\\/?#@\s]/.test(host) || host.endsWith(":")) return false;
+    const authority = new URL(`http://${host}`);
+    const hostname = authority.hostname.replace(/^\[|\]$/g, "");
+    const listenerAuthority = listenerHosts.some((listener) => {
+      const name = listener.toLowerCase().replace(/^\[|\]$/g, "");
+      return (
+        name !== "0.0.0.0" && name !== "::" && name !== "*" && name === hostname
+      );
+    });
+    const publicOrigins = allowRemoteManagement
+      ? managementOrigins.map((value) => new URL(value))
+      : [];
+    const publicAuthority = publicOrigins.some(
+      (configured) =>
+        configured.host === new URL(`${configured.protocol}//${host}`).host,
+    );
+    if (
+      !(
+        hostname === "localhost" ||
+        isLoopbackAddress(hostname) ||
+        listenerAuthority ||
+        publicAuthority
+      )
+    )
+      return false;
+    if (!origin) return null;
     const parsed = new URL(origin);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return false;
@@ -298,31 +313,23 @@ export function managementCorsOrigin(
     ) {
       return false;
     }
-    const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+    const originHostname = parsed.hostname.replace(/^\[|\]$/g, "");
     const loopbackOrigin =
-      hostname === "localhost" || isLoopbackAddress(hostname);
+      originHostname === "localhost" || isLoopbackAddress(originHostname);
     if (!isLoopbackAddress(peerAddress)) {
       if (!allowRemoteManagement) return false;
       if (loopbackOrigin) return false;
-      const requestHost = req.headers.get("host");
-      if (!requestHost) return false;
-      // Use the origin scheme only to normalize default ports. The scheme is
-      // not trusted for authorization; remote access is still gated by the
-      // socket peer and the origin/Host host-port match below.
-      const requestOrigin = new URL(`${parsed.protocol}//${requestHost}`);
-      if (
-        requestOrigin.username ||
-        requestOrigin.password ||
-        requestOrigin.pathname !== "/" ||
-        requestOrigin.search ||
-        requestOrigin.hash ||
-        parsed.host !== requestOrigin.host
-      ) {
-        return false;
-      }
-    } else if (!loopbackOrigin) {
-      return false;
     }
+    if (loopbackOrigin && isLoopbackAddress(peerAddress)) return origin;
+    if (parsed.host !== new URL(`${parsed.protocol}//${host}`).host)
+      return false;
+    // A loopback reverse proxy may preserve a public HTTPS Host and Origin.
+    // It needs explicit administrator configuration, never forwarded peer claims.
+    if (
+      !listenerAuthority &&
+      !publicOrigins.some((configured) => configured.origin === parsed.origin)
+    )
+      return false;
     return origin;
   } catch {
     return false;

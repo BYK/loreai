@@ -76,7 +76,7 @@ for (const width of [320, 390, 767]) {
   });
 }
 
-test("resizing mobile account layers returns focus to desktop navigation", async ({
+test("resizing transient account layers returns focus and preserves sign-in", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium");
@@ -92,9 +92,30 @@ test("resizing mobile account layers returns focus to desktop navigation", async
       await expect(
         page.getByRole("dialog", { name: "Sign in to Lore", exact: true }),
       ).toBeVisible();
+      await page
+        .getByLabel("Email address", { exact: true })
+        .fill("person@example.test");
     }
     await page.setViewportSize({ width: 1024, height: 740 });
     await expect(page.getByTestId("icon-rail")).toBeVisible();
+    if (layer === "sign-in") {
+      const dialog = page.getByRole("dialog", {
+        name: "Sign in to Lore",
+        exact: true,
+      });
+      await expect(dialog).toBeVisible();
+      await expect(
+        dialog.getByLabel("Email address", { exact: true }),
+      ).toHaveValue("person@example.test");
+      await page.setViewportSize({ width: 390, height: 740 });
+      await expect(dialog).toBeVisible();
+      await expect(
+        dialog.getByLabel("Email address", { exact: true }),
+      ).toHaveValue("person@example.test");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      continue;
+    }
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByTestId("folk-status-panel")).toHaveCount(0);
     await expect(page.getByTestId("rail-knowledge")).toBeFocused();

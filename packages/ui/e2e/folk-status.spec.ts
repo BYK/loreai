@@ -44,7 +44,7 @@ test.describe("Folk status surfaces", () => {
       fullPage: true,
     });
     await expect(page.getByTestId("folk-status-detail")).toContainText(
-      "lore login",
+      "Sign in to continue",
     );
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
@@ -52,7 +52,7 @@ test.describe("Folk status surfaces", () => {
     await expectNoTokenText(page);
   });
 
-  test("hosted mode explains the local flag and never shows an account avatar", async ({
+  test("a request without account access never shows the operator's avatar", async ({
     page,
   }) => {
     await page.route("**/api/v1/account", (route) =>
@@ -74,8 +74,9 @@ test.describe("Folk status surfaces", () => {
     await expect(page.getByText("You", { exact: true })).toHaveCount(0);
     await badge.click();
     await expect(page.getByTestId("folk-status-detail")).toContainText(
-      "lore start --local",
+      "This view cannot access the gateway account.",
     );
+    await expect(page.locator("body")).not.toContainText("lore start --local");
     await expectNoTokenText(page);
   });
 
@@ -189,9 +190,9 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
     exact: true,
   });
   await expect(login).toBeVisible();
-  await expect(login).toContainText("lore login");
+  await expect(login.getByLabel("Email address")).toBeVisible();
   await expect(
-    login.getByRole("button", { name: "Copy command" }),
+    login.getByRole("button", { name: "Continue with GitHub" }),
   ).toBeVisible();
   await expect(panel).toHaveCount(0);
   await page.keyboard.press("Escape");

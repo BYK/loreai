@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -264,14 +264,77 @@ describe("authenticated native recall", () => {
     });
     for (const [headers, status] of [
       [{ origin: "https://untrusted.example" }, 403],
-      [{ "x-api-key": "provider-key" }, 401],
+      [{ "x-api-key": "provider-key", authorization: "Bearer other-key" }, 400],
     ] as const) {
-      const response = await app.fetch(
-        new Request("http://gateway/v1/recall", { method: "POST", headers }),
-        { peerAddress: "192.0.2.1" },
-      );
+      const request = new Request("http://gateway/v1/recall", {
+        method: "POST",
+        headers,
+        body: "not-json",
+      });
+      const response = await app.fetch(request, { peerAddress: "192.0.2.1" });
       expect(response.status).toBe(status);
       expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(request.bodyUsed).toBe(false);
+    }
+  });
+
+  test("a legacy gateway token never replaces native request validation", async () => {
+    const sessionID = "legacy-token-validation-session";
+    const marker = "legacy-token-validation-memory";
+    harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: "native-test-gateway-token-32-bytes-minimum",
+      },
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          model: DEFAULT_MODEL,
+          requestMessages: [{ role: "user", content: marker }],
+          responseText: "remembered",
+          wasStreaming: false,
+        }),
+      ],
+    });
+    const chat = await harness.chat(
+      {
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        stream: false,
+        system: "You are a coding assistant. ".repeat(30),
+        messages: [{ role: "user", content: marker }],
+      },
+      "provider-key",
+      { "x-lore-session-id": sessionID },
+    );
+    expect(chat.status).toBe(200);
+    await chat.text();
+    const execute = vi.spyOn(
+      await import("@loreai/core"),
+      "createRecallToolExecutor",
+    );
+    try {
+      for (const token of [undefined, "mismatched-legacy-token"]) {
+        const headers = new Headers({
+          "x-api-key": "provider-key",
+          "x-lore-project": process.cwd(),
+          "x-lore-session-id": sessionID,
+        });
+        if (token) headers.set("x-lore-gateway-token", token);
+        const response = await harness.request("/v1/recall", {
+          method: "POST",
+          headers,
+          body: "not-json",
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          error: "recall_unavailable",
+          message: "Invalid recall arguments",
+        });
+      }
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      execute.mockRestore();
     }
   });
 

@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import {
-  assertGatewayAccessConfigured,
-  GATEWAY_AUTH_TOKEN_MAX_LENGTH,
-  GATEWAY_AUTH_TOKEN_MIN_LENGTH,
-  loadConfig,
-  parseGatewayAuthToken,
-} from "../src/config";
+import { assertGatewayAccessConfigured, loadConfig } from "../src/config";
 import { startServer } from "../src/server";
 
 const TOKEN = "gateway-auth-config-test-token-at-least-32";
@@ -38,35 +32,12 @@ describe("gateway access configuration", () => {
     saved.clear();
   });
 
-  test("parses a strong header-safe token without transforming it", () => {
-    expect(parseGatewayAuthToken(TOKEN)).toBe(TOKEN);
-    expect(
-      parseGatewayAuthToken("a".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH)),
-    ).toBe("a".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH));
-    expect(
-      parseGatewayAuthToken("z".repeat(GATEWAY_AUTH_TOKEN_MAX_LENGTH)),
-    ).toBe("z".repeat(GATEWAY_AUTH_TOKEN_MAX_LENGTH));
-  });
-
-  test.each([
-    "short",
-    "a".repeat(GATEWAY_AUTH_TOKEN_MAX_LENGTH + 1),
-    `a${"b".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH)} c`,
-    `a${"b".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH)},c`,
-    `a${"b".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH)}\n`,
-    "é".repeat(GATEWAY_AUTH_TOKEN_MIN_LENGTH),
-  ])("rejects weak or non-header-safe token %#", (token) => {
-    expect(() => parseGatewayAuthToken(token)).toThrow(
-      "LORE_GATEWAY_AUTH_TOKEN",
-    );
-  });
-
-  test("loads LORE_GATEWAY_AUTH_TOKEN separately from remote URL and provider auth", () => {
+  test("ignores a legacy gateway token", () => {
     process.env.LORE_GATEWAY_AUTH_TOKEN = TOKEN;
     process.env.LORE_REMOTE_GATEWAY = "1";
     const config = loadConfig();
 
-    expect(config.gatewayAuthToken).toBe(TOKEN);
+    expect(config.gatewayAuthToken).toBeUndefined();
     expect(config.remoteGateway).toBe(true);
     expect(config.remoteUrl).toBeUndefined();
     expect(config.upstreamExtraHeaders).toEqual({});
@@ -123,14 +94,14 @@ describe("gateway access configuration", () => {
     expect(loadConfig().exposeProviderDiagnostics).toBe(false);
   });
 
-  test("rejects a weak token supplied through a programmatic config", () => {
+  test("ignores a legacy token supplied through a programmatic config", () => {
     expect(() =>
       assertGatewayAccessConfigured({
         remoteGateway: true,
         hostedMode: false,
         gatewayAuthToken: "short",
       }),
-    ).toThrow("LORE_GATEWAY_AUTH_TOKEN");
+    ).not.toThrow();
   });
 
   test("public server startup allows remote mode without a token", async () => {

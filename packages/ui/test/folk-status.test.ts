@@ -90,7 +90,7 @@ const cases: Array<{
     input: { connection: "reachable", account: anonymous },
     state: "anonymous",
     label: "Not signed in",
-    detail: "lore login",
+    detail: "Sign in to continue",
   },
   {
     name: "expired accounts show their session state",

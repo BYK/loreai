@@ -1,15 +1,16 @@
 /**
  * `lore login` / `lore logout` — typed Stricli commands (Phase 3D.2).
  *
- * Both commands wrap their legacy counterparts from `../login` via the
- * shared `runLegacyAndCollect` bridge. The legacy handlers read from
+ * Logout wraps its legacy counterpart through the shared
+ * `runLegacyAndCollect` bridge. Login writes directly because it is interactive.
+ * The legacy handlers read from
  * `process.argv` and accept positionals + values; the typed wrappers
  * map the typed Stricli flags into the legacy `Record<string, unknown>`
  * shape.
  *
  * Output shape:
  *   - human: rendered legacy text (browser flow / device flow / logout)
- *   - JSON:  { output: <captured stdout> }
+ *   - JSON:  { output: <captured stdout> } for logout
  *
  * Exit codes: legacy semantics preserved (0 normal, 1 invalid args).
  */
@@ -62,13 +63,16 @@ export const loginCommand = buildOutputCommand<
     const values: Record<string, unknown> = {};
     if (flags.email) values.email = flags.email;
     if (flags["no-browser"]) values["no-browser"] = true;
-    const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandLogin([], values),
-    );
-    if (exitCode !== 0) {
-      process.exitCode = exitCode;
+    if ((flags as LoginFlags & { json?: boolean }).json) {
+      process.exitCode = 1;
+      return {
+        kind: "value" as const,
+        data: "Login requires an interactive terminal; run without --json.",
+      };
     }
-    return { kind: "value" as const, data: captured };
+    // Interactive instructions must reach the terminal before readline prompts.
+    await commandLogin([], values);
+    return { kind: "empty" as const };
   },
 });
 

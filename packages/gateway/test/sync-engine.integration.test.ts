@@ -15,8 +15,10 @@ import { execFileSync } from "node:child_process";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { loopbackRequest } from "./helpers/loopback-request";
 import {
+  config,
   crypto,
   db,
+  embedding,
   ensureProject as ensureProjectCore,
   keystore,
   ltm,
@@ -414,6 +416,61 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
 
     // Re-push is a no-op (content hash stable → no ping-pong).
     expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
+  });
+
+  it("a late local embedding never adds a settled knowledge push", async () => {
+    const previousProvider = embedding._saveAndClearProvider();
+    const completed = Promise.withResolvers<void>();
+    const vector = new Float32Array(config().search.embeddings.dimensions).fill(
+      1,
+    );
+    embedding._restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          await completed.promise;
+          return texts.map(() => vector);
+        },
+      },
+    });
+    try {
+      ensureProject("/tmp/lore-engine-it");
+      syncData.enableSync("basic");
+      const id = ltm.create({
+        projectPath: "/tmp/lore-engine-it",
+        scope: "project",
+        category: "decision",
+        title: "Deferred local vector",
+        content: "The content is already synced before the vector finishes.",
+        confidence: 0.6,
+      });
+      ltm.reinforce(id, 0.05);
+      const client = clientFor(uid);
+      expect((await pushOnce(client)).pushed).toBeGreaterThanOrEqual(2);
+      expect((await pushOnce(client)).pushed).toBe(0);
+      const before = syncData.readOutbox(0);
+
+      completed.resolve();
+      await embedding.settleDocumentEmbeds();
+
+      expect(syncData.readOutbox(0)).toEqual(before);
+      expect((await pushOnce(client)).pushed).toBe(0);
+      expect(
+        await h.asUser(uid, (c) =>
+          c
+            .query("SELECT content FROM public.knowledge WHERE id = $1", [id])
+            .then((r) => r.rows),
+        ),
+      ).toEqual([
+        {
+          content: "The content is already synced before the vector finishes.",
+        },
+      ]);
+    } finally {
+      completed.resolve();
+      await embedding.settleDocumentEmbeds();
+      embedding._restoreProvider(previousProvider);
+    }
   });
 
   it("merges a peer's confidence counter on pull (per-key MAX convergence)", async () => {

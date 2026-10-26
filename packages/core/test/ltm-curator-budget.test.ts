@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import { db } from "../src/db";
 import * as ltm from "../src/ltm";
+import { estimateTokens } from "../src/tokenize";
 
 const PROJECT = "/test/ltm/curator-budget";
 const OTHER = "/test/ltm/curator-budget-other";
@@ -228,7 +229,10 @@ describe("ltm.forCurator", () => {
   });
 
   test("over budget: always includes cross-project entries, packs project-scoped by confidence, never exceeds budget", () => {
+    // Numeric fixture IDs keep project-entry token costs equal, so this case
+    // measures ranking rather than random BPE differences in UUIDs.
     const global = ltm.create({
+      id: "00000000-0000-7000-8000-000000000100",
       category: "preference",
       title: "Global pref",
       content: "g".repeat(300),
@@ -239,6 +243,7 @@ describe("ltm.forCurator", () => {
     for (let i = 0; i < 20; i++) {
       ids.push(
         ltm.create({
+          id: `00000000-0000-7000-8000-${String(i).padStart(12, "0")}`,
           projectPath: PROJECT,
           category: "gotcha",
           title: `T${i}`,
@@ -257,20 +262,17 @@ describe("ltm.forCurator", () => {
     // Highest-confidence project entry kept; lowest dropped.
     expect(out.some((e) => e.id === ids[0])).toBe(true);
     expect(out.some((e) => e.id === ids[19])).toBe(false);
-    // The project-scoped slice never exceeds the token budget.
-    const projTokens = out
-      .filter((e) => e.project_id !== null && e.cross_project !== 1)
-      .reduce(
-        (sum, e) =>
-          sum +
-          Math.ceil(
-            `[${e.id}] (${e.category}) ${e.title}: ${e.content}`.length / 3,
-          ),
-        0,
-      );
-    expect(projTokens).toBeLessThanOrEqual(budget);
+    // Budget every rendered entry, including the shared one, in real tokens.
+    const totalTokens = out.reduce(
+      (sum, e) =>
+        sum +
+        estimateTokens(`[${e.id}] (${e.category}) ${e.title}: ${e.content}`),
+      0,
+    );
+    expect(totalTokens).toBeLessThanOrEqual(budget);
     // Result preserves forProject ordering (confidence DESC).
     const projOut = out.filter((e) => e.cross_project !== 1);
+    expect(projOut.map((e) => e.id)).toEqual(ids.slice(0, 2));
     const confs = projOut.map((e) => e.confidence);
     expect(confs).toEqual([...confs].sort((a, b) => b - a));
   });

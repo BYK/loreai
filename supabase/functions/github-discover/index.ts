@@ -55,6 +55,7 @@ import {
   type RepoContributors,
 } from "./discover.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
+import { supabaseFetch } from "../_shared/supabase-fetch.ts";
 import { captureReturnedError } from "../_shared/sentry-error.ts";
 
 function json(body: unknown, status = 200): Response {
@@ -119,7 +120,7 @@ Deno.serve(
 
     // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
     const userClient = createClient(url, anonKey, {
-      global: { headers: { Authorization: authHeader } },
+      global: { headers: { Authorization: authHeader }, fetch: supabaseFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const {
@@ -210,7 +211,7 @@ Deno.serve(
       selfGithubId = tokenOwner.id;
     } catch (e) {
       await capture(e, "github-discover.verify-token-owner");
-      return json({ error: `github: ${(e as Error).message}` }, 502);
+      return json({ error: "GitHub account verification failed" }, 502);
     }
 
     // Resolve the repo set: explicit list (validated) or the caller's own repos (first page).
@@ -228,7 +229,7 @@ Deno.serve(
       }
     } catch (e) {
       await capture(e, "github-discover.list-repositories");
-      return json({ error: `github: ${(e as Error).message}` }, 502);
+      return json({ error: "GitHub repository lookup failed" }, 502);
     }
     repos = repos.slice(0, MAX_REPOS);
 
@@ -245,12 +246,9 @@ Deno.serve(
         if (contributors === null) continue; // inaccessible — skip, don't fail the whole call
         rosters.push({ repo: `${repo.owner}/${repo.name}`, contributors });
       } catch (e) {
-        // A transient error on one repo shouldn't sink the batch — log and skip.
+        // Report only the fixed failure site; repo names and provider errors
+        // must never enter diagnostics. A failed repo does not sink the batch.
         await capture(e, "github-discover.list-contributors");
-        console.error(
-          `contributors ${repo.owner}/${repo.name}:`,
-          (e as Error).message,
-        );
       }
     }
 
@@ -260,6 +258,7 @@ Deno.serve(
     const loreIds = new Set<number>();
     if (githubIds.length > 0) {
       const admin = createClient(url, serviceKey, {
+        global: { fetch: supabaseFetch },
         auth: { persistSession: false, autoRefreshToken: false },
       });
       const { data, error } = await admin.rpc("lore_users_for_github_ids", {
@@ -267,7 +266,6 @@ Deno.serve(
       });
       if (error) {
         await capture(error, "github-discover.lookup-lore-users");
-        console.error("lore_users_for_github_ids failed:", error.message);
         return json({ error: "lookup failed" }, 500);
       }
       for (const row of (data ?? []) as Array<{ github_id: number | string }>) {
@@ -319,6 +317,7 @@ Deno.serve(
     // Service-role helpers (used for lore email lookup; supabase admin checks still run with the
     // caller's JWT for create_scope_invite + scope_role + send-invite-email).
     const admin = createClient(url, serviceKey, {
+      global: { fetch: supabaseFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     });
 

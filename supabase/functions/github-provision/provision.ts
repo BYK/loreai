@@ -41,9 +41,12 @@ export interface GitHubUser {
 }
 
 /**
- * The GitHub numeric id (as a string) that a Supabase user is linked to — from the github identity,
- * falling back to user_metadata.provider_id. Returns null when there is no linked GitHub identity
- * (an email-only user), so the caller fails CLOSED.
+ * The GitHub numeric id from the verified user's linked GitHub identity.
+ * User metadata is editable by the caller and never establishes this binding.
+ * Without a linked identity (for example an email-only user), fail CLOSED.
+ * GoTrue serializes auth.identities.provider_id as identity.id; identity_id is
+ * the separate database UUID. Keep this aligned with our SQL lookups.
+ * https://github.com/supabase/auth/blob/711763ce9c68c2b133e2f284e9e5fe6db56e3be1/internal/models/identity.go#L14-L23
  */
 export function resolveJwtGithubId(user: {
   identities?: Array<{ provider?: string; id?: string }> | null;
@@ -53,9 +56,6 @@ export function resolveJwtGithubId(user: {
     (i) => i.provider === "github",
   )?.id;
   if (fromIdentity != null && fromIdentity !== "") return String(fromIdentity);
-  const fromMeta = user.user_metadata?.provider_id;
-  if (typeof fromMeta === "string" && fromMeta !== "") return fromMeta;
-  if (typeof fromMeta === "number") return String(fromMeta);
   return null;
 }
 

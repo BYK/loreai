@@ -19,6 +19,7 @@ import {
   resolveJwtGithubId,
 } from "./provision.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
+import { supabaseFetch } from "../_shared/supabase-fetch.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -46,7 +47,7 @@ Deno.serve(
 
     // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
     const userClient = createClient(url, anonKey, {
-      global: { headers: { Authorization: authHeader } },
+      global: { headers: { Authorization: authHeader }, fetch: supabaseFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const {
@@ -81,11 +82,13 @@ Deno.serve(
       payload = buildProvisionPayload(memberships);
     } catch (e) {
       await capture(e, "github-provision.fetch-memberships");
-      return json({ error: `github: ${(e as Error).message}` }, 502);
+      // Transport exceptions can contain credentials or arbitrary diagnostics.
+      return json({ error: "GitHub membership lookup failed" }, 502);
     }
 
     // Provision as service_role — the only role permitted to call the RPC.
     const admin = createClient(url, serviceKey, {
+      global: { fetch: supabaseFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const { error: rpcErr } = await admin.rpc("provision_github_membership", {
@@ -95,8 +98,8 @@ Deno.serve(
     });
     if (rpcErr) {
       await capture(rpcErr, "github-provision.provision-membership");
-      console.error("provision_github_membership failed:", rpcErr.message);
-      return json({ error: "provisioning failed" }, 500); // generic — details logged server-side
+      // capture() exports only a fixed failure category, never provider text.
+      return json({ error: "provisioning failed" }, 500);
     }
 
     return json({
