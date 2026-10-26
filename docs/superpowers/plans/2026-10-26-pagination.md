@@ -54,3 +54,11 @@
 - [x] Reproduce PRRT_kwDORU1hfc6wPQvZ with a workspace knowledge entry having project_id=null and source_session, evidence loader idle/loading=false/data/error undefined, project unavailable. Both summary and expanded Source & history must state source project/availability cannot be checked instead of perpetual Checking source. Preserve project-present initial loader pending, available/summary-only/missing/error/no-source states and all existing source links/history.
 - [x] Reproduce PRRT_kwDORU1hfc6wPQvW: no-team closed settings errors remain visible, opening controls or ready-team Settings shows each underlying status error once, and unmount/retry/loading/error/account transitions clear parent advancedError. Standalone parity actions without a parent callback still expose their inline errors; late async replies cannot resurrect stale status. Preserve create/join/discovery/domain actions, permissions and owner guards.
 - [x] Run focused RED/GREEN, complete UI, typecheck/lint/format and built production affected desktop/mobile cases. Commit minimal fixes, write exact report, obtain separate scoped correctness/security review, then publish and resolve verified threads. Do not change pagination or parent screenshots/docs, push, or edit GitHub from the implementer.
+
+### Task 4: Final overview/search review comments
+
+**Files:** ProjectPage.tsx, SearchResults.tsx and their existing unit tests.
+
+- [x] Reproduce Seer PRRT_kwDORU1hfc6wR5Wy: recent overview entries must use existing previewOf so the link contains only a bounded first-line preview, retaining its entry URL and full document accessibility after navigation.
+- [x] Reproduce Seer PRRT_kwDORU1hfc6wR5W5: an empty all-scope search offers different words and browsing without a same-scope Search all memory link. All three narrower scopes retain a broader search with the original encoded query.
+- [x] Run focused RED/GREEN, complete UI and production browser matrix; verify types/lint/format/build, obtain scoped independent correctness/security review, publish on the same PR and resolve these verified threads.

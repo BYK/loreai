@@ -177,6 +177,8 @@ An idle source without project context reports that availability cannot be
 checked, while recorded evidence and real loading/error states remain distinct.
 Team status errors have one visible owner outside collapsed settings and clear
 when their controls unmount; standalone controls retain inline feedback.
+Overview entry links use bounded first-line previews. Empty searches suggest
+broader recall only from narrower scopes, preserving the current query.
 
 The accompanying PR contains before/after comparisons for desktop and mobile in
 both themes, including navigation, readers, tables, overview and team workflows.
