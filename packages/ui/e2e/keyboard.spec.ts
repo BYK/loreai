@@ -13,7 +13,13 @@ function focusName(page: import("@playwright/test").Page) {
     if (!active) return "none";
     if (active.closest('[data-testid="logo"]')) return "logo";
     if (active.matches('a[aria-label="Lore.AI — home"]')) return "logo";
-    if (active.matches('[aria-label="Search"]')) return "search";
+    if (
+      active.matches('[data-testid="search-entry"]') ||
+      active.matches(
+        'header input[name="q"][aria-label="Search knowledge across projects"], header input[name="q"][aria-label="Search this project\'s memory"]',
+      )
+    )
+      return "search";
     const closestTestId = active
       .closest("[data-testid]")
       ?.getAttribute("data-testid");

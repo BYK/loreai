@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   openProjectPicker,
   setWorkspaceTheme,
@@ -7,6 +7,14 @@ import {
   expectNavigationAvailable,
   waitForOverlayMotion,
 } from "./workspace-helpers";
+
+async function expectMainAfterNavigation(page: Page) {
+  const rail = page.getByTestId("icon-rail");
+  const navBox = (await rail.isVisible()) ? await rail.boundingBox() : null;
+  const mainBox = await page.locator('main[data-pane="detail"]').boundingBox();
+  expect(mainBox).not.toBeNull();
+  expect(mainBox?.x).toBeCloseTo(navBox ? navBox.x + navBox.width : 0, 0);
+}
 
 test("project picker is reachable, searchable and returns navigation to the selected project", async ({
   page,
@@ -235,7 +243,7 @@ test("directory and project pages use the width without a duplicate navigation p
   await expect(page.getByTestId("context-toggle")).toHaveCount(0);
   await expect(page.getByTestId("context-pane")).toBeHidden();
   await expect(main).toBeVisible();
-  expect((await main.boundingBox())!.x).toBeLessThanOrEqual(60);
+  await expectMainAfterNavigation(page);
   await page.getByTestId("project-card").first().click();
   await expect(page.getByTestId("health")).toBeVisible();
   await expect(page.getByTestId("context-toggle")).toHaveCount(0);
@@ -333,15 +341,40 @@ test("workspace tools use full-width layouts and all destinations remain reachab
     await expect(
       page.getByRole("navigation", { name: "Related pages" }),
     ).toHaveCount(0);
-    const main = (await page
-      .locator('main[data-pane="detail"]')
-      .boundingBox())!;
-    expect(main.x).toBeLessThanOrEqual(60);
+    await expectMainAfterNavigation(page);
     await expectNavigationAvailable(page);
   }
 });
 
-test("rail tooltips label every destination on hover and keyboard focus", async ({
+test("desktop navigation shows labels by default and persists an explicit compact choice", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop navigation preference",
+  );
+  await page.goto("/ui");
+  const rail = page.getByTestId("icon-rail");
+  await expect(rail.getByTestId("rail-projects")).toHaveText("Projects");
+  await expect(rail.getByTestId("rail-contradictions")).toHaveText(
+    "Conflicting instructions",
+  );
+  const toggle = page.getByTestId("navigation-compact-toggle");
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(toggle).toBeFocused();
+  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Show navigation labels", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  await toggle.click();
+  await expect(rail.getByTestId("rail-projects")).toHaveText("Projects");
+  await expectMainAfterNavigation(page);
+});
+
+test("compact rail tooltips label every destination on hover and keyboard focus", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -349,6 +382,9 @@ test("rail tooltips label every destination on hover and keyboard focus", async 
     "hover labels are for pointer and keyboard interaction",
   );
   await seededReader(page);
+  await page
+    .getByRole("button", { name: "Use compact navigation", exact: true })
+    .click();
   const rail = page.getByTestId("icon-rail");
   const links = rail.getByRole("link");
   for (const link of await links.all()) {
@@ -392,10 +428,7 @@ test("knowledge and search pages have no duplicate section links or empty contex
     await expect(
       page.getByRole("navigation", { name: "Section navigation" }),
     ).toHaveCount(0);
-    const main = (await page
-      .locator('main[data-pane="detail"]')
-      .boundingBox())!;
-    expect(main.x).toBeLessThanOrEqual(60);
+    await expectMainAfterNavigation(page);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

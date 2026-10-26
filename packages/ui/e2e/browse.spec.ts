@@ -50,11 +50,19 @@ test.describe("real data browsing", () => {
     expect(detail.ok()).toBe(true);
     expect((await detail.json()).id).toBe(knowledgeId);
 
-    await doc.getByText("More actions", { exact: true }).click();
+    await expect(doc.getByText("More actions", { exact: true })).toHaveCount(0);
+    await expect(
+      doc.getByRole("button", { name: "Edit", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      doc.getByText("Source & details", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      doc.getByRole("heading", { name: "History", exact: true }),
+    ).toBeVisible();
     for (const label of FUTURE_ACTIONS) {
       const button = doc.getByRole("button", { name: new RegExp(`^${label}`) });
-      await expect(button).toBeDisabled();
-      await expect(button).toContainText("not available yet");
+      await expect(button).toHaveCount(0);
     }
   });
 

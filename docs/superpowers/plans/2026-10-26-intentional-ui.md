@@ -37,21 +37,21 @@ directory grouping helper under packages/ui/src/lib; related UI tests/e2e.
 Produces presentation-only grouping and sort logic used by ProjectDirectory;
 existing component public props stay compatible.
 
-- [ ] Write focused failing behavioral tests for repository grouping, name collisions,
+- [x] Write focused failing behavioral tests for repository grouping, name collisions,
   older-child filter matches, sort determinism/nonmutation and unattributed records.
-- [ ] Implement group-by-exact-nonempty-recorded-remote, local/unattributed sections,
+- [x] Implement group-by-exact-nonempty-recorded-remote, local/unattributed sections,
   three usable sorts, and individual checkout links. No data merging/count invention.
   Repository groups share one grid with one card per remote and compact checkout
   rows inside each multi-checkout card; singleton groups do not get empty grid rows.
-- [ ] Make knowledge title/content dominate the table width; readable two-line
+- [x] Make knowledge title/content dominate the table width; readable two-line
   previews, compact metadata, real entry links supporting modified clicks, retain
   keyboard selection and paging. Remove production FutureActionRow calls in both
   knowledge/session readers while retaining real actions and source details.
-- [ ] Improve directory/filter empty-state next actions and capture guidance using
+- [x] Improve directory/filter empty-state next actions and capture guidance using
   existing capabilities; do not add a fake import button.
-- [ ] Run focused tests, UI typecheck and relevant format/lint checks. New
+- [x] Run focused tests, UI typecheck and relevant format/lint checks. New
   meaningful behavior gets regression coverage; CSS-only layout uses browser QA.
-- [ ] Commit and self-review. Write report with RED/GREEN commands, file list and
+- [x] Commit and self-review. Write report with RED/GREEN commands, file list and
   concerns; no other subagents, no push/PR, no full backend suite.
 
 ### Task 2: Everyday overview and focused team management
@@ -64,30 +64,30 @@ presentation components if needed; preserve existing state ownership.
 **Interfaces:** Consumes Task 1 readable lists and existing workspace loaders,
 FolkState, sharing/membership contracts. Keeps existing routes and action guards.
 
-- [ ] Write focused failing tests for compact connected/configured sharing,
+- [x] Write focused failing tests for compact connected/configured sharing,
   expanded incomplete/blocked recovery, explicit expand/collapse, overview recent
   knowledge and team Members/Invitations/Settings selection.
-- [ ] Show compact sharing after setup with clear team, sharing choice and sync
+- [x] Show compact sharing after setup with clear team, sharing choice and sync
   configuration; surface live errors/setup without hiding required recovery.
   Reuse SharingSync semantics; do not duplicate mutation handlers or opt in.
   Place the compact summary directly below DocHeader; omit repeated setup prose
   and use a compact SharingSync presentation with the existing sync handler.
-- [ ] Replace health claims with Memory summary. Add up to five recent knowledge
+- [x] Replace health claims with Memory summary. Add up to five recent knowledge
   entries via existing workspace knowledge loader; put useful activity early.
-- [ ] Organize Team page into Members, Invitations and Settings with URL tab state,
+- [x] Organize Team page into Members, Invitations and Settings with URL tab state,
   primary Invite teammate, visible member roster first, advanced organization/
   discovery/account-ID controls in Settings, and create/join recovery when no team.
   Preserve role restrictions, confirmation, focus and stale-account/team guards.
   Adapt member rows at 320/390px so role and action controls remain visible
   without horizontal scrolling and without duplicated mutation logic.
-- [ ] Make status wording distinguish configured/running/result/error, without
+- [x] Make status wording distinguish configured/running/result/error, without
   inventing last-success time. Add actionable empty import/history/team guidance.
   Empty session readers/list context offer capture/import guidance or query reset
   through existing routes and controls; normal no-work states remain calm.
-- [ ] Run focused tests, UI typecheck and relevant lint/format. Check pending,
+- [x] Run focused tests, UI typecheck and relevant lint/format. Check pending,
   account/team change, viewer, no-team and narrow layouts; update existing e2e
   assertions only where intended copy/interaction changed.
-- [ ] Commit, self-review, report RED/GREEN evidence and concerns; no subagents,
+- [x] Commit, self-review, report RED/GREEN evidence and concerns; no subagents,
   push/PR or full backend reruns.
 
 ### Task 3: Navigation and unambiguous search
@@ -102,14 +102,14 @@ Add small shared label/description helpers under lib as necessary.
 route paths, query values and API semantics stay unchanged; shared labels drive
 navigation and page headings consistently.
 
-- [ ] Write focused failing tests for desktop labeled/compact navigation, safe
+- [x] Write focused failing tests for desktop labeled/compact navigation, safe
   preference persistence, readable recall labels with unchanged submitted values,
   clear filter/search scope and consistent review destination headings.
-- [ ] Add labeled desktop navigation with a user-controlled compact mode. Preserve
+- [x] Add labeled desktop navigation with a user-controlled compact mode. Preserve
   mobile drawer, context-pane behavior, modified links and focus restoration.
-- [ ] Use Team proposals, Conflicting instructions and Sync recovery in shared nav
+- [x] Use Team proposals, Conflicting instructions and Sync recovery in shared nav
   metadata and matching headings. Include short explanations, preserve URLs.
-- [ ] Share readable recall-scope labels/descriptions; inspect real backend semantics
+- [x] Share readable recall-scope labels/descriptions; inspect real backend semantics
   before naming session/project scope. Clearly label local knowledge filters,
   project memory search and workspace knowledge search; make scope visible beside
   results and give empty search a relevant reset/browse action.
@@ -117,7 +117,7 @@ navigation and page headings consistently.
   overview search heading reflects project memory rather than knowledge only.
   Filtered empty entity lists expose a filter reset; review queues explain normal
   no-work states and provide a return to useful content without inventing tasks.
-- [ ] Run focused tests, full UI suite once, typecheck/lint/format, self-review and
+- [x] Run focused tests, full UI suite once, typecheck/lint/format, self-review and
   commit. Report evidence/concerns; no subagents or push/PR.
 
 ### Task 4: Integrated QA, screenshots and PR
