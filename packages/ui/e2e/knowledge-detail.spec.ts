@@ -44,6 +44,93 @@ async function fileLinkProjectAndEntry(page: Page) {
 }
 
 test.describe("knowledge detail provenance and history", () => {
+  for (const width of [320, 1280]) {
+    test(`reader aligns sections and exposes complete technical values at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const { project, live } = await projectAndEntry(page);
+      const first = "Full stored paragraph " + "word ".repeat(70).trim();
+      const last = "Final stored paragraph remains complete and readable.";
+      const model = "provider/" + "long-recorded-model-".repeat(18);
+      const mutations: string[] = [];
+      page.on("request", (request) => {
+        if (
+          ["POST", "PUT", "PATCH", "DELETE"].includes(request.method()) &&
+          new URL(request.url()).pathname.startsWith("/api/v1/")
+        )
+          mutations.push(request.method() + " " + request.url());
+      });
+      await page.route(`**/api/v1/knowledge/${live.id}`, async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            content: first + "\n\n" + last,
+            confidence: 0.45,
+          },
+        });
+      });
+      await page.route(
+        `**/api/v1/knowledge/${live.id}/versions`,
+        async (route) => {
+          const response = await route.fetch();
+          const history = await response.json();
+          for (const version of history.versions)
+            version.source_refs.worker_model_id = model;
+          await route.fulfill({ response, json: history });
+        },
+      );
+      await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+      const paragraph = page.getByText(first, { exact: true });
+      await expect(paragraph).toBeVisible();
+      await expect(page.getByText(last, { exact: true })).toBeVisible();
+      const header = await page
+        .getByRole("heading", { name: live.title, exact: true })
+        .boundingBox();
+      const body = await paragraph.boundingBox();
+      const promotion = await page.getByTestId("promotion-panel").boundingBox();
+      if (!header || !body || !promotion)
+        throw new Error("Missing reader geometry");
+      expect(Math.abs(header.x - body.x)).toBeLessThan(2);
+      expect(Math.abs(promotion.x - body.x)).toBeLessThan(2);
+      const edit = await page
+        .getByRole("button", { name: "Edit", exact: true })
+        .boundingBox();
+      const remove = await page
+        .getByRole("button", { name: "Delete", exact: true })
+        .boundingBox();
+      if (!edit || !remove) throw new Error("Missing reader actions");
+      expect(
+        Math.abs(edit.y + edit.height / 2 - remove.y - remove.height / 2),
+      ).toBeLessThan(2);
+      expect(remove.x - edit.x - edit.width).toBeGreaterThanOrEqual(8);
+      await page.getByText("Source & history", { exact: true }).click();
+      const technical = page
+        .getByText("Technical details", { exact: true })
+        .locator("..");
+      await technical.locator("summary").click();
+      const value = technical.getByText(model, { exact: true });
+      await expect(value).toBeVisible();
+      const fits = await value.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return (
+          element.scrollWidth <= element.clientWidth &&
+          Array.from(range.getClientRects()).every(
+            (rect) => rect.left >= box.left - 1 && rect.right <= box.right + 1,
+          )
+        );
+      });
+      expect(fits).toBe(true);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBe(width);
+      expect(mutations).toEqual([]);
+    });
+  }
   test("compares consecutive versions and offers a keyboard-accessible full-text view", async ({
     page,
   }) => {

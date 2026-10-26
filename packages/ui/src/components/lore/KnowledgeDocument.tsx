@@ -1,5 +1,5 @@
 import type { Component, JSX } from "solid-js";
-import { createMemo, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createUniqueId, For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { Badge } from "~/components/ui/badge";
@@ -24,7 +24,12 @@ import type { Loader } from "~/lib/loader";
 import type { KnowledgeVersionHistory } from "~/contracts";
 import { errorStateFor } from "./ErrorState";
 
-import { DocHeader, ScopeLabel, type Participant } from "./Document";
+import {
+  DOCUMENT_COLUMN_CLASS,
+  DocHeader,
+  ScopeLabel,
+  type Participant,
+} from "./Document";
 import { KnowledgeFiles } from "./KnowledgeFiles";
 import { RetainedSummary } from "./RetainedSummary";
 import { VersionHistory } from "./VersionHistory";
@@ -51,9 +56,9 @@ const Meta: Component<{ label: string; value: string | null | undefined }> = (
 ) => (
   <Show when={props.value}>
     <div class="contents">
-      <dt class="text-muted">{props.label}</dt>
+      <dt class="max-w-[12ch] text-muted sm:max-w-none">{props.label}</dt>
       <dd
-        class="m-0 truncate font-mono text-xs"
+        class="m-0 min-w-0 whitespace-pre-wrap break-all font-mono text-xs"
         title={props.value ?? undefined}
       >
         {props.value}
@@ -75,6 +80,7 @@ export const KnowledgeDocument: Component<{
   actions?: JSX.Element;
   renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
+  const detailsDescriptionId = createUniqueId();
   const isShared = () =>
     props.entry.project_id == null ||
     props.entry.cross_project === true ||
@@ -124,6 +130,7 @@ export const KnowledgeDocument: Component<{
     >
       <DocHeader
         compact
+        class={DOCUMENT_COLUMN_CLASS}
         crumb={[
           props.project?.name || props.project?.path || "Project",
           "Knowledge",
@@ -133,32 +140,41 @@ export const KnowledgeDocument: Component<{
         scope={<ScopeLabel scope={isShared() ? "shared" : "project"} />}
         trailing={`Updated ${formatWhen(props.entry.updated_at ?? props.entry.created_at)}`}
       >
-        <div class="mt-3 flex flex-wrap items-center gap-2">
-          <Badge variant="teal" data-testid="category">
-            {props.entry.category}
-          </Badge>
-          <Show
-            when={
-              props.entry.sensitivity && props.entry.sensitivity !== "normal"
-            }
-          >
-            <Badge variant="gold">{props.entry.sensitivity}</Badge>
-          </Show>
-          <Show
-            when={
-              props.entry.approval_status &&
-              props.entry.approval_status !== "approved"
-            }
-          >
-            <Badge variant="outline">{props.entry.approval_status}</Badge>
-          </Show>
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="teal" data-testid="category">
+              {props.entry.category}
+            </Badge>
+            <Badge
+              variant="outline"
+              data-testid="knowledge-confidence"
+              title="Recorded value, not a probability of correctness"
+            >
+              Recorded confidence {formatConfidence(props.entry.confidence)}
+            </Badge>
+            <Show
+              when={
+                props.entry.sensitivity && props.entry.sensitivity !== "normal"
+              }
+            >
+              <Badge variant="gold">{props.entry.sensitivity}</Badge>
+            </Show>
+            <Show
+              when={
+                props.entry.approval_status &&
+                props.entry.approval_status !== "approved"
+              }
+            >
+              <Badge variant="outline">{props.entry.approval_status}</Badge>
+            </Show>
+          </div>
           <Show when={props.actions}>
-            <div class="ml-auto flex items-center gap-2">{props.actions}</div>
+            <div class="flex shrink-0 items-center gap-2">{props.actions}</div>
           </Show>
         </div>
       </DocHeader>
 
-      <div class="mx-auto max-w-[800px] px-6 py-7 sm:px-7">
+      <div class={`${DOCUMENT_COLUMN_CLASS} py-7`}>
         <div class="text-[15px] leading-[1.75] [overflow-wrap:anywhere] [&_p]:my-0 [&_p+p]:mt-4">
           <For each={paragraphs(props.entry.content)}>{(p) => <p>{p}</p>}</For>
         </div>
@@ -171,8 +187,18 @@ export const KnowledgeDocument: Component<{
         </p>
 
         <details class="mt-6 min-w-0 rounded-lg border border-line bg-bg">
-          <summary class="min-h-11 cursor-pointer rounded-lg px-4 py-3 text-xs font-medium text-muted outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            Source &amp; history
+          <summary
+            aria-label="Source & history"
+            aria-describedby={detailsDescriptionId}
+            class="min-h-11 cursor-pointer rounded-lg px-4 py-3 text-xs font-medium text-muted outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span>Source &amp; history</span>
+            <span
+              id={detailsDescriptionId}
+              class="mt-1 block text-[11px] font-normal leading-relaxed"
+            >
+              Source, files, confidence, versions and technical details
+            </span>
           </summary>
           <section
             class="min-w-0 border-t border-line px-4 py-4 text-xs [overflow-wrap:anywhere]"
@@ -368,7 +394,7 @@ export const KnowledgeDocument: Component<{
               )}
             </Show>
 
-            <details class="mt-7 rounded-lg border border-line px-4 py-3 text-xs">
+            <details class="mt-5 min-w-0 border-t border-line pt-4 text-xs">
               <summary class="min-h-11 cursor-pointer py-3 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0 sm:py-0">
                 Technical details
               </summary>

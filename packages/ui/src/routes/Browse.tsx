@@ -23,6 +23,7 @@ import { formatWhen, previewOf } from "~/lib/format";
 import { ProjectDirectory } from "~/components/lore/ProjectDirectory";
 import { KnowledgeListToolbar } from "~/components/lore/KnowledgeListToolbar";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
+import { DOCUMENT_COLUMN_CLASS } from "~/components/lore/Document";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
 import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
@@ -422,7 +423,12 @@ export const Browse: Component<{
                       ws.tracked(() => ws.client.getDistillation(id))
                     }
                   />
-                  <PromotionPanel knowledgeId={value().id} client={ws.client} />
+                  <div class={`${DOCUMENT_COLUMN_CLASS} pb-7`}>
+                    <PromotionPanel
+                      knowledgeId={value().id}
+                      client={ws.client}
+                    />
+                  </div>
                 </>
               )}
             </Match>

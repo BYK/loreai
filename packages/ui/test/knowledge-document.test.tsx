@@ -130,6 +130,20 @@ function renderDocument(
   ));
 }
 
+it("keeps recorded confidence visible and describes the closed details", () => {
+  renderDocument({ entry: { ...entry("Ada"), confidence: 0.45 } });
+  expect(screen.getByTestId("knowledge-confidence")).toBeVisible();
+  expect(screen.getByTestId("knowledge-confidence")).toHaveTextContent(
+    "Recorded confidence 45%",
+  );
+  const summary = screen.getByText("Source & history").closest("summary");
+  if (!summary) throw new Error("Missing source disclosure");
+  expect(summary).toHaveAccessibleDescription(
+    "Source, files, confidence, versions and technical details",
+  );
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+});
+
 describe("authorOf", () => {
   it("attributes entries without an author to the Curator agent", () => {
     for (const missing of [undefined, null, ""]) {

@@ -490,7 +490,7 @@ export const ModelUsagePage: Component = () => {
                   endMs={toMs(range().to)}
                 />
 
-                <details class="mt-6 rounded-lg border border-line p-3">
+                <details class="mt-6 rounded-lg border border-line p-4 [&[open]>summary]:mb-4">
                   <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
                     Model totals
                   </summary>

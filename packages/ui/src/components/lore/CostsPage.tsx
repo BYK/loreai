@@ -174,8 +174,8 @@ export const CostsPage: Component = () => {
               </details>
             </Show>
 
-            <details class="mb-4 rounded-lg border border-line p-4">
-              <summary class="mb-3 min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+            <details class="mb-4 rounded-lg border border-line p-4 [&[open]>summary]:mb-3">
+              <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
                 Live cost breakdown
               </summary>
               <div class="grid gap-4 lg:grid-cols-2">

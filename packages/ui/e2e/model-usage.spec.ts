@@ -30,6 +30,12 @@ test.describe("model usage page", () => {
       "8 session-days",
     );
     await totals.click();
+    const summaryBox = await totals.boundingBox();
+    const filterBox = await page.getByTestId("model-filter").boundingBox();
+    if (!summaryBox || !filterBox) throw new Error("Missing totals controls");
+    expect(
+      filterBox.y - summaryBox.y - summaryBox.height,
+    ).toBeGreaterThanOrEqual(12);
     // Default order: Session-days desc then Model asc.
     await expect(modelCells(page)).toHaveText([
       "claude-sonnet-4",
