@@ -17,7 +17,6 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "~/components/ui/tooltip";
-import { Button } from "~/components/ui/button";
 import { Logo } from "./Logo";
 import { Icon, type IconName } from "./Icon";
 import { FolkStatus } from "./FolkStatus";
@@ -27,11 +26,9 @@ import { SECONDARY_LINKS, workspacePath } from "./navigation";
 export const Rail: Component<{
   projectId?: string;
   expanded?: boolean;
-  compact?: boolean;
-  onToggleCompact?: () => void;
 }> = (props) => {
   const location = useLocation();
-  const labeled = () => props.expanded || !props.compact;
+  const labeled = () => props.expanded;
   const path = () => workspacePath(location.pathname);
   const primary = () => {
     if (path().includes("/knowledge")) return "Knowledge";
@@ -219,27 +216,6 @@ export const Rail: Component<{
           )}
         </For>
       </div>
-      <Show when={!props.expanded && props.onToggleCompact}>
-        <Button
-          type="button"
-          variant="ghost"
-          aria-label={
-            props.compact ? "Show navigation labels" : "Use compact navigation"
-          }
-          aria-pressed={props.compact ?? false}
-          data-testid="navigation-compact-toggle"
-          class={cn(
-            "mb-2 min-h-10 shrink-0 text-xs text-muted",
-            labeled() ? "justify-start gap-3 px-3" : "size-10 p-0",
-          )}
-          onClick={() => props.onToggleCompact?.()}
-        >
-          <Icon name="panel" />
-          <Show when={labeled()}>
-            <span>Compact navigation</span>
-          </Show>
-        </Button>
-      </Show>
       <div
         class={cn(
           "flex shrink-0 items-center gap-2 border-t border-line pt-2",

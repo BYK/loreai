@@ -2603,59 +2603,26 @@ it("restores toolbar focus when a narrow reader context opens the full table", a
   );
 });
 
-it("defaults to labeled navigation and persists compact mode independently of context", async () => {
-  const first = mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
-  await screen.findByTestId("knowledge-document");
-  expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
-  const toggle = screen.getByRole("button", { name: "Use compact navigation" });
-  toggle.focus();
-  fireEvent.click(toggle);
-  expect(screen.getByTestId("rail-projects")).not.toHaveTextContent("Projects");
-  expect(document.activeElement).toBe(
-    screen.getByRole("button", { name: "Show navigation labels" }),
-  );
-  expect(localStorage.getItem("lore.ui.navigationCompact")).toBe("true");
-  expect(localStorage.getItem("lore.ui.sidebarCollapsed")).toBeNull();
-  first.unmount();
-  mount("/", fakeClient());
-  expect(
-    screen.getByRole("button", { name: "Show navigation labels" }),
-  ).toHaveAttribute("aria-pressed", "true");
-});
-
-it.each([null, "broken", "false"])(
-  "uses labeled navigation for missing or invalid preference %s",
-  (value) => {
+it.each([null, "broken", "false", "true"])(
+  "keeps desktop navigation mini regardless of the old preference %s",
+  async (value) => {
     if (value !== null)
       localStorage.setItem("lore.ui.navigationCompact", value);
-    mount("/", fakeClient());
-    expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
+    mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+    await screen.findByTestId("knowledge-document");
+    const rail = screen.getByTestId("icon-rail");
+    expect(within(rail).getByTestId("rail-projects").textContent).toBe("");
+    expect(within(rail).getByTestId("logo").lastElementChild).toHaveClass(
+      "sr-only",
+    );
+    expect(screen.queryByTestId("navigation-compact-toggle")).toBeNull();
+    expect(localStorage.getItem("lore.ui.navigationCompact")).toBe(value);
+    expect(localStorage.getItem("lore.ui.sidebarCollapsed")).toBeNull();
+    const toggle = screen.getByTestId("context-toggle");
+    fireEvent.click(toggle);
+    expect(within(rail).getByTestId("rail-projects").textContent).toBe("");
   },
 );
-
-it("keeps navigation usable when storage reads and writes are blocked", () => {
-  const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-    throw new Error("blocked");
-  });
-  const write = vi
-    .spyOn(Storage.prototype, "setItem")
-    .mockImplementation(() => {
-      throw new Error("blocked");
-    });
-  try {
-    mount("/", fakeClient());
-    expect(screen.getByTestId("rail-projects")).toHaveTextContent("Projects");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Use compact navigation" }),
-    );
-    expect(
-      screen.getByRole("button", { name: "Show navigation labels" }),
-    ).toHaveAttribute("aria-pressed", "true");
-  } finally {
-    read.mockRestore();
-    write.mockRestore();
-  }
-});
 
 it.each([
   "bogus",
@@ -2696,53 +2663,28 @@ it.each([
   },
 );
 
-it("updates every rail destination and group when compact mode changes without reloading", async () => {
+it("labels every mini rail destination through keyboard tooltips", async () => {
   mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
   await screen.findByTestId("knowledge-document");
   const rail = screen.getByTestId("icon-rail");
   const destinations = [
     ...rail.querySelectorAll<HTMLAnchorElement>("a[data-testid]"),
-  ].map((link) => ({
-    id: link.dataset.testid!,
-    label: link.getAttribute("aria-label")!,
-    href: link.getAttribute("href")!,
-  }));
+  ];
   expect(destinations.length).toBeGreaterThan(10);
-  for (const compact of [true, false, true, false]) {
-    fireEvent.click(screen.getByTestId("navigation-compact-toggle"));
-    for (const { id, label, href } of destinations) {
-      const link = screen.getByTestId(id);
-      expect(link).toHaveAttribute("href", href);
-      expect(link).toHaveAttribute("aria-label", label);
-      expect(link.textContent).toBe(compact ? "" : label);
-      if (compact) {
-        link.focus();
-        expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
-        expect(link).toHaveAttribute(
-          "aria-describedby",
-          screen.getByRole("tooltip").id,
-        );
-        fireEvent.keyDown(link, { key: "Escape" });
-        link.blur();
-        await waitFor(() =>
-          expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
-        );
-      }
-    }
-    for (const group of [
-      "Project tools",
-      "Knowledge tools",
-      "Collaboration",
-      "Operations",
-    ]) {
-      if (compact)
-        expect(
-          within(rail).getByRole("separator", { name: group }),
-        ).toBeInTheDocument();
-      else
-        expect(
-          within(rail).getByText(group, { exact: true }),
-        ).toBeInTheDocument();
-    }
+  for (const link of destinations) {
+    const label = link.getAttribute("aria-label")!;
+    expect(link.textContent).toBe("");
+    expect(link).toHaveAttribute("href");
+    link.focus();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+    expect(link).toHaveAttribute(
+      "aria-describedby",
+      screen.getByRole("tooltip").id,
+    );
+    fireEvent.keyDown(link, { key: "Escape" });
+    link.blur();
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
   }
 });

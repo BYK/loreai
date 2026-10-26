@@ -346,31 +346,28 @@ test("workspace tools use full-width layouts and all destinations remain reachab
   }
 });
 
-test("desktop navigation shows labels by default and persists an explicit compact choice", async ({
+test("desktop navigation stays mini even with a previously expanded preference", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "desktop navigation preference",
+    "desktop mini navigation",
+  );
+  await page.addInitScript(() =>
+    localStorage.setItem("lore.ui.navigationCompact", "false"),
   );
   await page.goto("/ui");
   const rail = page.getByTestId("icon-rail");
-  await expect(rail.getByTestId("rail-projects")).toHaveText("Projects");
-  await expect(rail.getByTestId("rail-contradictions")).toHaveText(
-    "Conflicting instructions",
+  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  await expect(rail.getByTestId("logo").locator(":scope > span")).toHaveClass(
+    /sr-only/,
   );
-  const toggle = page.getByTestId("navigation-compact-toggle");
-  await toggle.focus();
-  await page.keyboard.press("Enter");
-  await expect(toggle).toBeFocused();
-  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  expect((await rail.boundingBox())!.width).toBe(60);
+  await expect(page.getByTestId("navigation-compact-toggle")).toHaveCount(0);
+  await expect(rail.getByTestId("folk-status")).toBeVisible();
   await page.reload();
-  await expect(
-    page.getByRole("button", { name: "Show navigation labels", exact: true }),
-  ).toHaveAttribute("aria-pressed", "true");
+  expect((await rail.boundingBox())!.width).toBe(60);
   await expect(rail.getByTestId("rail-projects")).toHaveText("");
-  await toggle.click();
-  await expect(rail.getByTestId("rail-projects")).toHaveText("Projects");
   await expectMainAfterNavigation(page);
 });
 
@@ -382,9 +379,6 @@ test("compact rail tooltips label every destination on hover and keyboard focus"
     "hover labels are for pointer and keyboard interaction",
   );
   await seededReader(page);
-  await page
-    .getByRole("button", { name: "Use compact navigation", exact: true })
-    .click();
   const rail = page.getByTestId("icon-rail");
   const links = rail.getByRole("link");
   for (const link of await links.all()) {

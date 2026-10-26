@@ -24,7 +24,7 @@ status. Do not merge this PR.
    knowledge across projects. Use readable labels for recall scope values and
    explain actual search coverage; never pretend workspace search includes
    sessions when its API only searches knowledge.
-5. Provide labeled desktop navigation with a compact option, preserve mobile
+5. Keep desktop navigation mini-only with accessible tooltip labels, preserve mobile
    navigation, and use Team proposals, Conflicting instructions and Sync recovery
    consistently in destinations/headings. Keep routes unchanged.
 6. Distinguish sync configuration, running, completed and blocked states. Do not

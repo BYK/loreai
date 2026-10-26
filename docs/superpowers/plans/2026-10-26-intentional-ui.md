@@ -102,10 +102,10 @@ Add small shared label/description helpers under lib as necessary.
 route paths, query values and API semantics stay unchanged; shared labels drive
 navigation and page headings consistently.
 
-- [x] Write focused failing tests for desktop labeled/compact navigation, safe
-  preference persistence, readable recall labels with unchanged submitted values,
+- [x] Write focused failing tests for desktop mini navigation, legacy-preference recovery,
+  preserved context preferences, readable recall labels with unchanged submitted values,
   clear filter/search scope and consistent review destination headings.
-- [x] Add labeled desktop navigation with a user-controlled compact mode. Preserve
+- [x] Keep desktop navigation mini-only with keyboard and hover tooltips. Preserve
   mobile drawer, context-pane behavior, modified links and focus restoration.
 - [x] Use Team proposals, Conflicting instructions and Sync recovery in shared nav
   metadata and matching headings. Include short explanations, preserve URLs.

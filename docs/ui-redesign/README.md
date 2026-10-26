@@ -36,10 +36,10 @@ Destructive states retain their red tokens.
 
 ## Layout and verification
 
-Desktop opens with labeled navigation. The Compact navigation button switches to
-icons and persists this optional preference separately from context-pane collapse.
-Missing, invalid or blocked browser storage keeps navigation usable, defaulting to
-labels. Desktop account controls keep their popover; compact mode does not change
+Desktop uses a fixed mini icon sidebar, with tooltip labels on hover and keyboard
+focus. There is no expanded desktop mode or navigation expansion control. Old
+compact/expanded browser preferences are ignored. Account controls keep their
+popover; the mini sidebar does not change
 the mobile drawer or context-pane behavior. Below 768px, a
 logo-free toolbar button opens a labeled sliding drawer and the document uses
 the full viewport width. The mobile account row is fully tappable, its panel

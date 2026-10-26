@@ -38,24 +38,6 @@ export interface ShellProps {
 /** Desktop rail, mobile navigation drawer, optional context, and a stable main document. */
 export const Shell: Component<ShellProps> = (props) => {
   const location = useLocation();
-  const [navigationCompact, setNavigationCompact] = createSignal(
-    (() => {
-      try {
-        return localStorage.getItem("lore.ui.navigationCompact") === "true";
-      } catch {
-        return false;
-      }
-    })(),
-  );
-  const toggleNavigationCompact = () => {
-    const next = !navigationCompact();
-    setNavigationCompact(next);
-    try {
-      localStorage.setItem("lore.ui.navigationCompact", String(next));
-    } catch {
-      /* Optional preference. */
-    }
-  };
   const media = window.matchMedia?.("(min-width: 48rem)");
   const [wide, setWide] = createSignal(media?.matches ?? true);
   const [mobileOpen, setMobileOpen] = createSignal(false);
@@ -235,16 +217,12 @@ export const Shell: Component<ShellProps> = (props) => {
         class="grid min-h-0 flex-1"
         style={{
           "grid-template-columns": wide()
-            ? `${navigationCompact() ? 60 : 216}px minmax(0,1fr)`
+            ? "60px minmax(0,1fr)"
             : "minmax(0,1fr)",
         }}
       >
         <Show when={wide()}>
-          <Rail
-            projectId={props.searchProjectId}
-            compact={navigationCompact()}
-            onToggleCompact={toggleNavigationCompact}
-          />
+          <Rail projectId={props.searchProjectId} />
         </Show>
         <div
           data-testid="workspace-content"
