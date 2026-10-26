@@ -110,6 +110,16 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       return { status, owner };
     },
   );
+  // A failed read invalidates its retained value until a new read settles.
+  // Healthy refreshes keep their previously confirmed presentation.
+  const confirmedSharing = createMemo<ReturnType<typeof sharing.data>>(
+    (previous) => {
+      if (sharing.error() !== undefined) return undefined;
+      return sharing.loading() ? previous : sharing.data();
+    },
+  );
+  let manageSharingButton: HTMLButtonElement | undefined;
+  let sharingHeading: HTMLHeadingElement | undefined;
   const [expanded, setExpanded] = createSignal(false);
   const [receipt, setReceipt] = createSignal<SharingStatus>();
   const [confirmAutoShare, setConfirmAutoShare] = createSignal(false);
@@ -143,7 +153,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     shownStatus()?.team !== null &&
     contextAvailable() &&
     sharing.error() === undefined &&
-    (receipt() !== undefined || sharing.data()?.owner === accountId()) &&
+    confirmedSharing()?.owner === accountId() &&
     backgroundReady() &&
     !policyError() &&
     !linkError();
@@ -249,7 +259,10 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       if (operationEpoch === actionEpoch) setSavingPolicy(false);
     }
   };
-  const updateProjectLink = async (scopeId: string | null) => {
+  const updateProjectLink = async (
+    scopeId: string | null,
+    trigger?: HTMLButtonElement,
+  ) => {
     const current = shownStatus();
     if (
       !current ||
@@ -258,6 +271,8 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       (scopeId !== null && !selectedTeamValid())
     )
       return;
+    const initiatedWithFocus =
+      trigger !== undefined && document.activeElement === trigger;
     const owner = accountId();
     const projectId = props.projectId;
     const operationEpoch = actionEpoch;
@@ -282,11 +297,34 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
         sharing.reload();
         return;
       }
+      const handoffFocus =
+        scopeId !== null &&
+        initiatedWithFocus &&
+        (document.activeElement === trigger ||
+          document.activeElement === document.body);
       setReceipt(updated);
       setConfirmUnlink(false);
       setSelectedTeam("");
       setLinkSuccess(scopeId ? "Project linked to team." : "Project unlinked.");
       ws.state.folk.refresh();
+      if (handoffFocus)
+        queueMicrotask(() => {
+          if (
+            operationEpoch !== actionEpoch ||
+            accountId() !== owner ||
+            props.projectId !== projectId
+          )
+            return;
+          if (
+            document.activeElement !== trigger &&
+            document.activeElement !== document.body
+          )
+            return;
+          (manageSharingButton?.isConnected
+            ? manageSharingButton
+            : sharingHeading
+          )?.focus();
+        });
     } catch (error) {
       if (operationEpoch !== actionEpoch) return;
       if (accountId() !== owner || props.projectId !== projectId) return;
@@ -345,6 +383,10 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                     </div>
                     <div class="flex flex-wrap items-center justify-between gap-2">
                       <h2
+                        ref={(element) => {
+                          sharingHeading = element;
+                        }}
+                        tabIndex={-1}
                         class={
                           settingsVisible()
                             ? "max-w-full min-w-0 text-lg font-semibold tracking-tight [overflow-wrap:anywhere]"
@@ -394,6 +436,9 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                       type="button"
                       size="sm"
                       variant="outline"
+                      ref={(element) => {
+                        manageSharingButton = element;
+                      }}
                       aria-expanded={expanded()}
                       onClick={() => setExpanded(!expanded())}
                     >
@@ -569,8 +614,11 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                             icon="link"
                             data-testid="sharing-link-team"
                             disabled={busy() || !selectedTeamValid()}
-                            onClick={() =>
-                              void updateProjectLink(selectedTeam())
+                            onClick={(event) =>
+                              void updateProjectLink(
+                                selectedTeam(),
+                                event.currentTarget,
+                              )
                             }
                           >
                             {savingLink() ? "Linking…" : "Link to team"}

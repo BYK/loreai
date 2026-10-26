@@ -391,6 +391,26 @@ describe("TeamPage", () => {
     );
   });
 
+  it("keeps no-team create and join recovery visible while advanced settings require disclosure", async () => {
+    mount(
+      () => <TeamPage />,
+      clientWith({ getTeams: async () => ({ hosted: false, teams: [] }) }),
+    );
+    await screen.findByText("No team memberships");
+    expect(screen.getByTestId("team-create-form")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Join a team" })).toBeVisible();
+    expect(screen.getByTestId("organization-domains")).not.toBeVisible();
+    const settings = screen.getByRole("button", { name: "Team settings" });
+    settings.focus();
+    fireEvent.click(settings);
+    expect(settings).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("organization-domains")).toBeVisible();
+    expect(settings).toHaveFocus();
+    fireEvent.click(settings);
+    expect(screen.getByTestId("organization-domains")).not.toBeVisible();
+    expect(screen.getByTestId("team-create-form")).toBeVisible();
+  });
+
   it("hides prior members when a team reload fails and ignores late responses", async () => {
     const firstTeamResponse: TeamMembersResponse = {
       ...memberResponse,
@@ -1694,6 +1714,127 @@ describe("TeamParityActions", () => {
 });
 
 describe("SharingPanel auto-share control", () => {
+  it("does not restore compact sharing from retained data while a failed read is retrying", async () => {
+    const pendingSharing = deferred<SharingStatus>();
+    const getProjectSharing = vi
+      .fn<ApiClient["getProjectSharing"]>()
+      .mockResolvedValueOnce(automaticSharing)
+      .mockRejectedValueOnce(new Error("Sharing unavailable"))
+      .mockImplementation(() => pendingSharing.promise);
+    const getSyncStatus = vi
+      .fn<ApiClient["getSyncStatus"]>()
+      .mockResolvedValueOnce({
+        enabled: false,
+        state: "disabled",
+        pending_changes: null,
+      })
+      .mockResolvedValue({ enabled: true, state: "idle", pending_changes: 0 });
+    mount(
+      () => <SharingPanel projectId="p-1" />,
+      clientWith({ getProjectSharing, getSyncStatus }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Check again" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sharing status could not be refreshed",
+    );
+    expect(screen.getByLabelText("Sharing setup")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(getProjectSharing).toHaveBeenCalledTimes(3));
+    expect(screen.getByLabelText("Sharing setup")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Manage sharing" })).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: "Share automatically" }),
+    ).toBeDisabled();
+    pendingSharing.resolve(manualSharing);
+    expect(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    ).toBeVisible();
+  });
+
+  it("hands focused link action to compact sharing after success without focusing background refreshes", async () => {
+    const pendingLink = deferred<SharingStatus>();
+    const unlinked: SharingStatus = {
+      ...manualSharing,
+      linked: false,
+      team: null,
+      state: "not_linked",
+    };
+    const getAccount = vi.fn<ApiClient["getAccount"]>(async () => account);
+    mount(
+      () => (
+        <>
+          <button type="button">Elsewhere</button>
+          <SharingPanel projectId="p-1" />
+        </>
+      ),
+      clientWith({
+        getAccount,
+        getProjectSharing: async () => unlinked,
+        linkProjectToTeam: async () => pendingLink.promise,
+      }),
+    );
+    fireEvent.change(
+      await screen.findByRole("combobox", { name: "Link to team" }),
+      { target: { value: "team-1" } },
+    );
+    const link = screen.getByRole("button", { name: "Link to team" });
+    link.focus();
+    fireEvent.click(link);
+    pendingLink.resolve(manualSharing);
+    const manage = await screen.findByRole("button", {
+      name: "Manage sharing",
+    });
+    await waitFor(() => expect(manage).toHaveFocus());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled(),
+    );
+    const beforeRefresh = getAccount.mock.calls.length;
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    elsewhere.focus();
+    fireEvent(window, new Event("focus"));
+    await waitFor(() =>
+      expect(getAccount).toHaveBeenCalledTimes(beforeRefresh + 1),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled(),
+    );
+    expect(elsewhere).toHaveFocus();
+  });
+
+  it("keeps focus elsewhere if the user leaves a pending link action", async () => {
+    const pendingLink = deferred<SharingStatus>();
+    const unlinked: SharingStatus = {
+      ...manualSharing,
+      linked: false,
+      team: null,
+      state: "not_linked",
+    };
+    mount(
+      () => (
+        <>
+          <button type="button">Elsewhere</button>
+          <SharingPanel projectId="p-1" />
+        </>
+      ),
+      clientWith({
+        getProjectSharing: async () => unlinked,
+        linkProjectToTeam: async () => pendingLink.promise,
+      }),
+    );
+    fireEvent.change(
+      await screen.findByRole("combobox", { name: "Link to team" }),
+      { target: { value: "team-1" } },
+    );
+    const link = screen.getByRole("button", { name: "Link to team" });
+    link.focus();
+    fireEvent.click(link);
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    elsewhere.focus();
+    pendingLink.resolve(manualSharing);
+    await screen.findByRole("button", { name: "Manage sharing" });
+    expect(elsewhere).toHaveFocus();
+  });
+
   it("compacts configured sharing with explicit expansion and keeps sync visible", async () => {
     mount(
       () => <SharingPanel projectId="p-1" />,

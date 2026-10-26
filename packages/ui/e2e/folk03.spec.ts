@@ -729,6 +729,22 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
 
     const form = page.getByTestId("team-create-form");
     await expect(form).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Join a team" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("organization-domains")).not.toBeVisible();
+    const settings = page.getByRole("button", {
+      name: "Team settings",
+      exact: true,
+    });
+    await settings.focus();
+    await page.keyboard.press("Enter");
+    await expect(settings).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("organization-domains")).toBeVisible();
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("organization-domains")).not.toBeVisible();
+    await expect(form).toBeVisible();
     await form.getByLabel("Team name").fill("First team");
     await form.getByRole("button", { name: "Create team" }).click();
   });
@@ -789,7 +805,11 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page
       .getByRole("combobox", { name: "Link to team" })
       .selectOption("team-1");
-    await page.getByRole("button", { name: "Link to team" }).click();
+    await page.getByRole("button", { name: "Link to team" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("button", { name: "Manage sharing" }),
+    ).toBeFocused();
     await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
     await page.getByRole("button", { name: "Manage sharing" }).click();
     await page.getByRole("button", { name: "Unlink" }).click();

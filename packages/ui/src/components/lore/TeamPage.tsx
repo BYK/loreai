@@ -839,6 +839,7 @@ export const TeamPage: Component = () => {
               selectedTeamId=""
               canManage={false}
               hasTeams={false}
+              advancedDisclosure
               disabled={!accountReady()}
               onChanged={() => folk.refresh()}
             />

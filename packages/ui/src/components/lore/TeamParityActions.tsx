@@ -2,6 +2,7 @@ import type { Component } from "solid-js";
 import {
   createEffect,
   createSignal,
+  createUniqueId,
   For,
   onCleanup,
   onMount,
@@ -36,6 +37,7 @@ type Props = {
   hasTeams: boolean;
   onChanged: () => void;
   disabled?: boolean;
+  advancedDisclosure?: boolean;
   onStatusError?: (message: string) => void;
   onCloseAutoFocus?: (event: Event) => void;
 };
@@ -62,6 +64,8 @@ function tokenFromInviteInput(value: string): string | null {
 
 export const TeamParityActions: Component<Props> = (props) => {
   const ws = useWorkspace();
+  const advancedControlsId = createUniqueId();
+  const [advancedOpen, setAdvancedOpen] = createSignal(false);
   let active = true;
   onCleanup(() => {
     active = false;
@@ -500,7 +504,21 @@ export const TeamParityActions: Component<Props> = (props) => {
         </section>
       </Show>
 
+      <Show when={props.advancedDisclosure}>
+        <Button
+          type="button"
+          variant="outline"
+          class="h-11"
+          aria-expanded={advancedOpen()}
+          aria-controls={advancedControlsId}
+          onClick={() => setAdvancedOpen(!advancedOpen())}
+        >
+          Team settings
+        </Button>
+      </Show>
       <section
+        id={advancedControlsId}
+        hidden={props.advancedDisclosure && !advancedOpen()}
         class="rounded-md border border-line bg-bg p-4"
         data-testid="organization-domains"
       >
