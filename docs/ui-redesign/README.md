@@ -39,8 +39,7 @@ Destructive states retain their red tokens.
 Desktop uses a fixed mini icon sidebar, with tooltip labels on hover and keyboard
 focus. There is no expanded desktop mode or navigation expansion control. Old
 compact/expanded browser preferences are ignored. Account controls keep their
-popover; the mini sidebar does not change
-the mobile drawer or context-pane behavior. Below 768px, a
+popover; the mini sidebar does not change the mobile drawer or context-pane behavior. Below 768px, a
 logo-free toolbar button opens a labeled sliding drawer and the document uses
 the full viewport width. The mobile account row is fully tappable, its panel
 aligns with the drawer, and theme controls have 44px touch targets.
@@ -48,8 +47,19 @@ aligns with the drawer, and theme controls have 44px touch targets.
 Knowledge tables give titles and two-line content previews most of the width;
 category, visibility, dates and confidence remain available. The project directory
 groups checkouts only when they share a nonempty recorded git remote. Each checkout
-keeps its own destination; unattributed projects stay separate. Recent activity,
+keeps its own destination in a compact row; paths, counts and recorded activity
+are secondary. Local and unattributed projects stay separate. Recent activity,
 Name and Knowledge count sorts are presentation controls, not project merges.
+
+Session lists lead with conversation titles and recorded last-message time. Native
+Processing details disclosures retain IDs/copy, all four recorded title sources,
+processing counts and full recorded ranges, outside the title navigation link.
+
+Knowledge documents lead with content and an honest source summary. Source & history
+starts collapsed and retains source state, files, recorded confidence, version history,
+restore actions and technical metadata. Recorded confidence is explicitly not a
+probability of correctness; unavailable, retained-summary-only, checking and unknown
+source states remain distinct without additional evidence requests.
 
 The knowledge reader keeps Filter this list above a compact Filters/sort row. A labeled
 filter panel applies category and scope together, with explanations for project,
@@ -133,21 +143,41 @@ and disposal clears timers and suppresses late feedback. The icon registry suppl
 consistent decorative SVGs for copy/link/save/sync actions, sort direction,
 search controls, dialog close buttons, and loading/empty/locked/error states.
 
+## Recovery, operations and entity context
+
+Sync recovery compares coherent current/local title and content using the same bounded
+word-diff algorithm and semantic added/removed rendering as version history. Full text
+and metadata remain accessible. Missing/deleted/oversized/unchanged comparisons retain
+appropriate fallbacks and the existing owner, confirmation and stale-version guards.
+Action consequences explain that keeping a snapshot creates a new current version and
+that discarding removes only the saved snapshot.
+
+Cache warming keeps current status, warnings and per-session controls visible; statistics,
+bucket details, per-session diagnostics and histograms start collapsed. Cost intelligence
+leads with live spend and explicitly labeled estimates before detailed and historical
+breakdowns. Model usage names the selected scope and inclusive UTC range, with model
+totals in a disclosure; export and Model Tides privacy/confirmation choices remain intact.
+
+Entity lists show recorded aliases and project scope without additional per-row detail
+requests. Details prioritize the recorded description and linked knowledge/relationships
+before editing. Incoming/outgoing directions and entity type badges refer to the correct
+entity, and router-aware links preserve the UI base for project/workspace knowledge.
+
 ## Screenshot comparison
 
 The accompanying PR contains before/after comparisons for desktop and mobile in
 both themes, including navigation, readers, tables, overview and team workflows.
 Screenshots are attached to the PR rather than committed as build artifacts.
 
-[PR #2110](https://github.com/BYK/loreai/pull/2110) adds the content-first browsing
-and daily team workflow comparisons: grouped checkout cards, readable knowledge
-previews, compact sharing, focused team sections, clearer search coverage, and
-labeled/compact navigation. Its gallery includes matched desktop/mobile
-before-and-after views and the invitation and sharing settings flows.
+[PR #2110](https://github.com/BYK/loreai/pull/2110) includes the complete memory,
+team and operations refinement: mini-only navigation, grouped checkout rows, readable
+knowledge and sessions, focused sharing/team controls, clearer search coverage, recovery
+differences, progressive operation diagnostics and recorded entity context. The gallery
+shows current desktop/mobile layouts and labeled comparisons against earlier revisions.
 
-PR #2110 uses identical fictional API fixtures with actual base and branch
-frontend code. The browser suites below use a disposable database seeded by
-the UI tests.
+Screenshots use fictional API fixtures with actual frontend code. The latest reading and
+recovery comparison baseline is commit `82675158`; earlier full-PR comparisons are labeled
+separately in the PR. Browser suites use a disposable seeded database.
 `responsive-layout.spec.ts` audits 24 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,
 live palette propagation, and independent chart colors on desktop and mobile.
