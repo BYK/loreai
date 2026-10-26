@@ -9807,7 +9807,7 @@ export function buildStreamingResponse(
                 if (streamSignal.aborted) throw error;
                 if (
                   finalRecallRound ||
-                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                  recallBudget.requiresVerifiedContinuation
                 )
                   throw new RecallContinuationFailure("follow_up_setup");
                 reportRecallDiagnostic(
@@ -9838,7 +9838,7 @@ export function buildStreamingResponse(
               if (!streamingFollowUp.ok) {
                 if (
                   finalRecallRound ||
-                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                  recallBudget.requiresVerifiedContinuation
                 )
                   throw new RecallContinuationFailure("follow_up_failed");
                 reportRecallDiagnostic(
@@ -9911,7 +9911,7 @@ export function buildStreamingResponse(
 
               const finalTerminalEvents: string[] = [];
               // Usage arrives at the terminal event. Until it is validated,
-              // expanded-budget continuation text must not reach the client.
+              // separately budgeted continuation text must not reach the client.
               const heldContinuation = { events: [] as string[], bytes: 0 };
               const continuationValidator = new AnthropicSSEValidator();
               streamPhase = "follow_up_stream";
@@ -9948,7 +9948,7 @@ export function buildStreamingResponse(
                     // Forward non-recall, non-held-back events to client.
                     // message_delta usage scaling is handled by a separate pass
                     // below only for the final continuation's terminal events.
-                    if (recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS) {
+                    if (recallBudget.requiresVerifiedContinuation) {
                       heldContinuation.bytes += Buffer.byteLength(forwarded);
                       if (
                         heldContinuation.bytes > MAX_FOREGROUND_RESPONSE_BYTES
@@ -9989,7 +9989,7 @@ export function buildStreamingResponse(
                   continuationResp.usageComplete === true,
                 );
               if (
-                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                recallBudget.requiresVerifiedContinuation &&
                 continuationResp.usageComplete !== true
               ) {
                 throw new RecallContinuationFailure("follow_up_failed");
@@ -15172,7 +15172,7 @@ export function streamResponsesRecallAware(
                         if (
                           error instanceof SSEStreamTransportError &&
                           !continuationFollowUpInput.finalRecallRound &&
-                          (recallBudget.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+                          (!recallBudget.requiresVerifiedContinuation ||
                             recallBudget.canRecover()) &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
@@ -15245,7 +15245,7 @@ export function streamResponsesRecallAware(
                       };
                       chargeContinuationUsage();
                       if (
-                        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                        recallBudget.requiresVerifiedContinuation &&
                         !contState.usageComplete
                       ) {
                         throw new RecallContinuationFailure(
@@ -15837,7 +15837,7 @@ export function streamResponsesRecallAware(
                 rawRecovered.usage ?? ZERO_USAGE,
               );
               if (
-                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                recallBudget.requiresVerifiedContinuation &&
                 (!recallBudget.continuationModelMatches(rawRecovered.model) ||
                   rawRecovered.usageComplete !== true)
               ) {
@@ -22128,8 +22128,15 @@ async function handleConversationTurnPrepared(
     ? knownCodexContextLimit(req.model)
     : undefined;
   const verifiedRecallContext = canonicalCodexRecallRoute
-    ? providerRecallContext !== undefined && codexRecallContext !== undefined
-      ? Math.min(providerRecallContext, codexRecallContext)
+    ? providerRecallContext !== undefined
+      ? Math.min(
+          providerRecallContext,
+          // New Codex models may precede the bundled catalog. Keep each call
+          // within the conservative window, but let verified, metered calls
+          // spend separate recall budget instead of counting the sunk principal
+          // twice and rejecting an otherwise valid continuation.
+          codexRecallContext ?? MAX_RECALL_CHAIN_TOKENS,
+        )
       : undefined
     : providerRecallContext;
   const recallModelContextTokens =
@@ -24330,7 +24337,7 @@ async function handleConversationTurnPrepared(
             ),
           );
           if (
-            recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+            recallBudget.requiresVerifiedContinuation &&
             (!recallBudget.continuationModelMatches(
               recovery.continuation.model,
             ) ||
@@ -24485,7 +24492,7 @@ async function handleConversationTurnPrepared(
       if (!recallBudget.continuationModelMatches(continuationResp.model))
         return recoverRecallContinuation("follow_up_failed");
       if (
-        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+        recallBudget.requiresVerifiedContinuation &&
         continuationResp.usageComplete !== true
       ) {
         return failRecall("follow_up_failed");

@@ -38,7 +38,7 @@ export class SemanticTokenCache {
     bpe_ms: 0,
   };
   private entries = new Map<string, number>();
-  private readonly used = new Map<string, number>();
+  private used = new Map<string, { tokens: number; bytes: number }>();
   private dirty = false;
   private loaded = false;
   private readonly tenant = currentTenantId();
@@ -120,7 +120,7 @@ export class SemanticTokenCache {
       .update(visibleJson)
       .update(provenanceJson)
       .digest("hex");
-    let value = this.used.get(key) ?? this.entries.get(key);
+    let value = this.used.get(key)?.tokens ?? this.entries.get(key);
     if (value === undefined) {
       this.dirty = true;
       this.stats.misses++;
@@ -133,11 +133,23 @@ export class SemanticTokenCache {
       );
       this.stats.bpe_ms += performance.now() - started;
     } else this.stats.hits++;
-    this.used.delete(key);
-    this.used.set(key, value);
-    if (this.used.size > SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
-      this.used.delete(this.used.keys().next().value!);
+    this.remember(key, value, visibleJson.length + provenanceJson.length);
     return value;
+  }
+
+  private remember(key: string, tokens: number, bytes: number): void {
+    this.used.delete(key);
+    this.used.set(key, { tokens, bytes });
+    // A sequential history larger than the cache must not evict every costly
+    // count before its next scan. Prioritize input size, including expensive
+    // provenance comparisons whose exact token difference is zero. Batch
+    // pruning keeps memory bounded and avoids sorting on every cache miss.
+    if (this.used.size > 2 * SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
+      this.used = new Map(
+        [...this.used]
+          .sort((a, b) => a[1].bytes - b[1].bytes)
+          .slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES),
+      );
   }
 
   /** Cache each original counting boundary, including generated/stripped text. */
@@ -164,7 +176,7 @@ export class SemanticTokenCache {
       .digest("hex");
     const bytes = Buffer.byteLength(text);
     this.visibleStats.requested_bytes += bytes;
-    let value = this.used.get(key) ?? this.entries.get(key);
+    let value = this.used.get(key)?.tokens ?? this.entries.get(key);
     if (value === undefined) {
       this.dirty = true;
       this.visibleStats.misses++;
@@ -175,10 +187,7 @@ export class SemanticTokenCache {
       value = compute();
       this.visibleStats.bpe_ms += performance.now() - started;
     } else this.visibleStats.hits++;
-    this.used.delete(key);
-    this.used.set(key, value);
-    if (this.used.size > SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
-      this.used.delete(this.used.keys().next().value!);
+    this.remember(key, value, text.length);
     return value;
   }
 
@@ -202,13 +211,23 @@ export class SemanticTokenCache {
       )
         return;
       const retained = this.scope.retainUnused
-        ? new Map(this.entries)
-        : new Map<string, number>();
+        ? new Map(
+            // Older retained entries store only counts. Use that lower-bound
+            // work hint until this request observes their complete input size.
+            [...this.entries].map(([key, tokens]) => [
+              key,
+              { tokens, bytes: tokens },
+            ]),
+          )
+        : new Map<string, { tokens: number; bytes: number }>();
       for (const [key, value] of this.used) {
         retained.delete(key);
         retained.set(key, value);
       }
-      const data = [...retained].slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES);
+      const data = [...retained]
+        .sort((a, b) => a[1].bytes - b[1].bytes)
+        .slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
+        .map(([key, { tokens }]) => [key, tokens] as const);
       const payload = encodeTokenCounts(
         VERSION,
         data,

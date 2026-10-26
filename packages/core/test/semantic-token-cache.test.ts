@@ -75,6 +75,37 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("exact visible-content counts", () => {
+  it.each([false, true])(
+    "keeps expensive zero-overhead provenance when cheap visible counts overflow (retained=%s)",
+    (retainUnused) => {
+      // Equal token counts do not imply cheap work: comparing two large native
+      // envelopes can cost thousands of BPE tokens while their difference is zero.
+      const largeVisible = "large visible source ".repeat(1024);
+      const largeProvenance = "large native source ".repeat(1024);
+      const count = vi
+        .spyOn(tokenize, "estimateTokens")
+        .mockReturnValue(10_000);
+      const first = new SemanticTokenCache({ ...scope, retainUnused });
+      expect(first.count(largeVisible, largeProvenance)).toBe(0);
+      for (let i = 0; i < SEMANTIC_TOKEN_CACHE_MAX_ENTRIES * 2 + 3; i++)
+        first.countTokens(
+          `small-${i}`.padEnd(256, "x"),
+          "cl100k_base",
+          () => 1,
+        );
+      first.persist();
+      expect(JSON.parse(payload())[1]).toHaveLength(
+        SEMANTIC_TOKEN_CACHE_MAX_ENTRIES,
+      );
+
+      count.mockClear();
+      const retry = new SemanticTokenCache({ ...scope, retainUnused });
+      expect(retry.count(largeVisible, largeProvenance)).toBe(0);
+      expect(count).not.toHaveBeenCalled();
+      expect(retry.stats.hits).toBe(1);
+    },
+  );
+
   it.each(["local", "external"])(
     "does not lazily read a recreated %s owner",
     (kind) => {
