@@ -139,7 +139,15 @@ The accompanying PR contains before/after comparisons for desktop and mobile in
 both themes, including navigation, readers, tables, overview and team workflows.
 Screenshots are attached to the PR rather than committed as build artifacts.
 
-Screenshots use the disposable database seeded by the UI browser tests.
+[PR #2110](https://github.com/BYK/loreai/pull/2110) adds the content-first browsing
+and daily team workflow comparisons: grouped checkout cards, readable knowledge
+previews, compact sharing, focused team sections, clearer search coverage, and
+labeled/compact navigation. Its gallery includes matched desktop/mobile
+before-and-after views and the invitation and sharing settings flows.
+
+PR #2110 uses identical fictional API fixtures with actual base and branch
+frontend code. The browser suites below use a disposable database seeded by
+the UI tests.
 `responsive-layout.spec.ts` audits 24 routes at 1440, 390, and 320px in both
 themes. `palette.spec.ts` verifies actual component colors, text contrast,
 live palette propagation, and independent chart colors on desktop and mobile.

@@ -127,15 +127,15 @@ and docs/ui-redesign/README.md for final behavior documentation.
 
 **Interfaces:** All task reports and committed implementation. No new feature scope.
 
-- [ ] Independently review the whole branch for correctness, security, DRY and gaps;
+- [x] Independently review the whole branch for correctness, security, DRY and gaps;
   resolve actionable findings with failing-first regressions and scoped re-review.
-- [ ] Run required workspace checks/full suite/property stability once in final
+- [x] Run required workspace checks/full suite/property stability once in final
   review; record known backend/environment failures honestly, use CI for Linux.
-- [ ] Browser QA production pages with fictional fixtures at desktop/390/320px,
+- [x] Browser QA production pages with fictional fixtures at desktop/390/320px,
   light/dark, keyboard and relevant pending/error/empty/expanded states.
-- [ ] Capture actual main and branch before/after pairs at identical framing;
+- [x] Capture actual main and branch before/after pairs at identical framing;
   inspect every image, pixel-compare, upload via gh --attach, never commit images.
-- [ ] Create and attach draft PR; address CI and bot feedback. Preserve screenshots
+- [x] Create and attach draft PR; address CI and bot feedback. Preserve screenshots
   through description edits and retake affected captures after visual fixes.
-- [ ] Mark ready for review after validation/review, leave unmerged and report the
+- [x] Mark ready for review after validation/review, leave unmerged and report the
   PR, screenshot preview, checks and material limits.
