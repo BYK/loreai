@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@solidjs/testing-library";
-import { createSignal, type JSX } from "solid-js";
+import { createSignal, Show, type JSX } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -459,6 +459,184 @@ describe("TeamPage", () => {
       );
     },
   );
+
+  it.each([false, true])(
+    "exposes every advanced error once with hasTeams=%s",
+    async (hasTeams) => {
+      const view = mount(
+        () => <TeamPage />,
+        clientWith({
+          getTeams: async () =>
+            hasTeams ? teams : { hosted: false, teams: [] },
+          getOrganizations: async () => {
+            throw new Error("Organization service unavailable");
+          },
+          discoverTeamContributors: async () => {
+            throw new Error("Contributor discovery unavailable");
+          },
+        }),
+        "/team?section=settings",
+      );
+      await screen.findByText("Organization service unavailable");
+      expect(
+        screen.getAllByText("Organization service unavailable"),
+      ).toHaveLength(1);
+      if (!hasTeams)
+        fireEvent.click(screen.getByRole("button", { name: "Team settings" }));
+      expect(
+        screen.getAllByText("Organization service unavailable"),
+      ).toHaveLength(1);
+      if (hasTeams) {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Find contributors" }),
+        );
+        await waitFor(() =>
+          expect(screen.getAllByRole("alert")).toHaveLength(1),
+        );
+        await waitFor(() =>
+          expect(screen.getByRole("alert")).toHaveTextContent(
+            "Contributor discovery unavailable",
+          ),
+        );
+        expect(screen.getByRole("alert")).toHaveTextContent(
+          "Organization service unavailable",
+        );
+        view.history.set({ value: "/team" });
+        expect(screen.getByRole("alert")).toBeVisible();
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "Team settings" }));
+        expect(
+          screen.getByText("Organization service unavailable"),
+        ).toBeVisible();
+      }
+    },
+  );
+
+  it("clears caller-owned status on unmount and ignores a late organization reply", async () => {
+    const [visible, setVisible] = createSignal(true);
+    const [status, setStatus] = createSignal("");
+    let rejectRequests!: (error: Error) => void;
+    const requests = new Promise<
+      Awaited<ReturnType<ApiClient["getDomainJoinRequests"]>>
+    >((_resolve, reject) => {
+      rejectRequests = reject;
+    });
+    mount(
+      () => (
+        <>
+          <p data-testid="parent-status">{status()}</p>
+          <Show when={visible()}>
+            <TeamParityActions
+              selectedTeamId="team-1"
+              canManage
+              hasTeams
+              onChanged={() => undefined}
+              onStatusError={setStatus}
+            />
+          </Show>
+        </>
+      ),
+      clientWith({
+        getOrganizations: async () => ({
+          organizations: [{ id: "org-1", name: "Acme", role: "admin" }],
+        }),
+        getDomainJoinRequests: () => requests,
+        discoverTeamContributors: async () => {
+          throw new Error("Discovery failed");
+        },
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load join requests" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Find contributors" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("parent-status")).toHaveTextContent(
+        "Discovery failed",
+      ),
+    );
+    setVisible(false);
+    expect(screen.getByTestId("parent-status").textContent).toBe("");
+    rejectRequests(new Error("Late domain failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.getByTestId("parent-status").textContent).toBe("");
+  });
+
+  it.each(["retry", "error", "account"] as const)(
+    "clears advanced status through a %s transition",
+    async (transition) => {
+      let folk!: FolkState;
+      let failTeams = false;
+      let nextAccount = account;
+      const refreshedTeams = deferred<TeamList>();
+      let teamReads = 0;
+      mount(
+        () => {
+          folk = useWorkspace().state.folk;
+          return <TeamPage />;
+        },
+        clientWith({
+          getAccount: async () => nextAccount,
+          getTeams: async () => {
+            if (failTeams) throw new Error("Team read failed");
+            if (++teamReads > 1) return refreshedTeams.promise;
+            return teams;
+          },
+          getOrganizations: async () => {
+            throw new Error("Organization failure");
+          },
+        }),
+        "/team?section=settings",
+      );
+      await screen.findByText("Organization failure");
+      if (transition === "account") {
+        nextAccount = {
+          ...account,
+          signed_in: false,
+          user: null,
+          state: "anonymous",
+        };
+        folk.account.reload();
+        await screen.findByText("Sign in to manage a team");
+      } else {
+        failTeams = true;
+        folk.teams.reload();
+        await screen.findByText("The team could not be loaded");
+        if (transition === "retry") {
+          failTeams = false;
+          fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+          await screen.findByText("Loading team");
+        }
+      }
+      expect(screen.queryByText("Organization failure")).toBeNull();
+    },
+  );
+
+  it("retains inline status errors without a parent callback", async () => {
+    mount(
+      () => (
+        <TeamParityActions
+          selectedTeamId="team-1"
+          canManage
+          hasTeams
+          onChanged={() => undefined}
+        />
+      ),
+      clientWith({
+        getOrganizations: async () => {
+          throw new Error("Organization failure");
+        },
+        discoverTeamContributors: async () => {
+          throw new Error("Discovery failure");
+        },
+      }),
+    );
+    expect(await screen.findByText("Organization failure")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Find contributors" }));
+    expect(await screen.findByText("Discovery failure")).toBeVisible();
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+  });
 
   it("hides prior members when a team reload fails and ignores late responses", async () => {
     const firstTeamResponse: TeamMembersResponse = {

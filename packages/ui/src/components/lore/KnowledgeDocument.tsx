@@ -80,11 +80,20 @@ export const KnowledgeDocument: Component<{
     props.entry.cross_project === true ||
     props.entry.cross_project === 1;
   const sourceSession = () => props.entry.source_session;
+  const sourceProjectUnavailable = () =>
+    !props.project &&
+    props.evidence &&
+    !props.evidence.data() &&
+    !props.evidence.error() &&
+    !props.evidence.loading();
+  const sourceProjectMessage =
+    "Source project unavailable; source availability cannot be checked.";
   const sourceSummary = () => {
     if (!sourceSession()) return "No source session recorded.";
     const evidence = props.evidence;
     if (!evidence) return "Source session recorded; availability unknown.";
     if (evidence.error()) return "Source availability could not be checked.";
+    if (sourceProjectUnavailable()) return sourceProjectMessage;
     if (evidence.loading() || !evidence.data()) return "Checking source…";
     switch (evidence.data()?.state) {
       case "available":
@@ -215,9 +224,11 @@ export const KnowledgeDocument: Component<{
                   <Show when={props.evidence}>
                     {(evidence) => (
                       <Show
-                        when={props.project}
+                        when={!sourceProjectUnavailable()}
                         fallback={
-                          <div class="mt-2 text-muted">Checking source…</div>
+                          <div class="mt-2 text-muted">
+                            {sourceProjectMessage}
+                          </div>
                         }
                       >
                         <div class="mt-2 text-muted">

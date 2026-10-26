@@ -761,6 +761,78 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await form.getByRole("button", { name: "Create team" }).click();
   });
 
+  for (const hasTeams of [false, true]) {
+    test(`exposes advanced status errors once with hasTeams=${hasTeams}`, async ({
+      page,
+    }) => {
+      await installSignedInTeamRoutes(page);
+      await page.route("**/api/v1/teams/team-1/review-policy", (route) =>
+        route.fulfill({ json: { policy: "required" } }),
+      );
+      if (!hasTeams) {
+        await page.route("**/api/v1/teams", (route) =>
+          route.fulfill({ json: { hosted: false, teams: [] } }),
+        );
+      }
+      await page.route("**/api/v1/orgs", (route) =>
+        route.fulfill({
+          status: 500,
+          json: {
+            type: "error",
+            error: {
+              type: "internal",
+              message: "Organization service unavailable",
+            },
+          },
+        }),
+      );
+      await page.route("**/api/v1/teams/team-1/discover", (route) =>
+        route.fulfill({
+          status: 500,
+          json: {
+            type: "error",
+            error: {
+              type: "internal",
+              message: "Contributor discovery unavailable",
+            },
+          },
+        }),
+      );
+      await page.goto("/ui/team?section=settings");
+      const alerts = page.getByRole("alert");
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toHaveCount(1);
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toBeVisible();
+      if (!hasTeams) {
+        const settings = page.getByRole("button", {
+          name: "Team settings",
+          exact: true,
+        });
+        await settings.click();
+        await expect(
+          page.getByText("Organization service unavailable", { exact: true }),
+        ).toHaveCount(1);
+        await settings.click();
+      } else {
+        await page.getByRole("button", { name: "Find contributors" }).click();
+        await expect(
+          alerts.filter({ hasText: "Contributor discovery unavailable" }),
+        ).toHaveCount(1);
+        await expect(
+          alerts.filter({ hasText: "Organization service unavailable" }),
+        ).toHaveCount(1);
+        await expect(alerts).toHaveCount(1);
+        await page.getByRole("link", { name: "Members", exact: true }).click();
+      }
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toBeVisible();
+    });
+  }
+
   test("links and unlinks a seeded project and offers Sync now", async ({
     page,
   }) => {

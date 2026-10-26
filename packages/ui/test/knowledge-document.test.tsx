@@ -483,6 +483,44 @@ describe("KnowledgeDocument", () => {
     ).toBeNull();
   });
 
+  it("explains why an idle workspace source cannot be checked without its project", () => {
+    renderDocument({
+      project: undefined,
+      entry: { ...entry("Ada"), project_id: null, source_session: "s-1" },
+      evidence: loader<EvidenceResult>(undefined),
+    });
+    const message =
+      "Source project unavailable; source availability cannot be checked.";
+    expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+      message,
+    );
+    expect(screen.getByTestId("trust-section")).toHaveTextContent(message);
+    expect(screen.queryByText("Checking source…")).toBeNull();
+  });
+
+  it.each([
+    [
+      loader<EvidenceResult>({ state: "available" }),
+      "Source session available",
+    ],
+    [
+      loader<EvidenceResult>({ state: "summary_only" }),
+      "retained summary only",
+    ],
+    [
+      loader<EvidenceResult>({ state: "unavailable" }),
+      "Source session no longer available",
+    ],
+    [
+      loader<EvidenceResult>(undefined, new Error("offline")),
+      "Source session unavailable",
+    ],
+  ])("keeps recorded evidence without project context", (evidence, message) => {
+    renderDocument({ project: undefined, evidence });
+    expect(screen.getByTestId("trust-section")).toHaveTextContent(message);
+    expect(screen.queryByText("Checking source…")).toBeNull();
+  });
+
   it("shows pending states before the loaders' effects mark them loading", () => {
     // createLoader flips `loading` inside a createEffect, so on the very first
     // render data, error and loading are all falsy — never render blank there.

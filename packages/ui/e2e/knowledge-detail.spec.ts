@@ -151,6 +151,31 @@ test.describe("knowledge detail provenance and history", () => {
     await expect(history).toContainText("Portability is a requirement");
   });
 
+  test("explains unavailable project context for a workspace source", async ({
+    page,
+  }) => {
+    const { live } = await projectAndEntry(page);
+    await page.route(`**/api/v1/knowledge/${live.id}`, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        json: { ...(await response.json()), project_id: null },
+      });
+    });
+    await page.goto(`/ui/knowledge/${live.id}`);
+    const message =
+      "Source project unavailable; source availability cannot be checked.";
+    await expect(page.getByTestId("knowledge-source-summary")).toHaveText(
+      message,
+    );
+    await page.getByText("Source & history", { exact: true }).click();
+    await expect(page.getByTestId("trust-section")).toContainText(message);
+    await expect(page.getByText("Checking source…")).toHaveCount(0);
+    await expect(
+      page.getByRole("link", { name: "Distilled from session" }),
+    ).toHaveCount(0);
+  });
+
   test("links live source evidence to the exact session", async ({ page }) => {
     const { project, live } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);

@@ -69,6 +69,7 @@ export const TeamParityActions: Component<Props> = (props) => {
   let active = true;
   onCleanup(() => {
     active = false;
+    props.onStatusError?.("");
   });
   const [createOpen, setCreateOpen] = createSignal(false);
   const [createName, setCreateName] = createSignal("");
@@ -307,7 +308,9 @@ export const TeamParityActions: Component<Props> = (props) => {
   };
 
   createEffect(() => {
-    props.onStatusError?.(discoveryError() || domainError());
+    props.onStatusError?.(
+      [discoveryError(), domainError()].filter(Boolean).join(" "),
+    );
   });
 
   const requestOrgId = () => orgIdForRequest().trim() || selectedOrg() || "";
@@ -417,7 +420,7 @@ export const TeamParityActions: Component<Props> = (props) => {
           >
             {discovering() ? "Searching…" : "Find contributors"}
           </Button>
-          <Show when={discoveryError()}>
+          <Show when={!props.onStatusError && discoveryError()}>
             <p class="mt-2 text-sm text-danger" role="alert">
               {discoveryError()}
             </p>
@@ -669,7 +672,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             </Button>
           </div>
         </form>
-        <Show when={domainError()}>
+        <Show when={!props.onStatusError && domainError()}>
           <p class="mt-2 text-sm text-danger" role="alert">
             {domainError()}
           </p>
