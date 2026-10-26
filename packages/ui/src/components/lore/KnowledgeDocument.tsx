@@ -58,7 +58,7 @@ const Meta: Component<{ label: string; value: string | null | undefined }> = (
     <div class="contents">
       <dt class="max-w-[12ch] text-muted sm:max-w-none">{props.label}</dt>
       <dd
-        class="m-0 min-w-0 whitespace-pre-wrap break-all font-mono text-xs"
+        class="m-0 min-w-0 whitespace-pre-wrap font-mono text-xs [overflow-wrap:anywhere]"
         title={props.value ?? undefined}
       >
         {props.value}
@@ -169,7 +169,9 @@ export const KnowledgeDocument: Component<{
             </Show>
           </div>
           <Show when={props.actions}>
-            <div class="flex shrink-0 items-center gap-2">{props.actions}</div>
+            <div class="flex shrink-0 items-center gap-2 [&_button]:min-h-11 sm:[&_button]:min-h-9">
+              {props.actions}
+            </div>
           </Show>
         </div>
       </DocHeader>

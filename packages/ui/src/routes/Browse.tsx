@@ -423,7 +423,9 @@ export const Browse: Component<{
                       ws.tracked(() => ws.client.getDistillation(id))
                     }
                   />
-                  <div class={`${DOCUMENT_COLUMN_CLASS} pb-7`}>
+                  <div
+                    class={`${DOCUMENT_COLUMN_CLASS} pb-7 [&_button]:min-h-11 sm:[&_button]:min-h-9`}
+                  >
                     <PromotionPanel
                       knowledgeId={value().id}
                       client={ws.client}

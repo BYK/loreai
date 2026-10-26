@@ -106,6 +106,10 @@ test.describe("knowledge detail provenance and history", () => {
         Math.abs(edit.y + edit.height / 2 - remove.y - remove.height / 2),
       ).toBeLessThan(2);
       expect(remove.x - edit.x - edit.width).toBeGreaterThanOrEqual(8);
+      if (width === 320) {
+        expect(edit.height).toBeGreaterThanOrEqual(44);
+        expect(remove.height).toBeGreaterThanOrEqual(44);
+      }
       await page.getByText("Source & history", { exact: true }).click();
       const technical = page
         .getByText("Technical details", { exact: true })
