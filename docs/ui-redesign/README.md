@@ -55,11 +55,15 @@ Session lists lead with conversation titles and recorded last-message time. Nati
 Processing details disclosures retain IDs/copy, all four recorded title sources,
 processing counts and full recorded ranges, outside the title navigation link.
 
-Knowledge documents lead with content and an honest source summary. Source & history
-starts collapsed and retains source state, files, recorded confidence, version history,
-restore actions and technical metadata. Recorded confidence is explicitly not a
-probability of correctness; unavailable, retained-summary-only, checking and unknown
-source states remain distinct without additional evidence requests.
+Knowledge documents lead with complete content, visible recorded confidence and an
+honest source summary. Source & history starts collapsed, names its contents and
+retains source state, files, the confidence explanation, version history, restore
+actions and technical metadata. Full technical values wrap for touch inspection.
+Header, body and sharing controls use the same reader column; mobile entry actions
+have 44px targets. Recorded confidence is explicitly not a probability of correctness;
+unavailable, retained-summary-only, checking and unknown source states remain distinct
+without additional evidence requests. See the [information-preservation audit](knowledge-preservation.md)
+for the field/action inventory and verification limits.
 
 The knowledge reader keeps Filter this list above a compact Filters/sort row. A labeled
 filter panel applies category and scope together, with explanations for project,
