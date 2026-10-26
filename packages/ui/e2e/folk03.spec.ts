@@ -1042,7 +1042,8 @@ for (const theme of ["light", "dark"] as const) {
 async function expectMobileAction(action: Locator, width: number) {
   await expect(action).toBeVisible();
   await action.scrollIntoViewIfNeeded();
-  const box = (await action.boundingBox())!;
+  const box = await action.boundingBox();
+  if (!box) throw new Error("Missing action bounds");
   expect.soft(box.height, await action.innerText()).toBeGreaterThanOrEqual(44);
   expect.soft(box.width, await action.innerText()).toBeGreaterThanOrEqual(44);
   expect.soft(box.x).toBeGreaterThanOrEqual(0);
@@ -1209,10 +1210,13 @@ for (const width of [1280, 320, 390]) {
         name: "Browse knowledge",
         exact: true,
       });
-      const prose = page.getByText(sentence!, { exact: true });
+      if (!sentence) throw new Error("Missing empty state description");
+      const prose = page.getByText(sentence, { exact: true });
       await expect(prose).toBeVisible();
-      const actionBox = (await action.boundingBox())!;
-      const proseBox = (await prose.boundingBox())!;
+      const actionBox = await action.boundingBox();
+      const proseBox = await prose.boundingBox();
+      if (!actionBox || !proseBox)
+        throw new Error("Missing empty state bounds");
       expect
         .soft(actionBox.y)
         .toBeGreaterThanOrEqual(proseBox.y + proseBox.height + 8);
@@ -1232,13 +1236,13 @@ for (const width of [1280, 320, 390]) {
       { exact: true },
     );
     await expect(prose).toBeVisible();
+    const actionBox = await action.boundingBox();
+    const proseBox = await prose.boundingBox();
+    if (!actionBox || !proseBox)
+      throw new Error("Missing promotion state bounds");
     expect
-      .soft((await action.boundingBox())!.y)
-      .toBeGreaterThanOrEqual(
-        (await prose.boundingBox())!.y +
-          (await prose.boundingBox())!.height +
-          8,
-      );
+      .soft(actionBox.y)
+      .toBeGreaterThanOrEqual(proseBox.y + proseBox.height + 8);
     if (width < 768) await expectMobileAction(action, width);
     await action.click();
     await expect(page).toHaveURL(/\/ui\/team\?section=settings$/);
@@ -1275,8 +1279,8 @@ for (const width of [1280, 390, 320]) {
           exact: true,
         });
         const id = await header.getAttribute("id");
-        expect(id).toBeTruthy();
-        await expect(cells.nth(index)).toHaveAttribute("headers", id!);
+        if (!id) throw new Error("Missing team table header ID");
+        await expect(cells.nth(index)).toHaveAttribute("headers", id);
         await expect(header).toHaveAttribute("scope", "col");
       }
     }

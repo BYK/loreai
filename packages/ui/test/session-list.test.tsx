@@ -81,7 +81,8 @@ describe("SessionList", () => {
     expect(screen.getByText(long)).toHaveClass("[overflow-wrap:anywhere]");
     expect(link).not.toHaveTextContent("distilled");
     expect(link).not.toHaveTextContent("s-1");
-    const details = screen.getByText("Processing details").closest("details")!;
+    const details = screen.getByText("Processing details").closest("details");
+    if (!details) throw new Error("Missing details disclosure");
     expect(details).not.toHaveAttribute("open");
     expect(details.closest("a")).toBeNull();
     expect(details).toHaveTextContent(
@@ -113,7 +114,8 @@ describe("SessionList", () => {
     expect(
       screen.getByRole("link", { name: /Untitled session/ }),
     ).toBeInTheDocument();
-    const details = screen.getByText("Processing details").closest("details")!;
+    const details = screen.getByText("Processing details").closest("details");
+    if (!details) throw new Error("Missing details disclosure");
     expect(details).toHaveTextContent("Recorded range: unknown – unknown");
     expect(details.querySelector("time[datetime]")).toBeNull();
   });
@@ -310,7 +312,9 @@ describe("SessionList", () => {
     );
     // The id appears exactly once, inside the chip.
     expect(screen.getAllByText("s-1")).toHaveLength(1);
-    screen.getByText("Processing details").closest("details")!.open = true;
+    const details = screen.getByText("Processing details").closest("details");
+    if (!details) throw new Error("Missing processing disclosure");
+    details.open = true;
     expect(
       screen.getByRole("button", { name: "Copy session id" }),
     ).toBeInTheDocument();
@@ -367,7 +371,9 @@ describe("SessionList", () => {
       items: [summary()],
       next_cursor: null,
     }));
-    screen.getByText("Processing details").closest("details")!.open = true;
+    const details = screen.getByText("Processing details").closest("details");
+    if (!details) throw new Error("Missing processing disclosure");
+    details.open = true;
     fireEvent.click(screen.getByRole("button", { name: "Copy session id" }));
     expect(writeText).toHaveBeenCalledWith("s-1");
     expect(history.get()).toBe("/projects/p-1/sessions");

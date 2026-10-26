@@ -2676,7 +2676,8 @@ it("labels every mini rail destination through keyboard tooltips", async () => {
   ];
   expect(destinations.length).toBeGreaterThan(10);
   for (const link of destinations) {
-    const label = link.getAttribute("aria-label")!;
+    const label = link.getAttribute("aria-label");
+    if (!label) throw new Error("Missing navigation label");
     expect(link.textContent).toBe("");
     expect(link).toHaveAttribute("href");
     link.focus();

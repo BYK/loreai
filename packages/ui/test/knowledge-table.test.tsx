@@ -395,11 +395,11 @@ describe("KnowledgeTable", () => {
         { field: "updated_at", dir: "asc" },
       ],
     });
-    fireEvent.click(
-      within(screen.getByRole("table")).getAllByRole("button", {
-        name: "Sort by Title",
-      })[0]!,
-    );
+    const titleSort = within(screen.getByRole("table")).getAllByRole("button", {
+      name: "Sort by Title",
+    })[0];
+    if (!titleSort) throw new Error("Missing title sort control");
+    fireEvent.click(titleSort);
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?sort=title%3Aasc%2Ccreated_at%3Adesc%2Cconfidence%3Aasc",

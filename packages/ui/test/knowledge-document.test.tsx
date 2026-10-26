@@ -192,7 +192,8 @@ describe("KnowledgeDocument", () => {
       expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
         text,
       );
-      const details = screen.getByText("Source & history").closest("details")!;
+      const details = screen.getByText("Source & history").closest("details");
+      if (!details) throw new Error("Missing details disclosure");
       expect(details).not.toHaveAttribute("open");
       expect(details).toContainElement(screen.getByText("History"));
       expect(details).toContainElement(screen.getByText("Technical details"));
@@ -300,7 +301,9 @@ describe("KnowledgeDocument", () => {
       expect(screen.getByText(/gen 0/)).toBeInTheDocument();
       expect(screen.getByText(/gen 1/)).toBeInTheDocument();
       expect(screen.getAllByText(/2 distillations/)).toHaveLength(1);
-      screen.getByText("Source & history").closest("details")!.open = true;
+      const details = screen.getByText("Source & history").closest("details");
+      if (!details) throw new Error("Missing source disclosure");
+      details.open = true;
       const readerLink = screen.getByRole("link", { name: "session reader." });
       expect(readerLink).toHaveAttribute("href", "/projects/p/sessions/s-1");
       expect(screen.queryByText("observer")).not.toBeInTheDocument();

@@ -1232,7 +1232,8 @@ describe("ConflictsPage", () => {
     expect(after.querySelector("del")).toBeNull();
     const full = within(card)
       .getByText("Full local and current text")
-      .closest("details")!;
+      .closest("details");
+    if (!full) throw new Error("Missing details disclosure");
     expect(full).not.toHaveAttribute("open");
     fireEvent.click(within(full).getByText("Full local and current text"));
     expect(full).toHaveTextContent("Use another store.");
@@ -1245,16 +1246,18 @@ describe("ConflictsPage", () => {
   it.each(["title-only", "unchanged", "large", "missing-current"])(
     "handles %s recovery comparisons",
     async (kind) => {
-      const original = conflicts.conflicts[0]!;
+      const original = conflicts.conflicts[0];
+      if (!original?.local || !original.current)
+        throw new Error("Missing complete recovery fixture");
       const local = {
-        ...original.local!,
+        ...original.local,
         content: kind === "large" ? "a".repeat(20_001) : "same content",
       };
       const current =
         kind === "missing-current"
           ? null
           : {
-              ...original.current!,
+              ...original.current,
               title: kind === "unchanged" ? local.title : "Old title",
               content: kind === "large" ? "different" : local.content,
             };

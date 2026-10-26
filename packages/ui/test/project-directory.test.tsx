@@ -188,7 +188,8 @@ describe("ProjectDirectory", () => {
     expect(
       screen.getByRole("region", { name: "Unattributed sessions" }),
     ).toBeInTheDocument();
-    const link = links[0]!;
+    const link = links[0];
+    if (!link) throw new Error("Missing checkout link");
     const event = new MouseEvent("click", {
       bubbles: true,
       cancelable: true,

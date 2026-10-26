@@ -195,10 +195,12 @@ describe("WarmingPage", () => {
     ).toBeInTheDocument();
     const bucket = screen
       .getByText("Circuit breaker details")
-      .closest("details")!;
+      .closest("details");
+    if (!bucket) throw new Error("Missing details disclosure");
     const histograms = screen
       .getByText("Project histograms")
-      .closest("details")!;
+      .closest("details");
+    if (!histograms) throw new Error("Missing details disclosure");
     expect(bucket).not.toHaveAttribute("open");
     expect(histograms).not.toHaveAttribute("open");
     expect(

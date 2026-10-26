@@ -89,8 +89,10 @@ describe("EntityPage", () => {
         notes: "private notes",
       },
     });
+    const relation = data.relations[0];
+    if (!relation) throw new Error("Missing relation fixture");
     data.relations.push({
-      ...data.relations[0]!,
+      ...relation,
       id: "r-in",
       relation: "employs",
       direction: "incoming",
@@ -135,7 +137,8 @@ describe("EntityPage", () => {
     );
     const administration = screen
       .getByText("Edit entity details")
-      .closest("details")!;
+      .closest("details");
+    if (!administration) throw new Error("Missing details disclosure");
     expect(administration).not.toHaveAttribute("open");
     expect(
       screen

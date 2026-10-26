@@ -46,17 +46,19 @@ export const ProjectDirectory: Component<{
       href={
         props.sessionsMode ? sessionsHref(project.id) : projectHref(project.id)
       }
-      class="group flex min-h-11 min-w-0 items-start gap-3 px-4 py-3 outline-none hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      class="group flex min-h-11 min-w-0 items-start gap-3 px-4 py-3 outline-none lg:py-2 hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
     >
       <Icon name="folder" class="mt-0.5 shrink-0 text-accent" />
-      <div class="min-w-0 flex-1">
-        <div class="text-sm font-semibold text-heading [overflow-wrap:anywhere]">
-          {project.name || project.path}
+      <div class="min-w-0 flex-1 lg:flex lg:items-center lg:gap-6">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-semibold text-heading [overflow-wrap:anywhere]">
+            {project.name || project.path}
+          </div>
+          <div class="mt-1 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
+            {project.path}
+          </div>
         </div>
-        <div class="mt-1 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
-          {project.path}
-        </div>
-        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted lg:mt-0 lg:w-52 lg:shrink-0 lg:flex-col lg:items-start">
           <span>
             {`${project.knowledge_count} ${project.knowledge_count === 1 ? "entry" : "entries"}`}{" "}
             · {pluralize(project.session_count, "session")}
@@ -158,6 +160,7 @@ export const ProjectDirectory: Component<{
                   <Button
                     variant="outline"
                     size="sm"
+                    class="h-11 md:h-9"
                     onClick={() => setFilter("")}
                   >
                     Clear project filter

@@ -163,11 +163,55 @@ test.describe("mobile list (375x812)", () => {
     const box = await row
       .getByTitle("Refactor the sync outbox pruning", { exact: true })
       .boundingBox();
-    expect(box).not.toBeNull();
-    expect(box!.x).toBeGreaterThanOrEqual(0);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    if (!box) throw new Error("Missing session title bounds");
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(375);
     await expect(
       page.getByRole("searchbox", { name: "Search sessions" }),
     ).toBeVisible();
   });
 });
+
+for (const width of [320, 390]) {
+  test(`session search has mobile targets and preserves trimmed query/reset at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const projectId = await openSessions(
+      page,
+      "?q=diacritics&cursor=old-cursor",
+    );
+    const search = page.getByRole("searchbox", { name: "Search sessions" });
+    const submit = page
+      .getByRole("search")
+      .getByRole("button", { name: "Search", exact: true });
+    for (const target of [search, submit]) {
+      await expect(target).toBeVisible();
+      const box = await target.boundingBox();
+      if (!box) throw new Error("Missing session search target");
+      expect.soft(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+    }
+    await search.fill("  outbox  ");
+    await submit.click();
+    await expect(page).toHaveURL(`/ui/projects/${projectId}/sessions?q=outbox`);
+    await expect(
+      page.getByRole("link", { name: /Refactor the sync outbox pruning/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /Investigate FTS tokenizer/ }),
+    ).toHaveCount(0);
+    await search.fill("   ");
+    await search.press("Enter");
+    await expect(page).toHaveURL(`/ui/projects/${projectId}/sessions`);
+    await expect(
+      page.getByRole("link", { name: /Investigate FTS tokenizer/ }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

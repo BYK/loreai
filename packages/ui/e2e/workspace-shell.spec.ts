@@ -362,11 +362,11 @@ test("desktop navigation stays mini even with a previously expanded preference",
   await expect(rail.getByTestId("logo").locator(":scope > span")).toHaveClass(
     /sr-only/,
   );
-  expect((await rail.boundingBox())!.width).toBe(60);
+  expect((await rail.boundingBox())?.width).toBe(60);
   await expect(page.getByTestId("navigation-compact-toggle")).toHaveCount(0);
   await expect(rail.getByTestId("folk-status")).toBeVisible();
   await page.reload();
-  expect((await rail.boundingBox())!.width).toBe(60);
+  expect((await rail.boundingBox())?.width).toBe(60);
   await expect(rail.getByTestId("rail-projects")).toHaveText("");
   await expectMainAfterNavigation(page);
 });

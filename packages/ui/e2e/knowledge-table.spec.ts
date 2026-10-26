@@ -98,11 +98,21 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/sessions`);
-    await page
-      .getByRole("link")
-      .filter({ hasText: /messages/ })
-      .first()
-      .click();
+    const title = page.getByRole("link", {
+      name: /Refactor the sync outbox pruning/,
+    });
+    await expect(title).toHaveAttribute(
+      "href",
+      `/ui/projects/${projectId}/sessions/e2e-session-sqlite`,
+    );
+    const processing = title.locator("..").locator("details");
+    await expect(processing).not.toHaveAttribute("open");
+    await expect(
+      processing.getByText("Processing details", { exact: true }),
+    ).toBeVisible();
+    await expect(title.locator("summary, button, details")).toHaveCount(0);
+    await expect(title).not.toContainText(/messages|distilled/);
+    await title.click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/sessions/[^/]+$`),
     );
