@@ -199,11 +199,14 @@ test.describe("session reader", () => {
     const panel = page.getByTestId("selection-panel");
     await expect(panel).toBeVisible();
     await expect(page.getByTestId("selection-quote")).toContainText(PASSAGE);
+    await expect(panel.getByTestId("copy-with-source")).toBeEnabled();
+    await expect(panel.getByTestId("copy-link")).toBeEnabled();
+    await expect(panel.getByTestId("selection-clear")).toBeEnabled();
     for (const label of FUTURE_ACTIONS) {
       const button = panel.getByRole("button", {
         name: new RegExp(`^${label}`),
       });
-      await expect(button).toBeDisabled();
+      await expect(button).toHaveCount(0);
     }
     await expect(page).toHaveURL(
       /[?&]a=1(~|%7E)m\.lore_tm_v1_[^~%]+(~|%7E)0(~|%7E)\d+(~|%7E)\d+(~|%7E)[0-9a-z]+/,

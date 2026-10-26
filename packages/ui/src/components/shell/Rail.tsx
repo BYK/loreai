@@ -23,10 +23,12 @@ import { FolkStatus } from "./FolkStatus";
 import { SECONDARY_LINKS, workspacePath } from "./navigation";
 
 /** Stable destinations: clicking an icon always opens its page, never toggles another pane. */
-export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
-  props,
-) => {
+export const Rail: Component<{
+  projectId?: string;
+  expanded?: boolean;
+}> = (props) => {
   const location = useLocation();
+  const labeled = () => props.expanded;
   const path = () => workspacePath(location.pathname);
   const primary = () => {
     if (path().includes("/knowledge")) return "Knowledge";
@@ -47,8 +49,31 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
     id: string,
     active: () => boolean,
     scope: string,
-  ) =>
-    props.expanded ? (
+  ) => (
+    <Show
+      when={labeled()}
+      fallback={
+        <Tooltip>
+          <TooltipTrigger
+            as={NavigationLink}
+            href={href}
+            aria-label={label}
+            data-testid={id}
+            current={active()}
+            class={cn(
+              "rail-action",
+              active() && "bg-accent-soft text-accent-soft-text",
+            )}
+          >
+            <Icon name={icon} class="size-[18px]" />
+          </TooltipTrigger>
+          <TooltipContent>
+            <span class="font-medium">{label}</span>
+            <span class="ml-2 text-muted">{scope}</span>
+          </TooltipContent>
+        </Tooltip>
+      }
+    >
       <NavigationLink
         href={href}
         aria-label={label}
@@ -60,48 +85,32 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
         )}
       >
         <Icon name={icon} class="size-[18px]" />
-        <span>{label}</span>
+        <span class="min-w-0">{label}</span>
       </NavigationLink>
-    ) : (
-      <Tooltip>
-        <TooltipTrigger
-          as={NavigationLink}
-          href={href}
+    </Show>
+  );
+  const groupLabel = (label: string) => (
+    <Show
+      when={labeled()}
+      fallback={
+        <div
+          class="my-1 h-px min-h-px w-5 bg-line"
+          role="separator"
           aria-label={label}
-          data-testid={id}
-          current={active()}
-          class={cn(
-            "rail-action",
-            active() && "bg-accent-soft text-accent-soft-text",
-          )}
-        >
-          <Icon name={icon} class="size-[18px]" />
-        </TooltipTrigger>
-        <TooltipContent>
-          <span class="font-medium">{label}</span>
-          <span class="ml-2 text-muted">{scope}</span>
-        </TooltipContent>
-      </Tooltip>
-    );
-  const groupLabel = (label: string) =>
-    props.expanded ? (
+        />
+      }
+    >
       <div class="mt-4 px-3 pb-1 text-xs font-medium text-muted">{label}</div>
-    ) : (
-      <div
-        class="my-1 h-px min-h-px w-5 bg-line"
-        role="separator"
-        aria-label={label}
-      />
-    );
+    </Show>
+  );
   return (
     <nav
       aria-label="Primary navigation"
       data-testid={props.expanded ? "mobile-navigation" : "icon-rail"}
       class={cn(
         "flex h-full min-h-0 flex-col bg-nav py-2",
-        props.expanded
-          ? "items-stretch px-3"
-          : "items-center border-r border-line",
+        !props.expanded && "border-r border-line",
+        labeled() ? "items-stretch px-3" : "items-center border-r border-line",
       )}
     >
       <Show when={!props.expanded}>
@@ -121,7 +130,7 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
         data-testid="rail-links"
         class={cn(
           "flex min-h-0 w-full flex-1 flex-col gap-1 overflow-y-auto py-1",
-          !props.expanded && "items-center",
+          !labeled() && "items-center",
         )}
       >
         {item(
@@ -210,7 +219,7 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
       <div
         class={cn(
           "flex shrink-0 items-center gap-2 border-t border-line pt-2",
-          props.expanded ? "flex-col items-stretch" : "flex-col gap-1",
+          labeled() ? "flex-col items-stretch" : "flex-col gap-1",
         )}
       >
         <Tooltip>
@@ -220,13 +229,13 @@ export const Rail: Component<{ projectId?: string; expanded?: boolean }> = (
             aria-label="Gateway connection"
             class={cn(
               "flex items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              props.expanded
+              labeled()
                 ? "min-h-7 justify-start gap-2 px-2"
                 : "size-8 justify-center",
             )}
           >
             <ConnectionStatus compact />
-            <Show when={props.expanded}>
+            <Show when={labeled()}>
               <span class="text-[11px] text-muted">Gateway connection</span>
             </Show>
           </TooltipTrigger>

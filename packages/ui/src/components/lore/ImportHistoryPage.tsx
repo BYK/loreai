@@ -12,7 +12,7 @@ import { formatWhen, pluralize } from "~/lib/format";
 import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
 import { importsHref } from "~/lib/href";
-import { Button } from "~/components/ui/button";
+import { PaginationControls } from "./PaginationControls";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
 
@@ -77,7 +77,10 @@ export const ImportHistoryPage: Component<{
         </Match>
         <Match when={rows()?.length === 0}>
           <StateCard kind="empty" title="No imports">
-            No conversation imports recorded for this project.
+            No conversation imports recorded for this project. From this
+            project’s directory, run `lore import` to extract knowledge from
+            supported local agent conversations. Use `lore import --help` to see
+            sources and options.
           </StateCard>
         </Match>
         <Match when={rows()}>
@@ -119,24 +122,14 @@ export const ImportHistoryPage: Component<{
                   </tbody>
                 </table>
               </div>
-              <div class="mt-3 flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={history().length === 0}
-                  onClick={goPrev}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!nextCursor()}
-                  onClick={goNext}
-                >
-                  Next
-                </Button>
-              </div>
+              <PaginationControls
+                label="Import history pagination"
+                class="mt-3"
+                onPrevious={goPrev}
+                previousDisabled={history().length === 0}
+                onNext={goNext}
+                nextDisabled={!nextCursor()}
+              />
             </>
           )}
         </Match>

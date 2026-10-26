@@ -4,7 +4,13 @@ import {
   createMemoryHistory,
   useLocation,
 } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
@@ -57,6 +63,23 @@ function mount(data = [entry], query: KnowledgeQuery = defaultQuery) {
   ));
 }
 
+it("groups cursor controls in named navigation without inventing a previous page", () => {
+  mount([entry], { ...defaultQuery, cursor: "direct-link-without-history" });
+  const navigation = screen.getByRole("navigation", {
+    name: "Knowledge pagination",
+  });
+  const first = within(navigation).getByRole("button", { name: "First page" });
+  expect(first).toHaveTextContent("First");
+  expect(first.querySelector("svg")).not.toBeNull();
+  expect(
+    within(navigation).queryByRole("button", { name: "Previous page" }),
+  ).toBeNull();
+  const next = within(navigation).getByRole("button", { name: "Next page" });
+  expect(next).toHaveTextContent("Next");
+  expect(next.querySelector("svg")).not.toBeNull();
+  expect(next).toBeDisabled();
+});
+
 function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
   const history = createMemoryHistory();
   history.set({
@@ -86,6 +109,7 @@ function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
             <>
               <KnowledgeTable projectId="p-1" query={query()} page={page} />
               <output data-testid="route-search">{location.search}</output>
+              <output data-testid="route-path">{location.pathname}</output>
             </>
           );
         }}
@@ -96,6 +120,88 @@ function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
 }
 
 describe("KnowledgeTable", () => {
+  it("responsive sort controls preserve filters and stacked directions while resetting pagination", async () => {
+    mountRoutedTable({
+      ...defaultQuery,
+      q: "sqlite",
+      category: "gotcha",
+      scope: "project",
+      cursor: "next",
+      sort: [
+        { field: "title", dir: "desc" },
+        { field: "created_at", dir: "asc" },
+        { field: "confidence", dir: "asc" },
+      ],
+    });
+    const sorting = within(
+      screen.getByRole("group", { name: "Additional knowledge sorting" }),
+    );
+    fireEvent.click(
+      sorting.getByRole("button", { name: /Sort by Confidence/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=confidence%3Adesc%2Ctitle%3Adesc%2Ccreated_at%3Aasc",
+      ),
+    );
+    fireEvent.click(
+      sorting.getByRole("button", { name: /Sort by Confidence/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=confidence%3Aasc%2Ctitle%3Adesc%2Ccreated_at%3Aasc",
+      ),
+    );
+    fireEvent.click(sorting.getByRole("button", { name: /Sort by Updated/ }));
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(
+        "?q=sqlite&category=gotcha&scope=project&sort=updated_at%3Adesc%2Cconfidence%3Aasc%2Ctitle%3Adesc",
+      ),
+    );
+    expect(screen.getByTestId("route-path")).toHaveTextContent(
+      "/projects/p-1/knowledge",
+    );
+    expect(screen.getByRole("link", { name: entry.title })).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/k-1?q=sqlite&category=gotcha&scope=project&sort=updated_at%3Adesc%2Cconfidence%3Aasc%2Ctitle%3Adesc",
+    );
+  });
+
+  it("offers real entry links and leaves modified clicks to the browser", async () => {
+    mountRoutedTable({ ...defaultQuery, q: "sqlite" });
+    const link = screen.getByRole("link", { name: entry.title });
+    expect(link).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/k-1?q=sqlite",
+    );
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      button: 0,
+    });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(false);
+    expect(screen.getByTestId("route-path")).toHaveTextContent(
+      "/projects/p-1/knowledge",
+    );
+    fireEvent.click(link);
+    await waitFor(() =>
+      expect(screen.getByTestId("route-path")).toHaveTextContent(
+        "/projects/p-1/knowledge/k-1",
+      ),
+    );
+  });
+
+  it("keeps multiline entry content available in its reading preview", () => {
+    mount([
+      { ...entry, content: "First line.\nSecond line with useful context." },
+    ]);
+    expect(
+      screen.getByText("First line. Second line with useful context."),
+    ).toBeInTheDocument();
+  });
+
   it("renders server-provided order and escapes entry text", () => {
     mount();
     expect(screen.getByText("<img onerror><script>")).toBeInTheDocument();
@@ -118,10 +224,10 @@ describe("KnowledgeTable", () => {
     mount();
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Knowledge search" }),
+      screen.getByRole("textbox", { name: "Filter this list" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 1, descending",
       }),
     ).toBeInTheDocument();
@@ -136,7 +242,9 @@ describe("KnowledgeTable", () => {
       button: 0,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("option", { name: /^project$/ }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: /^Project-only$/ }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?scope=project",
@@ -147,7 +255,9 @@ describe("KnowledgeTable", () => {
       button: 0,
       pointerType: "mouse",
     });
-    fireEvent.click(await screen.findByRole("option", { name: /^Any scope$/ }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: /^This project$/ }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search").textContent).toBe(""),
     );
@@ -162,19 +272,19 @@ describe("KnowledgeTable", () => {
       ],
     });
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Title, level 1, ascending",
       }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Confidence, level 2, descending",
       }),
     ).toBeInTheDocument();
-    const titleHeader = screen
+    const titleHeader = within(screen.getByRole("table"))
       .getByRole("button", { name: "Sort by Title, level 1, ascending" })
       .closest("th");
-    const confidenceHeader = screen
+    const confidenceHeader = within(screen.getByRole("table"))
       .getByRole("button", {
         name: "Sort by Confidence, level 2, descending",
       })
@@ -212,8 +322,10 @@ describe("KnowledgeTable", () => {
 
   it("provides tabbable sortable column headers with a primary aria-sort", () => {
     mount();
-    const title = screen.getByRole("button", { name: "Sort by Title" });
-    const updated = screen.getByRole("button", {
+    const title = within(screen.getByRole("table")).getByRole("button", {
+      name: "Sort by Title",
+    });
+    const updated = within(screen.getByRole("table")).getByRole("button", {
       name: "Sort by Updated, level 1, descending",
     });
     expect(title).toHaveAttribute("type", "button");
@@ -260,14 +372,18 @@ describe("KnowledgeTable", () => {
 
   it("stacks, toggles, removes, and caps header sorts while clearing cursors", async () => {
     const first = mountRoutedTable({ ...defaultQuery, cursor: "next" });
-    fireEvent.click(screen.getByRole("button", { name: "Sort by Confidence" }));
+    fireEvent.click(
+      within(screen.getByRole("table")).getByRole("button", {
+        name: "Sort by Confidence",
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?sort=confidence%3Adesc%2Cupdated_at%3Adesc",
       ),
     );
     fireEvent.click(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 2, descending",
       }),
     );
@@ -277,7 +393,7 @@ describe("KnowledgeTable", () => {
       ),
     );
     fireEvent.click(
-      screen.getByRole("button", {
+      within(screen.getByRole("table")).getByRole("button", {
         name: "Sort by Updated, level 1, descending",
       }),
     );
@@ -296,9 +412,11 @@ describe("KnowledgeTable", () => {
         { field: "updated_at", dir: "asc" },
       ],
     });
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Sort by Title" })[0]!,
-    );
+    const titleSort = within(screen.getByRole("table")).getAllByRole("button", {
+      name: "Sort by Title",
+    })[0];
+    if (!titleSort) throw new Error("Missing title sort control");
+    fireEvent.click(titleSort);
     await waitFor(() =>
       expect(screen.getByTestId("route-search")).toHaveTextContent(
         "?sort=title%3Aasc%2Ccreated_at%3Adesc%2Cconfidence%3Aasc",
@@ -337,7 +455,7 @@ describe("KnowledgeTable", () => {
 
   it("keeps the search form available for cursor-reset navigation", () => {
     mount([entry], { ...defaultQuery, cursor: "next" });
-    const input = screen.getByRole("textbox", { name: "Knowledge search" });
+    const input = screen.getByRole("textbox", { name: "Filter this list" });
     expect(input).toHaveValue("");
     fireEvent.input(input, { target: { value: "sqlite" } });
     expect(input).toHaveValue("sqlite");
@@ -447,14 +565,14 @@ describe("KnowledgeTable", () => {
     expect(
       screen.getByRole("columnheader", { name: "project" }),
     ).not.toHaveAttribute("aria-sort");
-    expect(screen.getByText("Lore")).toBeInTheDocument();
-    const sharedRow = screen.getByText("No project").closest("tr");
+    expect(screen.getAllByText("Lore")[0]).toBeInTheDocument();
+    const sharedRow = screen.getAllByText("No project")[0]?.closest("tr");
     if (!sharedRow) throw new Error("Missing shared knowledge row");
     expect(sharedRow).toHaveTextContent("shared");
     expect(sharedRow).toHaveTextContent("No project");
     const crossProjectRow = screen
-      .getByText("Scratch", { exact: true })
-      .closest("tr");
+      .getAllByText("Scratch", { exact: true })[0]
+      ?.closest("tr");
     if (!crossProjectRow)
       throw new Error("Missing cross-project knowledge row");
     expect(crossProjectRow).toHaveTextContent("shared");
@@ -463,6 +581,19 @@ describe("KnowledgeTable", () => {
     if (!firstRow) throw new Error("Expected a knowledge table row");
     fireEvent.click(firstRow);
     expect(entryRoute).toHaveBeenCalledWith("k-1", query);
+    fireEvent.click(
+      within(
+        screen.getByRole("group", { name: "Additional knowledge sorting" }),
+      ).getByRole("button", { name: "Sort by Confidence" }),
+    );
+    expect(routes.list).toHaveBeenCalledWith({
+      ...query,
+      sort: [
+        { field: "confidence", dir: "desc" },
+        { field: "updated_at", dir: "desc" },
+      ],
+      cursor: null,
+    });
   });
 
   it("counts extra filters in the empty state and clears to the route default", () => {

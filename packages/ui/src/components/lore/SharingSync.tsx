@@ -8,6 +8,7 @@ import { Button } from "~/components/ui/button";
 
 /** Device sync is separate from a project's choice of what to share. */
 export const SharingSync: Component<{
+  compact?: boolean;
   status: SharingStatus;
   ready: boolean;
   busy: boolean;
@@ -114,14 +115,27 @@ export const SharingSync: Component<{
     return null;
   });
   const clipboard = createClipboard(() => setup()?.command);
+  const pendingSummary = () =>
+    folk.confirmedSync()?.pending_changes == null
+      ? "The pending-change count is unavailable."
+      : folk.confirmedSync()?.pending_changes === 0
+        ? "No local changes waiting to upload."
+        : `${folk.confirmedSync()?.pending_changes} pending changes across this device`;
   const canSync = () => props.ready && !props.busy && !setup();
   return (
     <div
       data-testid="sharing-sync"
-      class="border-t border-line bg-bg/50 px-4 py-4 sm:px-5"
+      class={
+        props.compact
+          ? "border-t border-line bg-bg/50 px-4 py-2 sm:px-5"
+          : "border-t border-line bg-bg/50 px-4 py-4 sm:px-5"
+      }
     >
       <div class="flex items-start gap-3">
-        <span class="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-soft text-muted">
+        <span
+          hidden={props.compact}
+          class="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-soft text-muted"
+        >
           <Icon
             name={setup() ? "lock" : "refresh"}
             class={folk.syncing() ? "motion-safe:animate-spin" : ""}
@@ -131,9 +145,17 @@ export const SharingSync: Component<{
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 class="text-sm font-medium">
-                {setup()?.title ?? "Background sync is enabled"}
+                {setup()?.title ??
+                  (folk.syncing()
+                    ? "Syncing this device…"
+                    : props.compact
+                      ? pendingSummary()
+                      : "Background sync configured")}
               </h3>
-              <p class="mt-1 max-w-lg text-xs leading-relaxed text-muted">
+              <p
+                hidden={props.compact}
+                class="mt-1 max-w-lg text-xs leading-relaxed text-muted"
+              >
                 {setup()?.detail ??
                   "Automatic syncing is enabled for this device. Use Sync now to check for changes and view the result."}
               </p>
@@ -207,14 +229,8 @@ export const SharingSync: Component<{
               </p>
             </Show>
           </Show>
-          <Show when={!setup()}>
-            <p class="mt-2 text-xs text-muted">
-              {folk.confirmedSync()?.pending_changes == null
-                ? "The pending-change count is unavailable."
-                : folk.confirmedSync()?.pending_changes === 0
-                  ? "No local changes waiting to upload."
-                  : `${folk.confirmedSync()?.pending_changes} pending changes across this device`}
-            </p>
+          <Show when={!setup() && !props.compact}>
+            <p class="mt-2 text-xs text-muted">{pendingSummary()}</p>
           </Show>
           <Show when={folk.syncReceipt()}>
             <p

@@ -3,11 +3,12 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A, useSearchParams } from "@solidjs/router";
 import { Button } from "~/components/ui/button";
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
-import { sessionHref, sessionsHref } from "~/lib/href";
+import { importsHref, sessionHref, sessionsHref } from "~/lib/href";
 import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 
 /** Reader-local session browsing preserves the selected transcript and anchor. */
 export const SessionContextList: Component<{
@@ -86,7 +87,36 @@ export const SessionContextList: Component<{
             kind="empty"
             title={q() ? "No matching sessions" : "No captured sessions"}
             compact
-          />
+          >
+            <Show
+              when={q()}
+              fallback={
+                <>
+                  Run <code>lore</code> in this project to capture an agent
+                  conversation.{" "}
+                  <A
+                    class="text-accent underline"
+                    href={importsHref(props.projectId)}
+                  >
+                    View import history
+                  </A>{" "}
+                  for knowledge extracted with <code>lore import</code>.
+                </>
+              }
+            >
+              Try another session filter, or{" "}
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                class="h-11 md:h-9"
+                onClick={() => setParams({ q: undefined, cursor: undefined })}
+              >
+                Clear filter
+              </Button>
+              .
+            </Show>
+          </StateCard>
         </Match>
         <Match when={data()}>
           <For each={data()?.items}>
@@ -111,29 +141,14 @@ export const SessionContextList: Component<{
           </For>
         </Match>
       </Switch>
-      <div class="flex justify-between gap-2 p-3">
-        <Show when={cursor()}>
-          <Button
-            variant="link"
-            size="sm"
-            class="h-11 md:h-8"
-            onClick={() => setParams({ cursor: undefined })}
-          >
-            First page
-          </Button>
-        </Show>
-        <Button
-          variant="link"
-          size="sm"
-          class="h-11 md:h-8"
-          disabled={!data()?.next_cursor}
-          onClick={() =>
-            setParams({ cursor: data()?.next_cursor ?? undefined })
-          }
-        >
-          Next page
-        </Button>
-      </div>
+      <PaginationControls
+        label="Session list pagination"
+        class="p-3"
+        compact
+        onFirst={cursor() ? () => setParams({ cursor: undefined }) : undefined}
+        nextDisabled={!data()?.next_cursor}
+        onNext={() => setParams({ cursor: data()?.next_cursor ?? undefined })}
+      />
     </div>
   );
 };

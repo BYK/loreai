@@ -2,16 +2,13 @@ import type { Component } from "solid-js";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
-import type {
-  AllKnowledgeQuery,
-  KnowledgeVersion,
-  RecallScope,
-} from "~/contracts";
+import type { AllKnowledgeQuery, KnowledgeVersion } from "~/contracts";
 import {
   DEFAULT_ALL_KNOWLEDGE_QUERY,
   DEFAULT_KNOWLEDGE_QUERY,
   parseAllKnowledgeQuery,
   parseKnowledgeQuery,
+  parseRecallScope,
 } from "~/contracts";
 import {
   allKnowledgeHref,
@@ -26,6 +23,7 @@ import { formatWhen, previewOf } from "~/lib/format";
 import { ProjectDirectory } from "~/components/lore/ProjectDirectory";
 import { KnowledgeListToolbar } from "~/components/lore/KnowledgeListToolbar";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
+import { DOCUMENT_COLUMN_CLASS } from "~/components/lore/Document";
 import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
 import { KnowledgeEditor } from "~/components/lore/KnowledgeEditor";
@@ -130,8 +128,7 @@ export const Browse: Component<{
     const q = workspaceQ();
     return props.view === "workspace-search" && q ? { q, project: null } : null;
   });
-  const searchScope = () =>
-    typeof searchParams.scope === "string" ? searchParams.scope : "all";
+  const searchScope = () => parseRecallScope(searchParams.scope);
   const sessionsPage = ws.state.sessions.page(() =>
     props.view === "sessions" && activeProjectId()
       ? {
@@ -426,7 +423,14 @@ export const Browse: Component<{
                       ws.tracked(() => ws.client.getDistillation(id))
                     }
                   />
-                  <PromotionPanel knowledgeId={value().id} client={ws.client} />
+                  <div
+                    class={`${DOCUMENT_COLUMN_CLASS} pb-7 [&_button]:min-h-11 sm:[&_button]:min-h-9`}
+                  >
+                    <PromotionPanel
+                      knowledgeId={value().id}
+                      client={ws.client}
+                    />
+                  </div>
                 </>
               )}
             </Match>
@@ -453,7 +457,7 @@ export const Browse: Component<{
               <SearchResults
                 project={value()}
                 q={searchQ() ?? ""}
-                scope={searchScope() as RecallScope}
+                scope={searchScope()}
               />
             )}
           </Show>

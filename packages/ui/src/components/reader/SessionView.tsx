@@ -14,8 +14,7 @@ import { createClipboard } from "~/lib/clipboard";
  *  - `?a=` deep links resolve through `resolveAnchor`: a hash mismatch is a
  *    visible "source changed" state, an unknown block "not in loaded
  *    history" (with older pages searched up to a bound), never a guess.
- *  - Copy-with-source is live; every discussion action is a labelled,
- *    disabled `FutureAction` until APP-02.
+ *  - Copy-with-source and copy-link preserve the selected passage and anchor.
  *  - In-session search (UI-06c) scans the logical rows in time-bounded
  *    slices — mounted or not — and walks hits with a distinct mark; the
  *    coverage declaration states what the view holds (captured / partial /
@@ -46,10 +45,6 @@ import {
 } from "@tanstack/solid-virtual";
 
 import { StaleBadge } from "~/components/lore/StaleBadge";
-import {
-  FUTURE_ACTIONS,
-  FutureActionRow,
-} from "~/components/lore/FutureAction";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import type {
@@ -2128,11 +2123,6 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                   )}
                 </Show>
               </div>
-              <FutureActionRow
-                actions={FUTURE_ACTIONS}
-                primary="Ask agent"
-                class="mt-2"
-              />
             </section>
           )}
         </Show>

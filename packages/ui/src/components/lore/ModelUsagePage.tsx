@@ -91,6 +91,7 @@ export const ModelUsagePage: Component = () => {
     project?: string;
   }>();
   const [doc, setDoc] = createSignal<ModelUsageDocument>();
+  const [loadedProject, setLoadedProject] = createSignal<string>();
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<unknown>();
   const [filterText, setFilterText] = createSignal("");
@@ -101,10 +102,12 @@ export const ModelUsagePage: Component = () => {
   const load = async () => {
     setLoading(true);
     setError(undefined);
+    const requestedProject = project();
     try {
       const result = await ws.tracked(() =>
-        ws.client.getModelUsage({ project: project() }),
+        ws.client.getModelUsage({ project: requestedProject }),
       );
+      setLoadedProject(requestedProject);
       setDoc(result);
     } catch (reason) {
       setError(reason);
@@ -330,6 +333,40 @@ export const ModelUsagePage: Component = () => {
       >
         {(_data) => (
           <>
+            <Show when={error()}>
+              <StateCard
+                kind="error"
+                title="Could not refresh model usage"
+                compact
+                action={
+                  <Button
+                    size="sm"
+                    class="h-11 md:h-9"
+                    variant="outline"
+                    onClick={() => void load()}
+                  >
+                    Retry
+                  </Button>
+                }
+              >
+                Showing the last successful snapshot. {showError(error())}
+              </StateCard>
+            </Show>
+            <Show when={hasData()}>
+              <p class="mb-4 text-sm" data-testid="model-usage-scope">
+                {filteredRows().reduce((sum, row) => sum + row.weight, 0)}{" "}
+                session-days · {totals().length} models ·{" "}
+                {loadedProject()
+                  ? ws.projectById(loadedProject())?.name ||
+                    ws.projectById(loadedProject())?.path ||
+                    loadedProject()
+                  : "all projects"}
+              </p>
+              <p class="mb-4 text-xs text-muted">
+                {range().from} to {range().to}, inclusive UTC dates. A session
+                can count on multiple days and models.
+              </p>
+            </Show>
             <div class="mb-5 flex flex-wrap items-end gap-3">
               <div class="min-w-52">
                 <ResponsiveSelect
@@ -357,14 +394,14 @@ export const ModelUsagePage: Component = () => {
                         ws.projects.data()?.find((p) => p.id === value)?.path ??
                         value)
                   }
-                  triggerClass="h-9 w-52 text-xs"
+                  triggerClass="h-11 w-52 md:h-9 text-xs"
                 />
               </div>
               <label class="flex items-center gap-1.5 text-xs text-muted">
                 From
                 <input
                   type="date"
-                  class="h-9 rounded-md border border-input bg-transparent px-2 text-xs"
+                  class="h-11 rounded-md border border-input md:h-9 bg-transparent px-2 text-xs"
                   min={docRange()?.min}
                   max={docRange()?.max}
                   value={range().from}
@@ -378,7 +415,7 @@ export const ModelUsagePage: Component = () => {
                 To
                 <input
                   type="date"
-                  class="h-9 rounded-md border border-input bg-transparent px-2 text-xs"
+                  class="h-11 rounded-md border border-input md:h-9 bg-transparent px-2 text-xs"
                   min={docRange()?.min}
                   max={docRange()?.max}
                   value={range().to}
@@ -397,6 +434,7 @@ export const ModelUsagePage: Component = () => {
                   {(preset) => (
                     <Button
                       size="sm"
+                      class="h-11 md:h-9"
                       variant="outline"
                       onClick={() => applyPreset(preset.days)}
                     >
@@ -409,7 +447,7 @@ export const ModelUsagePage: Component = () => {
                 <a
                   href={exportHref()}
                   download=""
-                  class="inline-flex h-9 items-center rounded-md border border-line px-3 text-xs font-medium hover:bg-soft"
+                  class="inline-flex h-11 items-center md:h-9 rounded-md border border-line px-3 text-xs font-medium hover:bg-soft"
                   data-testid="export-link"
                 >
                   Export
@@ -437,6 +475,7 @@ export const ModelUsagePage: Component = () => {
                       <Button
                         variant="link"
                         size="sm"
+                        class="h-11 md:h-9"
                         onClick={() => applyPreset(null)}
                       >
                         Show all
@@ -451,14 +490,16 @@ export const ModelUsagePage: Component = () => {
                   endMs={toMs(range().to)}
                 />
 
-                <section class="mt-6">
+                <details class="mt-6 rounded-lg border border-line p-4 [&[open]>summary]:mb-4">
+                  <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                    Model totals
+                  </summary>
                   <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-                    <h2 class="text-lg font-semibold">Totals</h2>
                     <TextField class="w-full sm:w-64">
                       <TextFieldInput
                         aria-label="Filter models"
                         placeholder="Filter models"
-                        class="h-9 text-xs"
+                        class="h-11 text-xs md:h-9"
                         value={filterText()}
                         data-testid="model-filter"
                         onInput={(event) =>
@@ -480,6 +521,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("model")}
                               onClick={() => clickSort("model")}
                             >
@@ -493,6 +535,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("provider")}
                               onClick={() => clickSort("provider")}
                             >
@@ -506,6 +549,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("sessions")}
                               onClick={() => clickSort("sessions")}
                             >
@@ -519,6 +563,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("share")}
                               onClick={() => clickSort("share")}
                             >
@@ -532,6 +577,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("days")}
                               onClick={() => clickSort("days")}
                             >
@@ -545,6 +591,7 @@ export const ModelUsagePage: Component = () => {
                           >
                             <button
                               type="button"
+                              class="min-h-11 md:min-h-0"
                               aria-label={sortButtonLabel("last")}
                               onClick={() => clickSort("last")}
                             >
@@ -583,13 +630,10 @@ export const ModelUsagePage: Component = () => {
                       </tbody>
                     </table>
                   </div>
-                </section>
+                </details>
               </Show>
             </Show>
             <ModelTidesUpload />
-            <Show when={error() && doc()}>
-              <p class="mt-4 text-xs text-danger">{showError(error())}</p>
-            </Show>
           </>
         )}
       </Show>

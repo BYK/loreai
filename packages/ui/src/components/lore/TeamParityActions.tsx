@@ -1,5 +1,13 @@
 import type { Component } from "solid-js";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  createUniqueId,
+  For,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 
 import type {
   DomainJoinRequestList,
@@ -29,6 +37,9 @@ type Props = {
   hasTeams: boolean;
   onChanged: () => void;
   disabled?: boolean;
+  advancedDisclosure?: boolean;
+  onStatusError?: (message: string) => void;
+  onCloseAutoFocus?: (event: Event) => void;
 };
 
 function errorText(error: unknown): string {
@@ -53,9 +64,12 @@ function tokenFromInviteInput(value: string): string | null {
 
 export const TeamParityActions: Component<Props> = (props) => {
   const ws = useWorkspace();
+  const advancedControlsId = createUniqueId();
+  const [advancedOpen, setAdvancedOpen] = createSignal(false);
   let active = true;
   onCleanup(() => {
     active = false;
+    props.onStatusError?.("");
   });
   const [createOpen, setCreateOpen] = createSignal(false);
   const [createName, setCreateName] = createSignal("");
@@ -293,6 +307,12 @@ export const TeamParityActions: Component<Props> = (props) => {
     }
   };
 
+  createEffect(() => {
+    props.onStatusError?.(
+      [discoveryError(), domainError()].filter(Boolean).join(" "),
+    );
+  });
+
   const requestOrgId = () => orgIdForRequest().trim() || selectedOrg() || "";
 
   return (
@@ -400,7 +420,7 @@ export const TeamParityActions: Component<Props> = (props) => {
           >
             {discovering() ? "Searching…" : "Find contributors"}
           </Button>
-          <Show when={discoveryError()}>
+          <Show when={!props.onStatusError && discoveryError()}>
             <p class="mt-2 text-sm text-danger" role="alert">
               {discoveryError()}
             </p>
@@ -487,7 +507,21 @@ export const TeamParityActions: Component<Props> = (props) => {
         </section>
       </Show>
 
+      <Show when={props.advancedDisclosure}>
+        <Button
+          type="button"
+          variant="outline"
+          class="h-11"
+          aria-expanded={advancedOpen()}
+          aria-controls={advancedControlsId}
+          onClick={() => setAdvancedOpen(!advancedOpen())}
+        >
+          Team settings
+        </Button>
+      </Show>
       <section
+        id={advancedControlsId}
+        hidden={props.advancedDisclosure && !advancedOpen()}
         class="rounded-md border border-line bg-bg p-4"
         data-testid="organization-domains"
       >
@@ -638,7 +672,7 @@ export const TeamParityActions: Component<Props> = (props) => {
             </Button>
           </div>
         </form>
-        <Show when={domainError()}>
+        <Show when={!props.onStatusError && domainError()}>
           <p class="mt-2 text-sm text-danger" role="alert">
             {domainError()}
           </p>
@@ -646,7 +680,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </section>
 
       <Dialog open={createOpen()} onOpenChange={setCreateOpen}>
-        <DialogContent data-testid="team-create-dialog">
+        <DialogContent
+          data-testid="team-create-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Create a team</DialogTitle>
             <DialogDescription>
@@ -690,7 +727,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </Dialog>
 
       <Dialog open={joinOpen()} onOpenChange={closeJoinDialog}>
-        <DialogContent data-testid="team-join-dialog">
+        <DialogContent
+          data-testid="team-join-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Join a team</DialogTitle>
             <DialogDescription>
@@ -730,7 +770,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </Dialog>
 
       <Dialog open={addOpen()} onOpenChange={setAddOpen}>
-        <DialogContent data-testid="team-add-by-id-dialog">
+        <DialogContent
+          data-testid="team-add-by-id-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Add by account ID</DialogTitle>
             <DialogDescription>

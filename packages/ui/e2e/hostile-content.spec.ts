@@ -101,7 +101,20 @@ test.describe("hostile content stays inert", () => {
     await assertSafe(page);
 
     await page.goto(`/ui/projects/${project.id}/sessions`);
-    await expect(page.getByText(session.session_id)).toBeVisible();
+    const sessionLink = page.locator(
+      `a[href$="/sessions/${encodeURIComponent(session.session_id)}"]`,
+    );
+    await expect(sessionLink).toBeVisible();
+    const processing = sessionLink.locator("..").locator("details");
+    await expect(processing).not.toHaveAttribute("open");
+    await expect(
+      processing.getByText(session.session_id, { exact: true }),
+    ).toBeHidden();
+    await assertSafe(page, false);
+    await processing.locator("summary").click();
+    await expect(
+      processing.getByText(session.session_id, { exact: true }),
+    ).toBeVisible();
     await assertSafe(page, false);
 
     await page.goto(
@@ -127,11 +140,27 @@ test.describe("hostile content stays inert", () => {
     });
     const { project, entry } = await hostileFixtures(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
+    const source = page
+      .locator("summary")
+      .filter({ hasText: "Source & history" });
+    await expect(source.locator("..")).not.toHaveAttribute("open");
+    const history = page.getByTestId("version-history");
+    await expect(history).toBeHidden();
+    await assertSafe(page);
+    await source.click();
+    await expect(history).toBeVisible();
+    await expect(history.locator("details").first()).not.toHaveAttribute(
+      "open",
+    );
     await page
       .getByTestId("version-history")
       .locator("summary")
       .first()
       .click();
+    await expect(history.getByTestId("version-content").first()).toBeVisible();
+    await expect(history.getByTestId("version-content").first()).toContainText(
+      PAYLOAD,
+    );
     await expect(page.getByTestId("version-history")).toContainText(PAYLOAD);
     await assertSafe(page);
     expect(dialogs).toEqual([]);

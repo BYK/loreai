@@ -90,7 +90,7 @@ describe("ImportHistoryPage", () => {
     );
     expect(await screen.findByText("No imports")).toBeInTheDocument();
     expect(
-      screen.getByText("No conversation imports recorded for this project."),
+      screen.getByText(/No conversation imports recorded for this project./),
     ).toBeInTheDocument();
   });
 
@@ -133,11 +133,11 @@ describe("ImportHistoryPage", () => {
     mount(client);
     expect(await screen.findByText("s-1")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByText("s-2")).toBeInTheDocument();
     expect(calls.at(-1)?.page).toBe("cur-2");
 
-    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    fireEvent.click(screen.getByRole("button", { name: "Previous page" }));
     expect(await screen.findByText("s-1")).toBeInTheDocument();
   });
 

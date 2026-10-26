@@ -1,14 +1,28 @@
-import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { SessionSummary } from "~/contracts";
-import { formatWhen } from "~/lib/format";
-import { sessionHref, sessionsHref } from "~/lib/href";
+import { formatFullDate, formatWhen } from "~/lib/format";
+import { importsHref, sessionHref, sessionsHref } from "~/lib/href";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 import { errorStateFor } from "./ErrorState";
 import { SessionIdChip } from "./SessionIdChip";
 import { SessionSearchBox } from "./SessionSearchBox";
+
+const titleSourceLabels = {
+  explicit: "explicit title",
+  first_message: "first message",
+  distillation: "from summary",
+  id: "session ID",
+} satisfies Record<SessionSummary["title_source"], string>;
+
+function recordedDateTime(value: number): string | undefined {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime())
+    ? date.toISOString()
+    : undefined;
+}
 
 export const SessionList: Component<{
   projectId: string;
@@ -58,7 +72,16 @@ export const SessionList: Component<{
         </Match>
         <Match when={data()?.items.length === 0}>
           <StateCard kind="empty" title="No captured sessions">
-            Run an agent through <code>lore</code> to capture history.
+            Run an agent through <code>lore</code> in this project to capture
+            history. To extract knowledge from prior local conversations, run{" "}
+            <code>lore import</code> and{" "}
+            <A
+              class="text-accent underline"
+              href={importsHref(props.projectId)}
+            >
+              view import history
+            </A>
+            .
           </StateCard>
         </Match>
         <Match when={data()}>
@@ -72,20 +95,19 @@ export const SessionList: Component<{
           </Show>
           <div class="divide-y divide-line">
             {(data()?.items ?? []).map((session) => (
-              <A
-                class="block py-3 hover:bg-soft"
-                href={sessionHref(props.projectId, session.session_id)}
-              >
-                <Show
-                  when={session.title_source !== "id"}
-                  fallback={<SessionIdChip id={session.session_id} />}
+              <div class="min-w-0 py-3">
+                <A
+                  class="block min-h-11 min-w-0 rounded-sm px-2 py-2 outline-none hover:bg-soft focus-visible:ring-2 focus-visible:ring-ring"
+                  href={sessionHref(props.projectId, session.session_id)}
                 >
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex min-w-0 flex-wrap items-start gap-1.5">
                     <div
-                      class="truncate font-medium text-sm"
+                      class="min-w-0 font-medium text-sm [overflow-wrap:anywhere]"
                       title={session.title}
                     >
-                      {session.title}
+                      {session.title_source === "id" || !session.title.trim()
+                        ? "Untitled session"
+                        : session.title}
                     </div>
                     <Show when={session.match === "fuzzy"}>
                       <span
@@ -97,50 +119,59 @@ export const SessionList: Component<{
                       </span>
                     </Show>
                   </div>
-                  <div class="mt-1 flex items-center gap-2">
-                    <SessionIdChip id={session.session_id} />
-                    <Show when={session.title_source === "distillation"}>
-                      <span class="text-[11px] text-muted">from summary</span>
-                    </Show>
+                  <div class="mt-1 text-xs text-muted">
+                    Last message {formatWhen(session.last_message_at)}
                   </div>
-                </Show>
-                <div class="mt-1 text-xs text-muted">
-                  {session.message_count} messages · {session.distilled_count}{" "}
-                  distilled · {session.undistilled_count} undistilled ·{" "}
-                  {formatWhen(session.first_message_at)} –{" "}
-                  {formatWhen(session.last_message_at)}
-                </div>
-              </A>
+                </A>
+                <details class="mt-1 min-w-0 text-xs text-muted">
+                  <summary class="min-h-11 cursor-pointer rounded-sm px-2 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0 sm:py-2">
+                    Processing details
+                  </summary>
+                  <div class="space-y-2 px-2 pb-2 [overflow-wrap:anywhere]">
+                    <SessionIdChip id={session.session_id} />
+                    <div>
+                      Title source: {titleSourceLabels[session.title_source]}
+                    </div>
+                    <div>
+                      {session.message_count} messages ·{" "}
+                      {session.distilled_count} distilled ·{" "}
+                      {session.undistilled_count} undistilled
+                    </div>
+                    <div>
+                      Recorded range:{" "}
+                      <time
+                        dateTime={recordedDateTime(session.first_message_at)}
+                      >
+                        {formatFullDate(session.first_message_at)}
+                      </time>{" "}
+                      –{" "}
+                      <time
+                        dateTime={recordedDateTime(session.last_message_at)}
+                      >
+                        {formatFullDate(session.last_message_at)}
+                      </time>
+                    </div>
+                  </div>
+                </details>
+              </div>
             ))}
           </div>
         </Match>
       </Switch>
-      <div class="mt-4 flex justify-between text-xs">
-        <Show when={props.cursor}>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            class="h-auto px-0 py-0 text-xs underline"
-            onClick={() => navigate(sessionsHref(props.projectId, null, q()))}
-          >
-            First page
-          </Button>
-        </Show>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          disabled={!data()?.next_cursor}
-          class="h-auto px-0 py-0 text-xs underline"
-          onClick={() => {
-            const next = data()?.next_cursor;
-            if (next) navigate(sessionsHref(props.projectId, next, q()));
-          }}
-        >
-          Next page
-        </Button>
-      </div>
+      <PaginationControls
+        label="Sessions pagination"
+        class="mt-4"
+        onFirst={
+          props.cursor
+            ? () => navigate(sessionsHref(props.projectId, null, q()))
+            : undefined
+        }
+        nextDisabled={!data()?.next_cursor}
+        onNext={() => {
+          const next = data()?.next_cursor;
+          if (next) navigate(sessionsHref(props.projectId, next, q()));
+        }}
+      />
     </div>
   );
 };

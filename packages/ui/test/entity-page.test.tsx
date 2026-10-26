@@ -1,4 +1,4 @@
-import { MemoryRouter, Route } from "@solidjs/router";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
@@ -50,9 +50,11 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
   } as unknown as ApiClient;
 }
 
-function mount(client: ApiClient) {
+function mount(client: ApiClient, base = "") {
+  const history = createMemoryHistory();
+  history.set({ value: `${base}/entities/e-1` });
   return render(() => (
-    <MemoryRouter>
+    <MemoryRouter history={history} base={base}>
       <Route
         path="*"
         component={() => (
@@ -78,6 +80,72 @@ describe("EntityPage", () => {
     expect(
       screen.getByRole("link", { name: "Built the analytical engine" }),
     ).toHaveAttribute("href", "/knowledge/k-1");
+  });
+
+  it("prioritizes recorded context and evidence, links accurate relation directions under /ui", async () => {
+    const data = detail({
+      metadata: {
+        description: "Recorded engine collaborator",
+        notes: "private notes",
+      },
+    });
+    const relation = data.relations[0];
+    if (!relation) throw new Error("Missing relation fixture");
+    data.relations.push({
+      ...relation,
+      id: "r-in",
+      relation: "employs",
+      direction: "incoming",
+      other_id: "org/space ?",
+      other_name: "Engine Company",
+      other_type: "org",
+    });
+    data.knowledge = [
+      {
+        id: "global/a ?",
+        title: "Workspace evidence",
+        category: "decision",
+        project_id: null,
+      },
+      {
+        id: "project/a ?",
+        title: "Project evidence",
+        category: "pattern",
+        project_id: "p/a ?",
+      },
+    ];
+    mount(clientWith({ getEntity: async () => data }), "/ui");
+    expect(
+      await screen.findByText("Recorded engine collaborator"),
+    ).toBeInTheDocument();
+    const incoming = screen.getByRole("link", { name: "Engine Company" });
+    expect(incoming).toHaveAttribute("href", "/ui/entities/org%2Fspace%20%3F");
+    expect(incoming.closest("li")).toHaveTextContent(
+      "Engine Company org employs → Ada Lovelace",
+    );
+    expect(
+      screen.getByRole("link", { name: "Charles Babbage" }).closest("li"),
+    ).toHaveTextContent("Ada Lovelace colleague → Charles Babbage person");
+    expect(
+      screen.getByRole("link", { name: "Workspace evidence" }),
+    ).toHaveAttribute("href", "/ui/knowledge/global%2Fa%20%3F");
+    expect(
+      screen.getByRole("link", { name: "Project evidence" }),
+    ).toHaveAttribute(
+      "href",
+      "/ui/projects/p%2Fa%20%3F/knowledge/project%2Fa%20%3F",
+    );
+    const administration = screen
+      .getByText("Edit entity details")
+      .closest("details");
+    if (!administration) throw new Error("Missing details disclosure");
+    expect(administration).not.toHaveAttribute("open");
+    expect(
+      screen
+        .getByTestId("entity-knowledge")
+        .compareDocumentPosition(administration) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("shows the not-found state for an unknown id", async () => {

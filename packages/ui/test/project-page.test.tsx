@@ -23,6 +23,7 @@ const project: ProjectSummary = {
 const client = {
   listProjects: async () => [project],
   listProjectSessionsPage: async () => ({ items: [], next_cursor: null }),
+  listProjectKnowledgePage: async () => ({ items: [], next_cursor: null }),
   getProjectSharing: async () => ({
     linked: false,
     team: null,
@@ -68,6 +69,71 @@ const linkedAuto: SharingStatus = {
 };
 
 describe("ProjectPage", () => {
+  it("bounds recent knowledge previews to the first recorded line", async () => {
+    const { default: entries } = await import("./fixtures/knowledge-list.json");
+    const entry = entries[0];
+    if (!entry) throw new Error("Missing knowledge fixture");
+    mountProject({
+      ...client,
+      listProjectKnowledgePage: async () => ({
+        items: [
+          {
+            ...entry,
+            id: "long-preview",
+            title: "Bounded preview",
+            content: "A".repeat(200) + "\nHidden second line",
+          },
+        ],
+        next_cursor: null,
+      }),
+    });
+    const link = await screen.findByRole("link", { name: /Bounded preview/ });
+    expect(link).toHaveTextContent("A".repeat(119) + "…");
+    expect(link.textContent).not.toContain("A".repeat(120));
+    expect(link.textContent).not.toContain("Hidden second line");
+    expect(link).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/long-preview",
+    );
+  });
+  it("shows a memory summary and up to five recent knowledge entries", async () => {
+    const { default: entries } = await import("./fixtures/knowledge-list.json");
+    const entry = entries[0];
+    if (!entry) throw new Error("Missing knowledge fixture");
+    const listProjectKnowledgePage = async () => ({
+      items: Array.from({ length: 6 }, (_, i) => ({
+        ...entry,
+        id: `entry-${i}`,
+        title: `Recent entry ${i}`,
+        project_id: project.id,
+      })),
+      next_cursor: null,
+    });
+    mountProject({
+      ...client,
+      listProjectKnowledgePage,
+    });
+    expect(screen.getByText("Memory summary")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("link", { name: /Recent entry 0/ }),
+    ).toHaveAttribute("href", "/projects/p-1/knowledge/entry-0");
+    expect(screen.queryByRole("link", { name: /Recent entry 5/ })).toBeNull();
+    expect(screen.queryByText(/health warnings/)).toBeNull();
+  });
+
+  it("reports a failed recent-session read without claiming no captured sessions", async () => {
+    mountProject({
+      ...client,
+      listProjectSessionsPage: async () => {
+        throw new Error("gateway unavailable");
+      },
+    });
+    expect(
+      await screen.findByText("Sessions could not be loaded"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No captured sessions")).toBeNull();
+  });
+
   it("offers project-level knowledge navigation", () => {
     render(() => (
       <MemoryRouter>
@@ -117,7 +183,7 @@ describe("ProjectPage", () => {
         />
       </MemoryRouter>
     ));
-    expect(screen.getByText(/1 knowledge/)).toBeInTheDocument();
+    expect(screen.getByText(/1 knowledge entry/)).toBeInTheDocument();
   });
 
   it("shows the no-sessions health hint", () => {
@@ -233,7 +299,7 @@ describe("ProjectPage", () => {
       </MemoryRouter>
     ));
     expect(
-      screen.getByRole("textbox", { name: "Search project memory" }),
+      screen.getByRole("textbox", { name: "Search this project's memory" }),
     ).toBeInTheDocument();
   });
 
@@ -259,7 +325,9 @@ describe("ProjectPage", () => {
         pointerType: "mouse",
       },
     );
-    fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Knowledge and memory files" }),
+    );
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() =>
       expect(history.get()).toBe("/projects/p-1/search?scope=knowledge"),

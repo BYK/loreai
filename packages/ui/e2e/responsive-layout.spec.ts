@@ -116,8 +116,9 @@ for (const theme of ["light", "dark"] as const) {
           )
           .toBeLessThanOrEqual(size.client + 1);
         if (route === base || route === `${base}/search`) {
-          const input = page.getByRole("textbox", {
-            name: route === base ? "Search project memory" : "Search query",
+          const input = page.getByRole("main").getByRole("textbox", {
+            name:
+              route === base ? "Search this project's memory" : "Search query",
             exact: true,
           });
           expect

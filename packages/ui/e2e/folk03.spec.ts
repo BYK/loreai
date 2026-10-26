@@ -1,5 +1,5 @@
 import { openAccountMenu, themeColor } from "./workspace-helpers";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Locator } from "@playwright/test";
 
 async function projectByName(page: Page, name: string) {
   const response = await page.request.get("/api/v1/projects");
@@ -124,6 +124,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
 
     await expect(page.getByTestId("team-members")).toBeVisible();
     await expect(page.getByText("Former member")).not.toHaveAttribute("title");
+    await page.getByRole("link", { name: "Invitations", exact: true }).click();
     await page.getByRole("button", { name: "Create invite" }).click();
     const receipt = page.getByTestId("team-invite-receipt");
     await expect(receipt).toContainText("e2e-invite-token");
@@ -292,7 +293,19 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
       .getByTestId("conflict-card")
       .filter({ hasText: "Keep SQLite as the only store" });
     await expect(card).toBeVisible();
-    await expect(card).toContainText("Your discarded version");
+    await expect(card.getByTestId("conflict-changes")).toBeVisible();
+    await expect(
+      card.getByTestId("conflict-changes").locator("ins"),
+    ).not.toHaveCount(0);
+    const full = card.getByText("Full local and current text", { exact: true });
+    await expect(full.locator("..")).not.toHaveAttribute("open");
+    await expect(
+      card.getByText("Your discarded version", { exact: true }),
+    ).not.toBeVisible();
+    await full.click();
+    await expect(
+      card.getByText("Your discarded version", { exact: true }),
+    ).toBeVisible();
     await expect(card).toContainText("Keep the local-first database.");
     await expect(card).toContainText("Current version");
     await expect(card).toContainText("Keep SQLite as the only store");
@@ -329,6 +342,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
   test("project auto-share toggle uses team review policy and keyboard input", async ({
     page,
   }) => {
+    await installSignedInTeamRoutes(page);
     const project = await projectByName(page, "sharing-e2e");
     const sharingUrl = `**/api/v1/projects/${project.id}/sharing`;
     await page.route(sharingUrl, (route) =>
@@ -377,6 +391,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
 
+    await page.getByRole("button", { name: "Manage sharing" }).click();
     const toggle = page.getByRole("switch", { name: "Share automatically" });
     await expect(toggle).toBeChecked();
     await expect(page.getByTestId("sharing-team-review")).toHaveText(
@@ -577,6 +592,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     );
     await page.goto("/ui/team");
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "New team" }).click();
     await page.getByTestId("team-create-name").fill("New Acme");
     await page.getByRole("button", { name: "Create team" }).click();
@@ -587,6 +603,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(reviewToggle).toBeChecked();
     await reviewDialog.getByRole("button", { name: "Turn off review" }).click();
     await expect(page.getByTestId("team-require-review")).not.toBeChecked();
+    await page.getByRole("link", { name: "Invitations", exact: true }).click();
     await page.getByTestId("team-offline-invite").check();
     await page.getByRole("button", { name: "Create invite" }).click();
     await expect(page.getByTestId("team-invite-receipt")).toContainText(
@@ -594,6 +611,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     );
     await page.getByRole("button", { name: "Done" }).click();
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Join a team" }).click();
     await page.getByTestId("team-invite-token").fill("join-token");
     await page.getByRole("button", { name: "Join team" }).click();
@@ -670,6 +688,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto("/ui/team");
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     const toggle = page.getByTestId("team-require-review");
     await expect(toggle).not.toBeChecked();
     await toggle.click();
@@ -722,9 +741,97 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
 
     const form = page.getByTestId("team-create-form");
     await expect(form).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Join a team" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("organization-domains")).not.toBeVisible();
+    const settings = page.getByRole("button", {
+      name: "Team settings",
+      exact: true,
+    });
+    await settings.focus();
+    await page.keyboard.press("Enter");
+    await expect(settings).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("organization-domains")).toBeVisible();
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("organization-domains")).not.toBeVisible();
+    await expect(form).toBeVisible();
     await form.getByLabel("Team name").fill("First team");
     await form.getByRole("button", { name: "Create team" }).click();
   });
+
+  for (const hasTeams of [false, true]) {
+    test(`exposes advanced status errors once with hasTeams=${hasTeams}`, async ({
+      page,
+    }) => {
+      await installSignedInTeamRoutes(page);
+      await page.route("**/api/v1/teams/team-1/review-policy", (route) =>
+        route.fulfill({ json: { policy: "required" } }),
+      );
+      if (!hasTeams) {
+        await page.route("**/api/v1/teams", (route) =>
+          route.fulfill({ json: { hosted: false, teams: [] } }),
+        );
+      }
+      await page.route("**/api/v1/orgs", (route) =>
+        route.fulfill({
+          status: 500,
+          json: {
+            type: "error",
+            error: {
+              type: "internal",
+              message: "Organization service unavailable",
+            },
+          },
+        }),
+      );
+      await page.route("**/api/v1/teams/team-1/discover", (route) =>
+        route.fulfill({
+          status: 500,
+          json: {
+            type: "error",
+            error: {
+              type: "internal",
+              message: "Contributor discovery unavailable",
+            },
+          },
+        }),
+      );
+      await page.goto("/ui/team?section=settings");
+      const alerts = page.getByRole("alert");
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toHaveCount(1);
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toBeVisible();
+      if (!hasTeams) {
+        const settings = page.getByRole("button", {
+          name: "Team settings",
+          exact: true,
+        });
+        await settings.click();
+        await expect(
+          page.getByText("Organization service unavailable", { exact: true }),
+        ).toHaveCount(1);
+        await settings.click();
+      } else {
+        await page.getByRole("button", { name: "Find contributors" }).click();
+        await expect(
+          alerts.filter({ hasText: "Contributor discovery unavailable" }),
+        ).toHaveCount(1);
+        await expect(
+          alerts.filter({ hasText: "Organization service unavailable" }),
+        ).toHaveCount(1);
+        await expect(alerts).toHaveCount(1);
+        await page.getByRole("link", { name: "Members", exact: true }).click();
+      }
+      await expect(
+        alerts.filter({ hasText: "Organization service unavailable" }),
+      ).toBeVisible();
+    });
+  }
 
   test("links and unlinks a seeded project and offers Sync now", async ({
     page,
@@ -779,11 +886,37 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
     await expect(page.getByTestId("sharing-team-picker")).toBeVisible();
+    const panel = page.getByTestId("sharing-panel");
+    const receipt = panel.getByRole("status");
+    await expect(receipt).toHaveCount(1);
+    await expect(receipt).toBeEmpty();
+    await expect(receipt).toHaveAttribute("aria-live", "polite");
+    await expect(receipt).toHaveAttribute("aria-atomic", "true");
+    const receiptElement = await receipt.elementHandle();
     await page
       .getByRole("combobox", { name: "Link to team" })
       .selectOption("team-1");
-    await page.getByRole("button", { name: "Link to team" }).click();
+    await page.getByRole("button", { name: "Link to team" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("button", { name: "Manage sharing" }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole("button", { name: "Manage sharing" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      panel.getByRole("switch", { name: "Share automatically" }),
+    ).toHaveCount(0);
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveText("Project linked to team.");
+    expect(
+      await receipt.evaluate(
+        (element, original) => element === original,
+        receiptElement,
+      ),
+    ).toBe(true);
     await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
+    await page.getByRole("button", { name: "Manage sharing" }).click();
     await page.getByRole("button", { name: "Unlink" }).click();
     await page
       .getByRole("button", { name: "Unlink project", exact: true })
@@ -791,6 +924,14 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(page.getByTestId("sharing-summary")).toContainText(
       "Not linked",
     );
+    await expect(receipt).toBeVisible();
+    await expect(receipt).toHaveText("Project unlinked.");
+    expect(
+      await receipt.evaluate(
+        (element, original) => element === original,
+        receiptElement,
+      ),
+    ).toBe(true);
     expect(linkCalls).toEqual([
       { scope_id: "team-1", expected_scope_id: null },
       { scope_id: null, expected_scope_id: "team-1" },
@@ -822,6 +963,16 @@ for (const theme of ["light", "dark"] as const) {
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/ui/team");
+      const memberRow = page.getByTestId("team-member-row").first();
+      const memberAction = memberRow.getByRole("button");
+      await expect(memberAction).toBeVisible();
+      const actionBox = await memberAction.boundingBox();
+      expect(actionBox, "member action has a visible box").not.toBeNull();
+      if (!actionBox) throw new Error("Missing member action box");
+      expect(actionBox.x).toBeGreaterThanOrEqual(0);
+      expect(actionBox.x + actionBox.width).toBeLessThanOrEqual(width);
+      if (width < 768) expect(actionBox.height).toBeGreaterThanOrEqual(44);
+      await page.goto("/ui/team?section=invitations");
       await expect(
         page.getByLabel("Invite email", { exact: true }),
       ).toBeVisible();
@@ -986,5 +1137,282 @@ for (const theme of ["light", "dark"] as const) {
         });
       }
     }
+  });
+}
+
+async function expectMobileAction(action: Locator, width: number) {
+  await expect(action).toBeVisible();
+  await action.scrollIntoViewIfNeeded();
+  const box = await action.boundingBox();
+  if (!box) throw new Error("Missing action bounds");
+  expect.soft(box.height, await action.innerText()).toBeGreaterThanOrEqual(44);
+  expect.soft(box.width, await action.innerText()).toBeGreaterThanOrEqual(44);
+  expect.soft(box.x).toBeGreaterThanOrEqual(0);
+  expect.soft(box.x + box.width).toBeLessThanOrEqual(width);
+  await expect(action).toBeInViewport();
+}
+
+for (const width of [320, 390]) {
+  test(`new team and sharing actions have mobile targets at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.goto("/ui/team");
+    const invite = page.getByRole("button", {
+      name: "Invite teammate",
+      exact: true,
+    });
+    await expectMobileAction(invite, width);
+    await invite.click();
+    await expect(page).toHaveURL(/section=invitations/);
+    const project = await projectByName(page, "lore");
+    await page.route(`**/api/v1/projects/${project.id}/sharing`, (route) =>
+      route.fulfill({
+        json: {
+          linked: true,
+          team: { id: "team-1", name: "Acme e2e" },
+          policy: {
+            effective: "manual",
+            project_override: "manual",
+            team_default: "auto",
+          },
+          auto_share: false,
+          review_required: false,
+          state: "linked",
+          detail: null,
+        },
+      }),
+    );
+    await page.goto(`/ui/projects/${project.id}`);
+    const manage = page.getByRole("button", {
+      name: "Manage sharing",
+      exact: true,
+    });
+    await expectMobileAction(manage, width);
+    await manage.click();
+    const hide = page.getByRole("button", {
+      name: "Hide sharing settings",
+      exact: true,
+    });
+    await expectMobileAction(hide, width);
+    await hide.click();
+    await expect(manage).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test(`new recovery actions have mobile targets at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    const project = await projectByName(page, "lore");
+    for (const suffix of ["knowledge", "sessions"]) {
+      await page.route(
+        `**/api/v1/projects/${project.id}/${suffix}?*`,
+        (route) =>
+          route.fulfill({
+            status: 503,
+            json: { error: "temporarily unavailable" },
+          }),
+      );
+    }
+    await page.goto(`/ui/projects/${project.id}`);
+    for (const label of ["Retry knowledge", "Retry sessions"]) {
+      await expectMobileAction(
+        page.getByRole("button", { name: label, exact: true }),
+        width,
+      );
+    }
+    await page.route("**/api/v1/entities?*", (route) =>
+      route.fulfill({ json: { entities: [], next_cursor: null, total: 0 } }),
+    );
+    await page.goto("/ui/entities?type=person");
+    const clearEntities = page.getByRole("button", {
+      name: "Clear entity filter",
+      exact: true,
+    });
+    await expectMobileAction(clearEntities, width);
+    await clearEntities.click();
+    await expect(page).toHaveURL(/\/ui\/entities$/);
+    await page.unroute(`**/api/v1/projects/${project.id}/sessions?*`);
+    await page.route(`**/api/v1/projects/${project.id}/sessions?*`, (route) =>
+      route.fulfill({ json: { items: [], next_cursor: null } }),
+    );
+    await page.goto(
+      `/ui/projects/${project.id}/sessions/e2e-reader?a=example&q=missing&cursor=old`,
+    );
+    const toggle = page.getByTestId("context-toggle");
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
+    const clearSessions = page.getByRole("button", {
+      name: "Clear filter",
+      exact: true,
+    });
+    await expectMobileAction(clearSessions, width);
+    await clearSessions.click();
+    await expect(page).toHaveURL(
+      new RegExp(`/sessions/e2e-reader\\?a=example$`),
+    );
+    await page.goto(`/ui/projects/${project.id}/search`);
+    await expectMobileAction(
+      page.getByRole("link", { name: "Browse project knowledge", exact: true }),
+      width,
+    );
+    await page.route("**/api/v1/recall?*", (route) =>
+      route.fulfill({
+        json: {
+          query: "missing",
+          scope: "all",
+          projectPath: "/tmp/lore",
+          result: "No results found for this query.",
+        },
+      }),
+    );
+    await page.goto(`/ui/projects/${project.id}/search?q=missing`);
+    await expectMobileAction(
+      page.getByRole("link", { name: "Browse project knowledge", exact: true }),
+      width,
+    );
+  });
+}
+
+for (const width of [1280, 320, 390]) {
+  test(`empty review recovery is separated and reachable at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.route("**/api/v1/promotions?*", (route) =>
+      route.fulfill({ json: { remote: "ok", requests: [], complete: true } }),
+    );
+    await page.route("**/api/v1/sync/conflicts", (route) =>
+      route.fulfill({
+        json: { available: true, complete: true, conflicts: [] },
+      }),
+    );
+    await page.route("**/api/v1/contradictions", (route) =>
+      route.fulfill({ json: { contradictions: [], total: 0 } }),
+    );
+    for (const [path, sentence] of [
+      ["promotions", "No proposals match the selected team and status."],
+      [
+        "conflicts",
+        "No replaced local versions are available in this view. Versions recorded by local sync appear here for review.",
+      ],
+      [
+        "contradictions",
+        "New pairs appear here only after the gateway has recorded a likely conflict for you to review.",
+      ],
+    ]) {
+      await page.goto(`/ui/${path}`);
+      const action = page.getByRole("link", {
+        name: "Browse knowledge",
+        exact: true,
+      });
+      if (!sentence) throw new Error("Missing empty state description");
+      const prose = page.getByText(sentence, { exact: true });
+      await expect(prose).toBeVisible();
+      const actionBox = await action.boundingBox();
+      const proseBox = await prose.boundingBox();
+      if (!actionBox || !proseBox)
+        throw new Error("Missing empty state bounds");
+      expect
+        .soft(actionBox.y)
+        .toBeGreaterThanOrEqual(proseBox.y + proseBox.height + 8);
+      if (width < 768) await expectMobileAction(action, width);
+      await expect(action).toHaveAttribute("href", "/ui/knowledge");
+    }
+    await page.route("**/api/v1/teams", (route) =>
+      route.fulfill({ json: { hosted: false, teams: [] } }),
+    );
+    await page.goto("/ui/promotions");
+    const action = page.getByRole("link", {
+      name: "Open team settings",
+      exact: true,
+    });
+    const prose = page.getByText(
+      "Join a team before reviewing proposal requests.",
+      { exact: true },
+    );
+    await expect(prose).toBeVisible();
+    const actionBox = await action.boundingBox();
+    const proseBox = await prose.boundingBox();
+    if (!actionBox || !proseBox)
+      throw new Error("Missing promotion state bounds");
+    expect
+      .soft(actionBox.y)
+      .toBeGreaterThanOrEqual(proseBox.y + proseBox.height + 8);
+    if (width < 768) await expectMobileAction(action, width);
+    await action.click();
+    await expect(page).toHaveURL(/\/ui\/team\?section=settings$/);
+  });
+}
+
+for (const width of [1280, 390, 320]) {
+  test(`responsive team table retains column semantics at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.goto("/ui/team");
+    const table = page.getByTestId("team-members");
+    await expect(table).toHaveRole("table");
+    const headers = ["Member", "Role", "Actions"];
+    for (const label of headers) {
+      // Browser role queries exclude hidden headers; responsive styling must
+      // retain all three accessible column names.
+      await expect(
+        table.getByRole("columnheader", { name: label, exact: true }),
+      ).toHaveCount(1);
+    }
+    await expect(table.getByRole("rowgroup")).toHaveCount(2);
+    await expect(table.getByRole("row")).toHaveCount(3);
+    for (const row of await table.getByTestId("team-member-row").all()) {
+      await expect(row).toHaveRole("row");
+      const cells = row.getByRole("cell");
+      await expect(cells).toHaveCount(3);
+      for (const [index, label] of headers.entries()) {
+        const header = table.getByRole("columnheader", {
+          name: label,
+          exact: true,
+        });
+        const id = await header.getAttribute("id");
+        if (!id) throw new Error("Missing team table header ID");
+        await expect(cells.nth(index)).toHaveAttribute("headers", id);
+        await expect(header).toHaveAttribute("scope", "col");
+      }
+    }
+    await expect(
+      table.getByRole("combobox", { name: "Role for Admin", exact: true }),
+    ).toHaveValue("admin");
+    await expect(
+      table.getByRole("combobox", {
+        name: "Role for Former member",
+        exact: true,
+      }),
+    ).toHaveValue("viewer");
+    // Both roles and actions remain reachable in the same DOM and handlers.
+    await expect(
+      table.getByRole("button", { name: "Leave team", exact: true }),
+    ).toBeVisible();
+    const remove = table.getByRole("button", { name: "Remove", exact: true });
+    await expect(remove).toBeVisible();
+    if (width < 768) {
+      await expectMobileAction(remove, width);
+      await expectMobileAction(
+        table.getByRole("combobox", {
+          name: "Role for Former member",
+          exact: true,
+        }),
+        width,
+      );
+    }
+    await remove.click();
+    await expect(page.getByTestId("team-remove-confirmation")).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(table.getByRole("row")).toHaveCount(3);
   });
 }

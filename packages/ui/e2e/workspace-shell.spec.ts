@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   openProjectPicker,
   setWorkspaceTheme,
@@ -7,6 +7,14 @@ import {
   expectNavigationAvailable,
   waitForOverlayMotion,
 } from "./workspace-helpers";
+
+async function expectMainAfterNavigation(page: Page) {
+  const rail = page.getByTestId("icon-rail");
+  const navBox = (await rail.isVisible()) ? await rail.boundingBox() : null;
+  const mainBox = await page.locator('main[data-pane="detail"]').boundingBox();
+  expect(mainBox).not.toBeNull();
+  expect(mainBox?.x).toBeCloseTo(navBox ? navBox.x + navBox.width : 0, 0);
+}
 
 test("project picker is reachable, searchable and returns navigation to the selected project", async ({
   page,
@@ -92,7 +100,7 @@ test("context collapse preserves the permanent rail, picker, document and deskto
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
   }
   await toggle.click();
-  const input = page.getByRole("textbox", { name: "Filter knowledge list" });
+  const input = page.getByRole("textbox", { name: "Filter this list" });
   await input.fill("SQLite");
   await input.press("Enter");
   await expect(page).toHaveURL(
@@ -235,7 +243,7 @@ test("directory and project pages use the width without a duplicate navigation p
   await expect(page.getByTestId("context-toggle")).toHaveCount(0);
   await expect(page.getByTestId("context-pane")).toBeHidden();
   await expect(main).toBeVisible();
-  expect((await main.boundingBox())!.x).toBeLessThanOrEqual(60);
+  await expectMainAfterNavigation(page);
   await page.getByTestId("project-card").first().click();
   await expect(page.getByTestId("health")).toBeVisible();
   await expect(page.getByTestId("context-toggle")).toHaveCount(0);
@@ -333,15 +341,37 @@ test("workspace tools use full-width layouts and all destinations remain reachab
     await expect(
       page.getByRole("navigation", { name: "Related pages" }),
     ).toHaveCount(0);
-    const main = (await page
-      .locator('main[data-pane="detail"]')
-      .boundingBox())!;
-    expect(main.x).toBeLessThanOrEqual(60);
+    await expectMainAfterNavigation(page);
     await expectNavigationAvailable(page);
   }
 });
 
-test("rail tooltips label every destination on hover and keyboard focus", async ({
+test("desktop navigation stays mini even with a previously expanded preference", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop mini navigation",
+  );
+  await page.addInitScript(() =>
+    localStorage.setItem("lore.ui.navigationCompact", "false"),
+  );
+  await page.goto("/ui");
+  const rail = page.getByTestId("icon-rail");
+  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  await expect(rail.getByTestId("logo").locator(":scope > span")).toHaveClass(
+    /sr-only/,
+  );
+  expect((await rail.boundingBox())?.width).toBe(60);
+  await expect(page.getByTestId("navigation-compact-toggle")).toHaveCount(0);
+  await expect(rail.getByTestId("folk-status")).toBeVisible();
+  await page.reload();
+  expect((await rail.boundingBox())?.width).toBe(60);
+  await expect(rail.getByTestId("rail-projects")).toHaveText("");
+  await expectMainAfterNavigation(page);
+});
+
+test("compact rail tooltips label every destination on hover and keyboard focus", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -392,10 +422,7 @@ test("knowledge and search pages have no duplicate section links or empty contex
     await expect(
       page.getByRole("navigation", { name: "Section navigation" }),
     ).toHaveCount(0);
-    const main = (await page
-      .locator('main[data-pane="detail"]')
-      .boundingBox())!;
-    expect(main.x).toBeLessThanOrEqual(60);
+    await expectMainAfterNavigation(page);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -498,7 +525,7 @@ test("knowledge filters combine, dismiss and clear without losing the reader or 
       .click();
   }
   await expect(
-    toolbar.getByRole("textbox", { name: "Filter knowledge list" }),
+    toolbar.getByRole("textbox", { name: "Filter this list" }),
   ).toHaveValue("");
   await expect(page).toHaveURL(
     `${readerPath}?sort=${encodeURIComponent(customSort)}`,
@@ -970,7 +997,7 @@ test("knowledge table and search scope share mobile selection sheets", async ({
   for (const [label, title, value] of [
     ["category", "Knowledge category", "decision"],
     ["project", "Filter by project", "lore"],
-    ["scope", "Knowledge scope", "project"],
+    ["scope", "Knowledge visibility", "Project-only"],
   ] as const) {
     const trigger = page.getByRole("button", {
       name: new RegExp(`^${label}\\b`),
@@ -987,7 +1014,13 @@ test("knowledge table and search scope share mobile selection sheets", async ({
     }
     await expect
       .poll(() => new URL(page.url()).searchParams.get(label))
-      .toBe(label === "project" ? project.id : value);
+      .toBe(
+        label === "project"
+          ? project.id
+          : label === "scope"
+            ? "project"
+            : value,
+      );
     expect(new URL(page.url()).searchParams.get("q")).toBe("SQLite");
     expect(new URL(page.url()).searchParams.get("sort")).toBe("title:asc");
   }
@@ -1006,7 +1039,9 @@ test("knowledge table and search scope share mobile selection sheets", async ({
   if (mobile)
     await expect(sheet).toHaveAttribute("data-select-presentation", "sheet");
   else await expect(sheet).toHaveCount(0);
-  await page.getByRole("option", { name: "knowledge", exact: true }).click();
+  await page
+    .getByRole("option", { name: "Knowledge and memory files", exact: true })
+    .click();
   expect(new URL(page.url()).searchParams.get("scope")).toBe("all");
   await page
     .getByRole("search")
@@ -1060,9 +1095,10 @@ test("workspace selectors use sheets on mobile and preserve desktop dropdowns", 
 
   await page.goto(`/ui/projects/${project.id}`);
   await page
-    .getByRole("textbox", { name: "Search project memory" })
+    .getByRole("main")
+    .getByRole("textbox", { name: "Search this project's memory" })
     .fill("SQLite");
-  await choose("Search scope", "Search scope", "knowledge");
+  await choose("Search scope", "Search scope", "Knowledge and memory files");
   await expect(page).toHaveURL(`/ui/projects/${project.id}`);
   await page
     .getByRole("search")
@@ -1106,9 +1142,7 @@ for (const section of ["knowledge", "sessions"] as const) {
       section === "sessions" ? "searchbox" : "textbox",
       {
         name:
-          section === "sessions"
-            ? "Filter session list"
-            : "Filter knowledge list",
+          section === "sessions" ? "Filter session list" : "Filter this list",
       },
     );
     await input.fill("SQLite");

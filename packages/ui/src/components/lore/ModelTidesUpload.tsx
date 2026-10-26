@@ -302,7 +302,11 @@ export const ModelTidesUpload: Component = () => {
             <Show
               when={report()}
               fallback={
-                <Button variant="outline" onClick={() => openReview("upload")}>
+                <Button
+                  class="min-h-11 md:min-h-10"
+                  variant="outline"
+                  onClick={() => openReview("upload")}
+                >
                   Review upload…
                 </Button>
               }
@@ -320,6 +324,7 @@ export const ModelTidesUpload: Component = () => {
                     </a>
                   </Show>
                   <Button
+                    class="min-h-11 md:min-h-10"
                     variant="outline"
                     disabled={Boolean(reportError())}
                     onClick={() => openReview("upload")}
@@ -327,6 +332,7 @@ export const ModelTidesUpload: Component = () => {
                     Review upload…
                   </Button>
                   <Button
+                    class="min-h-11 md:min-h-10"
                     variant="outline"
                     disabled={Boolean(reportError())}
                     onClick={() =>
@@ -336,6 +342,7 @@ export const ModelTidesUpload: Component = () => {
                     {r().published ? "Unshare" : "Share"}
                   </Button>
                   <Button
+                    class="min-h-11 md:min-h-10"
                     variant="outline"
                     disabled={Boolean(reportError())}
                     onClick={() =>
@@ -348,10 +355,18 @@ export const ModelTidesUpload: Component = () => {
               )}
             </Show>
             <Show when={report()}>
-              <Button variant="outline" onClick={() => openReview("rotate")}>
+              <Button
+                class="min-h-11 md:min-h-10"
+                variant="outline"
+                onClick={() => openReview("rotate")}
+              >
                 Rotate key
               </Button>
-              <Button variant="outline" onClick={() => openReview("delete")}>
+              <Button
+                class="min-h-11 md:min-h-10"
+                variant="outline"
+                onClick={() => openReview("delete")}
+              >
                 Delete report
               </Button>
             </Show>
