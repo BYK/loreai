@@ -8,8 +8,14 @@ import {
   parseOpenAIResponsesRequestChunks,
   STREAMING_PARSE_SPOOL_BYTES,
 } from "../src/translate/openai-responses";
-import { gatewayMessagesToLore } from "../src/temporal-adapter";
-import { loreMessagesToGateway } from "../src/pipeline";
+import {
+  gatewayMessagesToLore,
+  resolveToolResults,
+} from "../src/temporal-adapter";
+import {
+  loreMessagesToGateway,
+  removeOrphanedToolResults,
+} from "../src/pipeline";
 
 const metadata = { private_native_sentinel: "request-only" };
 const developer = (id: string, text: string) => ({
@@ -71,6 +77,105 @@ async function* chunks(body: unknown) {
 }
 
 describe("current Codex native Responses compatibility", () => {
+  test("preserves a native reasoning-only turn and context before the next user", () => {
+    const input = [
+      user("first", "First question"),
+      {
+        type: "reasoning",
+        id: "reasoning_only",
+        encrypted_content: "private-thinking",
+        summary: [],
+      },
+      developer("inline", "Updated rule"),
+      user("latest", "Continue"),
+    ];
+    const req = parseOpenAICodexRequest(build(input), {});
+    expect(wire(req).input).toEqual(input);
+    const lore = gatewayMessagesToLore(req.messages, "reasoning-context");
+    const provenance = responsesProvenanceByMessageId(req.messages, lore);
+    req.messages = loreMessagesToGateway(lore, provenance, true, true);
+    expect(wire(req).input).toEqual(input);
+    expect(JSON.stringify(lore)).not.toContain("private-thinking");
+  });
+  test.each(
+    ["function", "custom"].flatMap((kind) =>
+      ["calls", "results", "reversed results", "reasoning"].flatMap((seam) =>
+        [true, false].map((preserve) => ({ kind, seam, preserve })),
+      ),
+    ),
+  )(
+    "preserves inline context across parallel $kind $seam after semantic resolution (provenance=$preserve)",
+    ({ kind, seam, preserve }) => {
+      const call = (id: string) => ({
+        type: kind === "custom" ? "custom_tool_call" : "function_call",
+        id: `call_${id}`,
+        call_id: id,
+        name: "exec",
+        ...(kind === "custom" ? { input: `echo ${id}` } : { arguments: "{}" }),
+        status: "completed",
+      });
+      const output = (id: string) => ({
+        type:
+          kind === "custom"
+            ? "custom_tool_call_output"
+            : "function_call_output",
+        id: `output_${id}`,
+        call_id: id,
+        output: id,
+        internal_chat_message_metadata_passthrough: metadata,
+      });
+      const inline = developer("inline", "Updated rule");
+      const splitCalls = seam === "calls" || seam === "reasoning";
+      const outputIds = seam === "reversed results" ? ["b", "a"] : ["a", "b"];
+      const input = [
+        developer("initial", "Initial rule"),
+        user("u", "Run commands"),
+        call("a"),
+        ...(seam === "reasoning"
+          ? [
+              {
+                type: "reasoning",
+                id: "reasoning",
+                encrypted_content: "private-thinking",
+                summary: [],
+              },
+            ]
+          : []),
+        ...(splitCalls ? [inline] : []),
+        call("b"),
+        output(outputIds[0]),
+        ...(!splitCalls ? [inline] : []),
+        output(outputIds[1]),
+        user("latest", "Continue"),
+      ];
+      const req = parseOpenAICodexRequest(build(input), {});
+      const lore = gatewayMessagesToLore(
+        req.messages,
+        "parallel-native-session",
+      );
+      const provenance = responsesProvenanceByMessageId(req.messages, lore);
+      resolveToolResults(lore);
+      req.messages = loreMessagesToGateway(
+        lore,
+        provenance,
+        preserve,
+        true,
+        false,
+        true,
+        true,
+      );
+      removeOrphanedToolResults(req.messages);
+      const forwarded = wire(req).input as Array<Record<string, unknown>>;
+      const expected = preserve
+        ? input
+        : input.filter((item) => item.type !== "reasoning");
+      expect(
+        forwarded.filter((item) =>
+          input.some((original) => original.id === item.id),
+        ),
+      ).toEqual(expected);
+    },
+  );
   test.each([false, true])(
     "preserves native instructions and tool declarations (large=%s)",
     async (large) => {
@@ -108,6 +213,7 @@ describe("current Codex native Responses compatibility", () => {
       );
       expect(stored).not.toContain("private_native_sentinel");
       expect(stored).not.toContain("Client tools");
+      expect(stored).not.toContain("responsesSource");
     },
   );
 
@@ -362,6 +468,81 @@ describe("Codex native tool responses", () => {
 });
 
 describe("native instruction ordering properties", () => {
+  test("keeps inline context and parallel tool results in source order", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            beforeCall: fc.boolean(),
+            beforeResult: fc.boolean(),
+            custom: fc.boolean(),
+          }),
+          { minLength: 1, maxLength: 8 },
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        (tools, reverse, preserve) => {
+          const input: Array<Record<string, unknown>> = [
+            developer("initial", "Initial"),
+            user("u", "Run commands"),
+          ];
+          for (const [index, tool] of tools.entries()) {
+            if (tool.beforeCall)
+              input.push(developer(`call_rule_${index}`, `Call rule ${index}`));
+            input.push({
+              type: tool.custom ? "custom_tool_call" : "function_call",
+              id: `call_${index}`,
+              call_id: String(index),
+              name: "exec",
+              ...(tool.custom
+                ? { input: `echo ${index}` }
+                : { arguments: "{}" }),
+              status: "completed",
+            });
+          }
+          const order = tools.map((_tool, index) => index);
+          if (reverse) order.reverse();
+          for (const index of order) {
+            if (tools[index].beforeResult)
+              input.push(
+                developer(`result_rule_${index}`, `Result rule ${index}`),
+              );
+            input.push({
+              type: tools[index].custom
+                ? "custom_tool_call_output"
+                : "function_call_output",
+              id: `output_${index}`,
+              call_id: String(index),
+              output: `Output ${index}`,
+            });
+          }
+          input.push(user("latest", "Continue"));
+          const req = parseOpenAICodexRequest(build(input), {});
+          const lore = gatewayMessagesToLore(req.messages, "parallel-property");
+          const provenance = responsesProvenanceByMessageId(req.messages, lore);
+          resolveToolResults(lore);
+          req.messages = loreMessagesToGateway(
+            lore,
+            provenance,
+            preserve,
+            true,
+            false,
+            true,
+            true,
+          );
+          removeOrphanedToolResults(req.messages);
+          const forwarded = wire(req).input as Array<Record<string, unknown>>;
+          expect(
+            forwarded.filter((item) =>
+              input.some((original) => original.id === item.id),
+            ),
+          ).toEqual(input);
+        },
+      ),
+      { numRuns: 50 },
+    );
+  });
+
   test("keeps context relative to every surviving source turn", () => {
     fc.assert(
       fc.property(

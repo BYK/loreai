@@ -1,4 +1,4 @@
-import type { GatewayMessage, GatewayTool } from "./types";
+import type { GatewayContentBlock, GatewayMessage, GatewayTool } from "./types";
 import { InvalidCrossProviderRequestError } from "./errors";
 
 export const NATIVE_METADATA = "internal_chat_message_metadata_passthrough";
@@ -127,24 +127,57 @@ export function restoreNativeResponsesToolEnvelopes(
   message: GatewayMessage,
   source: Pick<GatewayMessage, "content" | "provenanceContent">,
 ): void {
-  const native =
-    source.provenanceContent
-      ?.filter((b) => b.type === "opaque" && b.responsesItem)
-      .map((b) => (b.type === "opaque" ? b.raw : {})) ?? [];
-  for (const block of message.content) {
-    const raw = native.find(
-      (item) =>
-        (block.type === "tool_use" || block.type === "tool_result") &&
-        item.call_id ===
-          (block.type === "tool_use" ? block.id : block.toolUseId) &&
-        (block.type === "tool_use"
-          ? ["function_call", "custom_tool_call"].includes(String(item.type))
-          : ["function_call_output", "custom_tool_call_output"].includes(
-              String(item.type),
-            )),
-    );
-    if (!raw) continue;
-    if (block.type === "tool_use") block.raw = raw;
-    if (block.type === "tool_result") block.nativeResponsesEnvelope = raw;
+  const calls = new Map<string, GatewayContentBlock>();
+  const outputs = new Map<string, GatewayContentBlock>();
+  for (const item of source.provenanceContent ?? []) {
+    if (
+      item.type !== "opaque" ||
+      !item.responsesItem ||
+      typeof item.raw.call_id !== "string"
+    )
+      continue;
+    const index = ["function_call", "custom_tool_call"].includes(
+      String(item.raw.type),
+    )
+      ? calls
+      : ["function_call_output", "custom_tool_call_output"].includes(
+            String(item.raw.type),
+          )
+        ? outputs
+        : undefined;
+    if (index && !index.has(item.raw.call_id))
+      index.set(item.raw.call_id, item);
   }
+  for (const block of message.content) {
+    const original =
+      block.type === "tool_use"
+        ? calls.get(block.id)
+        : block.type === "tool_result"
+          ? outputs.get(block.toolUseId)
+          : undefined;
+    if (original?.type !== "opaque") continue;
+    if (block.type === "tool_use") block.raw = original.raw;
+    if (block.type === "tool_result")
+      block.nativeResponsesEnvelope = original.raw;
+    if (original.responsesSourceIndex !== undefined)
+      block.responsesSourceIndex = original.responsesSourceIndex;
+  }
+  // Internal tool states are resolved in call order; native results can arrive
+  // in another order. Keep synthetic content in place while restoring source order.
+  const ordered = orderNativeResponsesSourceBlocks(message.content);
+  for (let index = 0; index < ordered.length; index++)
+    message.content[index] = ordered[index];
+}
+
+export function orderNativeResponsesSourceBlocks(
+  blocks: GatewayContentBlock[],
+): GatewayContentBlock[] {
+  const ordered = blocks
+    .filter((block) => block.responsesSourceIndex !== undefined)
+    .sort((a, b) => a.responsesSourceIndex! - b.responsesSourceIndex!);
+  if (!ordered.length) return blocks;
+  let index = 0;
+  return blocks.map((block) =>
+    block.responsesSourceIndex === undefined ? block : ordered[index++],
+  );
 }

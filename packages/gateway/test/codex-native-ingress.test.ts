@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { MockAgent } from "undici";
 import { createHarness, type Harness } from "./helpers/harness";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
-import { setUpstreamInterceptor } from "../src/pipeline";
+import {
+  getActiveSessions,
+  setPostResponseStartObserverForTest,
+  setUpstreamInterceptor,
+} from "../src/pipeline";
 
 function stream(items: Array<Record<string, unknown>>, id: string): string {
   const frame = (type: string, body: Record<string, unknown>) =>
@@ -52,10 +56,166 @@ describe("current Codex through real gateway ingress", () => {
     await harness?.teardown();
     harness = undefined;
     setUpstreamInterceptor(undefined);
+    setPostResponseStartObserverForTest(undefined);
     setUpstreamDispatcherForTest(null);
     await mock?.close();
     mock = undefined;
   });
+
+  test("does not retain native metadata from an instruction-only request after finalization", async () => {
+    harness = await createHarness({ fixtures: [] });
+    let finalized = 0;
+    setPostResponseStartObserverForTest(() => finalized++);
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          stream(
+            [
+              {
+                type: "message",
+                id: "answer",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "Done" }],
+              },
+            ],
+            "resp_instruction_only",
+          ),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer synthetic-token",
+        "chatgpt-account-id": "synthetic-account",
+        "x-lore-agent": "coder",
+      },
+      body: JSON.stringify({
+        model: "gpt-6-sol",
+        stream: true,
+        input: [
+          {
+            type: "message",
+            role: "developer",
+            content: "Rule",
+            internal_chat_message_metadata_passthrough: {
+              PRIVATE_NATIVE_KEY: "never-retain",
+            },
+          },
+        ],
+      }),
+    });
+    const body = await response.text();
+    expect(response.status, body).toBe(200);
+    expect(body).toContain("response.completed");
+    await vi.waitFor(() => expect(finalized).toBe(1));
+    const sessions = [...getActiveSessions().values()];
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].cacheAnalytics.lastRequestBody).toBeNull();
+    expect(sessions[0].cacheAnalytics.lastNormalizedBody).toBeNull();
+  });
+
+  test.each(
+    ["function", "custom"].flatMap((kind) =>
+      ["calls", "results"].map((seam) => ({ kind, seam })),
+    ),
+  )(
+    "preserves inline context between parallel $kind $seam through ingress",
+    async ({ kind, seam }) => {
+      harness = await createHarness({ fixtures: [] });
+      let captured: Record<string, unknown> | undefined;
+      setUpstreamInterceptor(async (body) => {
+        captured = body as Record<string, unknown>;
+        return new Response(
+          stream(
+            [
+              {
+                type: "message",
+                id: "answer",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "Done" }],
+              },
+            ],
+            "resp_parallel_context",
+          ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      const call = (id: string) => ({
+        type: kind === "custom" ? "custom_tool_call" : "function_call",
+        id: `call_${id}`,
+        call_id: id,
+        name: "exec",
+        ...(kind === "custom" ? { input: `echo ${id}` } : { arguments: "{}" }),
+        status: "completed",
+      });
+      const result = (id: string) => ({
+        type:
+          kind === "custom"
+            ? "custom_tool_call_output"
+            : "function_call_output",
+        id: `output_${id}`,
+        call_id: id,
+        output: id,
+      });
+      const inline = {
+        type: "message",
+        id: "inline",
+        role: "developer",
+        content: "Updated rule",
+      };
+      const input = [
+        {
+          type: "additional_tools",
+          id: "tools",
+          role: "developer",
+          tools: [
+            {
+              type: kind,
+              name: "exec",
+              ...(kind === "custom"
+                ? { format: { type: "text" } }
+                : { parameters: { type: "object", properties: {} } }),
+            },
+          ],
+        },
+        { type: "message", id: "u", role: "user", content: "Run commands" },
+        call("a"),
+        ...(seam === "calls" ? [inline] : []),
+        call("b"),
+        result("a"),
+        ...(seam === "results" ? [inline] : []),
+        result("b"),
+        { type: "message", id: "latest", role: "user", content: "Continue" },
+      ];
+      const response = await harness.request("/v1/responses", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer synthetic-token",
+          "chatgpt-account-id": "synthetic-account",
+          "x-lore-agent": "coder",
+        },
+        body: JSON.stringify({
+          model: "gpt-6-sol",
+          stream: true,
+          parallel_tool_calls: true,
+          input,
+        }),
+      });
+      const body = await response.text();
+      expect(response.status, body).toBe(200);
+      const forwarded = captured!.input as Array<Record<string, unknown>>;
+      expect(
+        forwarded.filter((item) =>
+          input.some((original) => original.id === item.id),
+        ),
+      ).toEqual(input);
+    },
+  );
 
   test("routes ChatGPT, preserves native tool loops and inline context across restart", async () => {
     mock = new MockAgent();

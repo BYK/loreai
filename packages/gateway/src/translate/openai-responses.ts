@@ -64,6 +64,7 @@ import {
   NATIVE_METADATA,
   parseNativeResponsesTools,
   responsesToolName,
+  orderNativeResponsesSourceBlocks,
 } from "./responses-native";
 
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
@@ -477,6 +478,7 @@ function createInputItemsBuilder(): {
   const itemPositions: number[] = [];
   const nativeTools: GatewayTool[] = [];
   const ranges = new Map<GatewayMessage, { start: number; end: number }>();
+  const sourceIndices = new WeakMap<Record<string, unknown>, number>();
   let sawItem = false;
   let sawConversationItem = false;
   let elevatedAfterConversation = false;
@@ -530,6 +532,7 @@ function createInputItemsBuilder(): {
       throw new InvalidCrossProviderRequestError();
     const raw = item as Record<string, unknown>;
     currentIndex = sourceIndex++;
+    sourceIndices.set(raw, currentIndex);
     const clean = nativeResponsesEnvelope(raw);
     if (
       Object.hasOwn(raw, NATIVE_METADATA) ||
@@ -549,7 +552,6 @@ function createInputItemsBuilder(): {
         )
       )
         throw new InvalidCrossProviderRequestError();
-      flushPending();
       nativeTools.push(...parseNativeResponsesTools(raw.tools, true));
       elevatedItems.push(raw);
       itemPositions.push(currentIndex);
@@ -565,7 +567,8 @@ function createInputItemsBuilder(): {
       if (role === "user" && pendingReasoning.length > 0) {
         // The pending assistant items would otherwise be appended after this
         // user turn, changing the source item's order.
-        throw new InvalidCrossProviderRequestError();
+        if (nativeFormat) flushPending();
+        else throw new InvalidCrossProviderRequestError();
       }
       if (
         role === "user" &&
@@ -658,7 +661,6 @@ function createInputItemsBuilder(): {
         }
         // Keep the original wire shape, including string content and an
         // omitted `type`. The joined text above is only for translation.
-        if (nativeFormat) flushPending();
         elevatedItems.push(raw);
         itemPositions.push(currentIndex);
         if (!sawConversationItem) prefixEnd = sourceIndex;
@@ -773,11 +775,7 @@ function createInputItemsBuilder(): {
         last !== undefined &&
         last.role === "assistant" &&
         last.content.length > 0 &&
-        last.content.every((b) => b.type === "tool_use") &&
-        !itemPositions.some(
-          (position) =>
-            position > (ranges.get(last)?.end ?? -1) && position < currentIndex,
-        );
+        last.content.every((b) => b.type === "tool_use");
       if (lastIsToolUseMessage) {
         const provenance = last.provenanceContent ?? [...last.content];
         const positions =
@@ -853,8 +851,7 @@ function createInputItemsBuilder(): {
         last !== undefined &&
         last.role === "user" &&
         last.content.length > 0 &&
-        last.content.every((b) => b.type === "tool_result") &&
-        ranges.get(last)?.end === currentIndex - 1;
+        last.content.every((b) => b.type === "tool_result");
       if (lastIsToolResultMessage) {
         if (last.provenanceContent || raw.output !== undefined) {
           last.provenanceContent = [
@@ -922,6 +919,11 @@ function createInputItemsBuilder(): {
       for (const message of messages) {
         const range = ranges.get(message);
         if (range) message.responsesSourceRange = range;
+        for (const block of message.provenanceContent ?? [])
+          if (block.type === "opaque" && block.responsesItem) {
+            const index = sourceIndices.get(block.raw);
+            if (index !== undefined) block.responsesSourceIndex = index;
+          }
       }
     return {
       messages,
@@ -1553,14 +1555,13 @@ function buildResponsesInput(
       if (range.start <= lastSourceEnd)
         throw new InvalidCrossProviderRequestError();
       flushContext(range.start + 1);
-      if (
-        contextIndex < positions.length &&
-        positions[contextIndex] <= range.end
-      )
-        throw new InvalidCrossProviderRequestError();
       lastSourceEnd = range.end;
     }
-    for (const block of msg.provenanceContent ?? msg.content) {
+    for (const block of orderNativeResponsesSourceBlocks(
+      msg.provenanceContent ?? msg.content,
+    )) {
+      if (positions && block.responsesSourceIndex !== undefined)
+        flushContext(block.responsesSourceIndex + 1);
       if (block.type === "text") {
         appendItem({
           type: "message",
@@ -1713,6 +1714,8 @@ function buildResponsesInput(
         }
       }
     }
+    if (positions && msg.responsesSourceRange)
+      flushContext(msg.responsesSourceRange.end + 1);
   }
 
   flushContext(Infinity);

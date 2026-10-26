@@ -17480,7 +17480,7 @@ export function recordCacheTurnUsage(
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
   endSpan?: () => void,
-  request?: Pick<GatewayRequest, "messages" | "tools">,
+  request?: Pick<GatewayRequest, "messages" | "tools" | "extras">,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -17497,7 +17497,9 @@ export function recordCacheTurnUsage(
   const nativeRequest =
     request?.messages.some(
       (message) => message.responsesSourceRange !== undefined,
-    ) || request?.tools.some((tool) => tool.responsesNative !== undefined);
+    ) ||
+    request?.tools.some((tool) => tool.responsesNative !== undefined) ||
+    request?.extras?.nativeInstructionPrefix?.itemPositions !== undefined;
   if (nativeRequest) {
     sessionState.cacheAnalytics.lastRequestBody = null;
     sessionState.cacheAnalytics.lastNormalizedBody = null;
@@ -25434,6 +25436,12 @@ export function loreMessagesToGateway(
 
     const message: GatewayMessage = { role: msg.info.role, content };
     let candidate = provenanceByMessageId.get(msg.info.id);
+    // Restoring native envelopes adds request-only fields to tool blocks.
+    // Compare before restoration so those fields cannot discard unchanged
+    // source provenance, including reasoning between parallel tool calls.
+    const nativeContentUnchanged =
+      candidate?.responsesSourceRange !== undefined &&
+      JSON.stringify(content) === JSON.stringify(candidate.content);
     if (candidate?.responsesSourceRange) {
       message.responsesSourceRange = candidate.responsesSourceRange;
       restoreNativeResponsesToolEnvelopes(message, candidate);
@@ -25565,7 +25573,8 @@ export function loreMessagesToGateway(
       });
     if (
       provenance?.provenanceContent &&
-      (JSON.stringify(content) === JSON.stringify(provenance.content) ||
+      (nativeContentUnchanged ||
+        JSON.stringify(content) === JSON.stringify(provenance.content) ||
         chatNativeTextProvenance ||
         toolResultsUnchanged)
     ) {

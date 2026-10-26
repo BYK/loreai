@@ -103,12 +103,16 @@ export type GatewayOpaqueBlock = {
   requestOnly?: boolean;
 };
 
-export type GatewayContentBlock =
+export type GatewayContentBlock = (
   | GatewayTextBlock
   | GatewayThinkingBlock
   | GatewayToolUseBlock
   | GatewayToolResultBlock
-  | GatewayOpaqueBlock;
+  | GatewayOpaqueBlock
+) & {
+  /** Original native Responses item ordinal, kept only in request provenance. */
+  responsesSourceIndex?: number;
+};
 
 /**
  * Project a content-block array down to a plain-text representation.

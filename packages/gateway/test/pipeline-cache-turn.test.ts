@@ -364,60 +364,71 @@ describe("recordCacheTurnUsage — pipeline bust-cause wiring (#928)", () => {
   });
 });
 
-test("native private metadata never reaches cache logs, span attributes, or retained comparison bodies", () => {
-  const nativeBody = (secret: string) =>
-    JSON.stringify({
-      input: [
-        {
-          type: "message",
-          role: "developer",
-          content: "rule",
-          internal_chat_message_metadata_passthrough: {
-            PRIVATE_NATIVE_KEY: secret,
+test.each([true, false])(
+  "native private metadata never reaches cache logs, span attributes, or retained comparison bodies (conversation=%s)",
+  (conversation) => {
+    const nativeBody = (secret: string) =>
+      JSON.stringify({
+        input: [
+          {
+            type: "message",
+            role: "developer",
+            content: "rule",
+            internal_chat_message_metadata_passthrough: {
+              PRIVATE_NATIVE_KEY: secret,
+            },
           },
-        },
-        { type: "message", role: "user", content: "long text ".repeat(3000) },
-      ],
-    });
-  const state = seedSession(
-    "cache-native-private",
-    nativeBody("PRIVATE_NATIVE_ALPHA"),
-  );
-  const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
-  const info = vi.spyOn(log, "info").mockImplementation(() => {});
-  const attributes = vi.fn();
-  const end = vi.fn();
-  const span = { setAttribute: attributes, end } as unknown as NonNullable<
-    Parameters<typeof recordCacheTurnUsage>[5]
-  >;
-  try {
-    recordCacheTurnUsage(
-      state,
-      BUST_USAGE,
-      "gpt-6-sol",
-      PROJECT,
-      nativeBody("PRIVATE_NATIVE_BRAVO"),
-      span,
-      undefined,
-      parseOpenAIResponsesRequest(
-        JSON.parse(nativeBody("PRIVATE_NATIVE_BRAVO")),
-        {},
-      ),
+          ...(conversation
+            ? [
+                {
+                  type: "message",
+                  role: "user",
+                  content: "long text ".repeat(3000),
+                },
+              ]
+            : []),
+        ],
+      });
+    const state = seedSession(
+      "cache-native-private",
+      nativeBody("PRIVATE_NATIVE_ALPHA"),
     );
-    expect(
-      JSON.stringify([
-        ...warn.mock.calls,
-        ...info.mock.calls,
-        ...attributes.mock.calls,
-      ]),
-    ).not.toContain("PRIVATE_NATIVE");
-    expect(state.cacheAnalytics.lastRequestBody).toBeNull();
-    expect(state.cacheAnalytics.lastNormalizedBody).toBeNull();
-    expect(getConsecutiveBusts(state.sessionID)).toBe(1);
-    expect(end).toHaveBeenCalledOnce();
-  } finally {
-    warn.mockRestore();
-    info.mockRestore();
-    evictSession(state.sessionID);
-  }
-});
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const attributes = vi.fn();
+    const end = vi.fn();
+    const span = { setAttribute: attributes, end } as unknown as NonNullable<
+      Parameters<typeof recordCacheTurnUsage>[5]
+    >;
+    try {
+      recordCacheTurnUsage(
+        state,
+        BUST_USAGE,
+        "gpt-6-sol",
+        PROJECT,
+        nativeBody("PRIVATE_NATIVE_BRAVO"),
+        span,
+        undefined,
+        parseOpenAIResponsesRequest(
+          JSON.parse(nativeBody("PRIVATE_NATIVE_BRAVO")),
+          {},
+        ),
+      );
+      expect(
+        JSON.stringify([
+          ...warn.mock.calls,
+          ...info.mock.calls,
+          ...attributes.mock.calls,
+        ]),
+      ).not.toContain("PRIVATE_NATIVE");
+      expect(state.cacheAnalytics.lastRequestBody).toBeNull();
+      expect(state.cacheAnalytics.lastNormalizedBody).toBeNull();
+      expect(getConsecutiveBusts(state.sessionID)).toBe(1);
+      expect(end).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+      info.mockRestore();
+      evictSession(state.sessionID);
+    }
+  },
+);
