@@ -1232,3 +1232,70 @@ for (const width of [1280, 320, 390]) {
     await expect(page).toHaveURL(/\/ui\/team\?section=settings$/);
   });
 }
+
+for (const width of [1280, 390, 320]) {
+  test(`responsive team table retains column semantics at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    await installSignedInTeamRoutes(page);
+    await page.goto("/ui/team");
+    const table = page.getByTestId("team-members");
+    await expect(table).toHaveRole("table");
+    const headers = ["Member", "Role", "Actions"];
+    for (const label of headers) {
+      // Browser role queries exclude hidden headers; responsive styling must
+      // retain all three accessible column names.
+      await expect(
+        table.getByRole("columnheader", { name: label, exact: true }),
+      ).toHaveCount(1);
+    }
+    await expect(table.getByRole("rowgroup")).toHaveCount(2);
+    await expect(table.getByRole("row")).toHaveCount(3);
+    for (const row of await table.getByTestId("team-member-row").all()) {
+      await expect(row).toHaveRole("row");
+      const cells = row.getByRole("cell");
+      await expect(cells).toHaveCount(3);
+      for (const [index, label] of headers.entries()) {
+        const header = table.getByRole("columnheader", {
+          name: label,
+          exact: true,
+        });
+        const id = await header.getAttribute("id");
+        expect(id).toBeTruthy();
+        await expect(cells.nth(index)).toHaveAttribute("headers", id!);
+        await expect(header).toHaveAttribute("scope", "col");
+      }
+    }
+    await expect(
+      table.getByRole("combobox", { name: "Role for Admin", exact: true }),
+    ).toHaveValue("admin");
+    await expect(
+      table.getByRole("combobox", {
+        name: "Role for Former member",
+        exact: true,
+      }),
+    ).toHaveValue("viewer");
+    // Both roles and actions remain reachable in the same DOM and handlers.
+    await expect(
+      table.getByRole("button", { name: "Leave team", exact: true }),
+    ).toBeVisible();
+    const remove = table.getByRole("button", { name: "Remove", exact: true });
+    await expect(remove).toBeVisible();
+    if (width < 768) {
+      await expectMobileAction(remove, width);
+      await expectMobileAction(
+        table.getByRole("combobox", {
+          name: "Role for Former member",
+          exact: true,
+        }),
+        width,
+      );
+    }
+    await remove.click();
+    await expect(page.getByTestId("team-remove-confirmation")).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(table.getByRole("row")).toHaveCount(3);
+  });
+}

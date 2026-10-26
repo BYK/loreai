@@ -877,16 +877,25 @@ export const TeamPage: Component = () => {
                   <Show when={current().members.length > 0}>
                     <div class="min-w-0">
                       <table
+                        role="table"
                         class="block w-full text-left text-sm md:table"
                         data-testid="team-members"
                       >
-                        <thead class="hidden md:table-header-group">
+                        <thead
+                          role="rowgroup"
+                          class="sr-only md:not-sr-only md:table-header-group"
+                        >
                           <For each={table.getHeaderGroups()}>
                             {(group) => (
-                              <tr class="border-b border-line">
+                              <tr role="row" class="border-b border-line">
                                 <For each={group.headers}>
                                   {(header) => (
-                                    <th class="px-2 py-2 font-semibold">
+                                    <th
+                                      role="columnheader"
+                                      scope="col"
+                                      id={`team-member-${header.column.id}`}
+                                      class="px-2 py-2 font-semibold"
+                                    >
                                       {flexRender(
                                         header.column.columnDef.header,
                                         header.getContext(),
@@ -898,10 +907,11 @@ export const TeamPage: Component = () => {
                             )}
                           </For>
                         </thead>
-                        <tbody class="block md:table-row-group">
+                        <tbody role="rowgroup" class="block md:table-row-group">
                           <For each={table.getRowModel().rows}>
                             {(row) => (
                               <tr
+                                role="row"
                                 class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 border-b border-line py-3 md:table-row md:py-0"
                                 data-testid="team-member-row"
                                 data-user-id={row.original.user_id}
@@ -909,6 +919,8 @@ export const TeamPage: Component = () => {
                                 <For each={row.getAllCells()}>
                                   {(cell) => (
                                     <td
+                                      role="cell"
+                                      headers={`team-member-${cell.column.id}`}
                                       class={
                                         cell.column.id === "member"
                                           ? "col-span-2 block min-w-0 break-words pb-2 [overflow-wrap:anywhere] md:table-cell md:px-2 md:py-3"
