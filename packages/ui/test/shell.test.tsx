@@ -2656,3 +2656,42 @@ it("keeps navigation usable when storage reads and writes are blocked", () => {
     write.mockRestore();
   }
 });
+
+it.each([
+  "bogus",
+  "",
+  "__proto__",
+  "constructor",
+  "toString",
+  "ALL",
+  "knowledge ",
+])(
+  "recovers invalid recall scope %s through the project search route",
+  async (rawScope) => {
+    const recall = vi.fn<ApiClient["recall"]>(async (opts) => ({
+      query: opts.q,
+      scope: opts.scope,
+      projectPath: opts.project.path,
+      result: "No results found for this query.",
+    }));
+    const { history } = mount(
+      `/projects/p-lore/search?q=SQLite&scope=${encodeURIComponent(rawScope)}`,
+      fakeClient({ recall }),
+    );
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Search scope/ }),
+    ).toHaveTextContent("All memory");
+    expect(screen.getByTestId("recall-search-scope")).toHaveTextContent(
+      "Scope: All memory",
+    );
+    expect(recall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: "SQLite", scope: "all" }),
+      expect.anything(),
+    );
+    fireEvent.submit(screen.getByRole("search"));
+    await waitFor(() =>
+      expect(history.get()).toBe("/projects/p-lore/search?q=SQLite&scope=all"),
+    );
+  },
+);

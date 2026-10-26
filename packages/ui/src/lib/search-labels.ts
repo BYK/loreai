@@ -1,4 +1,4 @@
-import { RECALL_SCOPES, type RecallScope } from "~/contracts";
+import { parseRecallScope, type RecallScope } from "~/contracts";
 
 export const LIST_FILTER_LABEL = "Filter this list";
 export const PROJECT_MEMORY_SEARCH_LABEL = "Search this project's memory";
@@ -36,7 +36,5 @@ export const RECALL_SCOPE_DETAILS: Record<
 };
 
 export function recallScopeLabel(value: string): string {
-  return RECALL_SCOPES.includes(value as RecallScope)
-    ? RECALL_SCOPE_DETAILS[value as RecallScope].label
-    : "All memory";
+  return RECALL_SCOPE_DETAILS[parseRecallScope(value)].label;
 }
