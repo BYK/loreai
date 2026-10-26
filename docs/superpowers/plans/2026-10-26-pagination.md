@@ -1,6 +1,6 @@
 # Pagination Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace scattered pagination links with consistent text/icon controls in existing PR #2110.
 
@@ -31,10 +31,10 @@
 
 **Interfaces:** PaginationControls props: label:string; onFirst?:()=>void; onPrevious?:()=>void; onNext:()=>void; previousDisabled?:boolean; nextDisabled:boolean; compact?:boolean; class?:string. No cursor ownership in the component.
 
-- [ ] Add integration regressions for named navigation landmarks, main text/icons and compact accessible controls while retaining existing URL/filter/anchor assertions. Run focused tests RED before source changes.
-- [ ] Implement the shared component and migrate all five callers using their unchanged callbacks/history logic. Use ghost buttons, right-aligned grouping and a first-page double-chevron icon.
-- [ ] Run focused and complete UI suites GREEN, workspace typecheck/lint/format and production build. Add/run desktop/mobile browser paging, terminal state, keyboard, tooltip and 320px geometry cases; update existing caller assertions only for intended accessible names.
-- [ ] Commit source/tests. Obtain independent adversarial correctness and security reviews of the increment since ed2d66ea; retain prior full-PR review and green hosted checks as context. Resolve confirmed defects and verify fixes.
+- [x] Add integration regressions for named navigation landmarks, main text/icons and compact accessible controls while retaining existing URL/filter/anchor assertions. Run focused tests RED before source changes.
+- [x] Implement the shared component and migrate all five callers using their unchanged callbacks/history logic. Use ghost buttons, right-aligned grouping and a first-page double-chevron icon.
+- [x] Run focused and complete UI suites GREEN, workspace typecheck/lint/format and production build. Add/run desktop/mobile browser paging, terminal state, keyboard, tooltip and 320px geometry cases; update existing caller assertions only for intended accessible names.
+- [x] Commit source/tests. Obtain independent adversarial correctness and security reviews of the increment since ed2d66ea; retain prior full-PR review and green hosted checks as context. Resolve confirmed defects and verify fixes.
 
 ### Task 2: Screenshots and publication
 
@@ -42,5 +42,5 @@
 
 **Interfaces:** Consume Task1 final UI and existing fictional preview API. Preserve all46existing remote screenshot URLs in the PR description.
 
-- [ ] Capture and inspect matched real-frontend before/after screenshots of main pagination and narrow sidebar, including mobile. No DOM/CSS/image editing or real user data.
-- [ ] Update docs/PR with new screenshots and exact validation results; push the same branch, verify hosted head/ready state/review threads/current checks. Do not merge.
+- [x] Capture and inspect matched real-frontend before/after screenshots of main pagination and narrow sidebar, including mobile. No DOM/CSS/image editing or real user data.
+- [x] Update docs/PR with new screenshots and exact validation results; push the same branch, verify hosted head/ready state/review threads/current checks. Do not merge.

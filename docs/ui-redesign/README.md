@@ -165,6 +165,14 @@ entity, and router-aware links preserve the UI base for project/workspace knowle
 
 ## Screenshot comparison
 
+Pagination uses a shared presentational control across knowledge, sessions,
+reader session context, entities and import history. Main views show text with
+direction icons; the narrow session sidebar uses labeled icons with keyboard
+and hover tooltips. Controls group at the right, keep existing cursor/history
+behavior, and provide 44px mobile targets. Append-style Load more actions remain
+distinct. The PR includes matched pagination comparisons and a focus-tooltip
+capture against revision `ed2d66ea`.
+
 The accompanying PR contains before/after comparisons for desktop and mobile in
 both themes, including navigation, readers, tables, overview and team workflows.
 Screenshots are attached to the PR rather than committed as build artifacts.
