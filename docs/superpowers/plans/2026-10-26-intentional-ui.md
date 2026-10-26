@@ -57,7 +57,8 @@ existing component public props stay compatible.
 ### Task 2: Everyday overview and focused team management
 
 **Files:** Modify ProjectPage.tsx, SharingPanel.tsx, SharingSync.tsx, TeamPage.tsx,
-ImportHistoryPage.tsx, lib/folk-status.ts and relevant UI tests/e2e. Extract small
+ImportHistoryPage.tsx, SessionList.tsx, SessionContextList.tsx, lib/folk-status.ts
+and relevant UI tests/e2e. Extract small
 presentation components if needed; preserve existing state ownership.
 
 **Interfaces:** Consumes Task 1 readable lists and existing workspace loaders,
@@ -69,14 +70,20 @@ FolkState, sharing/membership contracts. Keeps existing routes and action guards
 - [ ] Show compact sharing after setup with clear team, sharing choice and sync
   configuration; surface live errors/setup without hiding required recovery.
   Reuse SharingSync semantics; do not duplicate mutation handlers or opt in.
+  Place the compact summary directly below DocHeader; omit repeated setup prose
+  and use a compact SharingSync presentation with the existing sync handler.
 - [ ] Replace health claims with Memory summary. Add up to five recent knowledge
   entries via existing workspace knowledge loader; put useful activity early.
 - [ ] Organize Team page into Members, Invitations and Settings with URL tab state,
   primary Invite teammate, visible member roster first, advanced organization/
   discovery/account-ID controls in Settings, and create/join recovery when no team.
   Preserve role restrictions, confirmation, focus and stale-account/team guards.
+  Adapt member rows at 320/390px so role and action controls remain visible
+  without horizontal scrolling and without duplicated mutation logic.
 - [ ] Make status wording distinguish configured/running/result/error, without
   inventing last-success time. Add actionable empty import/history/team guidance.
+  Empty session readers/list context offer capture/import guidance or query reset
+  through existing routes and controls; normal no-work states remain calm.
 - [ ] Run focused tests, UI typecheck and relevant lint/format. Check pending,
   account/team change, viewer, no-team and narrow layouts; update existing e2e
   assertions only where intended copy/interaction changed.
@@ -86,8 +93,9 @@ FolkState, sharing/membership contracts. Keeps existing routes and action guards
 ### Task 3: Navigation and unambiguous search
 
 **Files:** Modify shell/Rail.tsx, Shell.tsx, SearchEntry.tsx, navigation.ts;
-KnowledgeTable.tsx, ProjectPage.tsx, SearchResults.tsx, WorkspaceSearch.tsx,
-PromotionsPage.tsx, ContradictionsPage.tsx and ConflictsPage.tsx; relevant tests.
+KnowledgeTable.tsx, KnowledgeListToolbar.tsx, ProjectPage.tsx, SearchResults.tsx, WorkspaceSearch.tsx,
+PromotionsPage.tsx, ContradictionsPage.tsx, ConflictsPage.tsx and EntitiesPage.tsx;
+relevant tests.
 Add small shared label/description helpers under lib as necessary.
 
 **Interfaces:** Consumes Task 1 table, Task 2 overview and team structure. Existing
@@ -105,6 +113,10 @@ navigation and page headings consistently.
   before naming session/project scope. Clearly label local knowledge filters,
   project memory search and workspace knowledge search; make scope visible beside
   results and give empty search a relevant reset/browse action.
+  Reader list filtering uses the same clear filter wording as the table; the
+  overview search heading reflects project memory rather than knowledge only.
+  Filtered empty entity lists expose a filter reset; review queues explain normal
+  no-work states and provide a return to useful content without inventing tasks.
 - [ ] Run focused tests, full UI suite once, typecheck/lint/format, self-review and
   commit. Report evidence/concerns; no subagents or push/PR.
 

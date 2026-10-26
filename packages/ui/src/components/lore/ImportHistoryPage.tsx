@@ -77,7 +77,10 @@ export const ImportHistoryPage: Component<{
         </Match>
         <Match when={rows()?.length === 0}>
           <StateCard kind="empty" title="No imports">
-            No conversation imports recorded for this project.
+            No conversation imports recorded for this project. From this
+            project’s directory, run `lore import` to extract knowledge from
+            supported local agent conversations. Use `lore import --help` to see
+            sources and options.
           </StateCard>
         </Match>
         <Match when={rows()}>

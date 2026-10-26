@@ -92,10 +92,25 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     folk.account.data()?.signed_in === true &&
     folk.account.data()?.state === "signed_in" &&
     accountId() !== null;
-  const sharing = createLoader(
-    () => props.projectId,
-    (projectId) => ws.tracked(() => ws.client.getProjectSharing(projectId)),
+  const initialAccountSettled = createMemo<boolean>(
+    (previous) =>
+      previous ||
+      (!folk.account.loading() &&
+        (folk.account.data() !== undefined ||
+          folk.account.error() !== undefined)),
+    false,
   );
+  const sharing = createLoader(
+    () => (initialAccountSettled() ? props.projectId : null),
+    async (projectId) => {
+      const owner = accountId();
+      const status = await ws.tracked(() =>
+        ws.client.getProjectSharing(projectId),
+      );
+      return { status, owner };
+    },
+  );
+  const [expanded, setExpanded] = createSignal(false);
   const [receipt, setReceipt] = createSignal<SharingStatus>();
   const [confirmAutoShare, setConfirmAutoShare] = createSignal(false);
   const [confirmUnlink, setConfirmUnlink] = createSignal(false);
@@ -118,10 +133,21 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     teams().some(
       (team) => team.id === selectedTeam() && team.role !== "viewer",
     );
-  const shownStatus = () => receipt() ?? sharing.data();
+  const shownStatus = () => receipt() ?? sharing.data()?.status;
   const writableTeams = () => teams().filter((team) => team.role !== "viewer");
   const linkedTeam = () =>
     teams().find((team) => team.id === shownStatus()?.team?.id);
+  const compactReady = () =>
+    shownStatus()?.state === "linked" &&
+    shownStatus()?.linked === true &&
+    shownStatus()?.team !== null &&
+    contextAvailable() &&
+    sharing.error() === undefined &&
+    (receipt() !== undefined || sharing.data()?.owner === accountId()) &&
+    backgroundReady() &&
+    !policyError() &&
+    !linkError();
+  const settingsVisible = () => !compactReady() || expanded();
   const busy = () => savingPolicy() || savingLink();
   const refresh = () => {
     reload();
@@ -142,6 +168,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   createEffect(
     on([() => props.projectId, accountId, contextAvailable], () => {
       actionEpoch++;
+      setExpanded(false);
       setSavingPolicy(false);
       setSavingLink(false);
       setReceipt(undefined);
@@ -298,20 +325,40 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
         <Match when={shownStatus()}>
           {(status) => (
             <div data-sharing-state={status().state}>
-              <div class="border-b border-line px-4 py-5 sm:px-5">
+              <div
+                class={
+                  settingsVisible()
+                    ? "border-b border-line px-4 py-5 sm:px-5"
+                    : "px-4 py-3 sm:px-5"
+                }
+              >
                 <div class="flex items-start gap-3">
-                  <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-soft-text">
+                  <span
+                    hidden={!settingsVisible()}
+                    class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent-soft-text"
+                  >
                     <Icon name="users" class="size-5" />
                   </span>
                   <div class="min-w-0 flex-1">
-                    <div class="eyebrow mb-1">Team memory</div>
+                    <div hidden={!settingsVisible()} class="eyebrow mb-1">
+                      Team memory
+                    </div>
                     <div class="flex flex-wrap items-center justify-between gap-2">
-                      <h2 class="max-w-full min-w-0 text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">
+                      <h2
+                        class={
+                          settingsVisible()
+                            ? "max-w-full min-w-0 text-lg font-semibold tracking-tight [overflow-wrap:anywhere]"
+                            : "max-w-full min-w-0 text-sm font-semibold [overflow-wrap:anywhere]"
+                        }
+                      >
                         {status().linked
                           ? `Connected to ${teamLabel(status())}`
                           : "Share knowledge with your team"}
                       </h2>
-                      <span class="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs text-muted">
+                      <span
+                        hidden={!settingsVisible()}
+                        class="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs text-muted"
+                      >
                         <Icon
                           name={status().linked ? "link" : "lock"}
                           class="size-3"
@@ -319,14 +366,43 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                         {status().linked ? "Team connected" : "Not connected"}
                       </span>
                     </div>
-                    <p class="mt-1.5 max-w-xl text-sm leading-relaxed text-muted">
+                    <p
+                      hidden={!settingsVisible()}
+                      class="mt-1.5 max-w-xl text-sm leading-relaxed text-muted"
+                    >
                       {status().linked
-                        ? "Choose what you share. Lore takes care of moving it between devices."
+                        ? "Choose what you share and check this device’s sync settings below."
                         : "Connect this project, choose how knowledge is shared, and keep your team in the loop."}
                     </p>
                   </div>
                 </div>
+                <Show when={compactReady()}>
+                  <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <p class="text-xs text-muted">
+                      {status().auto_share
+                        ? "Automatic sharing"
+                        : "You choose what to propose"}{" "}
+                      · Team review:{" "}
+                      {status().review_required === true
+                        ? "required"
+                        : status().review_required === false
+                          ? "optional"
+                          : "unavailable"}{" "}
+                      · Sync configured on this device
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-expanded={expanded()}
+                      onClick={() => setExpanded(!expanded())}
+                    >
+                      {expanded() ? "Hide sharing settings" : "Manage sharing"}
+                    </Button>
+                  </div>
+                </Show>
                 <ol
+                  hidden={!settingsVisible()}
                   aria-label="Sharing setup"
                   class="mt-5 grid list-none grid-cols-3 gap-2 p-0"
                 >
@@ -380,7 +456,10 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                   </For>
                 </ol>
               </div>
-              <div class="space-y-4 px-4 py-4 sm:px-5">
+              <div
+                hidden={!settingsVisible()}
+                class="space-y-4 px-4 py-4 sm:px-5"
+              >
                 <Show when={sharing.error() !== undefined}>
                   <p role="alert" class="text-sm text-danger">
                     Sharing status could not be refreshed.{" "}
@@ -652,9 +731,13 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                 status={status()}
                 ready={statusReady()}
                 busy={busy()}
+                compact={compactReady() && !expanded()}
                 onRefresh={refresh}
               />
-              <details class="border-t border-line px-4 py-3 text-xs text-muted sm:px-5">
+              <details
+                hidden={!settingsVisible()}
+                class="border-t border-line px-4 py-3 text-xs text-muted sm:px-5"
+              >
                 <summary class="cursor-pointer select-none hover:text-text">
                   Sharing details
                 </summary>

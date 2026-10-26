@@ -4,7 +4,7 @@ import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { SessionSummary } from "~/contracts";
 import { formatWhen } from "~/lib/format";
-import { sessionHref, sessionsHref } from "~/lib/href";
+import { importsHref, sessionHref, sessionsHref } from "~/lib/href";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 import { SessionIdChip } from "./SessionIdChip";
@@ -58,7 +58,16 @@ export const SessionList: Component<{
         </Match>
         <Match when={data()?.items.length === 0}>
           <StateCard kind="empty" title="No captured sessions">
-            Run an agent through <code>lore</code> to capture history.
+            Run an agent through <code>lore</code> in this project to capture
+            history. To extract knowledge from prior local conversations, run{" "}
+            <code>lore import</code> and{" "}
+            <A
+              class="text-accent underline"
+              href={importsHref(props.projectId)}
+            >
+              view import history
+            </A>
+            .
           </StateCard>
         </Match>
         <Match when={data()}>

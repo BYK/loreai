@@ -76,3 +76,36 @@ it("filters and pages sessions without losing the reader route or anchor, and en
   expect(link.searchParams.get("cursor")).toBe("next/?#");
   expect(link.searchParams.has("a")).toBe(false);
 });
+
+it("offers capture guidance and resets an empty reader filter without losing its anchor", async () => {
+  const history = createMemoryHistory();
+  history.set({
+    value: "/projects/p-1/sessions/selected?a=source&q=missing&cursor=old",
+  });
+  const client = {
+    listProjects: async () => [],
+    listProjectSessionsPage: async () => ({ items: [], next_cursor: null }),
+  } as unknown as ApiClient;
+  render(() => (
+    <MemoryRouter history={history}>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+            <SessionContextList projectId="p-1" sessionId="selected" />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
+  ));
+  fireEvent.click(await screen.findByRole("button", { name: "Clear filter" }));
+  await waitFor(() =>
+    expect(history.get()).toBe("/projects/p-1/sessions/selected?a=source"),
+  );
+  expect(
+    await screen.findByText(/capture an agent conversation/),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("link", { name: "View import history" }),
+  ).toHaveAttribute("href", "/projects/p-1/imports");
+});

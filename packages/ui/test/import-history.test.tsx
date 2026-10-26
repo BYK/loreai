@@ -90,7 +90,7 @@ describe("ImportHistoryPage", () => {
     );
     expect(await screen.findByText("No imports")).toBeInTheDocument();
     expect(
-      screen.getByText("No conversation imports recorded for this project."),
+      screen.getByText(/No conversation imports recorded for this project./),
     ).toBeInTheDocument();
   });
 

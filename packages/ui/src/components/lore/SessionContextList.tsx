@@ -3,7 +3,7 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A, useSearchParams } from "@solidjs/router";
 import { Button } from "~/components/ui/button";
 import { TextField, TextFieldInput } from "~/components/ui/text-field";
-import { sessionHref, sessionsHref } from "~/lib/href";
+import { importsHref, sessionHref, sessionsHref } from "~/lib/href";
 import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import { errorStateFor } from "./ErrorState";
@@ -86,7 +86,35 @@ export const SessionContextList: Component<{
             kind="empty"
             title={q() ? "No matching sessions" : "No captured sessions"}
             compact
-          />
+          >
+            <Show
+              when={q()}
+              fallback={
+                <>
+                  Run <code>lore</code> in this project to capture an agent
+                  conversation.{" "}
+                  <A
+                    class="text-accent underline"
+                    href={importsHref(props.projectId)}
+                  >
+                    View import history
+                  </A>{" "}
+                  for knowledge extracted with <code>lore import</code>.
+                </>
+              }
+            >
+              Try another session filter, or{" "}
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => setParams({ q: undefined, cursor: undefined })}
+              >
+                Clear filter
+              </Button>
+              .
+            </Show>
+          </StateCard>
         </Match>
         <Match when={data()}>
           <For each={data()?.items}>

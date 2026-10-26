@@ -1,5 +1,12 @@
 import type { Component } from "solid-js";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 
 import type {
   DomainJoinRequestList,
@@ -29,6 +36,8 @@ type Props = {
   hasTeams: boolean;
   onChanged: () => void;
   disabled?: boolean;
+  onStatusError?: (message: string) => void;
+  onCloseAutoFocus?: (event: Event) => void;
 };
 
 function errorText(error: unknown): string {
@@ -292,6 +301,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       if (active) setDomainBusy(false);
     }
   };
+
+  createEffect(() => {
+    props.onStatusError?.(discoveryError() || domainError());
+  });
 
   const requestOrgId = () => orgIdForRequest().trim() || selectedOrg() || "";
 
@@ -646,7 +659,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </section>
 
       <Dialog open={createOpen()} onOpenChange={setCreateOpen}>
-        <DialogContent data-testid="team-create-dialog">
+        <DialogContent
+          data-testid="team-create-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Create a team</DialogTitle>
             <DialogDescription>
@@ -690,7 +706,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </Dialog>
 
       <Dialog open={joinOpen()} onOpenChange={closeJoinDialog}>
-        <DialogContent data-testid="team-join-dialog">
+        <DialogContent
+          data-testid="team-join-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Join a team</DialogTitle>
             <DialogDescription>
@@ -730,7 +749,10 @@ export const TeamParityActions: Component<Props> = (props) => {
       </Dialog>
 
       <Dialog open={addOpen()} onOpenChange={setAddOpen}>
-        <DialogContent data-testid="team-add-by-id-dialog">
+        <DialogContent
+          data-testid="team-add-by-id-dialog"
+          onCloseAutoFocus={props.onCloseAutoFocus}
+        >
           <DialogHeader>
             <DialogTitle>Add by account ID</DialogTitle>
             <DialogDescription>

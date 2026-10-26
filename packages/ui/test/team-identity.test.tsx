@@ -1,3 +1,4 @@
+import { MemoryRouter, Route } from "@solidjs/router";
 import {
   fireEvent,
   render,
@@ -72,9 +73,16 @@ function setup(overrides: Partial<ApiClient> = {}) {
     ...overrides,
   } as unknown as ApiClient;
   render(() => (
-    <WorkspaceProvider client={api} db={Promise.resolve(null)}>
-      <TeamPage />
-    </WorkspaceProvider>
+    <MemoryRouter>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider client={api} db={Promise.resolve(null)}>
+            <TeamPage />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
   ));
   return {
     api,
@@ -193,6 +201,9 @@ describe("TeamPage account identity", () => {
         };
       },
     });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Invite teammate" }),
+    );
     const input = await screen.findByLabelText("Invite email");
     fireEvent.input(input, { target: { value: "draft@example.com" } });
     polling = true;
@@ -228,6 +239,7 @@ describe("TeamPage account identity", () => {
       getAccount: async () => (polling ? pending.promise : account("user-a")),
       acceptTeamInvite: accept,
     });
+    fireEvent.click(await screen.findByRole("link", { name: "Settings" }));
     await screen.findByLabelText("Invite email");
     const join = await screen.findByTestId("team-join");
     await waitFor(() => expect(join).toBeEnabled());

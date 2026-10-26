@@ -12,9 +12,14 @@ status. Do not merge this PR.
 2. Project overview is useful after setup: connected/configured sharing is a
    compact summary with an explicit expansion control. Incomplete or blocked
    setup remains visible. Recent knowledge/activity appear near the top.
+   Keep that compact team/sync context immediately below the project header;
+   remove repeated setup prose/badges in the collapsed state so activity follows
+   without scrolling past a setup card.
 3. Team management leads with members and Invite teammate. Use Members,
    Invitations and Settings sections; move discovery, domain and account-ID
    tools to Settings. Keep create/join recovery for people without a team.
+   On narrow screens, member roles and actions remain visible/reachable without
+   sideways scrolling; preserve a single set of permission/mutation handlers.
 4. Distinguish Filter this list, Search this project's memory and Search
    knowledge across projects. Use readable labels for recall scope values and
    explain actual search coverage; never pretend workspace search includes

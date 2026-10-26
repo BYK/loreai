@@ -3,12 +3,17 @@ import type { Component } from "solid-js";
 import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
-import type { ProjectSummary, RecallScope } from "~/contracts";
+import {
+  DEFAULT_KNOWLEDGE_QUERY,
+  type ProjectSummary,
+  type RecallScope,
+} from "~/contracts";
 import { formatWhen, pluralize } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import {
   projectHref,
   knowledgeListHref,
+  knowledgeHref,
   importsHref,
   sessionsHref,
   sessionHref,
@@ -32,6 +37,12 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
     projectId: props.project.id,
     cursor: null,
   }));
+  const knowledge = ws.state.knowledge.page(() => ({
+    projectId: props.project.id,
+    query: DEFAULT_KNOWLEDGE_QUERY,
+  }));
+  const recentKnowledge = () =>
+    knowledge.loader.data()?.items.slice(0, 5) ?? [];
   const aliases = () =>
     props.project.git_remote
       ? (ws.projects.data() ?? []).filter(
@@ -40,7 +51,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             p.git_remote === props.project.git_remote,
         )
       : [];
-  const healthHint = () => {
+  const captureHint = () => {
     if (props.project.session_count === 0)
       return "No captured sessions yet — run an agent through `lore` to capture history";
     if (props.project.distillation_count === 0) return "Nothing distilled yet";
@@ -75,7 +86,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       <SharingPanel projectId={props.project.id} />
       <section data-testid="health" class="border-b border-line py-5">
         <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div class="eyebrow">Memory health</div>
+          <div class="eyebrow">Memory summary</div>
           <A
             class="text-xs text-accent underline"
             data-testid="review-duplicates-link"
@@ -85,17 +96,141 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </A>
         </div>
         <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4 [&>span]:rounded-lg [&>span]:border [&>span]:border-line [&>span]:bg-bg [&>span]:min-w-0 [&>span]:p-3 sm:[&>span]:p-4 [&>span]:font-medium [&>span]:tabular-nums">
-          <span>{props.project.knowledge_count} knowledge</span>
+          <span>
+            {pluralize(
+              props.project.knowledge_count,
+              "knowledge entry",
+              "knowledge entries",
+            )}
+          </span>
           <span>{props.project.session_count} sessions</span>
           <span>{pluralize(props.project.message_count, "message")}</span>
-          <span>{props.project.distillation_count} distillations</span>
+          <span>
+            {pluralize(
+              props.project.distillation_count,
+              "summary",
+              "summaries",
+            )}
+          </span>
         </div>
         <div class="mt-2 text-xs text-muted">
-          Hints from recorded counts:{" "}
-          <Show when={healthHint()} fallback="No recorded health warnings.">
-            {healthHint()}
+          Recorded memory:{" "}
+          <Show
+            when={captureHint()}
+            fallback="Browse knowledge or sessions to explore what is recorded."
+          >
+            {captureHint()}
           </Show>
         </div>
+      </section>
+      <section class="border-b border-line py-5" aria-label="Recent knowledge">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 class="eyebrow">Recent knowledge</h2>
+          <A
+            class="text-xs text-accent underline"
+            href={knowledgeListHref(props.project.id)}
+          >
+            All knowledge
+          </A>
+        </div>
+        <Switch>
+          <Match when={knowledge.loader.loading() && !knowledge.loader.data()}>
+            <StateCard kind="loading" title="Loading knowledge" compact />
+          </Match>
+          <Match when={knowledge.loader.error() && !knowledge.loader.data()}>
+            <StateCard
+              kind="error"
+              title="Knowledge could not be loaded"
+              compact
+              action={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={knowledge.loader.reload}
+                >
+                  Retry knowledge
+                </Button>
+              }
+            />
+          </Match>
+          <Match when={recentKnowledge().length === 0}>
+            <StateCard kind="empty" title="No knowledge recorded yet" compact>
+              Run <code>lore</code> in this project to capture an agent session.
+              Knowledge appears as captured conversations are distilled.
+            </StateCard>
+          </Match>
+          <Match when={recentKnowledge().length > 0}>
+            <For each={recentKnowledge()}>
+              {(entry) => (
+                <ListRow
+                  href={knowledgeHref(props.project.id, entry.id)}
+                  title={entry.title}
+                  preview={entry.content}
+                  footRight={formatWhen(entry.updated_at)}
+                />
+              )}
+            </For>
+          </Match>
+        </Switch>
+      </section>
+      <section class="border-b border-line py-5">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div class="eyebrow">Recent sessions</div>
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <A
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
+              href={importsHref(props.project.id)}
+            >
+              Import history <Icon name="chevron" class="size-3.5" />
+            </A>
+            <A
+              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
+              href={sessionsHref(props.project.id)}
+            >
+              All sessions <Icon name="chevron" class="size-3.5" />
+            </A>
+          </div>
+        </div>
+        <Switch>
+          <Match when={sessions.loader.loading() && !sessions.loader.data()}>
+            <StateCard kind="loading" title="Loading sessions" compact />
+          </Match>
+          <Match when={sessions.loader.error() && !sessions.loader.data()}>
+            <StateCard
+              kind="error"
+              title="Sessions could not be loaded"
+              compact
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={sessions.loader.reload}
+                >
+                  Retry sessions
+                </Button>
+              }
+            />
+          </Match>
+          <Match when={recent().length === 0}>
+            <StateCard kind="empty" title="No captured sessions" compact>
+              Run <code>lore</code> from this project to launch an agent and
+              capture its conversation.
+            </StateCard>
+          </Match>
+          <Match when={recent().length > 0}>
+            <For each={recent()}>
+              {(session) => (
+                <ListRow
+                  href={sessionHref(props.project.id, session.session_id)}
+                  title={session.session_id}
+                  preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
+                  footRight={formatWhen(session.last_message_at)}
+                />
+              )}
+            </For>
+          </Match>
+        </Switch>
       </section>
       <section class="py-5">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -136,45 +271,6 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             Search
           </Button>
         </form>
-      </section>
-      <section class="border-b border-line py-5">
-        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div class="eyebrow">Recent sessions</div>
-          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <A
-              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
-              href={importsHref(props.project.id)}
-            >
-              Import history <Icon name="chevron" class="size-3.5" />
-            </A>
-            <A
-              class="inline-flex items-center gap-1 whitespace-nowrap text-xs text-accent underline"
-              href={sessionsHref(props.project.id)}
-            >
-              All sessions <Icon name="chevron" class="size-3.5" />
-            </A>
-          </div>
-        </div>
-        <Switch>
-          <Match when={sessions.loader.loading() && !sessions.loader.data()}>
-            <StateCard kind="loading" title="Loading sessions" compact />
-          </Match>
-          <Match when={recent().length === 0}>
-            <StateCard kind="empty" title="No captured sessions" compact />
-          </Match>
-          <Match when={recent().length > 0}>
-            <For each={recent()}>
-              {(session) => (
-                <ListRow
-                  href={sessionHref(props.project.id, session.session_id)}
-                  title={session.session_id}
-                  preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
-                  footRight={formatWhen(session.last_message_at)}
-                />
-              )}
-            </For>
-          </Match>
-        </Switch>
       </section>
       <section class="border-b border-line py-5">
         <div class="eyebrow mb-2">Identity</div>

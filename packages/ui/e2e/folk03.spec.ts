@@ -124,6 +124,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
 
     await expect(page.getByTestId("team-members")).toBeVisible();
     await expect(page.getByText("Former member")).not.toHaveAttribute("title");
+    await page.getByRole("link", { name: "Invitations", exact: true }).click();
     await page.getByRole("button", { name: "Create invite" }).click();
     const receipt = page.getByTestId("team-invite-receipt");
     await expect(receipt).toContainText("e2e-invite-token");
@@ -329,6 +330,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
   test("project auto-share toggle uses team review policy and keyboard input", async ({
     page,
   }) => {
+    await installSignedInTeamRoutes(page);
     const project = await projectByName(page, "sharing-e2e");
     const sharingUrl = `**/api/v1/projects/${project.id}/sharing`;
     await page.route(sharingUrl, (route) =>
@@ -377,6 +379,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto(`/ui/projects/${encodeURIComponent(project.id)}`);
 
+    await page.getByRole("button", { name: "Manage sharing" }).click();
     const toggle = page.getByRole("switch", { name: "Share automatically" });
     await expect(toggle).toBeChecked();
     await expect(page.getByTestId("sharing-team-review")).toHaveText(
@@ -577,6 +580,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     );
     await page.goto("/ui/team");
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "New team" }).click();
     await page.getByTestId("team-create-name").fill("New Acme");
     await page.getByRole("button", { name: "Create team" }).click();
@@ -587,6 +591,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await expect(reviewToggle).toBeChecked();
     await reviewDialog.getByRole("button", { name: "Turn off review" }).click();
     await expect(page.getByTestId("team-require-review")).not.toBeChecked();
+    await page.getByRole("link", { name: "Invitations", exact: true }).click();
     await page.getByTestId("team-offline-invite").check();
     await page.getByRole("button", { name: "Create invite" }).click();
     await expect(page.getByTestId("team-invite-receipt")).toContainText(
@@ -594,6 +599,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     );
     await page.getByRole("button", { name: "Done" }).click();
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Join a team" }).click();
     await page.getByTestId("team-invite-token").fill("join-token");
     await page.getByRole("button", { name: "Join team" }).click();
@@ -670,6 +676,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     });
     await page.goto("/ui/team");
 
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
     const toggle = page.getByTestId("team-require-review");
     await expect(toggle).not.toBeChecked();
     await toggle.click();
@@ -784,6 +791,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
       .selectOption("team-1");
     await page.getByRole("button", { name: "Link to team" }).click();
     await expect(page.getByTestId("sharing-summary")).toContainText("Linked");
+    await page.getByRole("button", { name: "Manage sharing" }).click();
     await page.getByRole("button", { name: "Unlink" }).click();
     await page
       .getByRole("button", { name: "Unlink project", exact: true })
@@ -822,6 +830,16 @@ for (const theme of ["light", "dark"] as const) {
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/ui/team");
+      const memberRow = page.getByTestId("team-member-row").first();
+      const memberAction = memberRow.getByRole("button");
+      await expect(memberAction).toBeVisible();
+      const actionBox = await memberAction.boundingBox();
+      expect(actionBox, "member action has a visible box").not.toBeNull();
+      if (!actionBox) throw new Error("Missing member action box");
+      expect(actionBox.x).toBeGreaterThanOrEqual(0);
+      expect(actionBox.x + actionBox.width).toBeLessThanOrEqual(width);
+      if (width < 768) expect(actionBox.height).toBeGreaterThanOrEqual(44);
+      await page.goto("/ui/team?section=invitations");
       await expect(
         page.getByLabel("Invite email", { exact: true }),
       ).toBeVisible();

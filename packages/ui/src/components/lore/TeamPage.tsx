@@ -1,3 +1,5 @@
+import { NavigationLink } from "~/components/shell/NavigationLink";
+import { useSearchParams } from "@solidjs/router";
 import { createClipboard } from "~/lib/clipboard";
 import type { Component } from "solid-js";
 import {
@@ -85,6 +87,27 @@ function memberLabel(member: TeamMember): string {
 
 export const TeamPage: Component = () => {
   const ws = useWorkspace();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const section = () =>
+    searchParams.section === "invitations" ||
+    searchParams.section === "settings"
+      ? searchParams.section
+      : "members";
+  const restoreSectionFocus = (expected: string, event: Event) => {
+    if (section() === expected) return;
+    event.preventDefault();
+    document
+      .querySelector<HTMLAnchorElement>(
+        'nav[aria-label="Team sections"] a[aria-current="page"]',
+      )
+      ?.focus();
+  };
+  const openInvitations = () => {
+    setSearchParams({ section: "invitations" });
+    queueMicrotask(() =>
+      document.getElementById("team-invite-heading")?.focus(),
+    );
+  };
   const folk = ws.state.folk;
   const [pageState, setPageState] = createSignal<PageState>("loading");
   const [teamId, setTeamId] = createSignal("");
@@ -93,6 +116,7 @@ export const TeamPage: Component = () => {
   const [loadingMembers, setLoadingMembers] = createSignal(false);
   const [pageError, setPageError] = createSignal<unknown>();
   const [actionError, setActionError] = createSignal("");
+  const [advancedError, setAdvancedError] = createSignal("");
   const [staleMemberId, setStaleMemberId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [inviteRole, setInviteRole] = createSignal<"editor" | "viewer">(
@@ -152,6 +176,7 @@ export const TeamPage: Component = () => {
     setOfflineInvite(false);
     clipboard.reset();
     setActionError("");
+    setAdvancedError("");
     setReviewPolicyError(null);
     setStaleMemberId(null);
     setRemoveReceipt(null);
@@ -624,6 +649,15 @@ export const TeamPage: Component = () => {
             Manage team membership and invitation links.
           </p>
         </div>
+        <Show when={pageState() === "ready"}>
+          <Button
+            type="button"
+            onClick={openInvitations}
+            disabled={!canAct() || members()?.actions.invite !== "available"}
+          >
+            Invite teammate
+          </Button>
+        </Show>
         <Show when={teams().length > 1}>
           <label class="flex w-full min-w-0 flex-col gap-1 text-xs text-muted sm:w-auto">
             Team
@@ -643,6 +677,38 @@ export const TeamPage: Component = () => {
         </Show>
       </div>
 
+      <Show when={pageState() === "ready"}>
+        <nav
+          aria-label="Team sections"
+          class="mb-5 flex flex-wrap gap-2 border-b border-line pb-3"
+        >
+          <For
+            each={[
+              { value: "members", label: "Members" },
+              { value: "invitations", label: "Invitations" },
+              { value: "settings", label: "Settings" },
+            ]}
+          >
+            {(item) => (
+              <NavigationLink
+                href={
+                  item.value === "members"
+                    ? "/team"
+                    : `/team?section=${item.value}`
+                }
+                current={section() === item.value}
+                class={
+                  section() === item.value
+                    ? "inline-flex min-h-11 items-center rounded-md bg-accent-soft px-3 py-2 text-sm font-medium text-accent-soft-text md:min-h-9"
+                    : "inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm text-muted hover:bg-soft md:min-h-9"
+                }
+              >
+                {item.label}
+              </NavigationLink>
+            )}
+          </For>
+        </nav>
+      </Show>
       <Show
         when={folk.sync.data()?.enabled === false && pageState() === "ready"}
       >
@@ -667,6 +733,42 @@ export const TeamPage: Component = () => {
       <Show when={actionError() && !removeTarget()}>
         <p class="mb-4 text-sm text-danger" role="alert">
           {actionError()}
+        </p>
+      </Show>
+      <Show when={inviteError()}>
+        <p class="mt-2 text-sm text-danger" role="alert">
+          {inviteError()}
+        </p>
+      </Show>
+      <Show when={roleReceipt()}>
+        {(receipt) => (
+          <p class="mb-4 text-sm text-muted" role="status">
+            {roleChangeMessage(receipt())}
+          </p>
+        )}
+      </Show>
+      <Show when={reviewPolicyError() && !reviewPolicyDialogOpen()}>
+        <p class="mt-2 text-sm text-danger" role="alert">
+          {reviewPolicyError()?.message}
+        </p>
+        <Button
+          class="mt-2"
+          size="sm"
+          variant="outline"
+          onClick={() => void reloadReviewPolicy()}
+        >
+          Reload review policy
+        </Button>
+      </Show>
+      <Show when={section() !== "settings" && advancedError()}>
+        <p class="mb-4 text-sm text-danger" role="alert">
+          {advancedError()}{" "}
+          <NavigationLink
+            href="/team?section=settings"
+            class="text-accent underline"
+          >
+            Open team settings
+          </NavigationLink>
         </p>
       </Show>
       <Show when={removeReceipt()}>
@@ -763,212 +865,171 @@ export const TeamPage: Component = () => {
                     first.
                   </p>
                 </Show>
-                <section class="mb-4 rounded-md border border-line bg-bg p-3">
-                  <label class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium">
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      aria-label="Require review"
-                      data-testid="team-require-review"
-                      checked={reviewPolicy() === "required"}
-                      disabled={
-                        !canAct() ||
-                        savingReviewPolicy() ||
-                        reviewPolicy() === undefined ||
-                        !current().can_manage
-                      }
-                      onChange={(event) => {
-                        if (!canAct()) return;
-                        const next = event.currentTarget.checked;
-                        event.currentTarget.checked =
-                          reviewPolicy() === "required";
-                        setNextReviewPolicy(next ? "required" : "optional");
-                        setReviewPolicyError(null);
-                        setReviewPolicyDialogOpen(true);
-                      }}
+                <div hidden={section() !== "members"}>
+                  <Show when={current().members.length === 0}>
+                    <StateCard
+                      kind="empty"
+                      title="No team members are listed"
                     />
-                    Require review
-                    <span class="w-full pl-7 text-xs font-normal text-muted sm:w-auto sm:pl-0">
-                      {reviewPolicy() === "required"
-                        ? "New proposals need approval."
-                        : reviewPolicy() === "optional"
-                          ? "Proposals are approved automatically."
-                          : "Loading team review policy…"}
-                    </span>
-                  </label>
-                  <Show when={!current().can_manage}>
-                    <p class="mt-2 text-xs text-muted">
-                      Only team admins can change the review policy.
-                    </p>
                   </Show>
-                  <Show when={reviewPolicyError() && !reviewPolicyDialogOpen()}>
-                    <p class="mt-2 text-sm text-danger" role="alert">
-                      {reviewPolicyError()?.message}
-                    </p>
-                    <Button
-                      class="mt-2"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void reloadReviewPolicy()}
-                    >
-                      Reload review policy
-                    </Button>
-                  </Show>
-                </section>
-                <TeamParityActions
-                  selectedTeamId={current().team?.id ?? teamId()}
-                  canManage={current().can_manage}
-                  hasTeams={teams().length > 0}
-                  disabled={!canAct()}
-                  onChanged={retry}
-                />
-                <Show when={roleReceipt()}>
-                  {(receipt) => (
-                    <p class="mb-4 text-sm text-muted" role="status">
-                      {roleChangeMessage(receipt())}
-                    </p>
-                  )}
-                </Show>
-                <Show when={current().members.length === 0}>
-                  <StateCard kind="empty" title="No team members are listed" />
-                </Show>
-                <Show when={current().members.length > 0}>
-                  <div class="overflow-x-auto">
-                    <table
-                      class="min-w-[560px] w-full text-left text-sm"
-                      data-testid="team-members"
-                    >
-                      <thead>
-                        <For each={table.getHeaderGroups()}>
-                          {(group) => (
-                            <tr class="border-b border-line">
-                              <For each={group.headers}>
-                                {(header) => (
-                                  <th class="px-2 py-2 font-semibold">
-                                    {flexRender(
-                                      header.column.columnDef.header,
-                                      header.getContext(),
-                                    )}
-                                  </th>
-                                )}
-                              </For>
-                            </tr>
-                          )}
-                        </For>
-                      </thead>
-                      <tbody>
-                        <For each={table.getRowModel().rows}>
-                          {(row) => (
-                            <tr
-                              class="border-b border-line align-top"
-                              data-testid="team-member-row"
-                              data-user-id={row.original.user_id}
-                            >
-                              <For each={row.getAllCells()}>
-                                {(cell) => (
-                                  <td class="px-2 py-3">
-                                    <Switch>
-                                      <Match when={cell.column.id === "member"}>
-                                        <PromotionIdentity
-                                          label={row.original.label}
-                                        />
-                                        <Show when={row.original.me}>
-                                          <span class="ml-2 text-xs text-muted">
-                                            You
-                                          </span>
-                                        </Show>
-                                      </Match>
-                                      <Match when={cell.column.id === "role"}>
-                                        <div class="flex flex-wrap items-center gap-2">
-                                          <select
-                                            aria-label={`Role for ${memberLabel(row.original)}`}
-                                            class="h-8 rounded-md border border-line bg-surface px-2 text-xs"
-                                            value={row.original.role}
+                  <Show when={current().members.length > 0}>
+                    <div class="min-w-0">
+                      <table
+                        class="block w-full text-left text-sm md:table"
+                        data-testid="team-members"
+                      >
+                        <thead class="hidden md:table-header-group">
+                          <For each={table.getHeaderGroups()}>
+                            {(group) => (
+                              <tr class="border-b border-line">
+                                <For each={group.headers}>
+                                  {(header) => (
+                                    <th class="px-2 py-2 font-semibold">
+                                      {flexRender(
+                                        header.column.columnDef.header,
+                                        header.getContext(),
+                                      )}
+                                    </th>
+                                  )}
+                                </For>
+                              </tr>
+                            )}
+                          </For>
+                        </thead>
+                        <tbody class="block md:table-row-group">
+                          <For each={table.getRowModel().rows}>
+                            {(row) => (
+                              <tr
+                                class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 border-b border-line py-3 md:table-row md:py-0"
+                                data-testid="team-member-row"
+                                data-user-id={row.original.user_id}
+                              >
+                                <For each={row.getAllCells()}>
+                                  {(cell) => (
+                                    <td
+                                      class={
+                                        cell.column.id === "member"
+                                          ? "col-span-2 block min-w-0 break-words pb-2 [overflow-wrap:anywhere] md:table-cell md:px-2 md:py-3"
+                                          : "block min-w-0 md:table-cell md:px-2 md:py-3"
+                                      }
+                                    >
+                                      <Switch>
+                                        <Match
+                                          when={cell.column.id === "member"}
+                                        >
+                                          <PromotionIdentity
+                                            label={row.original.label}
+                                          />
+                                          <Show when={row.original.me}>
+                                            <span class="ml-2 text-xs text-muted">
+                                              You
+                                            </span>
+                                          </Show>
+                                        </Match>
+                                        <Match when={cell.column.id === "role"}>
+                                          <div class="flex flex-wrap items-center gap-2">
+                                            <select
+                                              aria-label={`Role for ${memberLabel(row.original)}`}
+                                              class="h-11 max-w-full rounded-md border border-line bg-surface px-3 text-sm md:h-8 md:px-2 md:text-xs"
+                                              value={row.original.role}
+                                              disabled={
+                                                !canAct() ||
+                                                busy() ||
+                                                !current().can_manage ||
+                                                current().actions.set_role !==
+                                                  "available"
+                                              }
+                                              onChange={(event) =>
+                                                void changeRole(
+                                                  row.original,
+                                                  event.currentTarget
+                                                    .value as Role,
+                                                  event.currentTarget,
+                                                )
+                                              }
+                                            >
+                                              <option value="admin">
+                                                Admin
+                                              </option>
+                                              <option value="editor">
+                                                Editor
+                                              </option>
+                                              <option value="viewer">
+                                                Viewer
+                                              </option>
+                                            </select>
+                                            <Show
+                                              when={memberActionReason(
+                                                "set_role",
+                                              )}
+                                            >
+                                              <span class="text-xs text-muted">
+                                                {memberActionReason("set_role")}
+                                              </span>
+                                            </Show>
+                                          </div>
+                                        </Match>
+                                        <Match
+                                          when={cell.column.id === "actions"}
+                                        >
+                                          <Button
+                                            size="sm"
+                                            class="h-11 md:h-9"
+                                            variant="outline"
                                             disabled={
                                               !canAct() ||
                                               busy() ||
                                               !current().can_manage ||
-                                              current().actions.set_role !==
+                                              current().actions.remove !==
                                                 "available"
                                             }
-                                            onChange={(event) =>
-                                              void changeRole(
-                                                row.original,
-                                                event.currentTarget
-                                                  .value as Role,
-                                                event.currentTarget,
-                                              )
+                                            onClick={() =>
+                                              canAct() &&
+                                              setRemoveTarget(row.original)
                                             }
                                           >
-                                            <option value="admin">Admin</option>
-                                            <option value="editor">
-                                              Editor
-                                            </option>
-                                            <option value="viewer">
-                                              Viewer
-                                            </option>
-                                          </select>
+                                            {row.original.me
+                                              ? "Leave team"
+                                              : "Remove"}
+                                          </Button>
                                           <Show
                                             when={memberActionReason(
-                                              "set_role",
-                                            )}
-                                          >
-                                            <span class="text-xs text-muted">
-                                              {memberActionReason("set_role")}
-                                            </span>
-                                          </Show>
-                                        </div>
-                                      </Match>
-                                      <Match
-                                        when={cell.column.id === "actions"}
-                                      >
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          disabled={
-                                            !canAct() ||
-                                            busy() ||
-                                            !current().can_manage ||
-                                            current().actions.remove !==
-                                              "available"
-                                          }
-                                          onClick={() =>
-                                            canAct() &&
-                                            setRemoveTarget(row.original)
-                                          }
-                                        >
-                                          {row.original.me
-                                            ? "Leave team"
-                                            : "Remove"}
-                                        </Button>
-                                        <Show
-                                          when={memberActionReason(
-                                            "remove",
-                                            row.original,
-                                          )}
-                                        >
-                                          <span class="ml-2 text-xs text-muted">
-                                            {memberActionReason(
                                               "remove",
                                               row.original,
                                             )}
-                                          </span>
-                                        </Show>
-                                      </Match>
-                                    </Switch>
-                                  </td>
-                                )}
-                              </For>
-                            </tr>
-                          )}
-                        </For>
-                      </tbody>
-                    </table>
-                  </div>
-                </Show>
-
-                <section class="mt-6 rounded-lg border border-line bg-bg p-4">
-                  <h2 class="text-base font-semibold">Invite a teammate</h2>
+                                          >
+                                            <span class="ml-2 text-xs text-muted">
+                                              {memberActionReason(
+                                                "remove",
+                                                row.original,
+                                              )}
+                                            </span>
+                                          </Show>
+                                        </Match>
+                                      </Switch>
+                                    </td>
+                                  )}
+                                </For>
+                              </tr>
+                            )}
+                          </For>
+                        </tbody>
+                      </table>
+                    </div>
+                  </Show>
+                </div>
+                <section
+                  hidden={section() !== "invitations"}
+                  aria-labelledby="team-invite-heading"
+                  class="rounded-lg border border-line bg-bg p-4"
+                >
+                  <h2
+                    id="team-invite-heading"
+                    tabIndex={-1}
+                    class="text-base font-semibold"
+                  >
+                    Invite a teammate
+                  </h2>
                   <Show when={inviteUnavailableReason()}>
                     <p class="mt-1 text-sm text-muted">
                       {inviteUnavailableReason()}
@@ -1031,11 +1092,6 @@ export const TeamPage: Component = () => {
                       {busy() ? "Creating invite…" : "Create invite"}
                     </Button>
                   </form>
-                  <Show when={inviteError()}>
-                    <p class="mt-2 text-sm text-danger" role="alert">
-                      {inviteError()}
-                    </p>
-                  </Show>
                   <div class="mt-4 space-y-1 border-t border-line pt-3 text-xs text-muted">
                     <p>
                       Pending invites list/revoke: not supported by the sync
@@ -1044,6 +1100,62 @@ export const TeamPage: Component = () => {
                     <p>Invite creation works online or offline.</p>
                   </div>
                 </section>
+                <div
+                  hidden={section() !== "settings"}
+                  aria-label="Team settings"
+                >
+                  <h2 class="mb-3 text-base font-semibold">Team settings</h2>
+                  <section class="mb-4 rounded-md border border-line bg-bg p-3">
+                    <label class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        aria-label="Require review"
+                        data-testid="team-require-review"
+                        checked={reviewPolicy() === "required"}
+                        disabled={
+                          !canAct() ||
+                          savingReviewPolicy() ||
+                          reviewPolicy() === undefined ||
+                          !current().can_manage
+                        }
+                        onChange={(event) => {
+                          if (!canAct()) return;
+                          const next = event.currentTarget.checked;
+                          event.currentTarget.checked =
+                            reviewPolicy() === "required";
+                          setNextReviewPolicy(next ? "required" : "optional");
+                          setReviewPolicyError(null);
+                          setReviewPolicyDialogOpen(true);
+                        }}
+                      />
+                      Require review
+                      <span class="w-full pl-7 text-xs font-normal text-muted sm:w-auto sm:pl-0">
+                        {reviewPolicy() === "required"
+                          ? "New proposals need approval."
+                          : reviewPolicy() === "optional"
+                            ? "Proposals are approved automatically."
+                            : "Loading team review policy…"}
+                      </span>
+                    </label>
+                    <Show when={!current().can_manage}>
+                      <p class="mt-2 text-xs text-muted">
+                        Only team admins can change the review policy.
+                      </p>
+                    </Show>
+                  </section>
+                  <TeamParityActions
+                    selectedTeamId={current().team?.id ?? teamId()}
+                    canManage={current().can_manage}
+                    hasTeams={teams().length > 0}
+                    disabled={!canAct()}
+                    onChanged={retry}
+                    onStatusError={setAdvancedError}
+                    onCloseAutoFocus={(event) =>
+                      restoreSectionFocus("settings", event)
+                    }
+                  />
+                </div>
                 <Show when={loadingMembers()}>
                   <p class="mt-2 text-xs text-muted" role="status">
                     Refreshing members…
@@ -1059,7 +1171,10 @@ export const TeamPage: Component = () => {
         open={reviewPolicyDialogOpen()}
         onOpenChange={closeReviewPolicyDialog}
       >
-        <DialogContent data-testid="team-review-policy-confirmation">
+        <DialogContent
+          data-testid="team-review-policy-confirmation"
+          onCloseAutoFocus={(event) => restoreSectionFocus("settings", event)}
+        >
           <DialogHeader>
             <DialogTitle>
               {nextReviewPolicy() === "required"
@@ -1135,7 +1250,10 @@ export const TeamPage: Component = () => {
           if (!open) closeRemove();
         }}
       >
-        <DialogContent data-testid="team-remove-confirmation">
+        <DialogContent
+          data-testid="team-remove-confirmation"
+          onCloseAutoFocus={(event) => restoreSectionFocus("members", event)}
+        >
           <DialogHeader>
             <DialogTitle>
               {removeTarget()?.me ? "Leave team?" : "Remove team member?"}
@@ -1204,7 +1322,12 @@ export const TeamPage: Component = () => {
       </Dialog>
 
       <Dialog open={inviteReceipt() !== null} onOpenChange={closeInviteReceipt}>
-        <DialogContent data-testid="team-invite-receipt">
+        <DialogContent
+          data-testid="team-invite-receipt"
+          onCloseAutoFocus={(event) =>
+            restoreSectionFocus("invitations", event)
+          }
+        >
           <DialogHeader>
             <DialogTitle>Invite created</DialogTitle>
             <DialogDescription>

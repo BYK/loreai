@@ -1,3 +1,4 @@
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import {
   fireEvent,
   render,
@@ -202,12 +203,26 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
   } as unknown as ApiClient;
 }
 
-function mount(component: () => JSX.Element, client: ApiClient) {
-  return render(() => (
-    <WorkspaceProvider client={client} db={Promise.resolve(null)}>
-      {component()}
-    </WorkspaceProvider>
+function mount(
+  component: () => JSX.Element,
+  client: ApiClient,
+  path = "/team",
+) {
+  const history = createMemoryHistory();
+  history.set({ value: path });
+  const view = render(() => (
+    <MemoryRouter history={history}>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+            {component()}
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
   ));
+  return { ...view, history };
 }
 
 function deferred<T>() {
@@ -221,6 +236,161 @@ function deferred<T>() {
 }
 
 describe("TeamPage", () => {
+  it("starts with members and uses URL-backed invitation and settings sections", async () => {
+    const view = mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => memberResponse }),
+    );
+    await screen.findByTestId("team-members");
+    expect(screen.getByRole("link", { name: "Members" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.queryByRole("switch", { name: "Require review" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create invite" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Invite teammate" }));
+    expect(
+      await screen.findByRole("button", { name: "Create invite" }),
+    ).toBeInTheDocument();
+    expect(view.history.get()).toBe("/team?section=invitations");
+    expect(
+      screen.getByRole("heading", { name: "Invite a teammate" }),
+    ).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Invitations" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    expect(
+      await screen.findByRole("switch", { name: "Require review" }),
+    ).toBeInTheDocument();
+  });
+
+  it("restores the invitations URL section", async () => {
+    mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => memberResponse }),
+      "/team?section=invitations",
+    );
+    expect(
+      await screen.findByRole("button", { name: "Create invite" }),
+    ).toBeInTheDocument();
+  });
+
+  it("treats an unknown URL section as members without exposing advanced controls", async () => {
+    mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => memberResponse }),
+      "/team?section=%3Cscript%3Esettings",
+    );
+    expect(await screen.findByTestId("team-members")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Members" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.queryByRole("switch", { name: "Require review" })).toBeNull();
+  });
+
+  it("keeps invitation failure visible after navigating while the request is pending", async () => {
+    let reject!: (reason: Error) => void;
+    const inviteTeamMember = vi.fn<ApiClient["inviteTeamMember"]>(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const view = mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamMembers: async () => memberResponse,
+        inviteTeamMember,
+      }),
+      "/team?section=invitations",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Create invite" }),
+    );
+    expect(inviteTeamMember).toHaveBeenCalledTimes(1);
+    view.history.set({ value: "/team?section=settings" });
+    expect(
+      await screen.findByRole("switch", { name: "Require review" }),
+    ).toBeInTheDocument();
+    reject(new Error("Invitation service unavailable"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Invitation service unavailable",
+    );
+    expect(screen.getByRole("alert")).toBeVisible();
+    expect(inviteTeamMember).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an invite receipt open across history navigation and restores section focus", async () => {
+    const view = mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => memberResponse }),
+      "/team?section=invitations",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Create invite" }),
+    );
+    const dialog = await screen.findByTestId("team-invite-receipt");
+    view.history.set({ value: "/team?section=settings" });
+    expect(dialog).toBeVisible();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Settings" })).toHaveFocus(),
+    );
+  });
+
+  it("keeps advanced-tool errors visible after navigating away from settings", async () => {
+    let reject!: (reason: Error) => void;
+    const discoverTeamContributors = vi.fn<
+      ApiClient["discoverTeamContributors"]
+    >(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const view = mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamMembers: async () => memberResponse,
+        discoverTeamContributors,
+      }),
+      "/team?section=settings",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Find contributors" }),
+    );
+    expect(discoverTeamContributors).toHaveBeenCalledTimes(1);
+    view.history.set({ value: "/team" });
+    reject(new Error("Contributor discovery unavailable"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((element) =>
+            element.textContent?.includes("Contributor discovery unavailable"),
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("restores active-section focus when a settings dialog closes after history navigation", async () => {
+    const view = mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => memberResponse }),
+      "/team?section=settings",
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Join a team" }));
+    const dialog = await screen.findByTestId("team-join-dialog");
+    view.history.set({ value: "/team" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Members" })).toHaveFocus(),
+    );
+  });
+
   it("hides prior members when a team reload fails and ignores late responses", async () => {
     const firstTeamResponse: TeamMembersResponse = {
       ...memberResponse,
@@ -324,7 +494,8 @@ describe("TeamPage", () => {
     mount(() => <TeamPage />, clientWith({ getTeams, getTeamMembers }));
 
     await screen.findByTestId("team-members");
-    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    fireEvent.click(await screen.findByRole("link", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Join a team" }));
     const firstDialog = await screen.findByTestId("team-join-dialog");
     fireEvent.input(screen.getByTestId("team-invite-token"), {
       target: { value: "invite-token" },
@@ -338,7 +509,7 @@ describe("TeamPage", () => {
 
     refreshedTeams.resolve(emptyTeams);
     expect(await screen.findByText("No team memberships")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Join a team" }));
     const secondDialog = await screen.findByTestId("team-join-dialog");
     fireEvent.input(screen.getByTestId("team-invite-token"), {
       target: { value: "invite-token" },
@@ -349,7 +520,10 @@ describe("TeamPage", () => {
 
     await waitFor(() => expect(getTeams).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(getTeamMembers).toHaveBeenCalledTimes(2));
-    expect(await screen.findByTestId("team-members")).toBeVisible();
+    fireEvent.click(await screen.findByRole("link", { name: "Members" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("team-members")).toBeVisible(),
+    );
   });
 
   it("shows hosted mode before the anonymous state", async () => {
@@ -415,6 +589,7 @@ describe("TeamPage", () => {
         setTeamReviewPolicy,
       }),
     );
+    fireEvent.click(await screen.findByRole("link", { name: "Settings" }));
     const toggle = await screen.findByRole("switch", {
       name: "Require review",
     });
@@ -504,6 +679,7 @@ describe("TeamPage", () => {
         setTeamReviewPolicy,
       }),
     );
+    fireEvent.click(await screen.findByRole("link", { name: "Settings" }));
     const toggle = await screen.findByRole("switch", {
       name: "Require review",
     });
@@ -542,6 +718,7 @@ describe("TeamPage", () => {
         getTeamReviewPolicy: async () => ({ policy: "required" }),
       }),
     );
+    fireEvent.click(await screen.findByRole("link", { name: "Settings" }));
     expect(
       await screen.findByRole("switch", { name: "Require review" }),
     ).toBeDisabled();
@@ -832,8 +1009,11 @@ describe("TeamPage", () => {
       "viewer",
     );
 
+    fireEvent.click(screen.getByRole("link", { name: "Invitations" }));
     fireEvent.click(screen.getByTestId("team-offline-invite"));
-    const createInvite = screen.getByRole("button", { name: "Create invite" });
+    const createInvite = await screen.findByRole("button", {
+      name: "Create invite",
+    });
     await waitFor(() => expect(createInvite).toBeEnabled());
     fireEvent.click(createInvite);
     const inviteDialog = await screen.findByTestId("team-invite-receipt");
@@ -1282,7 +1462,7 @@ describe("TeamParityActions", () => {
       clientWith({ acceptTeamInvite }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Join a team" }));
     const dialog = await screen.findByTestId("team-join-dialog");
     fireEvent.input(screen.getByTestId("team-invite-token"), {
       target: {
@@ -1298,7 +1478,7 @@ describe("TeamParityActions", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("team-join-dialog")).not.toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Join a team" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Join a team" }));
     expect(await screen.findByTestId("team-invite-token")).toHaveValue("");
   });
 
@@ -1514,6 +1694,103 @@ describe("TeamParityActions", () => {
 });
 
 describe("SharingPanel auto-share control", () => {
+  it("compacts configured sharing with explicit expansion and keeps sync visible", async () => {
+    mount(
+      () => <SharingPanel projectId="p-1" />,
+      clientWith({ getProjectSharing: async () => manualSharing }),
+    );
+    const expand = await screen.findByRole("button", {
+      name: "Manage sharing",
+    });
+    expect(
+      screen.queryByRole("switch", { name: "Share automatically" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Sync now" }),
+    ).toBeInTheDocument();
+    fireEvent.click(expand);
+    expect(
+      screen.getByRole("switch", { name: "Share automatically" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Hide sharing settings" }),
+    );
+    expect(
+      screen.queryByRole("switch", { name: "Share automatically" }),
+    ).toBeNull();
+  });
+
+  it("keeps configured sharing compact through a healthy account and sync refresh while gating writes", async () => {
+    const nextAccount = deferred<AccountStatus>();
+    const nextSync =
+      deferred<Awaited<ReturnType<ApiClient["getSyncStatus"]>>>();
+    const getAccount = vi
+      .fn<ApiClient["getAccount"]>()
+      .mockResolvedValueOnce(account)
+      .mockImplementation(() => nextAccount.promise);
+    const getSyncStatus = vi
+      .fn<ApiClient["getSyncStatus"]>()
+      .mockResolvedValueOnce({
+        enabled: true,
+        state: "idle",
+        pending_changes: 0,
+      })
+      .mockImplementation(() => nextSync.promise);
+    const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>();
+    mount(
+      () => <SharingPanel projectId="p-1" />,
+      clientWith({ getAccount, getSyncStatus, setProjectAutoShare }),
+    );
+    await screen.findByRole("button", { name: "Manage sharing" });
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(getAccount).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText("Sharing setup")).not.toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Manage sharing" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Manage sharing" }));
+    expect(
+      screen.getByRole("switch", { name: "Share automatically" }),
+    ).toBeDisabled();
+    expect(setProjectAutoShare).not.toHaveBeenCalled();
+    nextAccount.resolve(account);
+    nextSync.resolve({ enabled: true, state: "idle", pending_changes: 0 });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Share automatically" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("expands setup when the account changes until sharing is confirmed for that owner", async () => {
+    const nextSharing = deferred<SharingStatus>();
+    const getAccount = vi
+      .fn<ApiClient["getAccount"]>()
+      .mockResolvedValueOnce(account)
+      .mockResolvedValue({
+        ...account,
+        user: { id: "other-user", email: null, display_name: "Other" },
+      });
+    const getProjectSharing = vi
+      .fn<ApiClient["getProjectSharing"]>()
+      .mockResolvedValueOnce(automaticSharing)
+      .mockImplementation(() => nextSharing.promise);
+    mount(
+      () => <SharingPanel projectId="p-1" />,
+      clientWith({ getAccount, getProjectSharing }),
+    );
+    await screen.findByRole("button", { name: "Manage sharing" });
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(getProjectSharing).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText("Sharing setup")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Manage sharing" })).toBeNull();
+    nextSharing.resolve(manualSharing);
+    expect(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows team review policy and confirms disabling automatic sharing", async () => {
     const setProjectAutoShare = vi.fn<ApiClient["setProjectAutoShare"]>(
       async () => manualSharing,
@@ -1523,6 +1800,9 @@ describe("SharingPanel auto-share control", () => {
       clientWith({ setProjectAutoShare }),
     );
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     const toggle = await screen.findByRole("switch", {
       name: "Share automatically",
     });
@@ -1569,6 +1849,9 @@ describe("SharingPanel auto-share control", () => {
         setProjectAutoShare,
       }),
     );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     const toggle = await screen.findByRole("switch", {
       name: "Share automatically",
     });
@@ -1610,6 +1893,9 @@ describe("SharingPanel auto-share control", () => {
     );
 
     fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
+    fireEvent.click(
       await screen.findByRole("switch", { name: "Share automatically" }),
     );
     const dialog = await screen.findByTestId("sharing-policy-confirmation");
@@ -1649,6 +1935,9 @@ describe("SharingPanel auto-share control", () => {
       clientWith({ setProjectAutoShare }),
     );
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     const toggle = await screen.findByRole("switch", {
       name: "Share automatically",
     });
@@ -1696,6 +1985,9 @@ describe("SharingPanel auto-share control", () => {
       clientWith({ getProjectSharing, setProjectAutoShare }),
     );
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     fireEvent.click(
       await screen.findByRole("switch", { name: "Share automatically" }),
     );
@@ -1771,6 +2063,9 @@ describe("SharingPanel team link control", () => {
       ),
     );
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     const unlink = await screen.findByRole("button", { name: "Unlink" });
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
@@ -1802,7 +2097,7 @@ describe("guided project sharing", () => {
     detail: null,
   };
 
-  it("shows the three steps and device-wide background sync beside the project", async () => {
+  it("shows compact device-wide background sync and can expand setup", async () => {
     const runSync = vi.fn<ApiClient["runSync"]>(async () => ({
       pushed: 2,
       pulled: 1,
@@ -1816,6 +2111,10 @@ describe("guided project sharing", () => {
     expect(
       await screen.findByRole("heading", { name: "Connected to Acme" }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Sharing setup")).not.toBeVisible();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     expect(screen.getByLabelText("Sharing setup")).toHaveTextContent(
       "Connect team",
     );
@@ -1826,7 +2125,7 @@ describe("guided project sharing", () => {
       "Keep in sync",
     );
     expect(screen.getByTestId("sharing-sync")).toHaveTextContent(
-      "Background sync is enabled",
+      "Background sync configured",
     );
     fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
     expect(
@@ -1842,6 +2141,9 @@ describe("guided project sharing", () => {
     mount(
       () => <SharingPanel projectId="project-1" />,
       clientWith({ linkProjectToTeam }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Unlink" }));
     let dialog = await screen.findByTestId("sharing-unlink-confirmation");
@@ -1932,6 +2234,9 @@ describe("guided project sharing", () => {
   it("explains the consequence of turning automatic sharing off", async () => {
     mount(() => <SharingPanel projectId="project-1" />, clientWith({}));
     fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
+    fireEvent.click(
       await screen.findByRole("switch", { name: "Share automatically" }),
     );
     const dialog = await screen.findByTestId("sharing-policy-confirmation");
@@ -1965,7 +2270,7 @@ describe("sharing sync status recovery", () => {
       );
     };
     mount(Harness, clientWith({ getSyncStatus }));
-    await screen.findByRole("heading", { name: "Background sync is enabled" });
+    await screen.findByRole("button", { name: "Sync now" });
     fireEvent.click(
       screen.getByRole("button", { name: "Refresh sync status" }),
     );
@@ -2012,6 +2317,9 @@ describe("sharing consent and locked device recovery", () => {
     expect(linkProjectToTeam).not.toHaveBeenCalled();
     fireEvent.change(picker, { target: { value: "team-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Link to team" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Manage sharing" }),
+    );
     expect(
       await screen.findByRole("switch", { name: "Share automatically" }),
     ).not.toBeChecked();
