@@ -79,10 +79,19 @@ describe("current Codex native Responses compatibility", () => {
         developer("dev_1", "Keep the rule"),
         user(
           "user_1",
-          large ? "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1) : "Hello",
+          // Cross the streaming cutoff without making token estimation merge
+          // one enormous word during the real temporal conversion below.
+          large
+            ? "native context ".repeat(
+                Math.ceil((STREAMING_PARSE_SPOOL_BYTES + 1) / 15),
+              )
+            : "Hello",
         ),
       ];
       const body = build(input);
+      expect(
+        Buffer.byteLength(JSON.stringify(body)) > STREAMING_PARSE_SPOOL_BYTES,
+      ).toBe(large);
       const req = parseOpenAIResponsesRequest(body, {});
       expect(await parseOpenAIResponsesRequestChunks(chunks(body), {})).toEqual(
         req,
