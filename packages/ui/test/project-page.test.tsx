@@ -302,7 +302,9 @@ describe("ProjectPage", () => {
       await screen.findByText("Linked · Acme · policy: auto"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("New knowledge is shared with the team automatically."),
+      screen.getByText(
+        "New team knowledge is proposed automatically. Your team’s review rules still apply.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -364,7 +366,7 @@ describe("ProjectPage", () => {
       await screen.findByText("Not signed in; team content cannot sync"),
     ).toBeInTheDocument();
     expect(screen.getByTestId("sharing-panel")).toHaveTextContent(
-      "project override none · team default manual",
+      "Project preference: none · team default: manual",
     );
   });
 
