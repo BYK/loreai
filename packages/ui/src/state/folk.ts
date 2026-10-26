@@ -64,7 +64,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
       window.removeEventListener("focus", refreshAccount);
     });
   });
-  const refresh = () => {
+  const refreshStatus = () => {
     account.reload();
     sync.reload();
     if (teamsWanted()) teams.reload();
@@ -123,7 +123,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
       if (result.notAuthed) {
         setSyncBlocker("unauthorized");
         setSyncError("Sign in again before syncing.");
-        refresh();
+        refreshStatus();
         return;
       }
       setSyncResult(result);
@@ -139,7 +139,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
       setSyncReceipt(
         `${issues.length ? "Sync needs attention" : "Sync complete"}: pushed ${result.pushed}, pulled ${result.pulled}.${issues.length ? ` ${issues.join(". ")}.` : ""}`,
       );
-      refresh();
+      refreshStatus();
     } catch (error) {
       if (generation !== syncGeneration) return;
       const code = isApiError(error) ? error.code : null;
@@ -172,8 +172,12 @@ export function createFolkState({ client }: { client: ApiClient }) {
     loadTeams() {
       if (!teamsWanted()) setTeamsWanted(true);
     },
-    /** Re-read account, sync and (once requested) teams; current data stays visible. */
-    refresh,
+    /** Recheck settings after external recovery; the next sync verifies them. */
+    refresh() {
+      setSyncBlocker(null);
+      setSyncError(null);
+      refreshStatus();
+    },
   };
 }
 

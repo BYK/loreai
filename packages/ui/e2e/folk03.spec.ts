@@ -386,7 +386,7 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await page.keyboard.press("Space");
     const dialog = page.getByTestId("sharing-policy-confirmation");
     await expect(dialog).toContainText(
-      "New team knowledge in this project is shared with Acme e2e on the next sync without review, because the team doesn't require review.",
+      "You’ll choose which new entries to propose. Copies already shared with the team are not removed.",
     );
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
@@ -799,7 +799,9 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
     await openAccountMenu(page);
     await page.getByTestId("sync-now").click();
     await expect(
-      page.getByText("Sync complete: pushed 1, pulled 2.", { exact: true }),
+      page
+        .getByTestId("folk-status-panel")
+        .getByText("Sync complete: pushed 1, pulled 2.", { exact: true }),
     ).toBeVisible();
   });
 });

@@ -2121,3 +2121,128 @@ it.each([403, 404])(
     ).toBeInTheDocument();
   },
 );
+
+it.each([
+  "encryption_locked",
+  "sync_disabled",
+  "unauthorized",
+  "gateway_access",
+] as const)(
+  "lets Check again recover from a stale %s sync blocker",
+  async (blocker) => {
+    const message = "Previous sync could not run";
+    const runSync = vi
+      .fn<ApiClient["runSync"]>()
+      .mockRejectedValueOnce(
+        new ApiError(
+          blocker === "gateway_access" ? "unauthorized" : "http",
+          "/sync/run",
+          message,
+          403,
+          blocker === "gateway_access" ? undefined : blocker,
+        ),
+      )
+      .mockResolvedValueOnce({
+        pushed: 1,
+        pulled: 0,
+        conflicts: 0,
+        skipped: 0,
+      });
+    const getSyncStatus = vi.fn<ApiClient["getSyncStatus"]>(async () => ({
+      enabled: true,
+      state: "idle",
+      pending_changes: 0,
+    }));
+    mount(
+      () => <SharingPanel projectId="project-1" />,
+      clientWith({ runSync, getSyncStatus }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(getSyncStatus).toHaveBeenCalledTimes(2));
+    const retry = await screen.findByRole("button", { name: "Sync now" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    expect(
+      await screen.findByText("Sync complete: pushed 1, pulled 0."),
+    ).toBeVisible();
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+  },
+);
+
+it("keeps a notAuthed receipt blocked during its automatic status refresh", async () => {
+  const getSyncStatus = vi.fn<ApiClient["getSyncStatus"]>(async () => ({
+    enabled: true,
+    state: "idle",
+    pending_changes: 0,
+  }));
+  mount(
+    () => <SharingPanel projectId="project-1" />,
+    clientWith({
+      getSyncStatus,
+      runSync: async () => ({
+        pushed: 0,
+        pulled: 0,
+        conflicts: 0,
+        skipped: 0,
+        notAuthed: true,
+      }),
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  await waitFor(() => expect(getSyncStatus).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText("lore login")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Sync now" }),
+  ).not.toBeInTheDocument();
+});
+
+it("preserves a newer sync failure when a settings refresh finishes later", async () => {
+  const refreshedAccount = deferred<AccountStatus>();
+  let accountReads = 0;
+  let rejectSync!: (reason: unknown) => void;
+  mount(
+    () => {
+      const folk = useWorkspace().state.folk;
+      return (
+        <>
+          <SharingPanel projectId="project-1" />
+          <button onClick={() => folk.refresh()}>Refresh settings</button>
+        </>
+      );
+    },
+    clientWith({
+      getAccount: async () =>
+        ++accountReads > 1 ? refreshedAccount.promise : account,
+      runSync: () =>
+        new Promise((_resolve, reject) => {
+          rejectSync = reject;
+        }),
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh settings" }));
+  await waitFor(() => expect(accountReads).toBe(2));
+  rejectSync(
+    new ApiError(
+      "http",
+      "/sync/run",
+      "Encryption is still locked",
+      409,
+      "encryption_locked",
+    ),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Encryption is still locked",
+  );
+  refreshedAccount.resolve(account);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("heading", { name: "Unlock sync on this device" }),
+    ).toBeVisible(),
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Encryption is still locked",
+  );
+});
