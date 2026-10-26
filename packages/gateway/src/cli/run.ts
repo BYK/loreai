@@ -15,7 +15,6 @@ import {
   detectAgents,
   AGENTS,
   appendCustomHeader,
-  setCustomHeader,
   captureUserUpstream,
   type AgentDef,
   type DetectedAgent,
@@ -28,7 +27,7 @@ import {
   type ProcessShutdownController,
 } from "./shutdown";
 import { maybeAutoImport } from "./import-auto";
-import { discoverWorkspaceRoot, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { discoverWorkspaceRoot, log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -223,24 +222,23 @@ export function injectAdoptionHeaders(
   }
 }
 
-/**
- * Optional gateway access credential for remote/hosted data-plane requests.
- * It is sent as `x-lore-gateway-token` and remains separate from provider API
- * keys/bearer tokens. When configured, it must be 32-256 visible ASCII
- * characters without commas and clients must supply it. OpenCode/Pi consume
- * LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code
- * supports a per-request custom header directly. Never place it in a URL or
- * CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.
- */
+/** Tell agent adapters which gateway handles remote requests. */
 export function injectRemoteGatewayAccess(
-  agent: AgentDef | null,
+  _agent: AgentDef | null,
   env: Record<string, string>,
   gatewayUrl: string,
 ): void {
   env.LORE_REMOTE_URL = gatewayUrl;
-  const token = process.env.LORE_GATEWAY_AUTH_TOKEN;
-  if (!token || agent?.name !== "claude-code") return;
-  setCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", GATEWAY_AUTH_HEADER, token);
+  if (env.ANTHROPIC_CUSTOM_HEADERS) {
+    // Older configurations may still contain this retired credential.
+    env.ANTHROPIC_CUSTOM_HEADERS = env.ANTHROPIC_CUSTOM_HEADERS.split("\n")
+      .filter(
+        (line) =>
+          line.split(":", 1)[0]?.trim().toLowerCase() !==
+          "x-lore-gateway-token",
+      )
+      .join("\n");
+  }
 }
 
 /**

@@ -32,14 +32,8 @@ import {
   withTransaction,
 } from "@loreai/core";
 
-/** Public project URL. Build-time default → Folk Lore's project; env override. */
-export const SUPABASE_URL =
-  process.env.SUPABASE_URL ?? "https://jlwxsrmvomocgngbxmcf.supabase.co";
-
-/** Public (publishable/anon) key — safe to ship; RLS enforces access. */
-export const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ??
-  "sb_publishable_P7FJq3V-Sui53nkbPsdpYg_N0U6lyZi";
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-settings";
+export { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-settings";
 
 /** team_config key under which the auth session is persisted. */
 const SESSION_KEY = "supabase.session";
@@ -354,42 +348,46 @@ export function createSupabaseClient(
 ): SupabaseClient {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     ...(accessToken ? { accessToken } : {}),
-    ...(signal
-      ? {
-          global: {
-            fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
-              const active = signal();
-              // The SDK retries thrown fetch errors and 5xx responses with
-              // uninterruptible backoff. Local scheduling owns retries; turn
-              // temporary/aborted auth failures into a non-retryable SDK error.
-              const unavailable = () =>
-                Response.json(
-                  { msg: "Account service unavailable" },
-                  { status: 499 },
-                );
-              try {
-                if (active?.aborted) return unavailable();
-                const response = await fetch(input, {
-                  ...init,
-                  ...(active
-                    ? {
-                        signal: init?.signal
-                          ? AbortSignal.any([active, init.signal])
-                          : active,
-                      }
-                    : {}),
-                });
-                return active && response.status >= 500
-                  ? unavailable()
-                  : response;
-              } catch (error) {
-                if (active) return unavailable();
-                throw error;
-              }
-            }) as typeof fetch,
-          },
+    global: {
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const active = signal?.();
+        // The SDK retries thrown fetch errors and 5xx responses with
+        // uninterruptible backoff. Local scheduling owns retries; turn
+        // temporary/aborted auth failures into a non-retryable SDK error.
+        const unavailable = () =>
+          Response.json(
+            { msg: "Account service unavailable" },
+            { status: 499 },
+          );
+        try {
+          if (active?.aborted) return unavailable();
+          const response = await fetch(input, {
+            ...init,
+            // A 307/308 can replay credential-bearing request bodies to
+            // another origin even when authorization headers are stripped.
+            redirect: "error",
+            ...(active
+              ? {
+                  signal: init?.signal
+                    ? AbortSignal.any([active, init.signal])
+                    : active,
+                }
+              : {}),
+          });
+          if (active && response.status >= 500) {
+            // The SDK never sees this body; retain operation ownership
+            // until its cancellation settles before replacing it.
+            await response.body?.cancel().catch(() => {});
+            return unavailable();
+          }
+          return response;
+        } catch {
+          // Auth logs rejected fetch exceptions before callers can sanitize
+          // them. Never hand it transport diagnostics, even without a signal.
+          return unavailable();
         }
-      : {}),
+      }) as typeof fetch,
+    },
     auth: {
       flowType: "pkce",
       persistSession: true,
@@ -625,6 +623,7 @@ async function restoreSession(
 export function accountDataClient(
   revision: string | null,
   initial: PersistedSession,
+  signal?: () => AbortSignal | undefined,
 ): SupabaseClient {
   let initialized = false;
   const read = () => {
@@ -640,7 +639,7 @@ export function accountDataClient(
       );
     return session;
   };
-  const client = createSupabaseClient(undefined, async () => {
+  const client = createSupabaseClient(signal, async () => {
     let session = read();
     // The SDK eagerly requests a realtime token in its constructor. The
     // authenticated initial token is already restored; avoid recursive work.

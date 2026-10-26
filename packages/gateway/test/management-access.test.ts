@@ -114,17 +114,16 @@ describe("management route access control", () => {
     },
   );
 
-  test("hides remote management API access without a Bearer token", async () => {
+  test("allows remote management API access without a Bearer token", async () => {
     const response = await fetch(
       urlFor(remoteManagementPeer, "/api/v1/projects"),
     );
 
-    expect(response.status).toBe(404);
-    expect(await response.text()).toBe("");
+    expect(response.status).toBe(200);
   });
 
   test.each(["/ui", "/"])(
-    "keeps the remote dashboard shell public at %s while API routes stay gated",
+    "keeps the remote dashboard shell available at %s",
     async (path) => {
       const response = await fetch(urlFor(remoteManagementPeer, path), {
         redirect: "manual",
@@ -148,15 +147,14 @@ describe("management route access control", () => {
     ["wrong token", "Bearer wrong-token"],
     ["extra credentials", `Bearer ${REMOTE_MANAGEMENT_TOKEN},other`],
   ])(
-    "rejects remote API credentials with %s",
+    "ignores remote API credentials with %s",
     async (_label, authorization) => {
       const response = await fetch(
         urlFor(remoteManagementPeer, "/api/v1/projects"),
         { headers: { authorization } },
       );
 
-      expect(response.status).toBe(404);
-      expect(await response.text()).toBe("");
+      expect(response.status).toBe(200);
     },
   );
 
@@ -174,47 +172,23 @@ describe("management route access control", () => {
     await expect(response.json()).resolves.toEqual(expect.any(Array));
   });
 
-  test("hides remote provider-pacing writes without a token before reading the body", async () => {
-    const rawResponse = await new Promise<string>((resolve, reject) => {
-      const socket = connect(tokenlessRemoteManagementPeer.port, "127.0.0.1");
-      let received = "";
-      const timer = setTimeout(() => {
-        socket.destroy();
-        reject(new Error("remote pacing denial waited for the request body"));
-      }, 2_000);
-      const finish = (): void => {
-        clearTimeout(timer);
-        socket.destroy();
-        resolve(received);
-      };
-      socket.once("connect", () => {
-        socket.write(
-          "PUT /api/v1/costs/pacing HTTP/1.1\r\n" +
-            `Host: 127.0.0.1:${tokenlessRemoteManagementPeer.port}\r\n` +
-            "Content-Type: application/json\r\n" +
-            "Content-Length: 100000\r\n" +
-            "\r\n" +
-            "{",
-        );
-      });
-      socket.on("data", (chunk) => {
-        received += chunk.toString();
-        if (received.includes("\r\n\r\n")) finish();
-      });
-      socket.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      socket.once("close", () => {
-        if (received) finish();
-      });
-    });
-
-    expect(rawResponse).toContain("404 Not Found");
-    expect(rawResponse.toLowerCase()).toContain("connection: close");
+  test("allows remote provider-pacing writes without a token", async () => {
+    const response = await fetch(
+      urlFor(tokenlessRemoteManagementPeer, "/api/v1/costs/pacing"),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "anthropic",
+          account: "remote-pacing-access-test",
+          enabled: false,
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
   });
 
-  test("requires the configured gateway token for remote pacing writes", async () => {
+  test("accepts remote pacing writes when a legacy token is configured", async () => {
     const response = await fetch(
       urlFor(remoteManagementPeer, "/api/v1/costs/pacing"),
       {

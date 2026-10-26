@@ -3,7 +3,6 @@ import {
   type RecallToolExecutor,
 } from "./recall-tool";
 import { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
-import { GATEWAY_AUTH_HEADER } from "./credential-headers";
 export { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
 
 const AUTH_HEADERS = ["x-api-key", "x-goog-api-key", "authorization"] as const;
@@ -47,8 +46,10 @@ export function createGatewayRecallClient(gatewayBase: string): {
       for (const [key, entry] of credentials) {
         if (entry.expiresAt <= now) credentials.delete(key);
       }
+      // Only provider credentials establish recall ownership. Retired gateway
+      // tokens must never change that identity or be forwarded to the gateway.
       const auth = Object.fromEntries(
-        [...AUTH_HEADERS, GATEWAY_AUTH_HEADER].flatMap((name) => {
+        AUTH_HEADERS.flatMap((name) => {
           const value = headers.get(name);
           return value ? [[name, value]] : [];
         }),

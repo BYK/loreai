@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { themeColor } from "./workspace-helpers";
+import { openNavigation, themeColor } from "./workspace-helpers";
 
 for (const theme of ["light", "dark"] as const) {
   for (const width of [1440, 390, 320]) {
@@ -148,7 +148,7 @@ for (const theme of ["light", "dark"] as const) {
         });
       }
     });
-    test(`gateway connection form uses olive surfaces at ${width}px in ${theme}`, async ({
+    test(`sign-in form fits at ${width}px in ${theme}`, async ({
       page,
     }, testInfo) => {
       test.skip(testInfo.project.name !== "desktop-chromium");
@@ -157,21 +157,16 @@ for (const theme of ["light", "dark"] as const) {
         theme,
       );
       await page.setViewportSize({ width, height: 900 });
-      let authenticated = false;
-      await page.route("**/api/v1/projects", (route) => {
-        authenticated =
-          route.request().headers().authorization ===
-          "Bearer ui-theme-test-token";
-        return route.fulfill(
-          authenticated
-            ? { json: [] }
-            : { status: 401, json: { error: "unauthorized" } },
-        );
-      });
       await page.goto("/ui");
-      const gate = page.getByTestId("gateway-auth-gate");
+      await openNavigation(page);
+      await page.getByTestId("folk-status").click();
+      await page
+        .getByTestId("folk-status-panel")
+        .getByRole("button", { name: "Sign in to Lore" })
+        .click();
+      const gate = page.getByRole("dialog", { name: "Sign in to Lore" });
       await expect(gate).toBeVisible();
-      const field = page.getByLabel("Gateway token", { exact: true });
+      const field = gate.getByLabel("Email address", { exact: true });
       const styles = await field.evaluate((el) => {
         const style = getComputedStyle(el);
         return {
@@ -180,22 +175,8 @@ for (const theme of ["light", "dark"] as const) {
           width: style.borderTopWidth,
         };
       });
-      expect
-        .soft(styles.border)
-        .toBe(
-          await themeColor(
-            page,
-            `--color-olive-${theme === "dark" ? 700 : 200}`,
-          ),
-        );
-      expect
-        .soft(styles.background)
-        .toBe(
-          await themeColor(
-            page,
-            `--color-olive-${theme === "dark" ? 900 : 50}`,
-          ),
-        );
+      expect.soft(styles.border).toBe(await themeColor(page, "--line"));
+      expect.soft(styles.background).toBe(await themeColor(page, "--surface"));
       expect.soft(styles.width).toBe("1px");
       const size = await gate.evaluate((el) => ({
         client: el.clientWidth,
@@ -206,15 +187,11 @@ for (const theme of ["light", "dark"] as const) {
         path: testInfo.outputPath(`gateway-connect-${theme}-${width}.png`),
         fullPage: true,
       });
-      await expect(field).toHaveAttribute("type", "password");
+      await expect(field).toHaveAttribute("type", "email");
       await expect(field).toHaveAttribute("required", "");
-      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await gate.getByRole("button", { name: "Send sign-in email" }).click();
       await expect(gate).toBeVisible();
-      expect(authenticated).toBe(false);
-      await field.fill("  ui-theme-test-token  ");
-      await field.press("Enter");
-      await expect(gate).toHaveCount(0);
-      expect(authenticated).toBe(true);
+      await expect(field).toBeFocused();
     });
     test(`project dialog has breathing room at ${width}px in ${theme}`, async ({
       page,

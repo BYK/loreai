@@ -153,21 +153,25 @@ These live in the Supabase dashboard because they involve secrets:
 1. **Authentication → Providers → GitHub**: enable, paste the GitHub OAuth App
    Client ID + secret. The GitHub OAuth App's *Authorization callback URL* must
    be `https://jlwxsrmvomocgngbxmcf.supabase.co/auth/v1/callback`.
-2. **Authentication → Providers → Email**: enabled by default. The CLI uses a
-   numeric OTP code (not a magic link — links are useless on a headless/remote
-   box; the OTP length is configurable, commonly 6–8 digits). Edit **BOTH**
-   email templates to include `{{ .Token }}` in the body:
-   - **Email Templates → Confirm signup** (sent on a first-time email login)
-   - **Email Templates → Magic Link** (sent to returning emails)
-
-   Without `{{ .Token }}`, the user receives a `{{ .ConfirmationURL }}` link
-   whose `?code=` is a PKCE code (not the OTP) — the CLI will reject it.
+2. **Authentication → Providers → Email**: enabled by default. Set both the
+   **Confirm signup** and **Magic Link** email templates to the contents of
+   [`templates/sign-in.html`](templates/sign-in.html), with the subject
+   `Your Folk Lore sign-in code`. The local Supabase configuration uses the same
+   template; hosted projects require this dashboard change separately. The CLI
+   also accepts sign-in links and redirect addresses from existing templates.
 3. **Authentication → URL Configuration → Redirect URLs**: the CLI redirects to
    a loopback `…/callback` path, so the allow-list entries must be **path-aware
    wildcards** (Supabase treats `/` as a separator, so a bare `http://127.0.0.1`
    or `http://127.0.0.1:*` will NOT match `/callback`). Add:
    - `http://127.0.0.1:*/**` — browser flow (ephemeral port + `/callback`)
    - `http://127.0.0.1/**` — headless `--no-browser` flow (`http://127.0.0.1/callback`)
+    - `http://localhost:*/**` and `http://localhost/**` — browser dashboard callbacks using localhost
+    - `http://\[::1\]:*/**` and `http://\[::1\]/**` — IPv6 loopback callbacks (the brackets are escaped for Supabase's glob matcher)
+
+   Supabase Auth v2.185.0 and current upstream accept numeric loopback addresses,
+   including the full `127.0.0.0/8` range and `::1`, before checking the redirect
+   allowlist. Verify the Auth version and redirect behavior of the deployed
+   project; the local configuration alone does not change a hosted project.
 
 ## Verifying
 

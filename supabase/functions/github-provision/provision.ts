@@ -41,9 +41,9 @@ export interface GitHubUser {
 }
 
 /**
- * The GitHub numeric id (as a string) that a Supabase user is linked to — from the github identity,
- * falling back to user_metadata.provider_id. Returns null when there is no linked GitHub identity
- * (an email-only user), so the caller fails CLOSED.
+ * The GitHub numeric id from the verified user's linked GitHub identity.
+ * User metadata is editable by the caller and never establishes this binding.
+ * Without a linked identity (for example an email-only user), fail CLOSED.
  */
 export function resolveJwtGithubId(user: {
   identities?: Array<{ provider?: string; id?: string }> | null;
@@ -53,9 +53,6 @@ export function resolveJwtGithubId(user: {
     (i) => i.provider === "github",
   )?.id;
   if (fromIdentity != null && fromIdentity !== "") return String(fromIdentity);
-  const fromMeta = user.user_metadata?.provider_id;
-  if (typeof fromMeta === "string" && fromMeta !== "") return fromMeta;
-  if (typeof fromMeta === "number") return String(fromMeta);
   return null;
 }
 

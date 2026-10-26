@@ -85,7 +85,7 @@ async function compact(instance: Awaited<ReturnType<typeof factory>>) {
   return requests.at(-1)!;
 }
 
-test("a retired first factory never supplies gateway access to the remaining owner", async () => {
+test("a retired first factory never supplies its session or a legacy token to the remaining owner", async () => {
   const first = await factory(gatewayA, "access-a", "retired-owner-a");
   const second = await factory(gatewayA, "access-b", "remaining-owner-b");
   await first.handlers.get("session_shutdown")?.({});
@@ -93,24 +93,73 @@ test("a retired first factory never supplies gateway access to the remaining own
   expect(request.headers.get("x-lore-session-id")).toBe(
     sessionIDFor(second.context.sessionManager.getSessionFile()),
   );
-  expect(request.headers.get(GATEWAY_AUTH_HEADER)).toBe(second.token);
+  expect(request.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
 });
 
-test("shared factories keep gateway and provider credentials with their owner across rotation and shutdown", async () => {
+test.each([undefined, "access-a", "mismatched-legacy-token"])(
+  "legacy header %s never changes scoped routing or provider-auth observation",
+  async (legacyToken) => {
+    const first = await factory(gatewayA, "access-a", "legacy-owner-a");
+    const second = await factory(gatewayB, "access-b", "legacy-owner-b");
+    const scope = {
+      "x-lore-project": second.context.cwd,
+      "x-lore-session-id": sessionIDFor(
+        second.context.sessionManager.getSessionFile(),
+      ),
+      ...(legacyToken ? { [GATEWAY_AUTH_HEADER]: legacyToken } : {}),
+    };
+    const routed = await send(undefined, {
+      ...scope,
+      "x-api-key": "provider-b",
+    });
+    expect(routed.url).toBe(`${gatewayB}/v1/messages`);
+    expect((await compact(second)).headers.get("x-api-key")).toBe("provider-b");
+    await send(`${gatewayB}/v1/messages`, {
+      ...scope,
+      "x-api-key": "provider-b-direct",
+    });
+    expect((await compact(second)).headers.get("x-api-key")).toBe(
+      "provider-b-direct",
+    );
+
+    await first.handlers.get("session_shutdown")?.({});
+    expect(
+      (await send(undefined, { ...scope, "x-api-key": "provider-b-rotated" }))
+        .url,
+    ).toBe(`${gatewayB}/v1/messages`);
+    expect((await compact(second)).headers.get("x-api-key")).toBe(
+      "provider-b-rotated",
+    );
+    const retired = await send(undefined, {
+      "x-lore-project": first.context.cwd,
+      "x-lore-session-id": sessionIDFor(
+        first.context.sessionManager.getSessionFile(),
+      ),
+      ...(legacyToken ? { [GATEWAY_AUTH_HEADER]: legacyToken } : {}),
+      "x-api-key": "retired-provider-key",
+    });
+    expect(retired.url).toBe("https://api.anthropic.com/v1/messages");
+    expect((await compact(second)).headers.get("x-api-key")).toBe(
+      "provider-b-rotated",
+    );
+  },
+);
+
+test("shared factories keep provider credentials with their owner and ignore legacy gateway tokens across rotation and shutdown", async () => {
   const first = await factory(gatewayA, "gateway-token-a", "owner-a");
-  expect((await send()).headers.get(GATEWAY_AUTH_HEADER)).toBe(first.token);
+  expect((await send()).headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   const second = await factory(gatewayA, "gateway-token-b", "owner-b");
   await first.handlers.get("turn_start")?.({}, first.context);
   expect(
     first.registrations.get("anthropic")!.headers[GATEWAY_AUTH_HEADER],
-  ).toBe(first.token);
+  ).toBeUndefined();
   const selectedSecond = await send(undefined, {
     "x-lore-project": second.context.cwd,
     "x-lore-session-id": sessionIDFor(
       second.context.sessionManager.getSessionFile(),
     ),
   });
-  expect(selectedSecond.headers.get(GATEWAY_AUTH_HEADER)).toBe(second.token);
+  expect(selectedSecond.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   const ambiguous = await send();
   expect(ambiguous.url).toBe("https://api.anthropic.com/v1/messages");
   expect(ambiguous.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
@@ -121,7 +170,7 @@ test("shared factories keep gateway and provider credentials with their owner ac
     ),
     "x-api-key": "provider-b",
   });
-  expect(scoped.headers.get(GATEWAY_AUTH_HEADER)).toBe(second.token);
+  expect(scoped.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   expect((await compact(second)).headers.get("x-api-key")).toBe("provider-b");
   // Gateway health/management auth has no model-request ownership scope.
   await fetch(`${gatewayA}/health`, {
@@ -140,19 +189,19 @@ test("shared factories keep gateway and provider credentials with their owner ac
     ),
     "x-api-key": "provider-a",
   });
-  expect(firstScoped.headers.get(GATEWAY_AUTH_HEADER)).toBe(first.token);
+  expect(firstScoped.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   expect((await compact(first)).headers.get("x-api-key")).toBe("provider-a");
   await first.handlers.get("session_shutdown")?.({});
   const remaining = await send(undefined, {
     "x-api-key": "provider-b-rotated",
   });
-  expect(remaining.headers.get(GATEWAY_AUTH_HEADER)).toBe(second.token);
+  expect(remaining.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   const compacted = await compact(second);
-  expect(compacted.headers.get(GATEWAY_AUTH_HEADER)).toBe(second.token);
+  expect(compacted.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   expect(compacted.headers.get("x-api-key")).toBe("provider-b-rotated");
   await second.handlers.get("session_shutdown")?.({});
   const rotated = await factory(gatewayA, "gateway-token-b-rotated", "owner-b");
-  expect((await send()).headers.get(GATEWAY_AUTH_HEADER)).toBe(rotated.token);
+  expect((await send()).headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   await rotated.handlers.get("session_shutdown")?.({});
 });
 
@@ -166,7 +215,7 @@ test("distinct gateway destinations are preserved and ambiguous upstream request
     "x-api-key": "provider-b",
   });
   expect(direct.url).toBe(target);
-  expect(direct.headers.get(GATEWAY_AUTH_HEADER)).toBe("token-b");
+  expect(direct.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   expect(direct.headers.get("x-lore-upstream-url")).toBeNull();
   const request = new Request(target, {
     method: "POST",
@@ -175,10 +224,10 @@ test("distinct gateway destinations are preserved and ambiguous upstream request
   });
   await fetch(request);
   expect(requests.at(-1)!.url).toBe(target);
-  expect(requests.at(-1)!.headers.get(GATEWAY_AUTH_HEADER)).toBe("token-b");
+  expect(requests.at(-1)!.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   await fetch(new URL(target), {
     method: "POST",
-    headers: registration.headers,
+    headers: { ...registration.headers, "x-api-key": "provider-b" },
     body: "{}",
   });
   expect(requests.at(-1)!.url).toBe(target);
@@ -218,11 +267,11 @@ test("distinct gateway destinations are preserved and ambiguous upstream request
     ),
   });
   expect(scoped.url).toBe(`${gatewayB}/v1/messages`);
-  expect(scoped.headers.get(GATEWAY_AUTH_HEADER)).toBe("token-b");
+  expect(scoped.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   await second.handlers.get("session_shutdown")?.({});
   const delayed = await send(target, registration.headers);
   expect(delayed.url).toBe(target);
-  expect(delayed.headers.get(GATEWAY_AUTH_HEADER)).toBe("token-b");
+  expect(delayed.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   expect((await send()).url).toBe(`${gatewayA}/v1/messages`);
   await first.handlers.get("session_shutdown")?.({});
 });
@@ -279,7 +328,7 @@ test.each([
       providerKey: routed.headers.get("x-api-key"),
     }).toEqual({
       url: `${shared}/tenant-b${endpoint}`,
-      gatewayToken: "tenant-token",
+      gatewayToken: null,
       providerKey: "tenant-provider-key",
     });
     const registration = tenant.registrations.get("anthropic")!;
@@ -288,7 +337,7 @@ test.each([
       registration.headers,
     );
     expect(direct.url).toBe(`${shared}/tenant-b/v1/messages`);
-    expect(direct.headers.get(GATEWAY_AUTH_HEADER)).toBe("tenant-token");
+    expect(direct.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
     const rootRequest = await send(undefined, {
       "x-lore-project": root.context.cwd,
       "x-lore-session-id": sessionIDFor(
@@ -296,6 +345,6 @@ test.each([
       ),
     });
     expect(rootRequest.url).toBe(`${shared}/v1/messages`);
-    expect(rootRequest.headers.get(GATEWAY_AUTH_HEADER)).toBe("root-token");
+    expect(rootRequest.headers.get(GATEWAY_AUTH_HEADER)).toBeNull();
   },
 );

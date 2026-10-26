@@ -1461,7 +1461,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       hasNonLoopbackHost(config.hosts)
     ) {
       console.warn(
-        "[lore] SECURITY WARNING: local mode on a non-loopback bind is filesystem-capable and does not require gateway access authentication. Bind to loopback or use hosted/remote mode with LORE_GATEWAY_AUTH_TOKEN for untrusted clients.",
+        "[lore] SECURITY WARNING: local mode on a non-loopback bind is filesystem-capable. Secure the listener against untrusted clients.",
       );
     }
     console.log("");
@@ -1501,9 +1501,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     console.log(
       `  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`,
     );
-    console.log(
-      `  LORE_GATEWAY_AUTH_TOKEN Optional access token for remote/hosted routes and remote management (value is never printed)`,
-    );
+    console.log();
     console.log(
       `  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`,
     );

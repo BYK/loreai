@@ -197,6 +197,29 @@ await esbuild.build({
 // The binary build has its own vendored path (__LORE_VENDOR_WORKER_URL__),
 // but the npm CJS bundle needs an actual file alongside index.cjs.
 
+// The login worker owns account refresh and optional requests off-thread so a
+// stalled transport can never keep the CLI alive past its deadline.
+await esbuild.build({
+  entryPoints: [join(packageDir, "src/cli/login-optional-task.ts")],
+  bundle: true,
+  format: "cjs",
+  target: "node22",
+  platform: "node",
+  conditions: ["node"],
+  alias: { "@loreai/core": join(packageDir, "../core/src/login-worker.ts") },
+  external,
+  outfile: join(distDir, "login-optional-task.cjs"),
+  minify: true,
+  legalComments: "none",
+  plugins: [sentryNodePlugin, jsoncParserEsmPlugin(packageDir)],
+  inject: [importMetaUrlShim],
+  define: {
+    "import.meta.url": "import_meta_url",
+    LORE_CLI_VERSION: JSON.stringify(cliVersion),
+    __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
+  },
+});
+
 await esbuild.build({
   entryPoints: [join(packageDir, "..", "core", "src", "embedding-worker.ts")],
   bundle: true,

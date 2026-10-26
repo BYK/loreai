@@ -607,6 +607,33 @@ async function buildBinary() {
 
   console.log(`✓ esbuild worker: ${workerBundlePath}`);
 
+  await esbuild.build({
+    entryPoints: [join(packageDir, "src/cli/login-optional-task.ts")],
+    bundle: true,
+    format: "cjs",
+    target: "node22",
+    platform: "node",
+    conditions: ["node"],
+    alias: {
+      "@loreai/core": join(repoRoot, "packages/core/src/login-worker.ts"),
+    },
+    external: ["sharp"],
+    plugins: [
+      binaryExternalsPlugin(),
+      sentryBunToNodePlugin(),
+      jsoncParserEsmPlugin(packageDir),
+      stubSqliteVecPlugin(),
+    ],
+    inject: [join(here, "native-loader.cjs")],
+    outfile: join(stagingDir, "login-optional-task.cjs"),
+    minify: true,
+    legalComments: "none",
+    define: {
+      LORE_CLI_VERSION: JSON.stringify(cliVersion),
+      __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
+    },
+  });
+
   // Rename worker to `worker.cjs` so the fossilize asset key matches
   // what sea-entry.ts reads at runtime (`worker.cjs`).
   const workerAssetPath = join(stagingDir, "worker.cjs");
@@ -814,6 +841,10 @@ async function buildBinary() {
   }
   const sharedManifest: Record<string, ManifestEntry> = {
     "worker.cjs": { file: "worker.cjs", src: "worker.cjs" },
+    "login-optional-task.cjs": {
+      file: "login-optional-task.cjs",
+      src: "login-optional-task.cjs",
+    },
     "vector-worker.cjs": {
       file: "vector-worker.cjs",
       src: "vector-worker.cjs",

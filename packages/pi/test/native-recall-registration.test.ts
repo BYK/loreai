@@ -103,12 +103,11 @@ test("keeps native recall for a verified local gateway", async () => {
   expect(pi.registerTool.mock.calls[0][0].name).toBe(RECALL_TOOL_NAME);
 });
 
-test("preserves access-token forwarding for an exact remote URL", async () => {
+test("ignores a legacy access token while preserving remote recall ownership", async () => {
   const pi = await register(localUrl);
   expect(pi.registerTool).not.toHaveBeenCalled();
-  expect(pi.registerProvider.mock.calls[0][1].headers).toHaveProperty(
+  expect(pi.registerProvider.mock.calls[0][1].headers).not.toHaveProperty(
     "x-lore-gateway-token",
-    "remote-access-token",
   );
 });
 

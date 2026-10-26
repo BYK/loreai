@@ -298,12 +298,11 @@ describe("api client: happy path", () => {
   });
 });
 
-describe("api client: remote gateway authentication", () => {
-  it("sends the configured gateway token as a Bearer credential", async () => {
+describe("api client: gateway access", () => {
+  it("does not send a stored gateway credential", async () => {
     let authorization: string | null = null;
-    const token = "remote-management-test-token";
+    sessionStorage.setItem("lore.gateway-auth-token", "old-token");
     const client = createApiClient({
-      getGatewayAuthToken: () => token,
       fetch: async (_url, init) => {
         authorization = new Headers(init?.headers).get("authorization");
         return json([PROJECT]);
@@ -312,13 +311,13 @@ describe("api client: remote gateway authentication", () => {
 
     await client.listProjects();
 
-    expect(authorization).toBe(`Bearer ${token}`);
+    expect(authorization).toBeNull();
+    sessionStorage.removeItem("lore.gateway-auth-token");
   });
 
-  it("sends the session token on management API writes", async () => {
+  it("sends management API writes without a gateway credential", async () => {
     const authorizations: string[] = [];
     const client = createApiClient({
-      getGatewayAuthToken: () => "remote-management-test-token",
       fetch: async (_url, init) => {
         authorizations.push(
           new Headers(init?.headers).get("authorization") ?? "",
@@ -335,21 +334,15 @@ describe("api client: remote gateway authentication", () => {
 
     await client.removeTeamMember("team-1", "user-2", "editor");
 
-    expect(authorizations).toEqual(["Bearer remote-management-test-token"]);
+    expect(authorizations).toEqual([""]);
   });
 
-  it("clears a rejected token when the gateway hides the management route", async () => {
-    let cleared = false;
+  it("classifies a hidden management route as unauthorized", async () => {
     const client = createApiClient({
-      getGatewayAuthToken: () => "rejected-token",
-      clearGatewayAuthToken: () => {
-        cleared = true;
-      },
       fetch: async () => new Response(null, { status: 404 }),
     });
 
     expect((await failure(client.listProjects())).kind).toBe("unauthorized");
-    expect(cleared).toBe(true);
   });
 });
 

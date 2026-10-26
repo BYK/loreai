@@ -169,7 +169,7 @@ describe.skipIf(process.platform === "win32")(
         expect(signalSent).toBe(true);
         expect(stderr).toContain("SECURITY WARNING: local mode");
         expect(stderr).toContain(
-          "does not require gateway access authentication",
+          "Secure the listener against untrusted clients.",
         );
         expect(outcome).toEqual({ code: 143, signal: null });
       },

@@ -3,7 +3,6 @@ import { EventEmitter } from "node:events";
 import type { PluginInput } from "@opencode-ai/plugin";
 import { log } from "@loreai/core";
 import {
-  gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
   isLoopbackUrl,
   prepareLocalUiAssets,
@@ -137,33 +136,6 @@ describe("embedded gateway SIGTERM", () => {
 });
 
 describe("remote gateway access headers", () => {
-  const token = "opencode-remote-gateway-token-at-least-32";
-
-  test("injects the access token only for the matching LORE_REMOTE_URL", () => {
-    expect(
-      gatewayAccessHeadersForRemote("https://lore.example", {
-        LORE_REMOTE_URL: "https://lore.example/",
-        LORE_GATEWAY_AUTH_TOKEN: token,
-      }),
-    ).toEqual({ "x-lore-gateway-token": token });
-
-    expect(
-      gatewayAccessHeadersForRemote("http://127.0.0.1:3207", {
-        LORE_REMOTE_URL: "https://lore.example",
-        LORE_GATEWAY_AUTH_TOKEN: token,
-      }),
-    ).toEqual({});
-  });
-
-  test("does not confuse provider credentials with gateway access", () => {
-    expect(
-      gatewayAccessHeadersForRemote("https://lore.example", {
-        LORE_REMOTE_URL: "https://lore.example",
-        ANTHROPIC_API_KEY: "provider-key",
-      }),
-    ).toEqual({});
-  });
-
   test("registers a native recall tool only for local gateway ownership", () => {
     expect(
       shouldRegisterNativeRecallTool("http://127.0.0.1:3207", {

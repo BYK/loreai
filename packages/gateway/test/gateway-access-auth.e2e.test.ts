@@ -194,16 +194,6 @@ const DATA_PLANE_ROUTES: DataPlaneRoute[] = [
   },
 ];
 
-const ACCESS_FAILURES = [
-  { name: "missing", value: undefined },
-  { name: "wrong", value: "wrong-gateway-token-with-32-characters" },
-  { name: "malformed", value: "malformed gateway token with spaces" },
-  {
-    name: "duplicate-equivalent",
-    value: [TEST_GATEWAY_AUTH_TOKEN, TEST_GATEWAY_AUTH_TOKEN] as string[],
-  },
-] as const;
-
 const MIXED_AUTH_PAIRS = [
   {
     name: "x-api-key + x-goog-api-key",
@@ -523,32 +513,6 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
 
   test.each(
     DATA_PLANE_ROUTES.flatMap((route) =>
-      ACCESS_FAILURES.map((failure) => ({ route, failure })),
-    ),
-  )(
-    "$route.name rejects $failure.name gateway access uniformly before work",
-    async ({ route, failure }) => {
-      const headers: Record<string, HeaderValue> = { ...route.headers };
-      if (failure.value !== undefined) headers[ACCESS_HEADER] = failure.value;
-
-      const response = await sendRoute(harness.baseURL, route, headers);
-
-      expect(response.status).toBe(401);
-      expect(response.body).toBe("");
-      expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(pipelineCalls).toBe(0);
-      expect(dispatcherCalls).toBe(0);
-      expect(getActiveSessions().size).toBe(0);
-      expect(getAllSessionCosts().size).toBe(0);
-      expect(getDailyCostForDay(new Date().toISOString().slice(0, 10))).toBe(
-        initialSpend,
-      );
-      expect(storageSnapshot()).toEqual(initialStorage);
-    },
-  );
-
-  test.each(
-    DATA_PLANE_ROUTES.flatMap((route) =>
       MIXED_AUTH_PAIRS.map((pair) => ({ route, pair })),
     ),
   )(
@@ -574,42 +538,11 @@ describe("remote gateway central access and mixed-auth enforcement", () => {
     },
   );
 
-  test("rejects a stalled body before parsing or waiting for it", async () => {
-    const port = Number(new URL(harness.baseURL).port);
-    const rawResponse = await new Promise<string>((resolve, reject) => {
-      const socket = connect(port, "127.0.0.1");
-      let received = "";
-      const timer = setTimeout(() => {
-        socket.destroy();
-        reject(new Error("gateway access denial waited for the request body"));
-      }, 2_000);
-      socket.once("connect", () => {
-        socket.write(
-          "POST /v1/messages HTTP/1.1\r\n" +
-            `Host: 127.0.0.1:${port}\r\n` +
-            "Content-Type: application/json\r\n" +
-            "X-Api-Key: fake-client-key\r\n" +
-            "Content-Length: 100000\r\n" +
-            "\r\n" +
-            "{",
-        );
-      });
-      socket.on("data", (chunk) => {
-        received += chunk.toString();
-        if (received.includes("\r\n\r\n")) {
-          clearTimeout(timer);
-          socket.destroy();
-          resolve(received);
-        }
-      });
-      socket.once("error", reject);
-    });
-
-    expect(rawResponse).toContain("401 Unauthorized");
-    expect(pipelineCalls).toBe(0);
-    expect(dispatcherCalls).toBe(0);
-    expect(getActiveSessions().size).toBe(0);
-    expect(storageSnapshot()).toEqual(initialStorage);
+  test("remote model requests do not require a gateway token", async () => {
+    const route = DATA_PLANE_ROUTES[0];
+    const response = await sendRoute(harness.baseURL, route, route.headers);
+    expect(response.status).toBe(200);
+    expect(pipelineCalls).toBe(1);
   });
 });
 
@@ -682,12 +615,18 @@ describe("authorized remote data-plane routes", () => {
     await mock?.close();
   });
 
-  test.each(DATA_PLANE_ROUTES)(
-    "$name accepts the gateway token plus one provider auth mechanism",
-    async (route) => {
+  test.each(
+    DATA_PLANE_ROUTES.flatMap((route) =>
+      [false, true].map((withLegacyToken) => ({ route, withLegacyToken })),
+    ),
+  )(
+    "$route.name accepts provider auth with legacy token: $withLegacyToken",
+    async ({ route, withLegacyToken }) => {
       const headers = {
         ...route.headers,
-        [ACCESS_HEADER]: TEST_GATEWAY_AUTH_TOKEN,
+        ...(withLegacyToken
+          ? { [ACCESS_HEADER]: TEST_GATEWAY_AUTH_TOKEN }
+          : {}),
       };
       let rawHeadersAtPipeline: Record<string, string> | undefined;
       setBeforeUpstreamCaptureForTest(async (request) => {

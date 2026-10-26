@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import type { AccountStatus, SyncStatus, TeamList } from "~/contracts";
-import { ApiError, clearGatewayAuthToken, type ApiClient } from "~/lib/api";
+import { ApiError, type ApiClient } from "~/lib/api";
 
 const ANONYMOUS: AccountStatus = {
   signed_in: false,
@@ -62,41 +62,22 @@ function mount(apiClient: ApiClient) {
 }
 
 describe("Folk shell status", () => {
-  it("lets a remote dashboard session enter its gateway token and retry", async () => {
+  it("does not ask for a gateway token when management access is denied", async () => {
     sessionStorage.clear();
     const listProjects = vi
       .fn()
-      .mockRejectedValueOnce(
+      .mockRejectedValue(
         new ApiError(
           "unauthorized",
           "/api/v1/projects",
           "Gateway hid this route from the current peer",
           404,
         ),
-      )
-      .mockResolvedValue([]);
+      );
     mount(client({ listProjects }));
 
-    expect(
-      await screen.findByRole("heading", { name: "Connect to your gateway" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/LORE_GATEWAY_AUTH_TOKEN/)).toBeInTheDocument();
-    const tokenInput = screen.getByLabelText("Gateway token");
-    expect(tokenInput).toHaveAttribute("type", "password");
-    fireEvent.input(tokenInput, { target: { value: "server-token" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-
-    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("heading", { name: "Connect to your gateway" }),
-      ).not.toBeInTheDocument(),
-    );
-    expect(sessionStorage.length).toBeGreaterThan(0);
-    expect(sessionStorage.getItem("lore.gateway-auth-token")).toBe(
-      "server-token",
-    );
-    clearGatewayAuthToken();
+    await waitFor(() => expect(listProjects).toHaveBeenCalled());
+    expect(screen.queryByLabelText("Gateway token")).not.toBeInTheDocument();
   });
 
   it("keeps anonymous status compact without empty team or sync sections", async () => {
@@ -112,7 +93,7 @@ describe("Folk shell status", () => {
 
     expect(await screen.findByTestId("folk-status-panel")).toBeInTheDocument();
     expect(screen.getByTestId("folk-status-detail")).toHaveTextContent(
-      "lore login",
+      "Sign in to continue",
     );
     expect(screen.queryByTestId("folk-teams")).toBeNull();
     expect(screen.queryByText("Teams", { exact: true })).toBeNull();
@@ -623,6 +604,719 @@ describe("Folk shell status", () => {
 });
 
 describe("rail account menu", () => {
+  it("keeps the submitted email fixed while the sign-in email is being sent", async () => {
+    let finish!: (value: { attempt: string }) => void;
+    const send = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mount(client({ startEmailLogin: send }));
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    const input = within(dialog).getByLabelText("Email address");
+    fireEvent.input(input, { target: { value: "a@example.com" } });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    expect(input).toBeDisabled();
+    finish({ attempt: "attempt-a" });
+    expect(
+      await within(dialog).findByText(/Check a@example.com/),
+    ).toBeVisible();
+  });
+  it("signs in with an emailed code and refreshes the account", async () => {
+    const send = vi.fn().mockResolvedValue({ attempt: "attempt-1" });
+    const verify = vi.fn().mockResolvedValue({ ok: true });
+    const getAccount = vi.fn().mockResolvedValue(ANONYMOUS);
+    mount(
+      client({ startEmailLogin: send, verifyEmailLogin: verify, getAccount }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "person@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    expect(
+      await within(dialog).findByText(/Check person@example.com/),
+    ).toBeVisible();
+    expect(send).toHaveBeenCalledWith("person@example.com");
+    fireEvent.input(within(dialog).getByLabelText("Code or sign-in link"), {
+      target: { value: "123456" },
+    });
+    fireEvent.submit(
+      within(dialog).getByRole("button", { name: "Sign in" }).closest("form")!,
+    );
+    await waitFor(() =>
+      expect(verify).toHaveBeenCalledWith("attempt-1", "123456"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+      ).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(getAccount.mock.calls.length).toBeGreaterThan(1),
+    );
+  });
+
+  it("cancels the pending attempt when changing email", async () => {
+    const cancel = vi.fn().mockResolvedValue({ ok: true });
+    mount(
+      client({
+        startEmailLogin: vi.fn().mockResolvedValue({ attempt: "attempt-1" }),
+        cancelLogin: cancel,
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "person@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    fireEvent.click(
+      await within(dialog).findByRole("button", {
+        name: "Use a different email",
+      }),
+    );
+    expect(cancel).toHaveBeenCalledWith("attempt-1");
+  });
+
+  it("waits for cancellation before starting another email attempt", async () => {
+    let finishCancel!: (result: { ok: boolean }) => void;
+    const cancel = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCancel = resolve;
+        }),
+    );
+    mount(
+      client({
+        startEmailLogin: vi.fn().mockResolvedValue({ attempt: "attempt-a" }),
+        cancelLogin: cancel,
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "a@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    fireEvent.click(
+      await within(dialog).findByRole("button", {
+        name: "Use a different email",
+      }),
+    );
+    expect(cancel).toHaveBeenCalledWith("attempt-a");
+    expect(within(dialog).queryByLabelText("Email address")).toBeNull();
+    finishCancel({ ok: true });
+    expect(await within(dialog).findByLabelText("Email address")).toBeVisible();
+  });
+
+  it("recovers an uncertain cancellation after confirming the account is anonymous", async () => {
+    let finishAccount!: (value: typeof ANONYMOUS) => void;
+    let checkingAccount = false;
+    const cancel = vi.fn().mockResolvedValue({ ok: false });
+    mount(
+      client({
+        startEmailLogin: vi.fn().mockResolvedValue({ attempt: "attempt-a" }),
+        cancelLogin: cancel,
+        getAccount: () =>
+          checkingAccount
+            ? new Promise((resolve) => {
+                finishAccount = resolve;
+              })
+            : Promise.resolve(ANONYMOUS),
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "a@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    const changeEmail = await within(dialog).findByRole("button", {
+      name: "Use a different email",
+    });
+    checkingAccount = true;
+    fireEvent.click(changeEmail);
+    expect(
+      await within(dialog).findByText(
+        "Sign-in may already have completed. Check your account.",
+      ),
+    ).toBeVisible();
+    expect(within(dialog).queryByLabelText("Email address")).toBeNull();
+    await waitFor(() => expect(finishAccount).toBeTypeOf("function"));
+    checkingAccount = false;
+    finishAccount(ANONYMOUS);
+    expect(await within(dialog).findByLabelText("Email address")).toBeVisible();
+    expect(
+      within(dialog).getByText(
+        "Sign-in may already have completed. Check your account.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("keeps the attempt when the account status cannot be confirmed", async () => {
+    const cancel = vi.fn().mockResolvedValue({ ok: false });
+    let failAccount = false;
+    mount(
+      client({
+        startEmailLogin: vi.fn().mockResolvedValue({ attempt: "attempt-a" }),
+        cancelLogin: cancel,
+        getAccount: () =>
+          failAccount
+            ? Promise.reject(new Error("offline"))
+            : Promise.resolve(ANONYMOUS),
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "a@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    const changeEmail = await within(dialog).findByRole("button", {
+      name: "Use a different email",
+    });
+    failAccount = true;
+    fireEvent.click(changeEmail);
+    expect(
+      await within(dialog).findByText(
+        "Sign-in may already have completed. Check your account.",
+      ),
+    ).toBeVisible();
+    await waitFor(() => expect(changeEmail).not.toBeDisabled());
+    expect(within(dialog).queryByLabelText("Email address")).toBeNull();
+  });
+
+  it("cancels an in-flight verification when the dialog is dismissed", async () => {
+    let finishCancel!: (value: { ok: boolean }) => void;
+    const cancel = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCancel = resolve;
+        }),
+    );
+    const verify = vi.fn().mockImplementation(() => new Promise(() => {}));
+    mount(
+      client({
+        startEmailLogin: vi.fn().mockResolvedValue({ attempt: "attempt-1" }),
+        verifyEmailLogin: verify,
+        cancelLogin: cancel,
+      }),
+    );
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "person@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    const code = await within(dialog).findByLabelText("Code or sign-in link");
+    fireEvent.input(code, { target: { value: "123456" } });
+    fireEvent.submit(
+      within(dialog).getByRole("button", { name: "Sign in" }).closest("form")!,
+    );
+    await waitFor(() => expect(verify).toHaveBeenCalled());
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("attempt-1"));
+    expect(
+      screen.getByRole("dialog", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+    finishCancel({ ok: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("waits for a delayed email start to be cancelled before dismissing", async () => {
+    let finishStart!: (value: { attempt: string }) => void;
+    let finishCancel!: (value: { ok: boolean }) => void;
+    const start = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishStart = resolve;
+        }),
+    );
+    const cancel = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCancel = resolve;
+        }),
+    );
+    mount(client({ startEmailLogin: start, cancelLogin: cancel }));
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "a@example.com" },
+    });
+    fireEvent.submit(
+      within(dialog)
+        .getByRole("button", { name: "Send sign-in email" })
+        .closest("form")!,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      screen.getByRole("dialog", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+    finishStart({ attempt: "attempt-a" });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("attempt-a"));
+    expect(
+      screen.getByRole("dialog", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+    finishCancel({ ok: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("cancels a delayed GitHub start before dismissing", async () => {
+    let finishStart!: (value: { url: string; attempt: string }) => void;
+    let finishCancel!: (value: { ok: boolean }) => void;
+    const start = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishStart = resolve;
+        }),
+    );
+    const cancel = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCancel = resolve;
+        }),
+    );
+    mount(client({ startGitHubLogin: start, cancelLogin: cancel }));
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      screen.getByRole("dialog", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+    finishStart({
+      url: "https://github.example/authorize",
+      attempt: "github-a",
+    });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("github-a"));
+    expect(
+      screen.getByRole("dialog", { name: "Sign in to Lore" }),
+    ).toBeVisible();
+    finishCancel({ ok: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("restores and cancels GitHub sign-in after returning from authorization", async () => {
+    sessionStorage.setItem("lore.github-login-attempt", "github-returned");
+    const cancel = vi.fn().mockResolvedValue({ ok: true });
+    mount(client({ cancelLogin: cancel }));
+    await screen.findByRole("dialog", { name: "Sign in to Lore" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("github-returned"));
+    expect(sessionStorage.getItem("lore.github-login-attempt")).toBeNull();
+  });
+
+  it.each(["failed", "success"])(
+    "retains a live GitHub cancellation handle after an unrelated %s callback",
+    async (result) => {
+      const previous = window.location.href;
+      window.history.replaceState(
+        {},
+        "",
+        `/ui?login=${result}&login_attempt=old-attempt`,
+      );
+      sessionStorage.setItem("lore.github-login-attempt", "live-attempt");
+      let finish!: (result: { ok: boolean }) => void;
+      const cancel = vi.fn(
+        () =>
+          new Promise<{ ok: boolean }>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      try {
+        mount(client({ cancelLogin: cancel }));
+        const dialog = await screen.findByRole("dialog", {
+          name: "Sign in to Lore",
+        });
+        expect(sessionStorage.getItem("lore.github-login-attempt")).toBe(
+          "live-attempt",
+        );
+        fireEvent.keyDown(document, { key: "Escape" });
+        await waitFor(() =>
+          expect(cancel).toHaveBeenCalledWith("live-attempt"),
+        );
+        expect(dialog).toBeVisible();
+        finish({ ok: true });
+        await waitFor(() =>
+          expect(
+            screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+          ).toBeNull(),
+        );
+        expect(sessionStorage.getItem("lore.github-login-attempt")).toBeNull();
+      } finally {
+        window.history.replaceState({}, "", previous);
+      }
+    },
+  );
+
+  it.each(["failed", "success"])(
+    "clears only the matching completed %s GitHub attempt",
+    async (result) => {
+      const previous = window.location.href;
+      window.history.replaceState(
+        {},
+        "",
+        `/ui?login=${result}&login_attempt=completed-attempt`,
+      );
+      sessionStorage.setItem("lore.github-login-attempt", "completed-attempt");
+      const cancel = vi.fn().mockResolvedValue({ ok: true });
+      try {
+        mount(client({ cancelLogin: cancel }));
+        await waitFor(() =>
+          expect(
+            sessionStorage.getItem("lore.github-login-attempt"),
+          ).toBeNull(),
+        );
+        if (result === "failed") {
+          await screen.findByRole("dialog", { name: "Sign in to Lore" });
+          fireEvent.keyDown(document, { key: "Escape" });
+          await waitFor(() =>
+            expect(
+              screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+            ).toBeNull(),
+          );
+        }
+        expect(cancel).not.toHaveBeenCalled();
+        expect(
+          new URL(window.location.href).searchParams.has("login_attempt"),
+        ).toBe(false);
+      } finally {
+        window.history.replaceState({}, "", previous);
+      }
+    },
+  );
+
+  it("reports when sign-in completed before dismissal", async () => {
+    sessionStorage.setItem("lore.github-login-attempt", "github-returned");
+    const cancel = vi.fn().mockResolvedValue({ ok: false });
+    mount(client({ cancelLogin: cancel }));
+    await screen.findByRole("dialog", { name: "Sign in to Lore" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      await screen.findByText(
+        "Sign-in may already have completed. Check your account.",
+      ),
+    ).toBeVisible();
+    expect(cancel).toHaveBeenCalledWith("github-returned");
+  });
+
+  it("keeps email sign-in available when reading GitHub attempt storage fails", async () => {
+    const original = Storage.prototype.getItem;
+    const storage = vi
+      .spyOn(Storage.prototype, "getItem")
+      .mockImplementation(function (this: Storage, key) {
+        if (key === "lore.github-login-attempt")
+          throw new DOMException("blocked", "SecurityError");
+        return original.call(this, key);
+      });
+    try {
+      mount(client());
+      const trigger = await screen.findByTestId("folk-status");
+      await waitFor(() =>
+        expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+      );
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+      expect(await screen.findByLabelText("Email address")).toBeVisible();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it("closes after successful cancellation when removing stored GitHub attempt fails", async () => {
+    sessionStorage.setItem("lore.github-login-attempt", "github-returned");
+    const original = Storage.prototype.removeItem;
+    const storage = vi
+      .spyOn(Storage.prototype, "removeItem")
+      .mockImplementation(function (this: Storage, key) {
+        if (key === "lore.github-login-attempt")
+          throw new DOMException("blocked", "SecurityError");
+        return original.call(this, key);
+      });
+    const cancel = vi.fn().mockResolvedValue({ ok: true });
+    try {
+      mount(client({ cancelLogin: cancel }));
+      await screen.findByRole("dialog", { name: "Sign in to Lore" });
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() =>
+        expect(cancel).toHaveBeenCalledWith("github-returned"),
+      );
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+        ).toBeNull(),
+      );
+    } finally {
+      storage.mockRestore();
+      sessionStorage.removeItem("lore.github-login-attempt");
+    }
+  });
+
+  it("explains when GitHub sign-in cannot retain its cancellation attempt", async () => {
+    const original = Storage.prototype.setItem;
+    const storage = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(function (this: Storage, key, value) {
+        if (key === "lore.github-login-attempt")
+          throw new DOMException("blocked", "SecurityError");
+        return original.call(this, key, value);
+      });
+    try {
+      mount(
+        client({
+          startGitHubLogin: vi.fn().mockResolvedValue({
+            url: "https://example.com",
+            attempt: "github-a",
+          }),
+          cancelLogin: vi.fn().mockResolvedValue({ ok: true }),
+        }),
+      );
+      const trigger = await screen.findByTestId("folk-status");
+      await waitFor(() =>
+        expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+      );
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+      const dialog = await screen.findByRole("dialog", {
+        name: "Sign in to Lore",
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+      );
+      expect(
+        await within(dialog).findByText(
+          "GitHub sign-in requires browser session storage. Use email sign-in instead.",
+        ),
+      ).toBeVisible();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it.each(["email", "github"])(
+    "cancels a delayed %s start after a restored GitHub attempt, including retry",
+    async (kind) => {
+      sessionStorage.setItem("lore.github-login-attempt", "github-old");
+      let finish!: (result: { attempt: string; url: string }) => void;
+      const start = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const cancel = vi
+        .fn()
+        .mockImplementation((id: string) =>
+          id === "new-attempt" &&
+          cancel.mock.calls.filter(([value]) => value === id).length === 1
+            ? Promise.reject(new Error("failed"))
+            : Promise.resolve({ ok: true }),
+        );
+      mount(
+        client({
+          startEmailLogin: start,
+          startGitHubLogin: start,
+          cancelLogin: cancel,
+        }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: "Sign in to Lore",
+      });
+      if (kind === "email") {
+        fireEvent.input(within(dialog).getByLabelText("Email address"), {
+          target: { value: "person@example.com" },
+        });
+        fireEvent.submit(
+          within(dialog)
+            .getByRole("button", { name: "Send sign-in email" })
+            .closest("form")!,
+        );
+      } else {
+        fireEvent.click(
+          within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+        );
+      }
+      await waitFor(() => expect(start).toHaveBeenCalledOnce());
+      fireEvent.keyDown(document, { key: "Escape" });
+      finish({ attempt: "new-attempt", url: "https://example.com/authorize" });
+      await waitFor(() => expect(cancel).toHaveBeenCalledWith("new-attempt"));
+      expect(
+        await within(dialog).findByText(
+          "Could not cancel sign-in. Please try again.",
+        ),
+      ).toBeVisible();
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() =>
+        expect(
+          cancel.mock.calls.filter(([id]) => id === "new-attempt"),
+        ).toHaveLength(2),
+      );
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Sign in to Lore" }),
+        ).toBeNull(),
+      );
+      expect(cancel).toHaveBeenCalledWith("github-old");
+      expect(sessionStorage.getItem("lore.github-login-attempt")).toBeNull();
+      const trigger = await screen.findByTestId("folk-status");
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+      const reopened = await screen.findByRole("dialog", {
+        name: "Sign in to Lore",
+      });
+      expect(
+        within(reopened).queryByLabelText("Code or sign-in link"),
+      ).toBeNull();
+    },
+  );
+
+  it.each([
+    ["http://localhost:54321/auth/v1/authorize", true],
+    ["http://127.0.0.1:54321/auth/v1/authorize", true],
+    ["http://example.com/authorize", false],
+  ])("validates GitHub authorization URL %s", async (url, allowed) => {
+    const start = vi
+      .fn()
+      .mockResolvedValue({ url, attempt: "github-url-test" });
+    mount(client({ startGitHubLogin: start }));
+    const trigger = await screen.findByTestId("folk-status");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("data-folk-state", "anonymous"),
+    );
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Lore" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+    );
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    if (allowed) {
+      await waitFor(() =>
+        expect(sessionStorage.getItem("lore.github-login-attempt")).toBe(
+          "github-url-test",
+        ),
+      );
+      sessionStorage.removeItem("lore.github-login-attempt");
+    } else {
+      expect(
+        await within(dialog).findByText("Could not start GitHub sign-in."),
+      ).toBeVisible();
+      expect(sessionStorage.getItem("lore.github-login-attempt")).toBeNull();
+    }
+  });
+
   it("keeps an anonymous avatar and preferences available without signing in", async () => {
     mount(client());
     const trigger = await screen.findByTestId("folk-status");
@@ -648,7 +1342,12 @@ describe("rail account menu", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Sign in to Lore",
     });
-    expect(dialog).toHaveTextContent("lore login");
+    expect(
+      within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByRole("textbox", { name: "Email address" }),
+    ).toBeVisible();
   });
 
   it.each(["refreshing", "unavailable", "hosted"] as const)(
@@ -686,7 +1385,7 @@ describe("rail account menu", () => {
     fireEvent.click(profile);
     expect(
       await screen.findByRole("dialog", { name: "Sign in to Lore" }),
-    ).toHaveTextContent("lore login");
+    ).toHaveTextContent("Continue with GitHub");
   });
 
   it("retains confirmed identity and teams throughout healthy account reloads", async () => {
@@ -818,6 +1517,119 @@ describe("rail account menu", () => {
       screen.queryByRole("button", { name: "Sign in to Lore" }),
     ).toBeNull();
   });
+});
+
+it.each(["email", "github"] as const)(
+  "retires a delayed %s start when the workspace unmounts",
+  async (kind) => {
+    sessionStorage.clear();
+    let finish!: (value: { attempt: string; url: string }) => void;
+    const start = vi.fn(
+      () =>
+        new Promise<{ attempt: string; url: string }>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const cancel = vi.fn().mockResolvedValue({ ok: true });
+    const view = mount(
+      client({
+        startEmailLogin: start,
+        startGitHubLogin: start,
+        cancelLogin: cancel,
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByText("Sign in to Lore"));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    if (kind === "email") {
+      fireEvent.input(within(dialog).getByLabelText("Email address"), {
+        target: { value: "fixture@example.test" },
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Send sign-in email" }),
+      );
+    } else
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Continue with GitHub" }),
+      );
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    view.unmount();
+    sessionStorage.setItem("lore.github-login-attempt", "newer-owner-attempt");
+    finish({
+      attempt: "retired-attempt",
+      url: "https://github.com/login/oauth/authorize",
+    });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("retired-attempt"));
+    expect(sessionStorage.getItem("lore.github-login-attempt")).toBe(
+      "newer-owner-attempt",
+    );
+    sessionStorage.clear();
+  },
+);
+
+it("retains email input, verification and cancellation controls across a breakpoint remount", async () => {
+  const media = {
+    matches: true,
+    addEventListener: vi.fn<(event: string, listener: () => void) => void>(),
+    removeEventListener: vi.fn(),
+  };
+  vi.stubGlobal("matchMedia", () => media);
+  let finish!: (value: { ok: boolean }) => void;
+  const verify = vi.fn(
+    () =>
+      new Promise<{ ok: boolean }>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const cancel = vi.fn().mockResolvedValue({ ok: true });
+  try {
+    mount(
+      client({
+        startEmailLogin: vi
+          .fn()
+          .mockResolvedValue({ attempt: "email-attempt" }),
+        verifyEmailLogin: verify,
+        cancelLogin: cancel,
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("folk-status"));
+    fireEvent.click(await screen.findByText("Sign in to Lore"));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Sign in to Lore",
+    });
+    fireEvent.input(within(dialog).getByLabelText("Email address"), {
+      target: { value: "fixture@example.test" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Send sign-in email" }),
+    );
+    fireEvent.input(await screen.findByLabelText("Code or sign-in link"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    await waitFor(() =>
+      expect(verify).toHaveBeenCalledWith("email-attempt", "123456"),
+    );
+    media.matches = false;
+    for (const [, listener] of media.addEventListener.mock.calls) listener();
+    expect(await screen.findByTestId("mobile-menu-trigger")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(dialog).toBeVisible();
+    expect(await screen.findByLabelText("Code or sign-in link")).toHaveValue(
+      "123456",
+    );
+    fireEvent.keyDown(screen.getByLabelText("Code or sign-in link"), {
+      key: "Escape",
+    });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith("email-attempt"));
+    finish({ ok: true });
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it("retains a confirmed account through drawer remounts during a healthy poll", async () => {

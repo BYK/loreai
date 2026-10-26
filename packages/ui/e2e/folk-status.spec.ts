@@ -44,7 +44,7 @@ test.describe("Folk status surfaces", () => {
       fullPage: true,
     });
     await expect(page.getByTestId("folk-status-detail")).toContainText(
-      "lore login",
+      "Sign in to continue",
     );
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
@@ -189,9 +189,9 @@ test("guest avatar keeps preferences and sign-in guidance available at narrow wi
     exact: true,
   });
   await expect(login).toBeVisible();
-  await expect(login).toContainText("lore login");
+  await expect(login.getByLabel("Email address")).toBeVisible();
   await expect(
-    login.getByRole("button", { name: "Copy command" }),
+    login.getByRole("button", { name: "Continue with GitHub" }),
   ).toBeVisible();
   await expect(panel).toHaveCount(0);
   await page.keyboard.press("Escape");
