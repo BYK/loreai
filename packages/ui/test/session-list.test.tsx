@@ -1,5 +1,11 @@
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { SessionList } from "~/components/lore/SessionList";
@@ -54,6 +60,64 @@ const renderList = (
 };
 
 describe("SessionList", () => {
+  it("keeps processing facts in a closed disclosure outside the conversation link", () => {
+    const long = "conversation".repeat(40);
+    renderList(() => ({
+      items: [
+        summary({
+          title: long,
+          title_source: "distillation",
+          first_message_at: 1700000000000,
+          last_message_at: 1700100000000,
+          message_count: 9,
+          distilled_count: 7,
+          undistilled_count: 2,
+        }),
+      ],
+      next_cursor: null,
+    }));
+    const link = screen.getByRole("link", { name: new RegExp(long) });
+    expect(link.querySelector("button, summary, details")).toBeNull();
+    expect(screen.getByText(long)).toHaveClass("[overflow-wrap:anywhere]");
+    expect(link).not.toHaveTextContent("distilled");
+    expect(link).not.toHaveTextContent("s-1");
+    const details = screen.getByText("Processing details").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(details.closest("a")).toBeNull();
+    expect(details).toHaveTextContent(
+      "9 messages · 7 distilled · 2 undistilled",
+    );
+    expect(details).toHaveTextContent("from summary");
+    expect(details).toHaveTextContent("s-1");
+    expect(details.querySelectorAll("time")[0]).toHaveAttribute(
+      "datetime",
+      "2023-11-14T22:13:20.000Z",
+    );
+    expect(details.querySelectorAll("time")[1]).toHaveAttribute(
+      "datetime",
+      "2023-11-16T02:00:00.000Z",
+    );
+    details.open = true;
+    expect(
+      within(details).getByRole("button", { name: "Copy session id" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps unknown recorded dates unknown without breaking a blank-title session", () => {
+    renderList(() => ({
+      items: [
+        summary({ title: " ", first_message_at: 0, last_message_at: 1e20 }),
+      ],
+      next_cursor: null,
+    }));
+    expect(
+      screen.getByRole("link", { name: /Untitled session/ }),
+    ).toBeInTheDocument();
+    const details = screen.getByText("Processing details").closest("details")!;
+    expect(details).toHaveTextContent("Recorded range: unknown – unknown");
+    expect(details.querySelector("time[datetime]")).toBeNull();
+  });
+
   it("renders the fuzzy badge only for approximate rows and the caption only when one exists (#1948)", () => {
     renderList(() => ({
       items: [
@@ -246,6 +310,7 @@ describe("SessionList", () => {
     );
     // The id appears exactly once, inside the chip.
     expect(screen.getAllByText("s-1")).toHaveLength(1);
+    screen.getByText("Processing details").closest("details")!.open = true;
     expect(
       screen.getByRole("button", { name: "Copy session id" }),
     ).toBeInTheDocument();
@@ -256,6 +321,9 @@ describe("SessionList", () => {
       items: [summary({ session_id: "s-9", title: "s-9", title_source: "id" })],
       next_cursor: null,
     }));
+    expect(
+      screen.getByRole("link", { name: /Untitled session/ }),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("s-9")).toHaveLength(1);
     expect(screen.queryByText("Session one")).not.toBeInTheDocument();
   });
@@ -268,7 +336,7 @@ describe("SessionList", () => {
       ],
       next_cursor: null,
     }));
-    expect(screen.getAllByText("from summary")).toHaveLength(1);
+    expect(screen.getAllByText("Title source: from summary")).toHaveLength(1);
   });
 
   it("copies the session id without navigating", async () => {
@@ -281,6 +349,7 @@ describe("SessionList", () => {
       items: [summary()],
       next_cursor: null,
     }));
+    screen.getByText("Processing details").closest("details")!.open = true;
     fireEvent.click(screen.getByRole("button", { name: "Copy session id" }));
     expect(writeText).toHaveBeenCalledWith("s-1");
     expect(history.get()).toBe("/projects/p-1/sessions");

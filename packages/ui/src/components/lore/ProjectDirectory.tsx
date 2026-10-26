@@ -40,59 +40,37 @@ export const ProjectDirectory: Component<{
     ) +
     groups().local.length +
     groups().unattributed.length;
-  const projectLink = (
-    project: ProjectSummary,
-    compact = false,
-    remote?: string,
-  ) => (
+  const projectLink = (project: ProjectSummary) => (
     <A
       data-testid="project-card"
       href={
         props.sessionsMode ? sessionsHref(project.id) : projectHref(project.id)
       }
-      class={
-        compact
-          ? "group block min-w-0 border-t border-line px-4 py-3 outline-none hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-          : "group flex h-full min-h-36 flex-col rounded-lg border border-line bg-bg p-4 outline-none hover:border-accent/50 hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-ring"
-      }
+      class="group flex min-h-11 min-w-0 items-start gap-3 px-4 py-3 outline-none hover:bg-soft/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
     >
-      <Show when={remote}>
-        <div class="mb-3 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
-          {remote}
-        </div>
-      </Show>
-      <div class="mb-2 flex min-w-0 items-start gap-2.5">
-        <Show when={!compact}>
-          <Icon name="folder" class="mt-0.5 shrink-0 text-accent" />
-        </Show>
-        <span class="min-w-0 text-sm font-semibold text-heading [overflow-wrap:anywhere]">
+      <Icon name="folder" class="mt-0.5 shrink-0 text-accent" />
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-semibold text-heading [overflow-wrap:anywhere]">
           {project.name || project.path}
-        </span>
-        <Icon
-          name="chevron"
-          class="ml-auto mt-0.5 size-3.5 shrink-0 text-muted"
-        />
+        </div>
+        <div class="mt-1 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
+          {project.path}
+        </div>
+        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
+          <span>
+            {`${project.knowledge_count} ${project.knowledge_count === 1 ? "entry" : "entries"}`}{" "}
+            · {pluralize(project.session_count, "session")}
+          </span>
+          <Show when={project.last_activity}>
+            <span>Last activity {formatWhen(project.last_activity)}</span>
+          </Show>
+        </div>
       </div>
-      <div
-        class={`${compact ? "mb-2" : "mb-4"} font-mono text-[11px] text-muted [overflow-wrap:anywhere]`}
-      >
-        {project.path}
-      </div>
-      <div
-        class={`${compact ? "" : "mt-auto border-t border-line pt-3"} flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted`}
-      >
-        <span>
-          {`${project.knowledge_count} ${project.knowledge_count === 1 ? "entry" : "entries"}`}{" "}
-          · {pluralize(project.session_count, "session")}
-        </span>
-        <Show when={project.last_activity}>
-          <span>{formatWhen(project.last_activity)}</span>
-        </Show>
-      </div>
+      <Icon name="chevron" class="mt-0.5 size-3.5 shrink-0 text-muted" />
     </A>
   );
-  const cards = (projects: readonly ProjectSummary[]) => (
-    <ul class="grid list-none gap-3 p-0 sm:grid-cols-2 xl:grid-cols-3">
+  const rows = (projects: readonly ProjectSummary[]) => (
+    <ul class="list-none divide-y divide-line overflow-hidden rounded-lg border border-line bg-bg p-0">
       <For each={projects}>
         {(project) => <li class="min-w-0">{projectLink(project)}</li>}
       </For>
@@ -124,7 +102,7 @@ export const ProjectDirectory: Component<{
         <div class="my-6 flex flex-wrap items-center justify-between gap-3">
           <TextField class="w-full max-w-sm">
             <TextFieldInput
-              aria-label="Filter project cards"
+              aria-label="Filter projects"
               placeholder="Filter by name, path or recorded remote…"
               class="h-11 bg-bg text-base md:h-9 md:text-xs"
               value={filter()}
@@ -200,7 +178,7 @@ export const ProjectDirectory: Component<{
                   </p>
                   <ul
                     aria-label="Repository groups"
-                    class="grid list-none items-start gap-3 p-0 sm:grid-cols-2 xl:grid-cols-3"
+                    class="list-none space-y-3 p-0"
                   >
                     <For each={groups().repositories}>
                       {(group) => (
@@ -208,34 +186,20 @@ export const ProjectDirectory: Component<{
                           class="min-w-0 self-stretch"
                           data-repository={group.remote}
                         >
-                          <Show
-                            when={group.projects.length === 1}
-                            fallback={
-                              <section
-                                aria-label={group.remote}
-                                class="h-full overflow-hidden rounded-lg border border-line bg-bg"
-                              >
-                                <div class="px-4 py-3">
-                                  <h3 class="font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
-                                    {group.remote}
-                                  </h3>
-                                  <p class="mt-1 text-xs text-muted">
-                                    {group.projects.length} recorded checkouts
-                                  </p>
-                                </div>
-                                <For each={group.projects}>
-                                  {(project) => projectLink(project, true)}
-                                </For>
-                              </section>
-                            }
-                          >
-                            {group.projects[0] &&
-                              projectLink(
-                                group.projects[0],
-                                false,
-                                group.remote,
-                              )}
-                          </Show>
+                          <section aria-label={group.remote} class="min-w-0">
+                            <div class="mb-2 flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 px-1">
+                              <h3 class="min-w-0 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">
+                                {group.remote}
+                              </h3>
+                              <span class="text-xs text-muted">
+                                {pluralize(
+                                  group.projects.length,
+                                  "recorded checkout",
+                                )}
+                              </span>
+                            </div>
+                            {rows(group.projects)}
+                          </section>
                         </li>
                       )}
                     </For>
@@ -248,7 +212,7 @@ export const ProjectDirectory: Component<{
                     Local projects
                   </h2>
                   <p class="mb-3 text-xs text-muted">No git remote recorded.</p>
-                  {cards(groups().local)}
+                  {rows(groups().local)}
                 </section>
               </Show>
               <Show when={groups().unattributed.length}>
@@ -261,7 +225,7 @@ export const ProjectDirectory: Component<{
                     to inspect its sessions; start future captures with{" "}
                     <code>lore run</code> from the project directory.
                   </p>
-                  {cards(groups().unattributed)}
+                  {rows(groups().unattributed)}
                 </section>
               </Show>
             </div>

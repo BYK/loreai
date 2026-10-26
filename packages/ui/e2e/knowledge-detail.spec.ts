@@ -62,6 +62,7 @@ test.describe("knowledge detail provenance and history", () => {
       },
     );
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const current = page.getByTestId("knowledge-version-2");
     await current.locator("summary").click();
     const content = current.getByTestId("version-content");
@@ -121,6 +122,7 @@ test.describe("knowledge detail provenance and history", () => {
       },
     );
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const current = page.getByTestId("knowledge-version-2");
     await current.locator("summary").click();
     await expect(current).toContainText(
@@ -140,6 +142,7 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, live } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const history = page.getByTestId("version-history");
     await expect(history).toBeVisible();
     await expect(history.getByText("Current")).toHaveCount(1);
@@ -151,6 +154,7 @@ test.describe("knowledge detail provenance and history", () => {
   test("links live source evidence to the exact session", async ({ page }) => {
     const { project, live } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const source = page.getByRole("link", {
       name: "Distilled from session",
     });
@@ -169,6 +173,7 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, entry } = await fileLinkProjectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
     await expect(
       page.getByText("packages/ui/src/contracts/url.ts"),
@@ -186,8 +191,9 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, expired } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${expired.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     await expect(
-      page.getByText("Source session no longer available"),
+      page.getByText("Source session no longer available", { exact: true }),
     ).toBeVisible();
     await expect(page.getByText("e2e-session-expired").first()).toBeVisible();
   });
@@ -195,7 +201,10 @@ test.describe("knowledge detail provenance and history", () => {
   test("opens retained summary text for expired evidence", async ({ page }) => {
     const { project, summary } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${summary.id}`);
-    await expect(page.getByText("retained summary only")).toBeVisible();
+    await expect(page.getByTestId("knowledge-source-summary")).toContainText(
+      "retained summary only",
+    );
+    await page.getByText("Source & history", { exact: true }).click();
     await page.getByText("Show retained summary").click();
     await expect(
       page.getByText(

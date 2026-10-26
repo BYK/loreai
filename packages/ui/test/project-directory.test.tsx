@@ -160,6 +160,45 @@ function mount(
 }
 
 describe("ProjectDirectory", () => {
+  it("uses compact rows for every group with wrapping labels and native checkout links", () => {
+    const long = "checkout".repeat(40);
+    const view = mount([
+      project("one", {
+        name: long,
+        path: `/work/${long}`,
+        git_remote: "remote",
+      }),
+      project("two", { git_remote: "remote" }),
+      project("local"),
+      project("unattributed", { path: "/__lore_unattributed__/capture" }),
+    ]);
+    const links = screen.getAllByTestId("project-card");
+    expect(links).toHaveLength(4);
+    for (const link of links) {
+      expect(link).not.toHaveClass("min-h-36");
+      expect(link.querySelector("button, a, summary")).toBeNull();
+    }
+    expect(screen.getByText(long)).toHaveClass("[overflow-wrap:anywhere]");
+    expect(screen.getByText(`/work/${long}`)).toHaveClass(
+      "[overflow-wrap:anywhere]",
+    );
+    expect(
+      screen.getByRole("region", { name: "Local projects" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Unattributed sessions" }),
+    ).toBeInTheDocument();
+    const link = links[0]!;
+    const event = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+    });
+    link.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(view.history.get()).toBe("/knowledge");
+  });
+
   it("lays out repository groups once while keeping every checkout reachable", () => {
     mount([
       project("single", { git_remote: "remote-one" }),
@@ -195,10 +234,9 @@ describe("ProjectDirectory", () => {
       "href",
       "/projects/older",
     );
-    fireEvent.input(
-      screen.getByRole("textbox", { name: "Filter project cards" }),
-      { target: { value: "" } },
-    );
+    fireEvent.input(screen.getByRole("textbox", { name: "Filter projects" }), {
+      target: { value: "" },
+    });
     await waitFor(() =>
       expect(screen.getAllByTestId("project-card")).toHaveLength(2),
     );
@@ -240,10 +278,9 @@ describe("ProjectDirectory", () => {
       "href",
       "/projects/a/sessions",
     );
-    fireEvent.input(
-      screen.getByRole("textbox", { name: "Filter project cards" }),
-      { target: { value: "missing" } },
-    );
+    fireEvent.input(screen.getByRole("textbox", { name: "Filter projects" }), {
+      target: { value: "missing" },
+    });
     fireEvent.click(
       await screen.findByRole("button", { name: "Clear project filter" }),
     );

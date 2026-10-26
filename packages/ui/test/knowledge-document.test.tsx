@@ -159,6 +159,64 @@ describe("authorOf", () => {
 });
 
 describe("KnowledgeDocument", () => {
+  it.each([
+    [
+      "available",
+      loader<EvidenceResult>({ state: "available" }),
+      "Source session available",
+    ],
+    [
+      "summary only",
+      loader<EvidenceResult>({ state: "summary_only" }),
+      "Original messages expired; retained summary only",
+    ],
+    [
+      "missing",
+      loader<EvidenceResult>({ state: "unavailable" }),
+      "Source session no longer available",
+    ],
+    ["checking", loader<EvidenceResult>(undefined), "Checking source…"],
+    [
+      "failed",
+      loader<EvidenceResult>(undefined, new Error("offline")),
+      "Source availability could not be checked",
+    ],
+    ["unknown", undefined, "Source session recorded; availability unknown"],
+  ])(
+    "summarizes %s evidence before a closed Source & history disclosure",
+    (_label, evidence, text) => {
+      const view = renderDocument({
+        evidence,
+        entry: { ...entry("Ada"), confidence: 0.12, source_session: "s-1" },
+      });
+      expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+        text,
+      );
+      const details = screen.getByText("Source & history").closest("details")!;
+      expect(details).not.toHaveAttribute("open");
+      expect(details).toContainElement(screen.getByText("History"));
+      expect(details).toContainElement(screen.getByText("Technical details"));
+      expect(details).toHaveTextContent(
+        "12% — recorded value, not a probability of correctness",
+      );
+      expect(
+        view.container.querySelector("a button, summary button"),
+      ).toBeNull();
+      if (evidence) expect(evidence.reload).not.toHaveBeenCalled();
+      expect(screen.queryByText("Why trust this")).toBeNull();
+    },
+  );
+
+  it("does not imply source evidence for an entry without a recorded source", () => {
+    renderDocument({
+      entry: entry("Ada"),
+      evidence: loader({ state: "available" }),
+    });
+    expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+      "No source session recorded",
+    );
+  });
+
   it("keeps provenance and history without advertising unavailable actions", () => {
     renderDocument();
     expect(screen.getByTestId("trust-section")).toBeInTheDocument();
@@ -182,9 +240,9 @@ describe("KnowledgeDocument", () => {
       screen.queryByText(/Nothing on this page writes to memory/),
     ).not.toBeInTheDocument();
     expect(article.textContent?.indexOf("c")).toBeLessThan(
-      article.textContent?.indexOf("Why trust this") ?? 0,
+      article.textContent?.indexOf("Source & history") ?? 0,
     );
-    expect(article.textContent?.indexOf("Why trust this")).toBeLessThan(
+    expect(article.textContent?.indexOf("Source & history")).toBeLessThan(
       article.textContent?.indexOf("History") ?? 0,
     );
   });
@@ -237,11 +295,12 @@ describe("KnowledgeDocument", () => {
       evidence: loader(evidence as unknown as EvidenceResult),
     });
     if (_label === "summary-only") {
-      expect(screen.getByText(/Original messages expired/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Original messages expired/)).toHaveLength(2);
       expect(screen.getByText(/2 distillations/)).toBeInTheDocument();
       expect(screen.getByText(/gen 0/)).toBeInTheDocument();
       expect(screen.getByText(/gen 1/)).toBeInTheDocument();
       expect(screen.getAllByText(/2 distillations/)).toHaveLength(1);
+      screen.getByText("Source & history").closest("details")!.open = true;
       const readerLink = screen.getByRole("link", { name: "session reader." });
       expect(readerLink).toHaveAttribute("href", "/projects/p/sessions/s-1");
       expect(screen.queryByText("observer")).not.toBeInTheDocument();
@@ -428,7 +487,7 @@ describe("KnowledgeDocument", () => {
       evidence: loader<EvidenceResult>(undefined),
       versions: loader<KnowledgeVersionHistory>(undefined),
     });
-    expect(screen.getByText("Checking source…")).toBeInTheDocument();
+    expect(screen.getAllByText("Checking source…")).toHaveLength(2);
     expect(screen.getByText("Loading version history")).toBeInTheDocument();
   });
 
@@ -458,7 +517,7 @@ describe("KnowledgeDocument", () => {
         ],
       }),
     });
-    expect(screen.getByText("No source session recorded.")).toBeInTheDocument();
+    expect(screen.getAllByText("No source session recorded.")).toHaveLength(2);
     expect(view.container.querySelector("a")).toBeNull();
   });
 

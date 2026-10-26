@@ -80,6 +80,23 @@ export const KnowledgeDocument: Component<{
     props.entry.cross_project === true ||
     props.entry.cross_project === 1;
   const sourceSession = () => props.entry.source_session;
+  const sourceSummary = () => {
+    if (!sourceSession()) return "No source session recorded.";
+    const evidence = props.evidence;
+    if (!evidence) return "Source session recorded; availability unknown.";
+    if (evidence.error()) return "Source availability could not be checked.";
+    if (evidence.loading() || !evidence.data()) return "Checking source…";
+    switch (evidence.data()?.state) {
+      case "available":
+        return "Source session available · exact message not recorded.";
+      case "summary_only":
+        return "Original messages expired; retained summary only.";
+      case "unavailable":
+        return "Source session no longer available.";
+      default:
+        return "Source session recorded; availability unknown.";
+    }
+  };
   const currentVersion = () =>
     props.versions?.data()?.versions.find((version) => version.is_current);
   const projectId = () =>
@@ -111,9 +128,6 @@ export const KnowledgeDocument: Component<{
           <Badge variant="teal" data-testid="category">
             {props.entry.category}
           </Badge>
-          <Badge variant="outline">
-            Confidence {formatConfidence(props.entry.confidence)}
-          </Badge>
           <Show
             when={
               props.entry.sensitivity && props.entry.sensitivity !== "normal"
@@ -140,15 +154,21 @@ export const KnowledgeDocument: Component<{
           <For each={paragraphs(props.entry.content)}>{(p) => <p>{p}</p>}</For>
         </div>
 
-        <details open class="mt-8 rounded-lg border border-line bg-bg">
-          <summary class="cursor-pointer px-4 py-3 text-xs font-medium text-muted">
-            Source &amp; details
+        <p
+          data-testid="knowledge-source-summary"
+          class="mt-5 text-xs leading-relaxed text-muted [overflow-wrap:anywhere]"
+        >
+          {sourceSummary()}
+        </p>
+
+        <details class="mt-6 min-w-0 rounded-lg border border-line bg-bg">
+          <summary class="min-h-11 cursor-pointer rounded-lg px-4 py-3 text-xs font-medium text-muted outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            Source &amp; history
           </summary>
           <section
-            class="border-t border-line px-4 py-4 text-xs"
+            class="min-w-0 border-t border-line px-4 py-4 text-xs [overflow-wrap:anywhere]"
             data-testid="trust-section"
           >
-            <div class="eyebrow mb-2">Why trust this</div>
             <div class="grid gap-4 sm:grid-cols-2">
               <div>
                 <div class="font-semibold">Source</div>
@@ -323,100 +343,102 @@ export const KnowledgeDocument: Component<{
               </div>
             </div>
           </section>
-        </details>
 
-        <Show when={props.versions}>
-          {(versions) => (
-            <VersionHistory
-              loader={versions()}
-              projectId={
-                props.project?.id ?? props.entry.project_id ?? undefined
-              }
-              renderRestore={props.renderRestore}
-            />
-          )}
-        </Show>
+          <div class="border-t border-line px-4 pb-4">
+            <Show when={props.versions}>
+              {(versions) => (
+                <VersionHistory
+                  loader={versions()}
+                  projectId={
+                    props.project?.id ?? props.entry.project_id ?? undefined
+                  }
+                  renderRestore={props.renderRestore}
+                />
+              )}
+            </Show>
 
-        <details class="mt-7 rounded-lg border border-line px-4 py-3 text-xs">
-          <summary class="cursor-pointer font-semibold">
-            Technical details
-          </summary>
-          <dl class="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5">
-            <Meta label="ID" value={props.entry.id} />
-            <Meta label="Logical ID" value={props.entry.logical_id} />
-            <Meta label="Project ID" value={props.entry.project_id} />
-            <Meta label="Title" value={props.entry.title} />
-            <Meta label="Category" value={props.entry.category} />
-            <Meta
-              label="Cross project"
-              value={
-                props.entry.cross_project === true ||
-                props.entry.cross_project === 1
-                  ? "true"
-                  : "false"
-              }
-            />
-            <Meta label="Created by" value={props.entry.created_by} />
-            <Meta label="Updated by" value={props.entry.updated_by} />
-            <Meta
-              label="Created"
-              value={formatFullDate(props.entry.created_at)}
-            />
-            <Meta
-              label="Updated"
-              value={formatFullDate(props.entry.updated_at)}
-            />
-            <Meta label="Promotion" value={props.entry.promotion_status} />
-            <Show when={props.entry.last_reinforced_at}>
-              <Meta
-                label="Last reinforced"
-                value={formatFullDate(props.entry.last_reinforced_at)}
-              />
-            </Show>
-            <Show when={props.versions?.data()}>
-              {(history) => {
-                const head = () =>
-                  history().versions.find((version) => version.is_current);
-                return (
-                  <>
-                    <Meta label="Version ID" value={head()?.version_id} />
-                    <Meta
-                      label="Current version ID"
-                      value={history().current_version_id}
-                    />
-                    <Meta
-                      label="Source user"
-                      value={
-                        head()?.source_refs.user_id
-                          ? "Identity unavailable"
-                          : undefined
-                      }
-                    />
-                    <Meta
-                      label="Source entry"
-                      value={head()?.source_refs.entry_id}
-                    />
-                    <Meta
-                      label="Source created by"
-                      value={head()?.source_refs.created_by}
-                    />
-                    <Meta
-                      label="Source updated by"
-                      value={head()?.source_refs.updated_by}
-                    />
-                    <Meta
-                      label="Worker provider"
-                      value={head()?.source_refs.worker_provider_id}
-                    />
-                    <Meta
-                      label="Worker model"
-                      value={head()?.source_refs.worker_model_id}
-                    />
-                  </>
-                );
-              }}
-            </Show>
-          </dl>
+            <details class="mt-7 rounded-lg border border-line px-4 py-3 text-xs">
+              <summary class="min-h-11 cursor-pointer py-3 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0 sm:py-0">
+                Technical details
+              </summary>
+              <dl class="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5">
+                <Meta label="ID" value={props.entry.id} />
+                <Meta label="Logical ID" value={props.entry.logical_id} />
+                <Meta label="Project ID" value={props.entry.project_id} />
+                <Meta label="Title" value={props.entry.title} />
+                <Meta label="Category" value={props.entry.category} />
+                <Meta
+                  label="Cross project"
+                  value={
+                    props.entry.cross_project === true ||
+                    props.entry.cross_project === 1
+                      ? "true"
+                      : "false"
+                  }
+                />
+                <Meta label="Created by" value={props.entry.created_by} />
+                <Meta label="Updated by" value={props.entry.updated_by} />
+                <Meta
+                  label="Created"
+                  value={formatFullDate(props.entry.created_at)}
+                />
+                <Meta
+                  label="Updated"
+                  value={formatFullDate(props.entry.updated_at)}
+                />
+                <Meta label="Promotion" value={props.entry.promotion_status} />
+                <Show when={props.entry.last_reinforced_at}>
+                  <Meta
+                    label="Last reinforced"
+                    value={formatFullDate(props.entry.last_reinforced_at)}
+                  />
+                </Show>
+                <Show when={props.versions?.data()}>
+                  {(history) => {
+                    const head = () =>
+                      history().versions.find((version) => version.is_current);
+                    return (
+                      <>
+                        <Meta label="Version ID" value={head()?.version_id} />
+                        <Meta
+                          label="Current version ID"
+                          value={history().current_version_id}
+                        />
+                        <Meta
+                          label="Source user"
+                          value={
+                            head()?.source_refs.user_id
+                              ? "Identity unavailable"
+                              : undefined
+                          }
+                        />
+                        <Meta
+                          label="Source entry"
+                          value={head()?.source_refs.entry_id}
+                        />
+                        <Meta
+                          label="Source created by"
+                          value={head()?.source_refs.created_by}
+                        />
+                        <Meta
+                          label="Source updated by"
+                          value={head()?.source_refs.updated_by}
+                        />
+                        <Meta
+                          label="Worker provider"
+                          value={head()?.source_refs.worker_provider_id}
+                        />
+                        <Meta
+                          label="Worker model"
+                          value={head()?.source_refs.worker_model_id}
+                        />
+                      </>
+                    );
+                  }}
+                </Show>
+              </dl>
+            </details>
+          </div>
         </details>
 
         <p class="mt-6 border-t border-line pt-4 text-xs text-muted">

@@ -622,10 +622,14 @@ describe("shell: project navigation and real-data path", () => {
     );
     expect(within(doc).getByTestId("category")).toHaveTextContent("gotcha");
     expect(within(doc).getByText("shared")).toBeInTheDocument();
-    expect(within(doc).getByText("Confidence 60%")).toBeInTheDocument();
     expect(
-      within(doc).getByText("No source session recorded."),
-    ).toBeInTheDocument();
+      within(doc).getByText("Recorded confidence").parentElement,
+    ).toHaveTextContent(
+      "60% — recorded value, not a probability of correctness",
+    );
+    expect(
+      within(doc).getByTestId("knowledge-source-summary"),
+    ).toHaveTextContent("No source session recorded.");
     const selectedRows = await screen.findAllByTestId("knowledge-row");
     expect(selectedRows[1]).toHaveAttribute("aria-current", "page");
     expect(selectedRows[0]).not.toHaveAttribute("aria-current");
@@ -761,7 +765,7 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).queryAllByRole("button", { name: /not available yet/ }),
     ).toHaveLength(0);
-    expect(within(doc).getByText("Source & details")).toBeInTheDocument();
+    expect(within(doc).getByText("Source & history")).toBeInTheDocument();
     expect(within(doc).getByText("History")).toBeInTheDocument();
   });
 
@@ -2356,7 +2360,7 @@ it("clears reader filters while preserving the selected entry and sort", async (
 it("filters project cards and can recover from an empty result", async () => {
   mount("/", fakeClient());
   await screen.findAllByTestId("project-card");
-  const filter = screen.getByRole("textbox", { name: "Filter project cards" });
+  const filter = screen.getByRole("textbox", { name: "Filter projects" });
   fireEvent.input(filter, { target: { value: "not-a-project" } });
   expect(await screen.findByText("No projects match")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Clear project filter" }));

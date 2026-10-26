@@ -54,9 +54,14 @@ test.describe("real data browsing", () => {
     await expect(
       doc.getByRole("button", { name: "Edit", exact: true }),
     ).toBeEnabled();
+    const source = doc.getByText("Source & history", { exact: true });
+    await expect(source).toBeVisible();
+    await expect(source.locator("..")).not.toHaveAttribute("open");
+    await expect(doc.getByTestId("knowledge-source-summary")).toBeVisible();
     await expect(
-      doc.getByText("Source & details", { exact: true }),
-    ).toBeVisible();
+      doc.getByRole("heading", { name: "History", exact: true }),
+    ).toBeHidden();
+    await source.click();
     await expect(
       doc.getByRole("heading", { name: "History", exact: true }),
     ).toBeVisible();

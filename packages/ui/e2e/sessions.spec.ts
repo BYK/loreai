@@ -28,13 +28,22 @@ test.describe("session titles and search", () => {
     await expect(
       page.getByRole("link", { name: /Investigate FTS tokenizer diacritics/ }),
     ).toBeVisible();
-    // Id stays reachable via the chip inside the row.
+    const record = row.locator("..");
+    const processing = record.locator("details");
+    await expect(processing).not.toHaveAttribute("open");
+    await expect(row.locator("button, summary")).toHaveCount(0);
+    await record.getByText("Processing details", { exact: true }).click();
     await expect(
-      row.getByRole("button", { name: "Copy session id" }),
+      record.getByRole("button", { name: "Copy session id" }),
     ).toBeVisible();
-    // A title-less session renders its id once, as the primary line.
-    const fallback = page.getByRole("link", { name: /e2e-session-tools/ });
-    await expect(fallback).toBeVisible();
+    const fallback = page
+      .locator("details")
+      .filter({ hasText: "e2e-session-tools" })
+      .locator("..");
+    await expect(
+      fallback.getByRole("link", { name: /Untitled session/ }),
+    ).toBeVisible();
+    await fallback.getByText("Processing details", { exact: true }).click();
     await expect(fallback.getByText("e2e-session-tools")).toHaveCount(1);
   });
 
@@ -126,12 +135,14 @@ test.describe("session titles and search", () => {
     const row = page.getByRole("link", {
       name: /Refactor the sync outbox pruning/,
     });
-    await row.getByRole("button", { name: "Copy session id" }).click();
+    const record = row.locator("..");
+    await record.getByText("Processing details", { exact: true }).click();
+    await record.getByRole("button", { name: "Copy session id" }).click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/sessions$`),
     );
     await expect(
-      row.getByRole("button", { name: "Copy session id" }),
+      record.getByRole("button", { name: "Copy session id" }),
     ).toContainText("Copied");
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     expect(copied).toBe("e2e-session-sqlite");
@@ -141,7 +152,7 @@ test.describe("session titles and search", () => {
 test.describe("mobile list (375x812)", () => {
   test.use({ viewport: { width: 375, height: 812 } });
 
-  test("titles truncate to one line and the search box stays usable", async ({
+  test("titles wrap within the viewport and the search box stays usable", async ({
     page,
   }) => {
     await openSessions(page);
@@ -153,7 +164,8 @@ test.describe("mobile list (375x812)", () => {
       .getByTitle("Refactor the sync outbox pruning", { exact: true })
       .boundingBox();
     expect(box).not.toBeNull();
-    expect(box?.height ?? 0).toBeLessThan(30);
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
     await expect(
       page.getByRole("searchbox", { name: "Search sessions" }),
     ).toBeVisible();
