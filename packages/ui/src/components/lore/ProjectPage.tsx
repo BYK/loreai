@@ -14,7 +14,7 @@ import {
   type ProjectSummary,
   type RecallScope,
 } from "~/contracts";
-import { formatWhen, pluralize } from "~/lib/format";
+import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import {
   projectHref,
@@ -172,7 +172,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                 <ListRow
                   href={knowledgeHref(props.project.id, entry.id)}
                   title={entry.title}
-                  preview={entry.content}
+                  preview={previewOf(entry.content)}
                   footRight={formatWhen(entry.updated_at)}
                 />
               )}

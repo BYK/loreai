@@ -69,6 +69,33 @@ const linkedAuto: SharingStatus = {
 };
 
 describe("ProjectPage", () => {
+  it("bounds recent knowledge previews to the first recorded line", async () => {
+    const { default: entries } = await import("./fixtures/knowledge-list.json");
+    const entry = entries[0];
+    if (!entry) throw new Error("Missing knowledge fixture");
+    mountProject({
+      ...client,
+      listProjectKnowledgePage: async () => ({
+        items: [
+          {
+            ...entry,
+            id: "long-preview",
+            title: "Bounded preview",
+            content: "A".repeat(200) + "\nHidden second line",
+          },
+        ],
+        next_cursor: null,
+      }),
+    });
+    const link = await screen.findByRole("link", { name: /Bounded preview/ });
+    expect(link).toHaveTextContent("A".repeat(119) + "…");
+    expect(link.textContent).not.toContain("A".repeat(120));
+    expect(link.textContent).not.toContain("Hidden second line");
+    expect(link).toHaveAttribute(
+      "href",
+      "/projects/p-1/knowledge/long-preview",
+    );
+  });
   it("shows a memory summary and up to five recent knowledge entries", async () => {
     const { default: entries } = await import("./fixtures/knowledge-list.json");
     const entry = entries[0];

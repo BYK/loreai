@@ -7,6 +7,7 @@ import {
 import type { Component } from "solid-js";
 import {
   Match,
+  Show,
   Switch,
   createEffect,
   createMemo,
@@ -135,13 +136,15 @@ export const SearchResults: Component<{
               </A>
             }
           >
-            Try different words or search all memory.
-            <A
-              class="ml-2 text-accent underline"
-              href={searchHref(props.project.id, props.q, "all")}
-            >
-              Search all memory
-            </A>
+            <Show when={props.scope !== "all"} fallback="Try different words.">
+              Try different words or search all memory.
+              <A
+                class="ml-2 text-accent underline"
+                href={searchHref(props.project.id, props.q, "all")}
+              >
+                Search all memory
+              </A>
+            </Show>
           </StateCard>
         </Match>
         <Match when={search.loader.data()}>

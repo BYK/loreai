@@ -37,6 +37,40 @@ const recallClient = {
 } as unknown as ApiClient;
 
 describe("SearchResults", () => {
+  it.each(["session", "project", "knowledge"] as const)(
+    "offers a broader search from %s while preserving the query",
+    async (scope) => {
+      render(() => (
+        <MemoryRouter>
+          <Route
+            path="*"
+            component={() => (
+              <WorkspaceProvider
+                client={recallClient}
+                db={Promise.resolve(null)}
+              >
+                <SearchResults
+                  project={project}
+                  q="SQLite & history"
+                  scope={scope}
+                />
+              </WorkspaceProvider>
+            )}
+          />
+        </MemoryRouter>
+      ));
+      const link = await screen.findByRole("link", {
+        name: "Search all memory",
+      });
+      const url = new URL(link.getAttribute("href") ?? "", "http://local");
+      expect(url.pathname).toBe("/projects/p-1/search");
+      expect(url.searchParams.get("q")).toBe("SQLite & history");
+      expect(url.searchParams.get("scope")).toBe("all");
+      expect(
+        screen.getByRole("link", { name: "Browse project knowledge" }),
+      ).toHaveAttribute("href", "/projects/p-1/knowledge");
+    },
+  );
   it("prompts for a query before making recall output", () => {
     render(() => (
       <MemoryRouter>
@@ -195,6 +229,10 @@ describe("SearchResults", () => {
     ));
     expect(await screen.findByText("No results")).toBeInTheDocument();
     expect(screen.getByText(/Scope: All memory/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Search all memory" }),
+    ).toBeNull();
+    expect(screen.getByText("Try different words.")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Browse project knowledge" }),
     ).toHaveAttribute("href", "/projects/p-1/knowledge");
