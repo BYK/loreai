@@ -173,6 +173,11 @@ behavior, and provide 44px mobile targets. Append-style Load more actions remain
 distinct. The PR includes matched pagination comparisons and a focus-tooltip
 capture against revision `ed2d66ea`.
 
+An idle source without project context reports that availability cannot be
+checked, while recorded evidence and real loading/error states remain distinct.
+Team status errors have one visible owner outside collapsed settings and clear
+when their controls unmount; standalone controls retain inline feedback.
+
 The accompanying PR contains before/after comparisons for desktop and mobile in
 both themes, including navigation, readers, tables, overview and team workflows.
 Screenshots are attached to the PR rather than committed as build artifacts.

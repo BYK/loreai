@@ -44,3 +44,13 @@
 
 - [x] Capture and inspect matched real-frontend before/after screenshots of main pagination and narrow sidebar, including mobile. No DOM/CSS/image editing or real user data.
 - [x] Update docs/PR with new screenshots and exact validation results; push the same branch, verify hosted head/ready state/review threads/current checks. Do not merge.
+
+### Task 3: Newly reported Seer UI states
+
+**Files:** KnowledgeDocument.tsx, TeamParityActions.tsx, TeamPage.tsx only if needed; existing knowledge-document and folk03 unit/browser tests.
+
+**Interfaces:** Preserve current loader/API/mutation/owner guards. Source summaries use recorded loader state and project context only; no new requests. TeamParityActions onStatusError remains an optional string callback; caller-owned errors must clear on unmount and ignore late async replies.
+
+- [x] Reproduce PRRT_kwDORU1hfc6wPQvZ with a workspace knowledge entry having project_id=null and source_session, evidence loader idle/loading=false/data/error undefined, project unavailable. Both summary and expanded Source & history must state source project/availability cannot be checked instead of perpetual Checking source. Preserve project-present initial loader pending, available/summary-only/missing/error/no-source states and all existing source links/history.
+- [x] Reproduce PRRT_kwDORU1hfc6wPQvW: no-team closed settings errors remain visible, opening controls or ready-team Settings shows each underlying status error once, and unmount/retry/loading/error/account transitions clear parent advancedError. Standalone parity actions without a parent callback still expose their inline errors; late async replies cannot resurrect stale status. Preserve create/join/discovery/domain actions, permissions and owner guards.
+- [x] Run focused RED/GREEN, complete UI, typecheck/lint/format and built production affected desktop/mobile cases. Commit minimal fixes, write exact report, obtain separate scoped correctness/security review, then publish and resolve verified threads. Do not change pagination or parent screenshots/docs, push, or edit GitHub from the implementer.
