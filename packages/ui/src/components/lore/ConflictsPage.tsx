@@ -1,7 +1,15 @@
 import { A } from "@solidjs/router";
 import { REVIEW_DESTINATIONS } from "~/components/shell/navigation";
 import type { Component } from "solid-js";
-import { createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import {
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 
 import type {
   SyncConflict,
@@ -21,6 +29,8 @@ import {
   DialogTitle,
 } from "~/components/ui/dialog";
 import { StateCard } from "./StateCard";
+import { TextChanges } from "./TextChanges";
+import { diffText } from "~/lib/text-diff";
 
 type Confirmation = {
   conflict: SyncConflict;
@@ -223,6 +233,7 @@ export const ConflictsPage: Component = () => {
         </div>
         <Button
           size="sm"
+          class="h-11 md:h-9"
           variant="outline"
           disabled={loading()}
           data-testid="conflicts-reload"
@@ -246,7 +257,12 @@ export const ConflictsPage: Component = () => {
             kind="error"
             title="Sync conflicts could not be reached"
             action={
-              <Button size="sm" variant="outline" onClick={reloadConflicts}>
+              <Button
+                size="sm"
+                class="h-11 md:h-9"
+                variant="outline"
+                onClick={reloadConflicts}
+              >
                 Retry
               </Button>
             }
@@ -259,7 +275,12 @@ export const ConflictsPage: Component = () => {
             kind="error"
             title="Sync conflicts could not be loaded"
             action={
-              <Button size="sm" variant="outline" onClick={reloadConflicts}>
+              <Button
+                size="sm"
+                class="h-11 md:h-9"
+                variant="outline"
+                onClick={reloadConflicts}
+              >
                 Retry
               </Button>
             }
@@ -297,6 +318,7 @@ export const ConflictsPage: Component = () => {
               </span>
               <Button
                 size="sm"
+                class="h-11 md:h-9"
                 variant="outline"
                 data-testid="conflicts-reload-after-action"
                 onClick={reloadConflicts}
@@ -359,43 +381,13 @@ export const ConflictsPage: Component = () => {
                           your local snapshot as a new version.
                         </p>
                       </Show>
-                      <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <section class="min-w-0 rounded-md border border-line bg-bg p-3">
-                          <h3 class="text-sm font-semibold">
-                            Your discarded version
-                          </h3>
-                          <Show when={conflict.local}>
-                            {(local) => (
-                              <>
-                                <p class="mt-1 text-xs text-muted">
-                                  {local().category}
-                                </p>
-                                <pre class="mt-2 whitespace-pre-wrap break-words font-sans text-sm">
-                                  {local().content}
-                                </pre>
-                              </>
-                            )}
-                          </Show>
-                        </section>
-                        <section class="min-w-0 rounded-md border border-line bg-bg p-3">
-                          <h3 class="text-sm font-semibold">Current version</h3>
-                          <Show when={conflict.current}>
-                            {(current) => (
-                              <>
-                                <p class="mt-1 break-all text-xs text-muted">
-                                  {versionSummary(current())}
-                                </p>
-                                <strong class="mt-2 block break-words text-sm">
-                                  {current().title}
-                                </strong>
-                                <pre class="mt-2 whitespace-pre-wrap break-words font-sans text-sm">
-                                  {current().content}
-                                </pre>
-                              </>
-                            )}
-                          </Show>
-                        </section>
-                      </div>
+                      <RecoveryComparison conflict={conflict} />
+                      <p class="mt-3 text-xs text-muted">
+                        Keep mine creates a new current version from this
+                        snapshot; its title may stay unchanged if another entry
+                        uses it. Discard mine permanently removes this saved
+                        snapshot and leaves the current entry unchanged.
+                      </p>
                     </Show>
 
                     <Show when={!conflict.recoverable}>
@@ -427,6 +419,7 @@ export const ConflictsPage: Component = () => {
                       <Show when={conflict.recoverable}>
                         <Button
                           size="sm"
+                          class="h-11 md:h-9"
                           disabled={
                             acting() ||
                             resolvedIds().has(conflict.id) ||
@@ -440,6 +433,7 @@ export const ConflictsPage: Component = () => {
                       </Show>
                       <Button
                         size="sm"
+                        class="h-11 md:h-9"
                         variant="outline"
                         disabled={
                           acting() ||
@@ -492,6 +486,7 @@ export const ConflictsPage: Component = () => {
           <Show when={reloadRequired() && dialogActionError()}>
             <Button
               size="sm"
+              class="h-11 md:h-9"
               variant="outline"
               data-testid="conflicts-reload-after-action"
               onClick={reloadAfterDialogError}
@@ -526,5 +521,147 @@ export const ConflictsPage: Component = () => {
         </DialogContent>
       </Dialog>
     </section>
+  );
+};
+
+const RecoveryComparison: Component<{ conflict: SyncConflict }> = (props) => {
+  const comparison = createMemo(() => {
+    const { local, current } = props.conflict;
+    if (!local || !current) return null;
+    const title = diffText(current.title, local.title);
+    const content = diffText(current.content, local.content);
+    return title && content ? { title, content } : null;
+  });
+  const changed = () => {
+    const value = comparison();
+    return (
+      value &&
+      [...value.title, ...value.content].some((part) => part.kind !== "equal")
+    );
+  };
+  return (
+    <div class="mt-4 space-y-3">
+      <h3 class="text-sm font-semibold">Changes if you keep mine</h3>
+      <Show
+        when={comparison()}
+        fallback={
+          <p class="text-sm text-muted">
+            {props.conflict.current
+              ? "Changes too large to compare. Showing full text."
+              : "Current version unavailable. Showing the saved local text."}
+          </p>
+        }
+      >
+        {(value) => (
+          <>
+            <p class="text-xs text-muted">
+              {changed()
+                ? "Added text is underlined; removed text is struck through."
+                : "No title or content changes. Other recorded details may differ."}
+            </p>
+            <div
+              class="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2"
+              data-testid="conflict-changes"
+            >
+              <section class="min-w-0 rounded-md border border-line bg-bg p-3">
+                <h4 class="mb-2 text-xs font-medium text-muted">
+                  Current text
+                </h4>
+                <div
+                  class="space-y-2 whitespace-pre-wrap break-words"
+                  data-testid="conflict-current-text"
+                >
+                  <div class="font-semibold">
+                    <TextChanges
+                      changes={value().title.filter(
+                        (part) => part.kind !== "added",
+                      )}
+                    />
+                  </div>
+                  <p class="text-sm leading-relaxed">
+                    <TextChanges
+                      changes={value().content.filter(
+                        (part) => part.kind !== "added",
+                      )}
+                    />
+                  </p>
+                </div>
+              </section>
+              <section class="min-w-0 rounded-md border border-line bg-bg p-3">
+                <h4 class="mb-2 text-xs font-medium text-muted">
+                  Text if you keep mine
+                </h4>
+                <div
+                  class="space-y-2 whitespace-pre-wrap break-words"
+                  data-testid="conflict-local-text"
+                >
+                  <div class="font-semibold">
+                    <TextChanges
+                      changes={value().title.filter(
+                        (part) => part.kind !== "removed",
+                      )}
+                    />
+                  </div>
+                  <p class="text-sm leading-relaxed">
+                    <TextChanges
+                      changes={value().content.filter(
+                        (part) => part.kind !== "removed",
+                      )}
+                    />
+                  </p>
+                </div>
+              </section>
+            </div>
+          </>
+        )}
+      </Show>
+      <details
+        class="rounded-md border border-line bg-bg p-3"
+        open={!comparison()}
+      >
+        <summary class="min-h-11 cursor-pointer content-center text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+          Full local and current text
+        </summary>
+        <div class="mt-3 grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2">
+          <section class="min-w-0">
+            <h4 class="text-sm font-semibold">Your discarded version</h4>
+            <Show when={props.conflict.local}>
+              {(local) => (
+                <>
+                  <p class="mt-1 text-xs text-muted">{local().category}</p>
+                  <strong class="mt-2 block text-sm">{local().title}</strong>
+                  <pre class="mt-2 whitespace-pre-wrap break-words font-sans text-sm">
+                    {local().content}
+                  </pre>
+                </>
+              )}
+            </Show>
+          </section>
+          <section class="min-w-0">
+            <h4 class="text-sm font-semibold">Current version</h4>
+            <Show
+              when={props.conflict.current}
+              fallback={
+                <p class="mt-2 text-sm text-muted">
+                  Current version unavailable.
+                </p>
+              }
+            >
+              {(current) => (
+                <>
+                  <p class="mt-1 break-all text-xs text-muted">
+                    {versionSummary(current())}
+                  </p>
+                  <strong class="mt-2 block text-sm">{current().title}</strong>
+                  <pre class="mt-2 whitespace-pre-wrap break-words font-sans text-sm">
+                    {current().content}
+                  </pre>
+                </>
+              )}
+            </Show>
+          </section>
+        </div>
+      </details>
+    </div>
   );
 };

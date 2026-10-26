@@ -51,6 +51,38 @@ function mount(client: ApiClient, path = "/entities") {
 }
 
 describe("EntitiesPage", () => {
+  it("shows recorded aliases, meaningful project scope and correct plurals without detail requests", async () => {
+    const getEntity = vi.fn();
+    mount(
+      clientWith({
+        getEntity,
+        listProjects: async () =>
+          [
+            { id: "p-1", name: "Engine workspace", path: "/tmp/engine" },
+          ] as never,
+        listEntities: async () => ({
+          entities: [
+            makeEntity({ project_id: "p-1" }),
+            makeEntity({ id: "e-2", canonical_name: "", aliases: [] }),
+          ],
+          next_cursor: null,
+          total: 2,
+        }),
+      }),
+    );
+    await screen.findByText("Ada Lovelace");
+    expect(screen.getByText("2 entities")).toBeInTheDocument();
+    expect(
+      screen.getByText("Also known as ada@example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Engine workspace")).toBeInTheDocument();
+    expect(screen.getByText("Across projects")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Unnamed entity/ }),
+    ).toBeInTheDocument();
+    expect(getEntity).not.toHaveBeenCalled();
+  });
+
   it("clears an empty type filter to return to available entities", async () => {
     const listEntities = vi
       .fn<ApiClient["listEntities"]>()

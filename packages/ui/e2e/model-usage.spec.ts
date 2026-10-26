@@ -24,6 +24,12 @@ test.describe("model usage page", () => {
       "8 active session-days",
     );
 
+    const totals = page.getByText("Model totals", { exact: true });
+    await expect(totals.locator("..")).not.toHaveAttribute("open");
+    await expect(page.getByTestId("model-usage-scope")).toContainText(
+      "8 session-days",
+    );
+    await totals.click();
     // Default order: Session-days desc then Model asc.
     await expect(modelCells(page)).toHaveText([
       "claude-sonnet-4",
@@ -36,7 +42,7 @@ test.describe("model usage page", () => {
     ).toHaveText("4");
 
     await page
-      .getByRole("heading", { name: "Totals", exact: true })
+      .getByText("Model totals", { exact: true })
       .scrollIntoViewIfNeeded();
     await page.screenshot({
       path: testInfo.outputPath("model-usage-spacing.png"),

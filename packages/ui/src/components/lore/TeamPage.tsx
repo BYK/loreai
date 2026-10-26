@@ -761,15 +761,9 @@ export const TeamPage: Component = () => {
           Reload review policy
         </Button>
       </Show>
-      <Show when={section() !== "settings" && advancedError()}>
+      <Show when={advancedError()}>
         <p class="mb-4 text-sm text-danger" role="alert">
-          {advancedError()}{" "}
-          <NavigationLink
-            href="/team?section=settings"
-            class="text-accent underline"
-          >
-            Open team settings
-          </NavigationLink>
+          {advancedError()}
         </p>
       </Show>
       <Show when={removeReceipt()}>
@@ -841,6 +835,7 @@ export const TeamPage: Component = () => {
               canManage={false}
               hasTeams={false}
               advancedDisclosure
+              onStatusError={setAdvancedError}
               disabled={!accountReady()}
               onChanged={() => folk.refresh()}
             />

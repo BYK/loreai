@@ -5,13 +5,13 @@
  */
 import type { Component } from "solid-js";
 import { createSignal, For, Match, Show, Switch } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { A, useNavigate } from "@solidjs/router";
 
 import type { EntityDetail } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
-import { knowledgeHref } from "~/lib/href";
+import { entityHref, globalKnowledgeHref, knowledgeHref } from "~/lib/href";
 import { Icon } from "~/components/shell/Icon";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -119,6 +119,7 @@ const MetadataForm: Component<{
           pending={saving()}
           icon="save"
           size="sm"
+          class="h-11 md:h-9"
           disabled={!dirty() || saving()}
           onClick={() => void save()}
           data-testid="entity-save"
@@ -148,6 +149,7 @@ const Fields: Component<{
     <TextField value={props.role[0]()} onChange={props.role[1]}>
       <TextFieldLabel>Role</TextFieldLabel>
       <TextFieldInput
+        class="h-11 md:h-9"
         on:input={(e) => props.role[1](e.currentTarget.value)}
         placeholder="e.g. colleague, maintainer"
         data-testid="entity-role"
@@ -156,6 +158,7 @@ const Fields: Component<{
     <TextField value={props.description[0]()} onChange={props.description[1]}>
       <TextFieldLabel>Description</TextFieldLabel>
       <TextFieldInput
+        class="h-11 md:h-9"
         on:input={(e) => props.description[1](e.currentTarget.value)}
         data-testid="entity-description"
       />
@@ -169,6 +172,20 @@ const Fields: Component<{
       />
     </TextField>
   </div>
+);
+
+const RelatedEntity: Component<{
+  relation: EntityDetail["relations"][number];
+}> = (props) => (
+  <span class="inline-flex max-w-full items-center gap-1.5 align-middle">
+    <A
+      class="inline-flex min-h-11 min-w-0 items-center text-accent underline md:min-h-0"
+      href={entityHref(props.relation.other_id)}
+    >
+      {props.relation.other_name || "Unnamed entity"}
+    </A>{" "}
+    <Badge variant="outline">{props.relation.other_type}</Badge>
+  </span>
 );
 
 export const EntityPage: Component<{ entityId: string }> = (props) => {
@@ -201,7 +218,7 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
 
   return (
     <div
-      class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5"
+      class="mx-auto min-w-0 max-w-[940px] px-5 py-8 [overflow-wrap:anywhere] sm:px-7.5"
       data-testid="entity-page"
     >
       <Switch>
@@ -219,12 +236,12 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                 class="mb-1 text-[25px] font-semibold"
                 data-testid="entity-name"
               >
-                {value().entity.canonical_name}
+                {value().entity.canonical_name || "Unnamed entity"}
               </h1>
               <p class="mb-4 text-sm text-muted">
                 <Badge variant="teal">{value().entity.entity_type}</Badge>{" "}
                 {value().entity.project_id === null
-                  ? "cross-project"
+                  ? "Across projects"
                   : (projectName(value().entity.project_id) ??
                     value().entity.project_id)}
                 {" · updated "}
@@ -242,25 +259,13 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                 </div>
               </Show>
 
-              <MetadataForm detail={value()} />
-
-              <Show when={value().relations.length > 0}>
-                <section class="mt-6" data-testid="entity-relations">
-                  <h2 class="mb-2 text-sm font-semibold">
-                    Relations ({value().relations.length})
-                  </h2>
-                  <ul class="list-none p-0">
-                    <For each={value().relations}>
-                      {(rel) => (
-                        <li class="border-t border-line py-2 text-sm">
-                          <span class="text-muted">{rel.relation} → </span>
-                          {rel.other_name}{" "}
-                          <Badge variant="outline">{rel.other_type}</Badge>
-                        </li>
-                      )}
-                    </For>
-                  </ul>
-                </section>
+              <Show when={metaString(value(), "description").trim()}>
+                <p
+                  class="mb-5 max-w-prose whitespace-pre-wrap text-sm leading-relaxed"
+                  data-testid="entity-context"
+                >
+                  {metaString(value(), "description")}
+                </p>
               </Show>
 
               <Show when={value().knowledge.length > 0}>
@@ -273,16 +278,16 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                     <For each={value().knowledge}>
                       {(entry) => (
                         <li class="border-t border-line py-2 text-sm">
-                          <a
-                            class="text-accent underline"
+                          <A
+                            class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
                             href={
                               entry.project_id === null
-                                ? `/knowledge/${encodeURIComponent(entry.id)}`
+                                ? globalKnowledgeHref(entry.id)
                                 : knowledgeHref(entry.project_id, entry.id)
                             }
                           >
                             {entry.title}
-                          </a>{" "}
+                          </A>{" "}
                           <Badge variant="outline">{entry.category}</Badge>
                         </li>
                       )}
@@ -290,6 +295,48 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                   </ul>
                 </section>
               </Show>
+
+              <Show when={value().relations.length > 0}>
+                <section class="mt-6" data-testid="entity-relations">
+                  <h2 class="mb-2 text-sm font-semibold">
+                    Relations ({value().relations.length})
+                  </h2>
+                  <ul class="list-none p-0">
+                    <For each={value().relations}>
+                      {(rel) => (
+                        <li class="border-t border-line py-2 text-sm">
+                          <Show
+                            when={rel.direction === "outgoing"}
+                            fallback={
+                              <>
+                                <RelatedEntity relation={rel} />{" "}
+                                <span class="text-muted">
+                                  {rel.relation} →{" "}
+                                </span>
+                                {value().entity.canonical_name ||
+                                  "Unnamed entity"}{" "}
+                              </>
+                            }
+                          >
+                            {value().entity.canonical_name || "Unnamed entity"}{" "}
+                            <span class="text-muted">{rel.relation} → </span>
+                            <RelatedEntity relation={rel} />
+                          </Show>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </section>
+              </Show>
+
+              <details class="mt-8 rounded-lg border border-line p-3">
+                <summary class="min-h-11 cursor-pointer content-center text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                  Edit entity details
+                </summary>
+                <div class="mt-3">
+                  <MetadataForm detail={value()} />
+                </div>
+              </details>
 
               <section class="mt-8 border-t border-line pt-4">
                 <Switch>
@@ -316,7 +363,7 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                 <Button
                   variant="destructive"
                   size="sm"
-                  class="mt-3"
+                  class="mt-3 h-11 md:h-9"
                   onClick={() => setConfirmDelete(true)}
                   data-testid="entity-delete"
                 >

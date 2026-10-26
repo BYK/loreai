@@ -185,6 +185,36 @@ function mountPage(page: "warming" | "costs", client: ApiClient) {
 }
 
 describe("WarmingPage", () => {
+  it("keeps status, breaker warning and controls above closed diagnostics", async () => {
+    mountPage("warming", clientWith({ getWarming: async () => warmingData }));
+    expect(
+      await screen.findByText("Cache warming is", { exact: false }),
+    ).toHaveTextContent("ON");
+    expect(
+      screen.getByText("1 live session · 0 warming now"),
+    ).toBeInTheDocument();
+    const bucket = screen
+      .getByText("Circuit breaker details")
+      .closest("details")!;
+    const histograms = screen
+      .getByText("Project histograms")
+      .closest("details")!;
+    expect(bucket).not.toHaveAttribute("open");
+    expect(histograms).not.toHaveAttribute("open");
+    expect(
+      screen
+        .getByRole("button", { name: "Reset circuit breakers" })
+        .closest("details"),
+    ).toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "stop warming for session-1" })
+        .closest("details"),
+    ).toBeNull();
+    expect(
+      screen.getByText("P(return)").closest("details"),
+    ).not.toHaveAttribute("open");
+  });
   it("shows live warming state, histograms and runs the global/session controls", async () => {
     const setEnabled = vi.fn(async () => ({ enabled: false, override: false }));
     const resetBreakers = vi.fn(async () => ({
@@ -309,6 +339,46 @@ describe("WarmingPage", () => {
 });
 
 describe("CostsPage", () => {
+  it("leads with live spend and keeps estimates and tables in closed disclosures", async () => {
+    mountPage("costs", clientWith({ getCosts: async () => costsData }));
+    expect(
+      await screen.findByText("Live spend since gateway start"),
+    ).toBeInTheDocument();
+    for (const title of [
+      "Daily costs · last 14 days",
+      "Live cost breakdown",
+      "Per-session costs",
+      "Historical estimates",
+    ]) {
+      expect(screen.getByText(title).closest("details")).not.toHaveAttribute(
+        "open",
+      );
+    }
+    expect(
+      screen.getByRole("button", { name: "Refresh" }).closest("details"),
+    ).toBeNull();
+  });
+  it.each([0, 1, 2])(
+    "uses truthful singular and plural live cost counts for %i",
+    async (count) => {
+      mountPage(
+        "costs",
+        clientWith({
+          getCosts: async () => ({
+            ...costsData,
+            live: { ...costsData.live, session_count: count, turns: count },
+          }),
+        }),
+      );
+      const summary = (
+        await screen.findByText("Live spend since gateway start")
+      ).closest("section");
+      expect(summary).toHaveTextContent(
+        `${count} ${count === 1 ? "session" : "sessions"} · ${count} ${count === 1 ? "turn" : "turns"}`,
+      );
+    },
+  );
+
   it("shows costs, history and per-session rows without a global budget", async () => {
     mountPage("costs", clientWith({ getCosts: async () => costsData }));
 

@@ -6,6 +6,7 @@ import { A } from "@solidjs/router";
 import type { CostsSnapshot, ProviderPacingInput } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatMoney } from "~/lib/money";
+import { pluralize } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
 import { errorStateFor } from "./ErrorState";
@@ -77,7 +78,12 @@ export const CostsPage: Component = () => {
           title="Could not refresh cost data"
           compact
           action={
-            <Button size="sm" variant="outline" onClick={() => void load()}>
+            <Button
+              size="sm"
+              class="h-11 md:h-9"
+              variant="outline"
+              onClick={() => void load()}
+            >
               Retry
             </Button>
           }
@@ -98,6 +104,35 @@ export const CostsPage: Component = () => {
       >
         {(data) => (
           <>
+            <section class="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-bg p-4">
+              <div>
+                <h2 class="text-sm font-medium">
+                  Live spend since gateway start
+                </h2>
+                <p class="mt-1 text-2xl font-semibold">
+                  {formatMoney(data().live.spend)}
+                </p>
+                <p class="mt-1 text-xs text-muted">
+                  {pluralize(data().live.session_count, "session")} ·{" "}
+                  {pluralize(data().live.turns, "turn")} ·{" "}
+                  {formatMoney(data().live.worker_cost)} worker overhead
+                </p>
+                <p class="mt-1 text-xs text-muted">
+                  {formatMoney(Math.abs(data().live.net_savings))} estimated net{" "}
+                  {data().live.net_savings >= 0 ? "savings" : "overhead"}.
+                  Estimates compare against modeled spend without Lore.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                class="h-11 md:h-9"
+                variant="outline"
+                disabled={loading()}
+                onClick={() => void load()}
+              >
+                Refresh
+              </Button>
+            </section>
             <ProviderCards
               providers={data().providers}
               quotas={data().quotas}
@@ -107,8 +142,10 @@ export const CostsPage: Component = () => {
             />
 
             <Show when={data().daily.entries.some((day) => day.cost > 0)}>
-              <section class="mb-6 rounded-lg border border-line bg-bg p-4">
-                <h2 class="mb-3 font-semibold">Daily costs · last 14 days</h2>
+              <details class="mb-4 rounded-lg border border-line bg-bg p-4">
+                <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                  Daily costs · last 14 days
+                </summary>
                 <div class="flex h-32 items-end gap-1 overflow-x-auto border-b border-line pb-1">
                   <For each={data().daily.entries}>
                     {(day) => (
@@ -134,11 +171,13 @@ export const CostsPage: Component = () => {
                     )}
                   </For>
                 </div>
-              </section>
+              </details>
             </Show>
 
-            <section class="mb-7">
-              <h2 class="mb-3 text-lg font-semibold">Live totals</h2>
+            <details class="mb-4 rounded-lg border border-line p-4">
+              <summary class="mb-3 min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                Live cost breakdown
+              </summary>
               <div class="grid gap-4 lg:grid-cols-2">
                 <MetricCard title="Spend composition">
                   <Metric
@@ -192,20 +231,15 @@ export const CostsPage: Component = () => {
                   value={formatMoney(data().live.cost_without_lore)}
                 />
               </div>
-            </section>
+            </details>
 
-            <section class="mb-7">
-              <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 class="text-lg font-semibold">Per-session costs</h2>
-                  <p class="text-xs text-muted">
-                    Live tracker data since this gateway started.
-                  </p>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => void load()}>
-                  Refresh
-                </Button>
-              </div>
+            <details class="mb-4 rounded-lg border border-line p-4">
+              <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                Per-session costs
+              </summary>
+              <p class="my-3 text-xs text-muted">
+                Live tracker data since this gateway started.
+              </p>
               <Show
                 when={spendRows().length > 0}
                 fallback={
@@ -297,10 +331,12 @@ export const CostsPage: Component = () => {
                   </table>
                 </div>
               </Show>
-            </section>
+            </details>
 
-            <section>
-              <h2 class="mb-1 text-lg font-semibold">Historical estimates</h2>
+            <details class="rounded-lg border border-line p-4">
+              <summary class="min-h-11 cursor-pointer content-center text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent md:min-h-0">
+                Historical estimates
+              </summary>
               <p class="mb-3 text-xs text-muted">
                 Backdated from {tokens(data().historical.session_count)}{" "}
                 sessions and {tokens(data().historical.message_count)} messages
@@ -352,13 +388,13 @@ export const CostsPage: Component = () => {
                     class={`mt-2 border-t border-line pt-2 text-sm font-semibold ${combinedSavingsTone()}`}
                   >
                     {data().totals.net_savings >= 0
-                      ? "Combined net savings"
-                      : "Combined net overhead"}
+                      ? "Combined net savings estimate"
+                      : "Combined net overhead estimate"}
                     : {formatMoney(Math.abs(data().totals.net_savings))}
                   </div>
                 </MetricCard>
               </div>
-            </section>
+            </details>
           </>
         )}
       </Show>

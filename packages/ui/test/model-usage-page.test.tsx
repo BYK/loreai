@@ -92,6 +92,51 @@ function mountPage(
 }
 
 describe("ModelUsagePage", () => {
+  it("keeps scope and UTC status visible with a closed detailed totals disclosure", async () => {
+    mountPage(clientWith({ getModelUsage: async () => usageData }));
+    expect(
+      await screen.findByText("12 session-days · 3 models · all projects"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Model totals").closest("details"),
+    ).not.toHaveAttribute("open");
+    expect(screen.getByTestId("project-select").closest("details")).toBeNull();
+    expect(screen.getByTestId("from-date").closest("details")).toBeNull();
+  });
+
+  it("keeps a failed project refresh visible above details and labels cached scope truthfully", async () => {
+    const getModelUsage = vi
+      .fn<ApiClient["getModelUsage"]>()
+      .mockResolvedValueOnce(usageData)
+      .mockRejectedValueOnce(new Error("Usage temporarily offline"))
+      .mockResolvedValueOnce(usageData);
+    mountPage(clientWith({ getModelUsage }), "/model-usage", [
+      { id: "p-2", name: "Project Two" },
+    ]);
+    await screen.findByTestId("model-usage-scope");
+    fireEvent.pointerDown(screen.getByTestId("project-select"), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("option", { name: "Project Two" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Usage temporarily offline");
+    expect(alert.closest("details")).toBeNull();
+    expect(screen.getByTestId("model-usage-scope")).toHaveTextContent(
+      "all projects",
+    );
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByTestId("model-usage-scope")).toHaveTextContent(
+        "Project Two",
+      ),
+    );
+    expect(
+      screen.getByText("Model totals").closest("details"),
+    ).not.toHaveAttribute("open");
+  });
+
   it("renders the flow chart SVG, legend and totals table", async () => {
     mountPage(clientWith({ getModelUsage: async () => usageData }));
     await waitFor(() =>

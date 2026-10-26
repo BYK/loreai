@@ -21,6 +21,7 @@ test.describe("entities (UI-08)", () => {
       "Analytical Engines Ltd",
     );
 
+    await detail.getByText("Edit entity details", { exact: true }).click();
     // Edit notes and save; the PATCH lands via /api/v1/entities/:id.
     const notes = detail.getByTestId("entity-notes");
     await notes.fill(notesValue);
@@ -31,7 +32,46 @@ test.describe("entities (UI-08)", () => {
 
     // The write persisted — a reload re-reads the same notes from the server.
     await page.reload();
+    await detail.getByText("Edit entity details", { exact: true }).click();
     await expect(detail.getByTestId("entity-notes")).toHaveValue(notesValue);
+  });
+
+  test("evidence and both relation directions navigate within /ui before editing", async ({
+    page,
+  }) => {
+    await page.goto("/ui/entities");
+    await page
+      .getByTestId("entity-row")
+      .filter({ hasText: "Ada Lovelace" })
+      .click();
+    const relations = page.getByTestId("entity-relations");
+    await expect(relations).toContainText(
+      "Ada Lovelace colleague → Analytical Engines Ltd org",
+    );
+    await expect(page.getByTestId("entity-knowledge")).toBeVisible();
+    await expect(page.getByTestId("entity-notes")).not.toBeVisible();
+    const evidence = page
+      .getByTestId("entity-knowledge")
+      .getByRole("link")
+      .first();
+    await expect(evidence).toHaveAttribute(
+      "href",
+      /^\/ui\/projects\/[^/]+\/knowledge\/[^/]+$/,
+    );
+    await evidence.click();
+    await expect(page.getByTestId("knowledge-document")).toBeVisible();
+    await page.goBack();
+    await relations
+      .getByRole("link", { name: "Analytical Engines Ltd" })
+      .click();
+    await expect(page.getByTestId("entity-name")).toHaveText(
+      "Analytical Engines Ltd",
+    );
+    await expect(relations).toContainText(
+      "Ada Lovelace person colleague → Analytical Engines Ltd",
+    );
+    await relations.getByRole("link", { name: "Ada Lovelace" }).click();
+    await expect(page.getByTestId("entity-name")).toHaveText("Ada Lovelace");
   });
 
   test("unknown entity id shows the not-found state", async ({ page }) => {

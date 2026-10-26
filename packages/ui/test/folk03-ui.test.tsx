@@ -411,6 +411,55 @@ describe("TeamPage", () => {
     expect(screen.getByTestId("team-create-form")).toBeVisible();
   });
 
+  it.each(["/team", "/team?section=settings"])(
+    "surfaces a no-team organization failure above closed settings at %s and clears it",
+    async (path) => {
+      mount(
+        () => <TeamPage />,
+        clientWith({
+          getTeams: async () => ({ hosted: false, teams: [] }),
+          getOrganizations: async () => {
+            throw new Error("Organization service unavailable");
+          },
+        }),
+        path,
+      );
+      await screen.findByText("No team memberships");
+      await waitFor(() =>
+        expect(
+          screen
+            .getAllByRole("alert")
+            .some(
+              (alert) =>
+                alert.textContent?.includes(
+                  "Organization service unavailable",
+                ) && !alert.closest("[hidden]"),
+            ),
+        ).toBe(true),
+      );
+      expect(
+        screen.queryByRole("link", { name: "Open team settings" }),
+      ).toBeNull();
+      expect(screen.getByTestId("organization-domains")).not.toBeVisible();
+      expect(screen.getByTestId("team-create-form")).toBeVisible();
+      expect(screen.getByRole("button", { name: "Join a team" })).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Team settings" }));
+      fireEvent.input(
+        screen.getByLabelText("Organization ID for a join request"),
+        { target: { value: "org-1" } },
+      );
+      fireEvent.input(screen.getByLabelText("Verified email domain"), {
+        target: { value: "example.test" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Request to join" }));
+      await waitFor(() =>
+        expect(
+          screen.queryByText("Organization service unavailable"),
+        ).toBeNull(),
+      );
+    },
+  );
+
   it("hides prior members when a team reload fails and ignores late responses", async () => {
     const firstTeamResponse: TeamMembersResponse = {
       ...memberResponse,
@@ -1169,6 +1218,85 @@ describe("TeamPage", () => {
 });
 
 describe("ConflictsPage", () => {
+  it("compares the current text to keeping the local snapshot and preserves full text", async () => {
+    mount(() => <ConflictsPage />, clientWith({}));
+    const card = await screen.findByTestId("conflict-card");
+    const changes = within(card).getByTestId("conflict-changes");
+    const before = within(changes).getByTestId("conflict-current-text");
+    const after = within(changes).getByTestId("conflict-local-text");
+    expect(before).toHaveTextContent("Remote decisionUse another store.");
+    expect(after).toHaveTextContent("Local decisionKeep SQLite.");
+    expect(before.querySelector("del")).toHaveTextContent("Remote");
+    expect(before.querySelector("ins")).toBeNull();
+    expect(after.querySelector("ins")).toHaveTextContent("Local");
+    expect(after.querySelector("del")).toBeNull();
+    const full = within(card)
+      .getByText("Full local and current text")
+      .closest("details")!;
+    expect(full).not.toHaveAttribute("open");
+    fireEvent.click(within(full).getByText("Full local and current text"));
+    expect(full).toHaveTextContent("Use another store.");
+    expect(card).toHaveTextContent(
+      "Discard mine permanently removes this saved snapshot",
+    );
+    expect(card).toHaveTextContent("Keep mine creates a new current version");
+  });
+
+  it.each(["title-only", "unchanged", "large", "missing-current"])(
+    "handles %s recovery comparisons",
+    async (kind) => {
+      const original = conflicts.conflicts[0]!;
+      const local = {
+        ...original.local!,
+        content: kind === "large" ? "a".repeat(20_001) : "same content",
+      };
+      const current =
+        kind === "missing-current"
+          ? null
+          : {
+              ...original.current!,
+              title: kind === "unchanged" ? local.title : "Old title",
+              content: kind === "large" ? "different" : local.content,
+            };
+      mount(
+        () => <ConflictsPage />,
+        clientWith({
+          listSyncConflicts: async () => ({
+            ...conflicts,
+            conflicts: [{ ...original, local, current }],
+          }),
+        }),
+      );
+      const card = await screen.findByTestId("conflict-card");
+      if (kind === "unchanged")
+        expect(card).toHaveTextContent("No title or content changes");
+      else if (kind === "large") {
+        expect(card).toHaveTextContent(
+          "Changes too large to compare. Showing full text.",
+        );
+        expect(
+          within(card)
+            .getByText("Full local and current text")
+            .closest("details"),
+        ).toHaveAttribute("open");
+        expect(card.querySelector("pre")?.textContent).toBe(local.content);
+      } else if (kind === "missing-current") {
+        expect(card).toHaveTextContent(
+          "Current version unavailable. Showing the saved local text.",
+        );
+        expect(
+          within(card)
+            .getByText("Full local and current text")
+            .closest("details"),
+        ).toHaveAttribute("open");
+        expect(card.querySelector("pre")?.textContent).toBe(local.content);
+      } else
+        expect(
+          within(card).getByTestId("conflict-changes").querySelector("del"),
+        ).toHaveTextContent("Old");
+    },
+  );
+
   it("separates empty conflict recovery from its explanation", async () => {
     mount(
       () => <ConflictsPage />,

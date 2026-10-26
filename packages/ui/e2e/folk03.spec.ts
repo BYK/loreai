@@ -293,7 +293,19 @@ test.describe("FOLK-03 team and conflict surfaces", () => {
       .getByTestId("conflict-card")
       .filter({ hasText: "Keep SQLite as the only store" });
     await expect(card).toBeVisible();
-    await expect(card).toContainText("Your discarded version");
+    await expect(card.getByTestId("conflict-changes")).toBeVisible();
+    await expect(
+      card.getByTestId("conflict-changes").locator("ins"),
+    ).not.toHaveCount(0);
+    const full = card.getByText("Full local and current text", { exact: true });
+    await expect(full.locator("..")).not.toHaveAttribute("open");
+    await expect(
+      card.getByText("Your discarded version", { exact: true }),
+    ).not.toBeVisible();
+    await full.click();
+    await expect(
+      card.getByText("Your discarded version", { exact: true }),
+    ).toBeVisible();
     await expect(card).toContainText("Keep the local-first database.");
     await expect(card).toContainText("Current version");
     await expect(card).toContainText("Keep SQLite as the only store");
