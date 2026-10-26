@@ -22,6 +22,7 @@ import { TeamParityActions } from "~/components/lore/TeamParityActions";
 import { TeamPage } from "~/components/lore/TeamPage";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { WorkspaceProvider, useWorkspace } from "~/routes/workspace";
+import type { FolkState } from "~/state/folk";
 
 const account: AccountStatus = {
   signed_in: true,
@@ -2158,7 +2159,9 @@ it.each([
       clientWith({ runSync, getSyncStatus }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      blocker === "unauthorized" ? "Sign in again before syncing." : message,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(getSyncStatus).toHaveBeenCalledTimes(2));
     const retry = await screen.findByRole("button", { name: "Sync now" });
@@ -2245,4 +2248,162 @@ it("preserves a newer sync failure when a settings refresh finishes later", asyn
   expect(screen.getByRole("alert")).toHaveTextContent(
     "Encryption is still locked",
   );
+});
+
+it.each([
+  ["success", "same"],
+  ["failure", "same"],
+  ["success", "other"],
+  ["failure", "other"],
+  ["success", "signed_out"],
+  ["failure", "signed_out"],
+] as const)(
+  "quarantines an in-flight sync %s during an account outage before %s account recovery",
+  async (outcome, recovery) => {
+    let accountUnavailable = false;
+    let recoveredAccount = account;
+    let folk!: FolkState;
+    let resolveSync!: (
+      value: Awaited<ReturnType<ApiClient["runSync"]>>,
+    ) => void;
+    let rejectSync!: (error: unknown) => void;
+    let syncCalls = 0;
+    mount(
+      () => {
+        folk = useWorkspace().state.folk;
+        return <SharingPanel projectId="project-1" />;
+      },
+      clientWith({
+        getAccount: async () => {
+          if (accountUnavailable)
+            throw new Error("Temporary account read failure");
+          return recoveredAccount;
+        },
+        runSync: () => {
+          syncCalls++;
+          return new Promise((resolve, reject) => {
+            resolveSync = resolve;
+            rejectSync = reject;
+          });
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    accountUnavailable = true;
+    folk.refresh();
+    await waitFor(() => expect(folk.account.error()).toBeDefined());
+    if (outcome === "success")
+      resolveSync({ pushed: 7, pulled: 2, conflicts: 0, skipped: 0 });
+    else
+      rejectSync(
+        new ApiError(
+          "http",
+          "/sync/run",
+          "Unlock encryption before syncing.",
+          409,
+          "encryption_locked",
+        ),
+      );
+    await waitFor(() => expect(folk.syncing()).toBe(false));
+    expect(folk.syncReceipt()).toBeNull();
+    expect(folk.syncError()).toBeNull();
+    expect(folk.syncResult()).toBeNull();
+    await folk.runSync();
+    expect(syncCalls).toBe(1);
+    // Check again must not discard an unseen failure while restoring identity.
+    accountUnavailable = false;
+    if (recovery === "other")
+      recoveredAccount = {
+        ...account,
+        user: { ...account.user!, id: "other-user" },
+      };
+    if (recovery === "signed_out")
+      recoveredAccount = {
+        ...account,
+        signed_in: false,
+        state: "anonymous",
+        user: null,
+      };
+    folk.refresh();
+    await waitFor(() =>
+      expect(folk.confirmedAccount()).toEqual(recoveredAccount),
+    );
+    if (recovery !== "same") {
+      expect(folk.syncReceipt()).toBeNull();
+      expect(folk.syncError()).toBeNull();
+      expect(folk.syncResult()).toBeNull();
+      expect(folk.syncBlocker()).toBeNull();
+      return;
+    }
+    if (outcome === "success")
+      expect(
+        await screen.findByText("Sync complete: pushed 7, pulled 2."),
+      ).toBeVisible();
+    else
+      expect(
+        await screen.findByText("Unlock encryption before syncing."),
+      ).toBeVisible();
+  },
+);
+
+it("uses cloud sign-in guidance for an explicit unauthorized 401 sync response", async () => {
+  mount(
+    () => <SharingPanel projectId="project-1" />,
+    clientWith({
+      runSync: async () => {
+        throw new ApiError(
+          "unauthorized",
+          "/sync/run",
+          "Gateway refused this browser",
+          401,
+          "unauthorized",
+        );
+      },
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Sign in again before syncing.",
+  );
+  expect(
+    screen.queryByText("Gateway refused this browser"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("lore login")).toBeVisible();
+});
+
+it("does not revive an old sync after a different user appears during account recovery", async () => {
+  let currentAccount = account;
+  let folk!: FolkState;
+  let resolveSync!: (value: Awaited<ReturnType<ApiClient["runSync"]>>) => void;
+  mount(
+    () => {
+      folk = useWorkspace().state.folk;
+      return <SharingPanel projectId="project-1" />;
+    },
+    clientWith({
+      getAccount: async () => currentAccount,
+      runSync: () =>
+        new Promise((resolve) => {
+          resolveSync = resolve;
+        }),
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  currentAccount = {
+    ...account,
+    signed_in: false,
+    state: "refreshing",
+    user: { ...account.user!, id: "other-user" },
+  };
+  folk.account.reload();
+  await waitFor(() =>
+    expect(folk.confirmedAccount()?.user?.id).toBe("other-user"),
+  );
+  resolveSync({ pushed: 7, pulled: 2, conflicts: 0, skipped: 0 });
+  await waitFor(() => expect(folk.syncing()).toBe(false));
+  currentAccount = account;
+  folk.account.reload();
+  await waitFor(() => expect(folk.confirmedAccount()?.state).toBe("signed_in"));
+  expect(folk.syncReceipt()).toBeNull();
+  expect(folk.syncResult()).toBeNull();
 });

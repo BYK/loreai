@@ -214,7 +214,7 @@ describe("Folk shell status", () => {
         async getAccount() {
           return {
             signed_in: true,
-            user: null,
+            user: { id: "user-1", email: null, display_name: "Ada" },
             provider: null,
             expires_at: null,
             state: "signed_in",

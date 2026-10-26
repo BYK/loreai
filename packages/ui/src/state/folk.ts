@@ -91,12 +91,23 @@ export function createFolkState({ client }: { client: ApiClient }) {
     );
   });
   let syncGeneration = 0;
-  const syncOwner = createMemo(() => {
+  const confirmedSyncOwner = createMemo(() => {
     const current = confirmedAccount();
     return current?.signed_in && current.state === "signed_in"
       ? (current.user?.id ?? null)
       : null;
   });
+  // An uncertain read is not a sign-out. Keep the operation's owner until a
+  // settled identity says otherwise, but quarantine its diagnostics meanwhile.
+  const syncOwner = createMemo<string | null>((previous) => {
+    const current = confirmedAccount();
+    if (!current) return previous ?? null;
+    if (current.state === "refreshing" || current.state === "unavailable")
+      return current.user?.id ?? previous ?? null;
+    return confirmedSyncOwner();
+  });
+  const syncVisible = () =>
+    syncOwner() !== null && syncOwner() === confirmedSyncOwner();
   createEffect(
     on(syncOwner, () => {
       syncGeneration++;
@@ -110,7 +121,7 @@ export function createFolkState({ client }: { client: ApiClient }) {
     syncGeneration++;
   });
   const runSync = async () => {
-    if (syncing()) return;
+    if (syncing() || confirmedSyncOwner() === null) return;
     const generation = syncGeneration;
     setSyncing(true);
     setSyncResult(null);
@@ -151,7 +162,13 @@ export function createFolkState({ client }: { client: ApiClient }) {
         setSyncBlocker(code);
       else if (isApiError(error) && error.kind === "unauthorized")
         setSyncBlocker("gateway_access");
-      setSyncError(error instanceof Error ? error.message : "Sync failed.");
+      setSyncError(
+        code === "unauthorized"
+          ? "Sign in again before syncing."
+          : error instanceof Error
+            ? error.message
+            : "Sync failed.",
+      );
     } finally {
       setSyncing(false);
     }
@@ -163,19 +180,22 @@ export function createFolkState({ client }: { client: ApiClient }) {
     sync,
     teams,
     syncing,
-    syncError,
-    syncBlocker,
-    syncReceipt,
-    syncResult,
-    syncAttention,
+    syncError: () => (syncVisible() ? syncError() : null),
+    syncBlocker: () => (syncVisible() ? syncBlocker() : null),
+    syncReceipt: () => (syncVisible() ? syncReceipt() : null),
+    syncResult: () => (syncVisible() ? syncResult() : null),
+    syncAttention: () => syncVisible() && syncAttention(),
     runSync,
     loadTeams() {
       if (!teamsWanted()) setTeamsWanted(true);
     },
     /** Recheck settings after external recovery; the next sync verifies them. */
     refresh() {
-      setSyncBlocker(null);
-      setSyncError(null);
+      // An unseen outcome belongs to the quarantined owner, not to this read.
+      if (syncVisible()) {
+        setSyncBlocker(null);
+        setSyncError(null);
+      }
       refreshStatus();
     },
   };
