@@ -328,6 +328,24 @@ describe("SessionList", () => {
     expect(screen.queryByText("Session one")).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["explicit", "explicit title"],
+    ["first_message", "first message"],
+    ["distillation", "from summary"],
+    ["id", "session ID"],
+  ] as const)(
+    "reports %s title provenance truthfully in processing details",
+    (title_source, label) => {
+      renderList(() => ({
+        items: [summary({ title_source })],
+        next_cursor: null,
+      }));
+      const details = screen.getByText("Processing details").closest("details");
+      expect(details).not.toHaveAttribute("open");
+      expect(details).toHaveTextContent(`Title source: ${label}`);
+    },
+  );
+
   it("shows the muted summary tag only for distillation titles", () => {
     renderList(() => ({
       items: [

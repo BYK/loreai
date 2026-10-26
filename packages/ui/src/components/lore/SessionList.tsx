@@ -10,6 +10,13 @@ import { errorStateFor } from "./ErrorState";
 import { SessionIdChip } from "./SessionIdChip";
 import { SessionSearchBox } from "./SessionSearchBox";
 
+const titleSourceLabels = {
+  explicit: "explicit title",
+  first_message: "first message",
+  distillation: "from summary",
+  id: "session ID",
+} satisfies Record<SessionSummary["title_source"], string>;
+
 function recordedDateTime(value: number): string | undefined {
   const date = new Date(value);
   return value && Number.isFinite(date.getTime())
@@ -123,12 +130,7 @@ export const SessionList: Component<{
                   <div class="space-y-2 px-2 pb-2 [overflow-wrap:anywhere]">
                     <SessionIdChip id={session.session_id} />
                     <div>
-                      Title source:{" "}
-                      {session.title_source === "distillation"
-                        ? "from summary"
-                        : session.title_source === "first_message"
-                          ? "first message"
-                          : "session ID"}
+                      Title source: {titleSourceLabels[session.title_source]}
                     </div>
                     <div>
                       {session.message_count} messages ·{" "}
