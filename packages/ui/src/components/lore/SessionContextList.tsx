@@ -8,6 +8,7 @@ import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 
 /** Reader-local session browsing preserves the selected transcript and anchor. */
 export const SessionContextList: Component<{
@@ -140,29 +141,14 @@ export const SessionContextList: Component<{
           </For>
         </Match>
       </Switch>
-      <div class="flex justify-between gap-2 p-3">
-        <Show when={cursor()}>
-          <Button
-            variant="link"
-            size="sm"
-            class="h-11 md:h-8"
-            onClick={() => setParams({ cursor: undefined })}
-          >
-            First page
-          </Button>
-        </Show>
-        <Button
-          variant="link"
-          size="sm"
-          class="h-11 md:h-8"
-          disabled={!data()?.next_cursor}
-          onClick={() =>
-            setParams({ cursor: data()?.next_cursor ?? undefined })
-          }
-        >
-          Next page
-        </Button>
-      </div>
+      <PaginationControls
+        label="Session list pagination"
+        class="p-3"
+        compact
+        onFirst={cursor() ? () => setParams({ cursor: undefined }) : undefined}
+        nextDisabled={!data()?.next_cursor}
+        onNext={() => setParams({ cursor: data()?.next_cursor ?? undefined })}
+      />
     </div>
   );
 };

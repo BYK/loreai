@@ -1,4 +1,3 @@
-import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -6,6 +5,7 @@ import type { SessionSummary } from "~/contracts";
 import { formatFullDate, formatWhen } from "~/lib/format";
 import { importsHref, sessionHref, sessionsHref } from "~/lib/href";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 import { errorStateFor } from "./ErrorState";
 import { SessionIdChip } from "./SessionIdChip";
 import { SessionSearchBox } from "./SessionSearchBox";
@@ -158,32 +158,20 @@ export const SessionList: Component<{
           </div>
         </Match>
       </Switch>
-      <div class="mt-4 flex justify-between text-xs">
-        <Show when={props.cursor}>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            class="min-h-11 px-2 text-xs underline sm:min-h-0"
-            onClick={() => navigate(sessionsHref(props.projectId, null, q()))}
-          >
-            First page
-          </Button>
-        </Show>
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          disabled={!data()?.next_cursor}
-          class="min-h-11 px-2 text-xs underline sm:min-h-0"
-          onClick={() => {
-            const next = data()?.next_cursor;
-            if (next) navigate(sessionsHref(props.projectId, next, q()));
-          }}
-        >
-          Next page
-        </Button>
-      </div>
+      <PaginationControls
+        label="Sessions pagination"
+        class="mt-4"
+        onFirst={
+          props.cursor
+            ? () => navigate(sessionsHref(props.projectId, null, q()))
+            : undefined
+        }
+        nextDisabled={!data()?.next_cursor}
+        onNext={() => {
+          const next = data()?.next_cursor;
+          if (next) navigate(sessionsHref(props.projectId, next, q()));
+        }}
+      />
     </div>
   );
 };

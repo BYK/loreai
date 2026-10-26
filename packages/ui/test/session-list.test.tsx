@@ -198,7 +198,13 @@ describe("SessionList", () => {
         />
       </MemoryRouter>
     ));
-    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+    expect(
+      screen.getByRole("navigation", { name: "Sessions pagination" }),
+    ).toBeInTheDocument();
+    const next = screen.getByRole("button", { name: "Next page" });
+    expect(next).toBeEnabled();
+    expect(next).toHaveTextContent("Next");
+    expect(next.querySelector("svg")).not.toBeNull();
   });
 
   it("renders first-page when a cursor is active", () => {

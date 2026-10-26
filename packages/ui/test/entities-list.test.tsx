@@ -180,7 +180,7 @@ describe("EntitiesPage", () => {
         total: 2,
       });
     mount(clientWith({ listEntities }));
-    const next = await screen.findByRole("button", { name: "Next" });
+    const next = await screen.findByRole("button", { name: "Next page" });
     await waitFor(() => expect(next).toBeEnabled());
     fireEvent.click(next);
     await waitFor(() =>

@@ -25,6 +25,7 @@ import {
 import { knowledgeListHref, knowledgeHref } from "~/lib/href";
 import { formatConfidence, formatWhen } from "~/lib/format";
 import { StaleBadge } from "./StaleBadge";
+import { PaginationControls } from "./PaginationControls";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 import { Badge } from "../ui/badge";
@@ -542,42 +543,29 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
           </table>
         </Match>
       </Switch>
-      <div class="mt-4 flex items-center justify-between text-xs">
-        <Show when={props.query.cursor}>
-          <Button
-            variant="link"
-            size="sm"
-            onClick={() => go({ ...props.query, cursor: null })}
-          >
-            First page
-          </Button>
-        </Show>
-        <Show when={props.query.cursor && prevCursorOf.has(props.query.cursor)}>
-          <Button
-            variant="link"
-            size="sm"
-            onClick={() =>
-              go({
-                ...props.query,
-                cursor: prevCursorOf.get(props.query.cursor!) ?? null,
-              })
-            }
-          >
-            Previous page
-          </Button>
-        </Show>
-        <Button
-          variant="link"
-          size="sm"
-          disabled={!page()?.next_cursor}
-          onClick={() => {
-            const next = page()?.next_cursor;
-            if (next) go({ ...props.query, cursor: next });
-          }}
-        >
-          Next page
-        </Button>
-      </div>
+      <PaginationControls
+        label="Knowledge pagination"
+        class="mt-4"
+        onFirst={
+          props.query.cursor
+            ? () => go({ ...props.query, cursor: null })
+            : undefined
+        }
+        onPrevious={
+          props.query.cursor && prevCursorOf.has(props.query.cursor)
+            ? () =>
+                go({
+                  ...props.query,
+                  cursor: prevCursorOf.get(props.query.cursor!) ?? null,
+                })
+            : undefined
+        }
+        nextDisabled={!page()?.next_cursor}
+        onNext={() => {
+          const next = page()?.next_cursor;
+          if (next) go({ ...props.query, cursor: next });
+        }}
+      />
       {/* Virtualization is intentionally absent because each page contains at most 50 rows. */}
     </div>
   );

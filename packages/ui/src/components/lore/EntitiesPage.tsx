@@ -24,6 +24,7 @@ import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 
 export const ENTITY_TYPES = [
   "self",
@@ -362,26 +363,14 @@ export const EntitiesPage: Component = () => {
                   )}
                 </For>
               </div>
-              <div class="mt-3 flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-11 md:h-9"
-                  disabled={history().length === 0}
-                  onClick={goPrev}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-11 md:h-9"
-                  disabled={!nextCursor()}
-                  onClick={goNext}
-                >
-                  Next
-                </Button>
-              </div>
+              <PaginationControls
+                label="Entities pagination"
+                class="mt-3"
+                onPrevious={goPrev}
+                previousDisabled={history().length === 0}
+                onNext={goNext}
+                nextDisabled={!nextCursor()}
+              />
             </>
           )}
         </Match>

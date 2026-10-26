@@ -12,7 +12,7 @@ import { formatWhen, pluralize } from "~/lib/format";
 import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
 import { importsHref } from "~/lib/href";
-import { Button } from "~/components/ui/button";
+import { PaginationControls } from "./PaginationControls";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
 
@@ -122,24 +122,14 @@ export const ImportHistoryPage: Component<{
                   </tbody>
                 </table>
               </div>
-              <div class="mt-3 flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={history().length === 0}
-                  onClick={goPrev}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!nextCursor()}
-                  onClick={goNext}
-                >
-                  Next
-                </Button>
-              </div>
+              <PaginationControls
+                label="Import history pagination"
+                class="mt-3"
+                onPrevious={goPrev}
+                previousDisabled={history().length === 0}
+                onNext={goNext}
+                nextDisabled={!nextCursor()}
+              />
             </>
           )}
         </Match>

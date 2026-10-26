@@ -58,6 +58,12 @@ it("filters and pages sessions without losing the reader route or anchor, and en
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled(),
   );
+  expect(
+    screen.getByRole("navigation", { name: "Session list pagination" }),
+  ).toBeInTheDocument();
+  const nextPage = screen.getByRole("button", { name: "Next page" });
+  expect(nextPage.textContent).toBe("");
+  expect(nextPage.querySelector("svg")).not.toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Next page" }));
   await waitFor(() =>
     expect(calls.at(-1)).toMatchObject({

@@ -63,6 +63,23 @@ function mount(data = [entry], query: KnowledgeQuery = defaultQuery) {
   ));
 }
 
+it("groups cursor controls in named navigation without inventing a previous page", () => {
+  mount([entry], { ...defaultQuery, cursor: "direct-link-without-history" });
+  const navigation = screen.getByRole("navigation", {
+    name: "Knowledge pagination",
+  });
+  const first = within(navigation).getByRole("button", { name: "First page" });
+  expect(first).toHaveTextContent("First");
+  expect(first.querySelector("svg")).not.toBeNull();
+  expect(
+    within(navigation).queryByRole("button", { name: "Previous page" }),
+  ).toBeNull();
+  const next = within(navigation).getByRole("button", { name: "Next page" });
+  expect(next).toHaveTextContent("Next");
+  expect(next.querySelector("svg")).not.toBeNull();
+  expect(next).toBeDisabled();
+});
+
 function mountRoutedTable(initialQuery: KnowledgeQuery = defaultQuery) {
   const history = createMemoryHistory();
   history.set({
