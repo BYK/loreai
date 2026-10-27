@@ -13,8 +13,7 @@ The blog uses compact article rows and noninteractive topic metadata. The ticker
 three terraced regions: Conversation, Knowledge, and Recall. Clicking or tapping
 any region selects its native stage control, highlights the terrain and updates
 the fictional example. Stage controls select the region in return. Dragging turns
-the landscape without changing the selected stage; a keyboard rotation slider
-and Reset view provide the same view controls. A brief brass trail traces forward
+the landscape without changing the selected stage. A brief brass trail traces forward
 stage selections, then stops. There is no idle animation.
 
 The server-rendered SVG shares the terrain contours, camera and region boundaries

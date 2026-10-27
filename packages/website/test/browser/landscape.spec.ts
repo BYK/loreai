@@ -172,8 +172,6 @@ test("WebGL context loss shows the fallback and restores the selected stage", as
   await graph.scrollIntoViewIfNeeded();
   await expect(graph).toHaveAttribute("data-renderer", "webgl");
   await page.getByRole("radio", { name: "3 Recall", exact: true }).check();
-  const rotation = page.getByRole("slider", { name: "Rotate landscape" });
-  await rotation.fill("24");
   const supported = await graph
     .locator("canvas")
     .evaluate((canvas: HTMLCanvasElement) => {
@@ -198,7 +196,6 @@ test("WebGL context loss shows the fallback and restores the selected stage", as
   await expect(graph).toHaveAttribute("data-renderer", "webgl");
   await expect(page.locator("#memory-stage-recall")).toBeVisible();
   await expect(graph.locator("canvas")).toHaveCount(1);
-  await expect(rotation).toHaveValue("24");
 });
 
 async function regionPoint(
@@ -267,7 +264,7 @@ test("clicking each broad terrain region selects and highlights its correspondin
   expect(errors).toEqual([]);
 });
 
-test("dragging away and back rotates without selecting a region; keyboard rotation and reset remain available", async ({
+test("dragging away and back preserves selection without extra view controls", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -283,12 +280,12 @@ test("dragging away and back rotates without selecting a region; keyboard rotati
   await expect(
     page.getByRole("radio", { name: "1 Conversation", exact: true }),
   ).toBeChecked();
-  const slider = page.getByRole("slider", { name: "Rotate landscape" });
-  await slider.focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(slider).toHaveValue("1");
-  await page.getByRole("button", { name: "Reset view", exact: true }).click();
-  await expect(slider).toHaveValue("0");
+  await expect(
+    page.getByRole("slider", { name: "Rotate landscape" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Reset view", exact: true }),
+  ).toHaveCount(0);
   const target = await regionPoint(page, "recall");
   await page.mouse.click(target.x, target.y);
   await expect(
@@ -436,10 +433,12 @@ test("mobile horizontal swipes rotate, while vertical gestures still scroll", as
       touchPoints: [],
     });
   };
+  const canvas = art.locator("canvas");
+  const initial = await canvas.screenshot();
   await swipe(55, 0);
-  await expect(
-    page.getByRole("slider", { name: "Rotate landscape" }),
-  ).not.toHaveValue("0");
+  await expect
+    .poll(async () => !(await canvas.screenshot()).equals(initial))
+    .toBe(true);
   await expect(
     page.getByRole("radio", { name: "1 Conversation", exact: true }),
   ).toBeChecked();

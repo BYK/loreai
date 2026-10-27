@@ -73,3 +73,6 @@ return. Dragging rotates without selecting, with keyboard rotation and reset
 controls. Use a brief trail for user-driven forward stage changes; no idle loop.
 The matching SVG and native controls cover reduced motion, low memory, unavailable
 WebGL and no JavaScript. Add this approved design to existing PR #2115.
+
+The user subsequently requested removing the Rotate slider and Reset view button.
+Keep drag rotation and region/stage selection; remove the extra view controls.

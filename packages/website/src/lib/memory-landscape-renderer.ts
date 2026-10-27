@@ -15,14 +15,11 @@ import {
 export interface LandscapeRenderer {
   setPhase(phase: MemoryPhase, animate?: boolean): void;
   setVisible(visible: boolean): void;
-  setRotation(degrees: number): void;
-  resetView(): void;
   dispose(): void;
 }
 interface Events {
   select(phase: MemoryPhase): void;
   hover(phase: MemoryPhase | null): void;
-  rotation(degrees: number): void;
   failure(): void;
 }
 export function mountLandscape(
@@ -612,7 +609,6 @@ export function mountLandscape(
           targetOrbit = clamp(press.orbit + dx * 0.0045, -0.42, 0.42);
           if (!press.touch)
             targetTilt = clamp(press.tilt + dy * 0.0018, -0.1, 0.1);
-          events.rotation(Math.round((targetOrbit * 180) / Math.PI));
           targetX = targetY = 0;
           hover(-1);
           schedule();
@@ -668,7 +664,6 @@ export function mountLandscape(
     }
     function contextRestored() {
       lost = false;
-      events.rotation(Math.round((targetOrbit * 180) / Math.PI));
       fit();
       palette();
       schedule();
@@ -712,19 +707,6 @@ export function mountLandscape(
           stop();
           settle();
         }
-      },
-      setRotation(degrees) {
-        if (!Number.isFinite(degrees) || disposed) return;
-        targetOrbit = (clamp(degrees, -24, 24) * Math.PI) / 180;
-        schedule();
-      },
-      resetView() {
-        release();
-        pendingTap = false;
-        targetOrbit = targetTilt = targetX = targetY = 0;
-        events.rotation(0);
-        hover(-1);
-        schedule();
       },
       dispose,
     };

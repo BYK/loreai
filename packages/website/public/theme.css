@@ -161,13 +161,7 @@ th { font-weight: 500; }
 .landscape-pin { cursor:pointer; }
 .landscape-pin ellipse, .landscape-pin circle { fill:var(--land-brass); }
 .landscape-pin path { stroke:var(--land-brass); stroke-width:1; }
-.landscape-toolbar { min-height:52px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
-.landscape-hint { color:var(--muted); font-size:.6875rem; }
-.landscape-controls { display:flex; gap:8px; align-items:center; }
-.landscape-controls[hidden] { display:none; }
-.landscape-controls label { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--muted); }
-.landscape-rotate { width:72px; min-height:44px; margin:0; accent-color:var(--land-jade); }
-.landscape-reset { min-height:44px; border:1px solid var(--line); border-radius:3px; padding:5px 8px; background:transparent; color:var(--text); font:11px var(--sans); cursor:pointer; }
+.landscape-hint { margin-block:.5rem; color:var(--muted); font-size:.6875rem; }
 .landscape-art[data-renderer="webgl"]:not([data-target-phase]) canvas { cursor:grab; }
 .landscape-art[data-target-phase] canvas { cursor:pointer; }
 .memory-landscape:has(input[value="conversation"]:checked) .landscape-face[data-land-region="conversation"],
@@ -175,7 +169,6 @@ th { font-weight: 500; }
 .memory-landscape:has(input[value="recall"]:checked) .landscape-face[data-land-region="recall"] { --region-color:var(--land-jade); }
 .memory-landscape:has(input[value="knowledge"]:checked) .landscape-trail[data-trail="0"],
 .memory-landscape:has(input[value="recall"]:checked) .landscape-trail { opacity:1; }
-@media(max-width:600px) { .landscape-toolbar { min-height:88px; flex-wrap:wrap; align-content:center; } .landscape-hint { width:100%; } .landscape-controls { width:100%; justify-content:space-between; } .landscape-rotate { width:110px; } }
 .memory-stage-controls { display: flex; flex-wrap: wrap; border: 0; border-bottom: 1px solid var(--line); padding: 0; margin: .75rem 0 0; }
 .memory-stage-controls label { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 44px; border-bottom: 2px solid transparent; padding: .5rem .375rem; cursor: pointer; font-size: .8125rem; }
 .memory-stage-controls input { position: absolute; width: 1px; height: 1px; opacity: 0; }

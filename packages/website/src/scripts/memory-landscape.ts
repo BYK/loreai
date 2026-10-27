@@ -6,14 +6,9 @@ for (const root of document.querySelectorAll<HTMLElement>(
   ".memory-landscape",
 )) {
   const art = root.querySelector<HTMLElement>(".landscape-art");
-  const controls = root.querySelector<HTMLElement>(".landscape-controls");
-  const rotation = root.querySelector<HTMLInputElement>(".landscape-rotate");
-  const reset = root.querySelector<HTMLButtonElement>(".landscape-reset");
   const hint = root.querySelector<HTMLElement>(".landscape-hint");
-  if (!art || !controls || !rotation || !reset || !hint) continue;
+  if (!art || !hint) continue;
   const element = art,
-    viewControls = controls,
-    slider = rotation,
     help = hint;
   let renderer: LandscapeRenderer | null = null;
   let visible = false,
@@ -31,22 +26,14 @@ for (const root of document.querySelectorAll<HTMLElement>(
     return !media.matches && (memory === undefined || memory > 2);
   };
   function ready(value: boolean) {
-    const restoreFocus =
-      !value && viewControls.contains(document.activeElement);
     element.dataset.renderer = value ? "webgl" : "static";
-    viewControls.hidden = !value;
     if (!value) {
-      slider.value = "0";
       element
         .querySelectorAll<HTMLElement>("[data-rest-style]")
         .forEach((label) => {
           label.style.cssText = label.dataset.restStyle ?? "";
         });
     }
-    if (restoreFocus)
-      root
-        .querySelector<HTMLInputElement>('input[name="memory-stage"]:checked')
-        ?.focus({ preventScroll: true });
   }
   function select(next: MemoryPhase) {
     const input = root.querySelector<HTMLInputElement>(
@@ -101,10 +88,6 @@ for (const root of document.querySelectorAll<HTMLElement>(
     );
   });
   fallback?.addEventListener("pointerleave", () => hover(null));
-  slider.addEventListener("input", () =>
-    renderer?.setRotation(slider.valueAsNumber),
-  );
-  reset.addEventListener("click", () => renderer?.resetView());
   async function sync() {
     if (!allowed()) {
       generation++;
@@ -128,9 +111,6 @@ for (const root of document.querySelectorAll<HTMLElement>(
       renderer = module.mountLandscape(element, ready, {
         select,
         hover,
-        rotation(value) {
-          slider.value = String(value);
-        },
         failure() {
           failed = true;
           renderer = null;

@@ -21,10 +21,7 @@ const pins = SITES.map(([x,z],index) => ({ phase: PHASES[index], base: projectPo
     </svg>
     <div class="landscape-labels">{pins.map(pin => <span data-marker={pin.phase} data-rest-style={`left:${pin.label[0]/SVG_WIDTH*100}%;top:calc(${pin.label[1]/SVG_HEIGHT*100}% - ${pin.phase === "knowledge" ? 15 : 0}px);`} style={`left:${pin.label[0]/SVG_WIDTH*100}%;top:calc(${pin.label[1]/SVG_HEIGHT*100}% - ${pin.phase === "knowledge" ? 15 : 0}px);`}>{pin.title}</span>)}</div>
   </div>
-  <div class="landscape-toolbar">
-    <span class="landscape-hint">Choose a stage to explore.</span>
-    <div class="landscape-controls" hidden><label>Rotate <input class="landscape-rotate" type="range" min="-24" max="24" step="1" value="0" aria-label="Rotate landscape" /></label><button type="button" class="landscape-reset">Reset view</button></div>
-  </div>
+  <p class="landscape-hint">Choose a stage to explore.</p>
   <fieldset class="memory-stage-controls"><legend class="visually-hidden">Explore how Lore uses memory</legend>
     {PHASES.map((phase,index) => <label><input type="radio" name="memory-stage" value={phase} checked={index === 0} aria-controls={`memory-stage-${phase}`} /><span>{index+1} {phase === "knowledge" ? "Knowledge" : phase === "recall" ? "Recall" : "Conversation"}</span></label>)}
   </fieldset>
