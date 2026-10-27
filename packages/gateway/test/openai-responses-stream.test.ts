@@ -111,7 +111,16 @@ const validToolSearchItems: Array<Record<string, unknown>> = [
     call_id: "call_1",
     execution: "client",
     status: "completed",
-    tools: [],
+    tools: [
+      {
+        type: "function",
+        name: "lookup_weather",
+        description: "Look up weather.",
+        parameters: { type: "object", properties: {} },
+        strict: true,
+        defer_loading: true,
+      },
+    ],
   },
 ];
 
@@ -184,6 +193,79 @@ describe("Responses tool-search completion validation", () => {
     ).toThrow("upstream Responses request did not complete");
   });
 
+  test.each([
+    [
+      "orphan client output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_orphan",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "unmatched client call",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_unmatched",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          arguments: {},
+        },
+      ],
+    ],
+    [
+      "duplicate client output",
+      [
+        validToolSearchItems[0],
+        validToolSearchItems[1],
+        { ...validToolSearchItems[1], id: "tso_duplicate" },
+      ],
+    ],
+    [
+      "orphan server output with a null call_id",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_server_orphan",
+          call_id: null,
+          execution: "server",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "output containing a malformed function definition",
+      [
+        validToolSearchItems[0],
+        {
+          ...validToolSearchItems[1],
+          tools: [{ type: "function", name: "lookup_weather" }],
+        },
+      ],
+    ],
+    [
+      "unfinished call status",
+      [
+        { ...validToolSearchItems[0], status: "incomplete" },
+        validToolSearchItems[1],
+      ],
+    ],
+  ] as const)("rejects completion with %s", (_label, output) => {
+    expect(() =>
+      assertSuccessfulResponsesCompletion(
+        completion([...output] as Record<string, unknown>[]),
+      ),
+    ).toThrow("upstream Responses request did not complete");
+  });
+
   test.each(invalidToolSearchItems)(
     "rejects non-streamed %s",
     (_label, item) => {
@@ -199,16 +281,86 @@ describe("Responses tool-search completion validation", () => {
 // ---------------------------------------------------------------------------
 
 describe("accumulateResponsesSSEStream", () => {
+  test("accepts in-progress added events and paired server-owned null call IDs", async () => {
+    const items = [
+      {
+        type: "tool_search_call",
+        id: "tsc_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        arguments: {},
+      },
+      {
+        type: "tool_search_output",
+        id: "tso_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        tools: [],
+      },
+    ];
+    const events = items.flatMap((item, output_index) => [
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          output_index,
+          item: {
+            ...item,
+            status:
+              item.type === "tool_search_call" ? "in_progress" : "completed",
+          },
+        },
+      },
+      {
+        event: "response.output_item.done",
+        data: {
+          type: "response.output_item.done",
+          output_index,
+          item,
+        },
+      },
+    ]);
+    const response = buildSSEResponse([
+      ...events,
+      {
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            id: "resp_tool_search_server",
+            model: "gpt-5.6",
+            status: "completed",
+            usage: { input_tokens: 1, output_tokens: 1 },
+            output: items,
+          },
+        },
+      },
+    ]);
+
+    await expect(
+      accumulateResponsesSSEStream(response, { validation: "public" }),
+    ).resolves.toBeDefined();
+  });
+
   test("rejects streamed tool-search call/output owner mismatch", async () => {
     const call = validToolSearchItems[0];
-    const output = { ...validToolSearchItems[1], execution: "server" };
+    const output: Record<string, unknown> = {
+      ...validToolSearchItems[1],
+      execution: "server",
+    };
     const events = [call, output].flatMap((item, output_index) => [
       {
         event: "response.output_item.added",
         data: {
           type: "response.output_item.added",
           output_index,
-          item: { ...item, status: "in_progress" },
+          item: {
+            ...item,
+            status:
+              item.type === "tool_search_call" ? "in_progress" : "completed",
+          },
         },
       },
       {
@@ -240,6 +392,76 @@ describe("accumulateResponsesSSEStream", () => {
     await expect(
       accumulateResponsesSSEStream(response, { validation: "public" }),
     ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test.each([
+    [
+      "orphan output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_orphan_stream",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "malformed nested tool",
+      [
+        validToolSearchItems[0],
+        {
+          ...validToolSearchItems[1],
+          tools: [{ type: "function", name: "lookup_weather" }],
+        },
+      ],
+    ],
+  ] as const)("rejects streamed tool-search %s", async (_label, items) => {
+    const records = items as readonly Record<string, unknown>[];
+    const events = records.flatMap((item, output_index) => [
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          output_index,
+          item: {
+            ...item,
+            status:
+              item.type === "tool_search_call" ? "in_progress" : "completed",
+          },
+        },
+      },
+      {
+        event: "response.output_item.done",
+        data: {
+          type: "response.output_item.done",
+          output_index,
+          item: { ...item, status: "completed" },
+        },
+      },
+    ]);
+    const response = buildSSEResponse([
+      ...events,
+      {
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            id: "resp_tool_search_invalid",
+            model: "gpt-5.6",
+            status: "completed",
+            usage: { input_tokens: 1, output_tokens: 1 },
+            output: records.map((item) => ({ ...item, status: "completed" })),
+          },
+        },
+      },
+    ]);
+
+    await expect(
+      accumulateResponsesSSEStream(response, { validation: "public" }),
+    ).rejects.toThrow();
   });
 
   test.each(invalidToolSearchItems)(

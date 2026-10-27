@@ -1141,7 +1141,7 @@ function validatePublicResponsesEvent(
         ) ||
         ((addedItem.type === "tool_search_call" ||
           addedItem.type === "tool_search_output") &&
-          !isValidResponsesToolSearchItem(addedItem, "output")) ||
+          !isValidResponsesToolSearchItem(addedItem, "output-added")) ||
         (addedItem.type === "message" && typeof addedItem.id !== "string") ||
         (addedItem.type === "message" &&
           addedItem.status !== undefined &&
@@ -1488,7 +1488,10 @@ function validateCodexOutputItem(
   }
   if (
     (item.type === "tool_search_call" || item.type === "tool_search_output") &&
-    !isValidResponsesToolSearchItem(item, "output")
+    !isValidResponsesToolSearchItem(
+      item,
+      event === "response.output_item.added" ? "output-added" : "output",
+    )
   ) {
     malformedResponsesEvent();
   }

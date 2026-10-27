@@ -26,6 +26,7 @@ import {
   buildOpenAIResponsesUpstreamRequest,
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
+import { isValidResponsesToolSearchItem } from "../src/translate/responses-tool-search";
 import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import { gzipSync, inflateSync } from "node:zlib";
 import { decodedRequestChunks } from "../src/http-body";
@@ -723,7 +724,34 @@ describe("parseOpenAIResponsesRequest", () => {
       call_id: "call_1",
       execution: "client",
       status: "completed",
-      tools: [],
+      tools: [
+        {
+          type: "function",
+          name: "lookup_weather",
+          description: "Look up weather.",
+          parameters: { type: "object", properties: {} },
+          strict: true,
+          defer_loading: true,
+        },
+        {
+          type: "custom",
+          name: "run_query",
+          format: { type: "text" },
+          defer_loading: true,
+        },
+        {
+          type: "namespace",
+          name: "crm",
+          description: "CRM tools.",
+          tools: [
+            {
+              type: "function",
+              name: "lookup_contact",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        },
+      ],
     };
     const req = parseOpenAIResponsesRequest(
       {
@@ -743,6 +771,282 @@ describe("parseOpenAIResponsesRequest", () => {
 
     expect(body.input).toContainEqual(toolSearchCall);
     expect(body.input).toContainEqual(toolSearchOutput);
+  });
+
+  test("accepts omitted client execution and pairs server-owned null call IDs", () => {
+    const clientHistory = [
+      {
+        type: "tool_search_call",
+        id: "tsc_client",
+        call_id: "call_client",
+        status: "completed",
+        arguments: {},
+      },
+      {
+        type: "tool_search_output",
+        id: "tso_client",
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+        tools: [],
+      },
+    ];
+    const serverHistory = [
+      {
+        type: "tool_search_call",
+        id: "tsc_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        arguments: {},
+      },
+      {
+        type: "tool_search_output",
+        id: "tso_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        tools: [],
+      },
+    ];
+
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        { model: "gpt-5.6", input: clientHistory },
+        headers,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        { model: "gpt-5.6", input: serverHistory },
+        headers,
+      ),
+    ).not.toThrow();
+  });
+
+  test.each([
+    [
+      "client call without call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+      },
+    ],
+    [
+      "client call with null call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        call_id: null,
+      },
+    ],
+    [
+      "server call with a non-null call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "server",
+        call_id: "call_server",
+      },
+    ],
+    [
+      "unfinished call status",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        call_id: "call_client",
+        execution: "client",
+        status: "in_progress",
+      },
+    ],
+    [
+      "null call status",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        call_id: "call_client",
+        execution: "client",
+        status: null,
+      },
+    ],
+    [
+      "incomplete output status",
+      {
+        type: "tool_search_output",
+        tools: [],
+        call_id: "call_client",
+        execution: "client",
+        status: "incomplete",
+      },
+    ],
+    [
+      "malformed function definition",
+      {
+        type: "tool_search_output",
+        tools: [{ type: "function", name: "lookup" }],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+    [
+      "unknown nested tool type",
+      {
+        type: "tool_search_output",
+        tools: [{ type: "unrecognized_tool", name: "lookup" }],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+    [
+      "malformed custom format",
+      {
+        type: "tool_search_output",
+        tools: [
+          {
+            type: "custom",
+            name: "run_query",
+            format: { type: "grammar", syntax: "unknown", definition: "x" },
+          },
+        ],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+  ] as const)("rejects invalid tool-search input: %s", (_label, item) => {
+    expect(isValidResponsesToolSearchItem(item, "input")).toBe(false);
+  });
+
+  test.each([
+    ["function missing parameters", [{ type: "function", name: "lookup" }]],
+    [
+      "custom with an invalid format",
+      [
+        {
+          type: "custom",
+          name: "run_query",
+          format: { type: "grammar", syntax: "unknown", definition: "x" },
+        },
+      ],
+    ],
+    [
+      "namespace with an invalid child",
+      [
+        {
+          type: "namespace",
+          name: "crm",
+          description: "CRM tools.",
+          tools: [{ type: "function" }],
+        },
+      ],
+    ],
+    ["unknown tool type", [{ type: "unrecognized_tool", name: "lookup" }]],
+  ] as const)("rejects malformed output tools: %s", (_label, tools) => {
+    expect(
+      isValidResponsesToolSearchItem(
+        {
+          type: "tool_search_output",
+          id: "tso_invalid",
+          call_id: "call_client",
+          execution: "client",
+          status: "completed",
+          tools,
+        },
+        "output",
+      ),
+    ).toBe(false);
+  });
+
+  test.each([
+    [
+      "an orphan client output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_orphan",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an unmatched client call",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_unmatched",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          arguments: {},
+        },
+      ],
+    ],
+    [
+      "duplicate client outputs",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_duplicate_output",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          arguments: {},
+        },
+        {
+          type: "tool_search_output",
+          id: "tso_duplicate_output_1",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+        {
+          type: "tool_search_output",
+          id: "tso_duplicate_output_2",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an orphan server output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_server_orphan",
+          call_id: null,
+          execution: "server",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an unmatched server call",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_server_unmatched",
+          call_id: null,
+          execution: "server",
+          status: "completed",
+          arguments: {},
+        },
+      ],
+    ],
+  ] as const)("rejects %s at Responses ingress", (_label, input) => {
+    expect(() =>
+      parseOpenAIResponsesRequest({ model: "gpt-5.6", input }, headers),
+    ).toThrow();
   });
 
   test.each([
