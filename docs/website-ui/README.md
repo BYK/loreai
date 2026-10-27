@@ -9,11 +9,12 @@ The homepage presents the workflow, current Git-based sharing, one scoped histor
 benchmark and practical FAQs. Folk Lore is explicitly early access. The setup guide
 leads through client selection, installation, connection and verification; detailed
 installer/telemetry/uninstall content and old reference fragments remain reachable.
-The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The round network artwork retains the
-live site’s central hub, nine satellite nodes, rings and curved connections, with
-lazy WebGL depth, pointer response and a pause control. Native stage choices
+The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The memory sculpture weaves 216 small jade/ivory tiles into a continuous
+three-lobed path, with nine faceted anchors and curved connections. It uses lazy
+WebGL depth, pointer response and a pause control; the tiles render in three
+instanced GPU batches. Native stage choices
 connect the sculpture to the fictional conversation → knowledge → recall example.
-A matching SVG stays usable without JavaScript, under reduced motion or if WebGL
+A painter-sorted SVG built from the same tile rotations stays usable without JavaScript, under reduced motion or if WebGL
 fails. Offscreen/hidden states stop rendering and disposal releases GPU resources. Clipboard failure, release lookup failure,
 signup timeout/retry and menu focus have explicit behavior and browser regressions.
 

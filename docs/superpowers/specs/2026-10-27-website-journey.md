@@ -39,3 +39,13 @@ Retain the clearly fictional example through native, keyboard/touch stage contro
 Respect reduced motion, hidden/offscreen pages, failed loading and WebGL loss.
 Use the pinned Three.js and type versions from the reference; no React runtime.
 The Hackweek repository is a read-only visual/behavioral reference.
+
+
+## Sculpture redesign after visual feedback
+
+The user rejected the initial glossy hub-and-spoke rendering and explicitly gave
+freedom to change the form to make it more appealing. Replace that treatment with
+a woven, three-lobed 3D memory path built from small jade/ivory tiles and connected
+faceted anchors. Keep the graph concept, pointer depth, stage exploration, static
+fallback and motion safeguards. This supersedes the earlier requirement to retain
+literal concentric rings and a large round central hub. No letter sculpture.

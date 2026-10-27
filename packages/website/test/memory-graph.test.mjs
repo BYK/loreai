@@ -7,6 +7,7 @@ import {
   REST_PITCH,
   REST_YAW,
   MEMORY_NODES,
+  MEMORY_WEAVE,
   connectionPoints,
   projectPoint,
 } from "../src/lib/memory-graph.ts";
@@ -33,7 +34,7 @@ await test("static projections match the GPU's Euler rest pose", () => {
 await test("connections terminate at their satellite and cannot mutate shared positions", () => {
   for (const node of MEMORY_NODES) {
     const points = connectionPoints(node.position);
-    assert.deepEqual(points[0], [0, 0, 0]);
+    assert.ok(MEMORY_WEAVE.includes(points[0]));
     assert.deepEqual(points.at(-1), node.position);
     assert.throws(() => {
       node.position[0] = 999;
@@ -43,4 +44,37 @@ await test("connections terminate at their satellite and cannot mutate shared po
     new Set(MEMORY_NODES.map((node) => node.phase)),
     new Set(["conversation", "knowledge", "recall"]),
   );
+});
+
+await test("woven tile orientations and fallback faces remain finite and correctly ordered", async () => {
+  const { memoryPoint, tileRotation, MEMORY_TILE_FACES } =
+    await import("../src/lib/memory-graph.ts");
+  const { Quaternion } = await import("three");
+  for (let index = 0; index < MEMORY_WEAVE.length; index++) {
+    const rotation = new Quaternion(...tileRotation(index));
+    assert.ok(Math.abs(rotation.length() - 1) < 1e-9);
+    const tangent = new Vector3(
+      ...memoryPoint(((index + 0.2) / MEMORY_WEAVE.length) * Math.PI * 2),
+    )
+      .sub(new Vector3(...MEMORY_WEAVE[index]))
+      .normalize();
+    assert.ok(
+      new Vector3(1, 0, 0).applyQuaternion(rotation).distanceTo(tangent) < 1e-9,
+    );
+  }
+  assert.ok(MEMORY_TILE_FACES.length >= MEMORY_WEAVE.length * 2);
+  let lastDepth = -Infinity;
+  for (const face of MEMORY_TILE_FACES) {
+    assert.ok(face.depth >= lastDepth);
+    lastDepth = face.depth;
+    assert.equal(face.points.length, 4);
+    for (const point of face.points) {
+      const projected = projectPoint(point);
+      assert.ok(
+        projected.every(
+          (value) => Number.isFinite(value) && value > 0 && value < GRAPH_SIZE,
+        ),
+      );
+    }
+  }
 });

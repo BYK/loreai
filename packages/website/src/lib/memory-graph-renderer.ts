@@ -1,6 +1,9 @@
 import * as THREE from "three";
 import {
   MEMORY_NODES,
+  MEMORY_WEAVE,
+  tileRotation,
+  MEMORY_THREADS,
   REST_PITCH,
   REST_YAW,
   WORLD_SIZE,
@@ -38,7 +41,6 @@ export function mountGraph(
     return null;
   }
   const scene = new THREE.Scene();
-  const textures: THREE.CanvasTexture[] = [];
   const cleanups: (() => void)[] = [];
   let disposed = false;
   let frame = 0;
@@ -51,8 +53,9 @@ export function mountGraph(
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     scene.traverse((object) => {
-      if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
-        if (object instanceof THREE.Mesh) geometries.add(object.geometry);
+      if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
+        geometries.add(object.geometry);
+        if (object instanceof THREE.InstancedMesh) object.dispose();
         (Array.isArray(object.material)
           ? object.material
           : [object.material]
@@ -61,7 +64,6 @@ export function mountGraph(
     });
     geometries.forEach((geometry) => geometry.dispose());
     materials.forEach((material) => material.dispose());
-    textures.forEach((texture) => texture.dispose());
     scene.clear();
     renderer.dispose();
     renderer.forceContextLoss();
@@ -71,6 +73,8 @@ export function mountGraph(
   try {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
     element.appendChild(canvas);
     const camera = new THREE.OrthographicCamera(
       -WORLD_SIZE / 2,
@@ -84,27 +88,15 @@ export function mountGraph(
     const graph = new THREE.Group();
     graph.rotation.set(REST_PITCH, REST_YAW, 0);
     scene.add(graph);
-    scene.add(new THREE.AmbientLight(0xffffff, 1.7));
-    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.8));
+    const key = new THREE.DirectionalLight(0xfff6df, 2.8);
     key.position.set(-120, 180, 300);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0xffd99a, 0.65);
-    fill.position.set(160, -80, 100);
-    scene.add(fill);
-    const hub = new THREE.Mesh(
-      new THREE.SphereGeometry(45, 48, 32),
-      new THREE.MeshStandardMaterial({
-        color: 0x2a4d32,
-        roughness: 0.38,
-        metalness: 0.1,
-      }),
-    );
-    graph.add(hub);
-    const nodeGeometry = new THREE.SphereGeometry(1, 24, 16);
+    const nodeGeometry = new THREE.IcosahedronGeometry(1, 0);
     const nodes = MEMORY_NODES.map((node) => {
       const mesh = new THREE.Mesh(
         nodeGeometry,
-        new THREE.MeshStandardMaterial({ roughness: 0.3, metalness: 0.12 }),
+        new THREE.MeshStandardMaterial({ roughness: 0.76, metalness: 0.16 }),
       );
       mesh.position.set(...node.position);
       mesh.scale.setScalar(node.radius);
@@ -121,69 +113,48 @@ export function mountGraph(
         points[2],
         points[3],
       );
-      const mesh = new THREE.Mesh(
-        new THREE.TubeGeometry(curve, 40, 0.55, 6, false),
-        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.6 }),
+      const mesh = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(curve.getPoints(56)),
+        new THREE.LineBasicMaterial({ transparent: true, opacity: 0.6 }),
       );
       graph.add(mesh);
       return mesh;
     });
-    const orbitMaterial = new THREE.MeshBasicMaterial({
-      transparent: true,
-      opacity: 0.2,
+    const tileGeometry = new THREE.BoxGeometry(5.4, 8.8, 7.6);
+    const tileMaterials = [0, 1, 2].map(
+      () =>
+        new THREE.MeshStandardMaterial({ roughness: 0.58, metalness: 0.12 }),
+    );
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3(1, 1, 1);
+    tileMaterials.forEach((material, phaseIndex) => {
+      const tiles = new THREE.InstancedMesh(tileGeometry, material, 72);
+      for (let index = 0; index < 72; index++) {
+        const tileIndex = phaseIndex * 72 + index;
+        position.set(...MEMORY_WEAVE[tileIndex]);
+        rotation.set(...tileRotation(tileIndex));
+        matrix.compose(position, rotation, scale);
+        tiles.setMatrixAt(index, matrix);
+      }
+      tiles.instanceMatrix.needsUpdate = true;
+      graph.add(tiles);
     });
-    for (const radius of [158, 104, 58]) {
-      const orbit = new THREE.Mesh(
-        new THREE.TorusGeometry(radius, 0.4, 5, 128),
-        orbitMaterial,
-      );
-      orbit.position.z = -22;
-      graph.add(orbit);
-    }
-    function label(
-      text: string,
-      position: readonly [number, number, number],
-      width: number,
-      color: string,
-      serif = false,
-    ) {
-      const surface = document.createElement("canvas");
-      surface.width = 768;
-      surface.height = 160;
-      const ctx = surface.getContext("2d");
-      if (!ctx) return;
-      const texture = new THREE.CanvasTexture(surface);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      textures.push(texture);
-      const material = new THREE.SpriteMaterial({
-        map: texture,
-        depthTest: false,
-      });
-      const sprite = new THREE.Sprite(material);
-      sprite.scale.set(width, (width * 160) / 768, 1);
-      sprite.position.set(...position);
-      sprite.renderOrder = 2;
-      graph.add(sprite);
-      const paint = (ink: string) => {
-        ctx.clearRect(0, 0, 768, 160);
-        ctx.font = serif
-          ? 'italic 130px "Playfair Display", Georgia, serif'
-          : '500 80px "DM Sans Variable", sans-serif';
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = ink;
-        ctx.fillText(text, 384, 80);
-        texture.needsUpdate = true;
-      };
-      paint(color);
-      return paint;
-    }
-    label("Lore.AI", [0, 0, 47], 120, "#f7f2e8", true);
-    const labelPainters = [
-      label("Conversation", [-92, 103, 22], 110, "#52604a"),
-      label("Knowledge", [100, -36, 35], 100, "#52604a"),
-      label("Recall", [-125, -76, 35], 70, "#52604a"),
-    ];
+    const threadMaterial = new THREE.LineBasicMaterial({
+      transparent: true,
+      opacity: 0.32,
+    });
+    const threadPositions = MEMORY_THREADS.flatMap(([a, b]) => [
+      ...MEMORY_WEAVE[a],
+      ...MEMORY_WEAVE[b],
+    ]);
+    const threadGeometry = new THREE.BufferGeometry();
+    threadGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(threadPositions, 3),
+    );
+    graph.add(new THREE.LineSegments(threadGeometry, threadMaterial));
     let phase: MemoryPhase = "conversation";
     let automatic = true;
     let visible = false;
@@ -214,15 +185,27 @@ export function mountGraph(
     }
     function palette() {
       accent = color("--accent", "#b45309");
-      neutral = color("--palette-base-400", "#8c9a7d");
-      orbitMaterial.color.copy(color("--muted", "#52604a"));
-      const ink = `#${color("--muted", "#52604a").getHexString()}`;
-      labelPainters.forEach((paint) => paint?.(ink));
+      neutral = color("--palette-base-500", "#719078");
+      const dark = document.documentElement.dataset.theme === "dark";
+      const phases = ["conversation", "knowledge", "recall"];
+      tileMaterials.forEach((material, index) => {
+        material.color.set(
+          phases[index] === phase
+            ? dark
+              ? "#52846b"
+              : "#345b47"
+            : dark
+              ? "#c4c7b1"
+              : "#b7bdab",
+        );
+      });
+      threadMaterial.color.copy(color("--muted", "#52604a"));
+      threadMaterial.opacity = dark ? 0.18 : 0.12;
       MEMORY_NODES.forEach((node, index) => {
         const selected = node.phase === phase;
         nodes[index].material.color.copy(selected ? accent : neutral);
         connections[index].material.color.copy(selected ? accent : neutral);
-        connections[index].material.opacity = selected ? 0.85 : 0.3;
+        connections[index].material.opacity = selected ? 0.65 : 0.12;
       });
       resume();
     }
@@ -241,9 +224,9 @@ export function mountGraph(
       currentX += (targetX - currentX) * easing;
       currentY += (targetY - currentY) * easing;
       graph.rotation.x =
-        REST_PITCH - currentY * 0.18 + Math.sin(elapsed * 0.35) * 0.025;
+        REST_PITCH - currentY * 0.18 + Math.sin(elapsed * 0.24) * 0.085;
       graph.rotation.y =
-        REST_YAW + currentX * 0.3 + Math.sin(elapsed * 0.23) * 0.045;
+        REST_YAW + currentX * 0.42 + Math.sin(elapsed * 0.16) * 0.22;
       nodes.forEach((mesh, index) => {
         const node = MEMORY_NODES[index];
         const distance = Math.hypot(
@@ -254,7 +237,8 @@ export function mountGraph(
           Math.exp((-distance * distance) / 2400) *
           (Math.abs(currentX) + Math.abs(currentY)) *
           9;
-        mesh.scale.setScalar(node.radius + lift * 0.15);
+        mesh.scale.setScalar(node.radius + lift * 0.09);
+        mesh.rotation.y = elapsed * 0.15;
       });
       renderer.render(scene, camera);
       if (!announced) {

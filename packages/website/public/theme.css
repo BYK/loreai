@@ -143,34 +143,40 @@ th { font-weight: 500; }
   .evidence th, .evidence td { padding: .75rem .5rem; overflow-wrap: anywhere; }
 }
 
-/* The live site's round memory graph, rendered with real depth when available. */
-.memory-sculpture { padding: 0; border: 0; background: transparent; box-shadow: none; }
+/* The woven memory sculpture shares its geometry with the static SVG. */
+.memory-sculpture { padding: 0; border: 0; background: transparent; box-shadow: none; --tile-ink: #aeb8a3; --tile-active: #345b47; }
+:root[data-theme="dark"] .memory-sculpture { --tile-ink: #c4c7b1; --tile-active: #6b9c81; }
 .memory-sculpture h2 { font-size: 1.5rem; }
-.memory-graph { position: relative; width: 100%; aspect-ratio: 1; isolation: isolate; touch-action: pan-y pinch-zoom; }
+.memory-graph { position: relative; width: 100%; aspect-ratio: 1; margin-block: -.5rem; isolation: isolate; touch-action: pan-y pinch-zoom; }
+.memory-graph::before { content: ""; position: absolute; inset: 14%; z-index: -1; border-radius: 50%; background: radial-gradient(ellipse, color-mix(in oklch, var(--palette-base-400) 12%, transparent), transparent 70%); }
 .memory-graph svg, .memory-graph canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
 .memory-graph[data-renderer="webgl"] .memory-graph-fallback { visibility: hidden; }
-.memory-orbit { stroke: var(--muted); stroke-width: .6; opacity: .2; }
-.memory-connection { stroke: var(--palette-base-400); stroke-width: 1; opacity: .55; }
-.memory-graph-fallback circle[data-memory-node] { fill: url(#memory-node-fill); }
-.memory-hub-label { fill: #f7f2e8; font: italic 23px "Playfair Display", Georgia, serif; }
-.memory-graph-label { fill: var(--muted); text-anchor: middle; font: 500 11px var(--sans); }
+.memory-thread { stroke: var(--muted); stroke-width: .65; opacity: .15; }
+.memory-connection { stroke: var(--palette-base-400); stroke-width: 1; opacity: .35; }
+.memory-graph-fallback circle[data-memory-node] { fill: var(--palette-base-500); }
+.memory-tile { fill: var(--tile-ink); }
+.memory-tile[data-shade="1"] { fill: color-mix(in oklch, var(--tile-ink) 85%, black); }
+.memory-tile[data-shade="2"] { fill: color-mix(in oklch, var(--tile-ink) 65%, black); }
 .graph-instructions { display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--muted); font-size: .75rem; }
-.graph-motion { border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--text); min-height: 44px; padding: .5rem .75rem; cursor: pointer; white-space: nowrap; font: inherit; }
+.graph-motion { border: 0; background: transparent; color: var(--text); min-height: 44px; padding: .5rem .75rem; cursor: pointer; white-space: nowrap; font: inherit; text-decoration: underline; text-underline-offset: .2em; }
 .graph-motion[hidden] { display: none; }
-.memory-stage-controls { display: flex; gap: .375rem; flex-wrap: wrap; border: 0; padding: 0; margin: .75rem 0 0; }
-.memory-stage-controls label { display: flex; flex: 1; align-items: center; justify-content: center; gap: .375rem; min-height: 44px; border: 1px solid var(--line); border-radius: var(--radius-control); padding: .5rem; background: var(--surface); cursor: pointer; font-size: .75rem; }
-.memory-stage-controls input { margin: 0; accent-color: var(--accent); }
-.memory-stage-controls label:has(:checked) { background: var(--accent-soft); color: var(--accent-soft-text); border-color: var(--accent); }
+.memory-stage-controls { display: flex; flex-wrap: wrap; border: 0; border-bottom: 1px solid var(--line); padding: 0; margin: .75rem 0 0; }
+.memory-stage-controls label { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 44px; border-bottom: 2px solid transparent; padding: .5rem .375rem; cursor: pointer; font-size: .8125rem; }
+.memory-stage-controls input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.memory-stage-controls label:has(:checked) { border-bottom-color: var(--accent); color: var(--text); }
 .memory-stage-controls label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-.memory-stage-panels { min-height: 154px; padding-block: 1rem; }
-.memory-stage-panels section { display: none; }
+.memory-stage-panels { display: grid; padding-block: 1rem; }
+.memory-stage-panels section { grid-area: 1 / 1; visibility: hidden; }
 .memory-stage-panels p { font-size: .875rem; color: var(--muted); margin-top: .5rem; }
 .memory-sculpture:has(input[value="conversation"]:checked) #memory-stage-conversation,
 .memory-sculpture:has(input[value="knowledge"]:checked) #memory-stage-knowledge,
-.memory-sculpture:has(input[value="recall"]:checked) #memory-stage-recall { display: block; }
+.memory-sculpture:has(input[value="recall"]:checked) #memory-stage-recall { visibility: visible; }
 .memory-sculpture:has(input[value="conversation"]:checked) circle[data-phase="conversation"],
 .memory-sculpture:has(input[value="knowledge"]:checked) circle[data-phase="knowledge"],
-.memory-sculpture:has(input[value="recall"]:checked) circle[data-phase="recall"] { fill: url(#memory-active-fill); }
-.memory-sculpture:has(input[value="conversation"]:checked) path[data-phase="conversation"],
-.memory-sculpture:has(input[value="knowledge"]:checked) path[data-phase="knowledge"],
-.memory-sculpture:has(input[value="recall"]:checked) path[data-phase="recall"] { stroke: var(--accent); opacity: .85; }
+.memory-sculpture:has(input[value="recall"]:checked) circle[data-phase="recall"] { fill: var(--accent); }
+.memory-sculpture:has(input[value="conversation"]:checked) .memory-connection[data-phase="conversation"],
+.memory-sculpture:has(input[value="knowledge"]:checked) .memory-connection[data-phase="knowledge"],
+.memory-sculpture:has(input[value="recall"]:checked) .memory-connection[data-phase="recall"] { stroke: var(--accent); opacity: .65; }
+.memory-sculpture:has(input[value="conversation"]:checked) .memory-tile[data-phase="conversation"],
+.memory-sculpture:has(input[value="knowledge"]:checked) .memory-tile[data-phase="knowledge"],
+.memory-sculpture:has(input[value="recall"]:checked) .memory-tile[data-phase="recall"] { --tile-ink: var(--tile-active); }
