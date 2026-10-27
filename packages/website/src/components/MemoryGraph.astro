@@ -1,0 +1,41 @@
+---
+import { MEMORY_NODES, GRAPH_SIZE, projectPoint, connectionPath, orbitPath } from "../lib/memory-graph";
+const center = GRAPH_SIZE / 2;
+const phases = [
+  { id: "conversation", label: "1 Conversation" },
+  { id: "knowledge", label: "2 Knowledge" },
+  { id: "recall", label: "3 Recall" },
+];
+---
+<aside class="memory-example memory-sculpture" aria-labelledby="example-title">
+  <p class="eyebrow">Illustrative example · fictional project</p>
+  <h2 id="example-title">A decision can survive the session.</h2>
+  <div class="memory-graph" data-renderer="static" aria-hidden="true">
+    <svg class="memory-graph-fallback" viewBox={`0 0 ${GRAPH_SIZE} ${GRAPH_SIZE}`} fill="none">
+      <defs>
+        <radialGradient id="memory-hub-fill" cx="30%" cy="24%" r="82%"><stop offset="0" stop-color="#587e58" /><stop offset=".55" stop-color="#2a4d32" /><stop offset="1" stop-color="#12281a" /></radialGradient>
+        <radialGradient id="memory-node-fill" cx="28%" cy="22%" r="82%"><stop offset="0" stop-color="var(--palette-base-200)" /><stop offset=".65" stop-color="var(--palette-base-400)" /><stop offset="1" stop-color="var(--palette-base-700)" /></radialGradient>
+        <radialGradient id="memory-active-fill" cx="28%" cy="22%" r="82%"><stop offset="0" stop-color="var(--palette-accent-100)" /><stop offset=".55" stop-color="var(--palette-accent-400)" /><stop offset="1" stop-color="var(--palette-accent-800)" /></radialGradient>
+      </defs>
+      {[158, 104, 58].map(radius => <path d={orbitPath(radius)} class="memory-orbit" />)}
+      {MEMORY_NODES.map(node => <path d={connectionPath(node.position)} data-phase={node.phase} class="memory-connection" />)}
+      {MEMORY_NODES.map(node => { const [x, y] = projectPoint(node.position); return <circle data-memory-node data-phase={node.phase} cx={x} cy={y} r={node.radius * GRAPH_SIZE / 360} />; })}
+      <circle cx={center} cy={center} r="52.5" fill="url(#memory-hub-fill)" />
+      <text x={center} y={center + 7} text-anchor="middle" class="memory-hub-label">Lore.AI</text>
+      <text x="102" y="84" class="memory-graph-label">Conversation</text>
+      <text x="292" y="250" class="memory-graph-label">Knowledge</text>
+      <text x="72" y="337" class="memory-graph-label">Recall</text>
+    </svg>
+  </div>
+  <div class="graph-instructions"><span>Choose a stage to explore the example.</span><button type="button" class="graph-motion" aria-label="Pause graph motion" hidden>Pause motion</button></div>
+  <fieldset class="memory-stage-controls"><legend class="visually-hidden">Explore how Lore uses memory</legend>
+    {phases.map((phase, index) => <label><input type="radio" name="memory-stage" value={phase.id} checked={index === 0} aria-controls={`memory-stage-${phase.id}`} /><span>{phase.label}</span></label>)}
+  </fieldset>
+  <div class="memory-stage-panels">
+    <section id="memory-stage-conversation"><h3>You explain a decision</h3><p>“Keep webhook handlers idempotent. The provider can deliver the same event twice.”</p></section>
+    <section id="memory-stage-knowledge"><h3>Lore curates project knowledge</h3><p class="file-label">.lore.md</p><blockquote><strong>Idempotent webhooks:</strong> Reuse the existing event-id check before applying a webhook.</blockquote></section>
+    <section id="memory-stage-recall"><h3>A later session has the context</h3><p>“I’ll reuse the event-id check for this handler.”</p></section>
+  </div>
+  <p class="small muted">A conceptual example, not a live transcript. Extraction and recall depend on the conversation and configuration; review the knowledge Lore records.</p>
+</aside>
+<script>import "../scripts/memory-graph";</script>

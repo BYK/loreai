@@ -1,6 +1,7 @@
 ---
 import PublicLayout from "../layouts/PublicLayout.astro";
 import InstallCommand from "../components/InstallCommand.astro";
+import MemoryGraph from "../components/MemoryGraph.astro";
 import Waitlist from "../components/Waitlist.astro";
 const base = import.meta.env.BASE_URL;
 ---
@@ -12,11 +13,7 @@ const base = import.meta.env.BASE_URL;
       <InstallCommand />
       <p class="small muted">Already use npm? <a href={`${base}docs/install/#other-installation-options`}>See the npm option</a>. Client setup and your provider’s charges still apply.</p>
     </div>
-    <aside class="memory-example" aria-labelledby="example-title"><p class="eyebrow">Illustrative example · fictional project</p><h2 id="example-title">A decision can survive the session.</h2><ol>
-      <li><span class="example-number">1</span><div><h3>You explain a decision</h3><p>“Keep webhook handlers idempotent. The provider can deliver the same event twice.”</p></div></li>
-      <li><span class="example-number">2</span><div><h3>Lore curates project knowledge</h3><p class="file-label">.lore.md</p><blockquote><strong>Idempotent webhooks:</strong> Reuse the existing event-id check before applying a webhook.</blockquote></div></li>
-      <li><span class="example-number">3</span><div><h3>A later session has the context</h3><p>“I’ll reuse the event-id check for this handler.”</p></div></li>
-    </ol><p class="small muted">A conceptual example, not a live transcript. Extraction and recall depend on the conversation and configuration; review the knowledge Lore records.</p></aside>
+    <MemoryGraph />
   </section>
   <nav class="page-sections section" aria-label="On this page"><a href="#how">How it works</a><a href="#features">What’s available</a><a href="#evidence">Evidence</a><a href="#questions">Questions</a></nav>
   <section class="section" id="how"><span id="unified" class="fragment-anchor" aria-hidden="true"></span><div class="section-heading"><p class="eyebrow">The workflow</p><h2>From conversation to reusable knowledge.</h2><p>Recent work stays in context. Older work can be distilled, and details remain searchable.</p></div><ol class="workflow">

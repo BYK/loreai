@@ -25,3 +25,17 @@ changes. Example content must not imply a live session or a guaranteed recall.
 
 Preserve public URLs, referenced legacy fragments, RSS, social metadata and docs
 reference access. No new dependencies. No deployment or merge is requested.
+
+
+## Graph revision approved later in the same chat
+
+The user asked to restore the graph treatment, specifically referencing the
+interactive 3D voxel “I” in the Hackweek project. This supersedes the earlier
+removal of the orbit. The user clarified that this must preserve the live Lore graph: a round central
+Lore hub, rounded satellite nodes, orbital rings and curved connections. Do not
+create an L or other letter sculpture. Give that familiar craft real WebGL depth,
+pointer-responsive motion, a pause control, and a matching static SVG. Keep the first action above the artwork on mobile.
+Retain the clearly fictional example through native, keyboard/touch stage controls.
+Respect reduced motion, hidden/offscreen pages, failed loading and WebGL loss.
+Use the pinned Three.js and type versions from the reference; no React runtime.
+The Hackweek repository is a read-only visual/behavioral reference.

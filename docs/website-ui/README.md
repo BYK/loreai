@@ -9,15 +9,19 @@ The homepage presents the workflow, current Git-based sharing, one scoped histor
 benchmark and practical FAQs. Folk Lore is explicitly early access. The setup guide
 leads through client selection, installation, connection and verification; detailed
 installer/telemetry/uninstall content and old reference fragments remain reachable.
-The blog uses compact article rows and noninteractive topic metadata. The ticker,
-orbit and scroll reveals are removed. Clipboard failure, release lookup failure,
+The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The round network artwork retains the
+live site’s central hub, nine satellite nodes, rings and curved connections, with
+lazy WebGL depth, pointer response and a pause control. Native stage choices
+connect the sculpture to the fictional conversation → knowledge → recall example.
+A matching SVG stays usable without JavaScript, under reduced motion or if WebGL
+fails. Offscreen/hidden states stop rendering and disposal releases GPU resources. Clipboard failure, release lookup failure,
 signup timeout/retry and menu focus have explicit behavior and browser regressions.
 
 See [the website package](../../packages/website/README.md) for maintenance and tests.
 
 These are original Chromium screenshots of the built frontends. Before uses
-upstream `82e1af50`; after uses this PR. Both builds use identical public page
-content, viewport, system colour preference, and a reduced-motion preference.
+upstream `82e1af50`; after uses this PR. Both builds use the same viewport, system colour preference,
+and reduced-motion preference.
 The GitHub release response is fixed to `0.34.0` for a stable badge. No DOM, CSS,
 or image edits were applied to the captures. Desktop is 1280×900; mobile is
 320×844.
@@ -29,3 +33,12 @@ or image edits were applied to the captures. Desktop is 1280×900; mobile is
 | Docs · desktop dark | ![Before](screenshots/docs-desktop-dark-before.png) | ![After](screenshots/docs-desktop-dark-after.png) |
 | Docs · mobile light | ![Before](screenshots/docs-mobile-light-before.png) | ![After](screenshots/docs-mobile-light-after.png) |
 | Blog · desktop light | ![Before](screenshots/blog-desktop-light-before.png) | ![After](screenshots/blog-desktop-light-after.png) |
+
+
+The additional graph captures below use normal motion at 1280×1000 with the
+same fixed release response. Motion was paused through the visible control before
+capture; the dark image is a direct component screenshot. The comparison table
+above continues to use reduced motion so it also shows the SVG fallback.
+
+![Interactive round graph, desktop light](screenshots/graph-desktop-light.png)
+![Graph detail, dark](screenshots/graph-detail-dark.png)
