@@ -1,16 +1,13 @@
 ---
 const choices = [
-  { value: "auto", label: "System", icon: "◐" },
-  { value: "light", label: "Light", icon: "☀" },
-  { value: "dark", label: "Dark", icon: "☾" },
+  { value: "auto", label: "System", detail: "Follow your device" },
+  { value: "light", label: "Light", detail: "Always light" },
+  { value: "dark", label: "Dark", detail: "Always dark" },
 ];
 ---
-
-<div class="theme-toggle" role="group" aria-label="Colour theme">
-  {choices.map(({ value, label, icon }) => (
-    <button type="button" data-theme-choice={value} aria-label={`${label} theme`} aria-pressed="false" title={`${label} theme`}>
-      <span aria-hidden="true">{icon}</span>
-      <span class="theme-label">{label}</span>
-    </button>
-  ))}
-</div>
+<details class="theme-toggle" data-menu>
+  <summary aria-label="Theme settings"><span aria-hidden="true">◐</span><span data-theme-current>System</span><span aria-hidden="true">⌄</span></summary>
+  <div class="theme-options" role="group" aria-label="Colour theme">
+    {choices.map(({ value, label, detail }) => <button type="button" data-theme-choice={value} aria-label={`${label} theme`} aria-pressed="false"><span>{label}</span><small>{detail}</small></button>)}
+  </div>
+</details>

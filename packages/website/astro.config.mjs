@@ -90,6 +90,7 @@ export default defineConfig({
             { label: "Overview", slug: "docs" },
             { label: "Install", slug: "docs/install" },
             { label: "Architecture", slug: "docs/architecture" },
+            { label: "Recall benchmark", slug: "docs/benchmark" },
             { label: "Team memory", slug: "docs/team-memory" },
           ],
         },
@@ -115,6 +116,10 @@ export default defineConfig({
             { label: "Environment variables", slug: "docs/environment" },
             { label: "Setup command", slug: "docs/setup" },
             { label: "Import conversations", slug: "docs/import" },
+            {
+              label: "Installer and uninstall",
+              slug: "docs/installation-reference",
+            },
           ],
         },
       ],

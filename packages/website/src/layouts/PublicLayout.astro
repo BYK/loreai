@@ -1,0 +1,35 @@
+---
+import ThemeProvider from "../components/ThemeProvider.astro";
+import SocialMeta from "../components/SocialMeta.astro";
+import PublicHeader from "../components/PublicHeader.astro";
+import PublicFooter from "../components/PublicFooter.astro";
+import siteJs from "../scripts/site.js?raw";
+interface Props { title: string; description: string; bodyClass?: string; documentUri?: string; }
+const { title, description, bodyClass = "", documentUri } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const path = Astro.url.pathname.startsWith(base) ? Astro.url.pathname.slice(base.length) : Astro.url.pathname.replace(/^\//, "");
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <ThemeProvider />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <SocialMeta title={title} description={description} path={path} type={path.startsWith("blog/") && path !== "blog/" ? "article" : "website"} />
+    {documentUri && <link rel="site.standard.document" href={documentUri} />}
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <link rel="icon" type="image/png" sizes="32x32" href={`${base}favicon-32.png`} />
+    <link rel="apple-touch-icon" sizes="180x180" href={`${base}apple-touch-icon.png`} />
+    <link rel="stylesheet" href={`${base}theme.css`} />
+  </head>
+  <body class={bodyClass}>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <PublicHeader />
+    <main id="main-content"><slot /></main>
+    <PublicFooter />
+    <script is:inline set:html={siteJs} />
+    <script>import "../scripts/menus.js";</script>
+  </body>
+</html>

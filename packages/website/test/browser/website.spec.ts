@@ -1,17 +1,17 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const surfaces = [
-  { name: "home", path: "/", heading: "Stop re-explaining." },
+  { name: "home", path: "/", heading: "Keep project decisions" },
   {
     name: "comparison",
     path: "/different/",
-    heading: "What makes Lore different",
+    heading: "Context for the work in progress.",
   },
   { name: "docs", path: "/docs/install/", heading: "Install Lore" },
   {
     name: "blog",
     path: "/blog/",
-    heading: "Lore notes, from the memory layer outward.",
+    heading: "Blog",
   },
   {
     name: "article",
@@ -21,16 +21,14 @@ const surfaces = [
 ];
 
 async function themeButton(page: Page, choice: string) {
-  const visibleButton = page
-    .getByRole("button", { name: `${choice} theme`, exact: true })
-    .filter({ visible: true });
-  if (!(await visibleButton.count())) {
-    await page.getByRole("button", { name: "Menu", exact: true }).click();
-  }
-  return page
-    .getByRole("button", { name: `${choice} theme`, exact: true })
+  const menu = page
+    .getByLabel("Theme settings", { exact: true })
     .filter({ visible: true })
     .first();
+  const value = choice === "System" ? "auto" : choice.toLowerCase();
+  const control = page.locator(`button[data-theme-choice="${value}"]`).first();
+  if (!(await control.isVisible())) await menu.click();
+  return control;
 }
 
 test.beforeEach(async ({ page }) => {
@@ -104,6 +102,9 @@ test("theme override survives navigation and reload; System resumes live OS upda
 }) => {
   await page.goto("/");
   await (await themeButton(page, "Dark")).click();
+  await expect(
+    page.getByLabel("Theme settings", { exact: true }).first(),
+  ).toContainText("Dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   for (const path of ["/docs/install/", "/blog/", "/different/"]) {
     await page.goto(path);
@@ -137,7 +138,10 @@ test("keyboard theme controls and native installation copy button", async ({
   await page.keyboard.press("Enter");
   await expect(dark).toHaveAttribute("aria-pressed", "true");
   expect(
-    await dark.evaluate((button) => getComputedStyle(button).outlineStyle),
+    await page
+      .getByLabel("Theme settings", { exact: true })
+      .first()
+      .evaluate((summary) => getComputedStyle(summary).outlineStyle),
   ).toBe("solid");
   const copy = page.getByRole("button", { name: "Copy installation command" });
   await copy.focus();
@@ -162,10 +166,10 @@ test("mobile menu closes on Escape and after an in-page link", async ({
   await toggle.click();
   await page
     .locator(".nav-mobile-panel")
-    .getByRole("link", { name: "The Problem", exact: true })
+    .getByRole("link", { name: "How it works", exact: true })
     .click();
   await expect(page.locator(".nav-mobile")).not.toHaveAttribute("open");
-  await expect(page).toHaveURL(/#problem$/);
+  await expect(page).toHaveURL(/#how$/);
 });
 
 test("disabled storage still permits an explicit in-memory theme", async ({
@@ -234,7 +238,7 @@ test("newsletter input retains a visible keyboard focus ring", async ({
   ).toBeGreaterThanOrEqual(2);
 });
 
-test("community destinations remain visible and reduced-motion diagrams stay complete", async ({
+test("community destinations remain visible without decorative motion", async ({
   page,
 }) => {
   await page.goto("/");
@@ -245,14 +249,7 @@ test("community destinations remain visible and reduced-motion diagrams stay com
   await expect(
     footer.getByRole("link", { name: "Follow on X", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".mg-edge").first()).toHaveCSS(
-    "stroke-dashoffset",
-    "0px",
-  );
-  await expect(page.locator(".mg-edge").first()).toHaveCSS(
-    "animation-name",
-    "none",
-  );
+  expect(await page.locator(".ticker, .hero-visual").count()).toBe(0);
 });
 
 test("HTML declares its charset within the first 1024 bytes", async ({

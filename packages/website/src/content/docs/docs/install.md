@@ -1,119 +1,145 @@
 ---
 title: Install Lore
-description: Install Lore locally and launch your coding agent through the memory gateway.
+description: Choose your coding agent, install Lore, connect a session, and verify that it is recorded.
 sidebar:
   order: 1
 ---
 
-Install Lore with the hosted install script:
+Choose a client, connect Lore, and verify a recorded session. You’ll need an
+existing supported coding agent and its provider authentication.
+
+:::note[Telemetry]
+Production telemetry is on by default; set `SENTRY_ENABLED=0` before starting Lore
+to opt out. [Data and provider details](#operational-telemetry).
+:::
+
+## 1. Choose your agent
+
+Use the guide for the client you already have. Each guide covers its routing and
+configuration requirements:
+
+- [Claude Code](/docs/guides/with-claude-code/) — launch the terminal client through Lore.
+- [Codex](/docs/guides/with-codex/) — terminal launch and persistent Desktop setup.
+- [OpenCode](/docs/guides/with-opencode/) — gateway and plugin integration.
+- [Pi](/docs/guides/with-pi/) — gateway and extension integration.
+- **Hermes** — supported by the launcher; use `lore run` from the project directory.
+
+For a remote gateway or another provider, start with
+[setup](/docs/setup/) and [custom upstreams](/docs/guides/custom-upstreams/).
+
+## 2. Install and check the executable
+
+Run the hosted installer in your terminal:
 
 ```bash
 curl -fsSL https://withlore.ai/install | bash
 ```
 
-Then launch Lore with your detected coding agent:
+This downloads the standalone executable and may update your shell’s `PATH`.
+Review [what the installer writes](#what-the-installer-writes) if you want to
+inspect those changes first. Check that the command is available:
+
+```bash
+lore --version
+```
+
+If your shell cannot find `lore`, open a new terminal after installation and
+check the installer’s output for the installation directory.
+
+## 3. Connect from your project
+
+Agent requests and Lore’s background model work use your configured providers
+and may incur charges. For a terminal agent, change to your project directory and run:
 
 ```bash
 lore run
 ```
 
-Lore auto-detects Claude Code, OpenCode, Pi, Codex, and Hermes Agent when you run `lore run`. For harness-specific setup, see the Guides section.
+Lore starts the gateway and launches a detected supported agent with routing
+configured for that invocation. Follow any authentication or client-selection
+prompts. This path does not require persistent `lore setup` configuration.
 
-## Operational telemetry
+### Codex Desktop or an independently launched client
 
-Production builds send privacy-filtered operational telemetry to Sentry by default. It can include a random persistent installation ID, credential and project-path hashes, conversation/session IDs, model and upstream origin, gateway port, token usage, estimated cost, performance traces, and fixed-category errors. Lore disables automatic collection of prompts, model responses, request or response bodies, headers, cookies, URL query values, file paths, project names, application logs, and stack-frame variables; a final transport scrubber removes those fields before transmission.
-
-To opt out, set `SENTRY_ENABLED=0` before starting Lore:
-
-```bash
-export SENTRY_ENABLED=0
-lore run
-```
-
-Development builds do not send telemetry unless explicitly enabled with `SENTRY_ENABLED=1`. Test processes always disable it.
-
-## What the installer writes
-
-The hosted install script downloads one standalone executable to `${LORE_INSTALL_DIR:-$HOME/.local/bin}/lore` (`lore.exe` on Windows). If that directory is not already on `PATH`, the script appends this marked block to the active shell profile (`~/.zshrc`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`, or `~/.config/fish/config.fish`):
-
-```sh
-# Added by lore installer
-export PATH='/home/you/.local/bin':"$PATH"
-```
-
-The installer records a generation-bound executable receipt in `~/.lore/install-path` so uninstall can distinguish the exact hosted standalone binary from package-managed copies. It writes the selected release channel (`stable` or `nightly`) to `${LORE_CONFIG_DIR:-$HOME/.lore}/channel`. Running Lore may subsequently create:
-
-- `${XDG_DATA_HOME:-$HOME/.local/share}/lore/` for `lore.db`, logs, gateway PID/port files, and account/sync state
-- `${LORE_CONFIG_DIR:-$HOME/.lore}/` for the release channel and update metadata (`channel`, `latest-version`, `version-check.json`, and `patch-cache/`); the standalone binary's extracted embedding model is always under `~/.lore/embeddings-vendored/`
-- `~/.cache/lore/` for extracted worker files
-- `.lore.md`, `.lore.json`, and a managed section in `AGENTS.md` or `CLAUDE.md` inside projects where those features are used
-
-Lifecycle serialization and hosted-install provenance use the fixed per-user `~/.lore/` directory even when `LORE_CONFIG_DIR` is customized. `~/.lore/lifecycle.lock/` exists only while a normal setup/start/stop/upgrade/install/uninstall transition owns the lock; stale token-named lock claims may be retained after crash recovery. A successful verified hosted self-removal intentionally leaves `~/.lore/uninstalled.json` as a persistent, owner-only tombstone. It prevents an already-running old hosted binary from starting Lore again. A fresh hosted install, or a fresh invocation of the declared `@loreai/gateway` package CLI after package installation, verifies its own install generation before atomically clearing that tombstone. Unverified and Windows invocations that preserve the running executable do not create this tombstone.
-
-`lore setup <app>` is separate from installation. It changes that app's config and saves a backup; see [Undoing setup](/docs/setup/#undoing-setup). `lore setup status` is read-only and recognizes both `~/.config/opencode/opencode.json` and OpenCode's supported `opencode.jsonc` form.
-
-## Uninstall
-
-To restore app configs, remove the hosted standalone executable recorded by the installer, remove the exact marked `PATH` block written by the installer, and clear disposable Lore caches while keeping your memory database:
+For Codex Desktop, configure routing once, start a local gateway, and relaunch
+the app:
 
 ```bash
-lore uninstall
+lore setup codex
+lore start --bg --local
 ```
 
-Inspect the resolved cleanup and preservation plan first with `lore uninstall --dry-run`. Setup restoration and shell-profile cleanup are summarized because their exact files are discovered and validated during execution. Preview mode does not run the live gateway, setup-backup, or filesystem preflight checks; the real command runs all of them before its first mutation. Uninstall refuses to continue while a gateway appears to be running; run `lore stop`, verify it stopped, and retry.
+Persistent setup changes client configuration and saves a backup.
+[Read setup and undo instructions](/docs/setup/). Other clients have their own
+manual setup steps in the guides above.
 
-The command prints the preserved data directory. To also permanently delete the database, logs, stored Folk Lore session, and gateway state in the default data directory, use:
+## 4. Verify the connection
+
+1. Send a normal message from the connected agent.
+2. Open the **Dashboard URL printed by Lore** to inspect the local memory browser.
+3. Look for the project and its recorded session. This verifies actual activity;
+   a saved client configuration alone does not prove requests passed through Lore.
+
+If the gateway or session is missing, run diagnostics:
 
 ```bash
-lore uninstall --purge
+lore doctor
 ```
 
-`--purge` prints the resolved cleanup plan, then asks for confirmation. Review the paths before answering. Use `lore uninstall --purge --yes` in a non-interactive shell only after previewing the same environment with `lore uninstall --purge --dry-run` immediately beforehand; the preview is not a filesystem snapshot.
+Read the findings rather than assuming every check must be green. You can also
+inspect stored sessions with `lore data list sessions`.
 
-For safety, uninstall does not recursively delete custom `XDG_DATA_HOME` / `LORE_CONFIG_DIR` locations or an external/relative `LORE_DB_PATH`; it prints those paths as preserved for manual review. Purgeable default directories are generation-bound: uninstall quarantines and verifies the exact directory checked during preflight, and refuses or preserves a replacement raced into the same pathname. A package-managed or otherwise unverified standalone executable is also preserved and must be removed through its installer or package manager. On Windows, the running standalone executable cannot delete itself. A fully verified hosted-install receipt still allows uninstall to transactionally remove only the exact installer-owned marked `PATH` block; unrelated profile content is preserved. The command retains the executable and receipt and prints their exact paths so you can delete both after uninstall exits. Preserved databases are never opened or modified during uninstall.
+:::note[Knowledge comes later]
+A `.lore.md` file may not appear after one message. Distillation and curation run
+in the background and depend on conversation volume and configuration. First
+verify the recorded session, then inspect the knowledge Lore extracts.
+:::
 
-Uninstall never searches for or removes project-owned `.lore.md`, `.lore.json`, `AGENTS.md`, or `CLAUDE.md` files. Review and remove those per project if you no longer want the exported knowledge or managed instruction section.
+## Next steps
 
-If Lore was installed through npm rather than the hosted standalone installer, `lore uninstall` still restores setup and handles Lore data/cache cleanup, then prints the package-manager command to remove the CLI itself. It does not create a tombstone for a package-managed uninstall. If a valid tombstone remains from an earlier hosted uninstall, a fresh installed `@loreai/gateway` package invocation verifies its declared package entry before clearing it; stale hosted binaries remain blocked:
+- [Import existing conversations](/docs/import/) to bring earlier work into memory.
+- [Review and share project knowledge](/docs/team-memory/) through `.lore.md` and Git.
+- [Understand the architecture](/docs/architecture/) and [configuration](/docs/configuration/).
 
-```bash
-npm uninstall -g @loreai/gateway
-```
+## Reference
 
-If `lore setup opencode` installed the optional global OpenCode plugin, remove the package after setup has been undone:
+The [installer and uninstall reference](/docs/installation-reference/) retains
+full path, telemetry, runtime, lifecycle, and cleanup information.
 
-```bash
-npm uninstall -g @loreai/opencode
-```
+### Operational telemetry
 
-Pi extensions added manually to `~/.pi/settings.json` are not owned by the installer; remove `npm:@loreai/pi@latest` from the `packages` array and run `pi install`.
+Production builds send privacy-filtered operational telemetry by default;
+prompts and response bodies are excluded from automatic collection. Set
+`SENTRY_ENABLED=0` before starting Lore to opt out. [Read the full fields and
+privacy boundaries](/docs/installation-reference/#operational-telemetry).
 
-If you'd rather configure Codex manually (for the Codex Desktop app, or to run `codex` without going through `lore run`), run [`lore setup codex`](/docs/setup/) once — it writes `~/.codex/config.toml` with the gateway URL and the no-auto-compact override. See the [Setup command](/docs/setup/) page for the full reference.
+### What the installer writes
 
-You can also run the gateway directly with npm:
+The hosted installer downloads the executable, records its install generation,
+and may update your shell profile. [See every installed/runtime path](/docs/installation-reference/#what-the-installer-writes).
+
+### Uninstall
+
+Use `lore uninstall --dry-run` to inspect the cleanup plan before uninstalling.
+[Read preservation, purge, package-manager, and platform details](/docs/installation-reference/#uninstall).
+
+### Other installation options
+
+You can run the gateway through npm:
 
 ```bash
 npx @loreai/gateway
 ```
 
-## Slimmer installs (remote embeddings)
+The npm packages require Node.js 22.16+ in the 22.x line, or Node.js 24+;
+Node.js 23 is excluded. With no subcommand, this uses the same default agent-launch flow as `lore run`.
+Use your client’s guide for persistent or independently launched setups.
 
-Lore's on-device (local) embeddings run through `@huggingface/transformers` and the ONNX runtime — about 480 MB of ML runtime that's pulled in when you `npm install` a Lore package (`@loreai/core`, `@loreai/opencode`, `@loreai/pi`). It's an **optional dependency**, so if you use a remote embedding provider — or don't need vector recall — you can skip it:
+### Slimmer installs (remote embeddings)
 
-```bash
-npm install @loreai/opencode --omit=optional
-```
+[Read about optional local-runtime dependencies and remote embeddings](/docs/installation-reference/#slimmer-installs-remote-embeddings).
 
-With the stack absent, recall degrades gracefully to FTS-only keyword search. To keep semantic recall without the local runtime, set a remote provider in `.lore.json` (`search.embeddings.provider` = `voyage` or `openai`, with the matching API key). The hosted install script and the standalone binary are unaffected — they ship their own runtime and never read `node_modules`.
+### Existing Conversations
 
-## Existing Conversations
-
-Lore can import previous coding conversations so a new project memory does not start from a blank slate:
-
-```bash
-lore import
-```
-
-Imported history feeds the same distillation and knowledge pipeline as live sessions. `lore import` detects Claude Code, Codex, OpenCode, Pi, Aider, Cline, and Continue, lets you pick which agents to import, and finds conversations across all of a repo's git worktrees.
-
-→ See the full [Import conversations](/docs/import/) guide.
+Use `lore import` to select supported local conversation sources.
+[Read the import guide](/docs/import/) or the [installation reference](/docs/installation-reference/#existing-conversations).

@@ -1,30 +1,38 @@
 ---
 title: Lore Documentation
-description: Install, operate, and understand Lore's local-first memory layer for AI coding agents.
-template: splash
-hero:
-  title: Lore Documentation
-  tagline: Persistent memory and context management for the coding agents you already use.
-  actions:
-    - text: Install Lore
-      link: install/
-      icon: right-arrow
-      variant: primary
-    - text: Architecture
-      link: architecture/
-      icon: open-book
+description: Set up your coding agent with Lore, verify recorded sessions, and manage project knowledge.
+sidebar:
+  order: 0
 ---
 
-Lore is a local-first memory layer for AI coding agents. It captures conversation history, distills operational context, extracts durable project knowledge, and gives agents a recall tool for details that should not be lost to compaction.
+Lore records coding conversations locally, manages working context, and curates
+project knowledge you can inspect and edit.
+
+## Set up your first session
+
+[Start the installation guide](/docs/install/): choose your agent, install Lore,
+connect a session, and verify it appears in the local memory browser.
+
+Already installed? Go straight to [connection and verification](/docs/install/#3-connect-from-your-project).
+
+## Work with your memory
+
+- [Import conversations](/docs/import/) from supported local clients.
+- [Review and share knowledge](/docs/team-memory/) through `.lore.md` and Git.
+- [Configure behavior](/docs/configuration/) or look up [environment variables](/docs/environment/).
+
+## Understand the system
+
+- [Architecture](/docs/architecture/) — storage, distillation, knowledge, and context management.
+- [Benchmark methodology](/docs/benchmark/) — the scope and limitations of the published recall evaluation.
+- [Installer and uninstall reference](/docs/installation-reference/) — paths, telemetry, runtime options, and cleanup.
 
 ## Start Here
 
-- Install Lore and run your existing agent through the gateway.
-- Read the architecture overview to understand temporal storage, distillation, and long-term knowledge.
-- Keep project knowledge in version-controlled `.lore.md` files when sharing memory with a team.
+[Follow the guided setup](/docs/install/) for a first local session, or choose
+[client-specific instructions](/docs/install/#1-choose-your-agent).
 
 ## Site Sections
 
-- [Home](../) introduces the product and Folk Lore early access signup.
-- [Why Lore](../different/) compares Lore to memory-only and context-only approaches.
-- [Blog](../blog/) is ready for essays, release notes, and engineering writeups.
+[Why Lore](/different/) explains the approach; the [blog](/blog/) covers product
+notes and engineering. [Return to the homepage](/).

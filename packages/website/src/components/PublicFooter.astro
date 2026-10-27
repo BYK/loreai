@@ -1,0 +1,13 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+<footer class="site-footer">
+  <div><a href={base} class="footer-brand">Lore.AI</a><p>Local memory. Reviewable knowledge.</p></div>
+  <nav class="footer-links" aria-label="Community links">
+    <a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub</a>
+    <a href="https://x.com/withLoreAI" target="_blank" rel="noopener noreferrer">Follow on X</a>
+    <a href={`${base}rss.xml`}>RSS</a>
+    <a class="release-link" href="https://github.com/BYK/loreai/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>
+  </nav>
+  <small>© {new Date().getFullYear()} Lore.AI · FSL-1.1-Apache-2.0</small>
+</footer>

@@ -13,6 +13,9 @@ function browser({ stored = null, dark = false, blocked = false } = {}) {
   const buttons = ["auto", "light", "dark"].map((choice) => ({
     dataset: { themeChoice: choice },
     attributes: {},
+    closest() {
+      return null;
+    },
     setAttribute(name, value) {
       this.attributes[name] = value;
     },
@@ -31,8 +34,8 @@ function browser({ stored = null, dark = false, blocked = false } = {}) {
   const document = {
     documentElement: root,
     readyState: "loading",
-    querySelectorAll() {
-      return buttons;
+    querySelectorAll(selector) {
+      return selector === "button[data-theme-choice]" ? buttons : [];
     },
     addEventListener(name, handler) {
       listeners[name] = handler;

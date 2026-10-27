@@ -98,3 +98,7 @@
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Informational setup notes stay quiet beside the task steps. */
+.starlight-aside--note { border-color: var(--line); background: var(--surface); color: var(--text); }
+.starlight-aside--note .starlight-aside__title { color: var(--heading); }
