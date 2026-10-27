@@ -18,7 +18,7 @@ conversation containing an editor-theme tangent to a distilled fact and relevant
 context for adding retries. Other history stays searchable and recent conversation
 remains available. It illustrates selection within a context budget, without
 claiming perfect filtering. Peak markers, floating labels and checkpoint routes
-are removed. One asymmetric landform narrows from a broad base to a single summit.
+are removed. An open crescent ridge wraps terraces around an inner valley and narrows to an upper crest.
 On selection, the band highlight sweeps between elevations while transient brass
 fragments climb and thin out. These are abstract details, not actual record counts.
 Rapid choices retarget the visible transition; hidden/offscreen/context-loss states

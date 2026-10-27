@@ -9,6 +9,7 @@ import {
   SVG_WIDTH,
   SVG_HEIGHT,
   terrainLevels,
+  terrainHeight,
   landscapeView,
   projectPoint,
   landscapeFaces,
@@ -76,7 +77,11 @@ await test("static faces use the owning contour elevation, without landmark regi
   assert.ok(faces.length < 150);
 });
 
-await test("the terrain is a single narrowing landform with one summit", () => {
+await test("the terrain is a connected winding ridge with a narrow upper crest", () => {
+  // The inner valley and camera-facing opening remain below the visible landform.
+  assert.ok(terrainHeight(-10, -2) < 0);
+  assert.ok(terrainHeight(29, 56) < 0);
+  assert.ok(terrainHeight(-49, -60) > 75);
   const levels = terrainLevels();
   const area = (loop) =>
     Math.abs(
@@ -92,7 +97,7 @@ await test("the terrain is a single narrowing landform with one summit", () => {
     assert.ok(current < previous);
     previous = current;
   }
-  assert.ok(area(levels.at(-1).loops[0]) / area(levels[0].loops[0]) < 0.03);
+  assert.ok(area(levels.at(-1).loops[0]) / area(levels[0].loops[0]) < 0.05);
 });
 await test("refinement fragments follow the terraces and thin toward relevant context", async () => {
   const {

@@ -17,19 +17,26 @@ export function bandAtHeight(height: number): number {
 const outlineScale = (angle: number) =>
   1 + 0.09 * Math.sin(angle * 3) + 0.035 * Math.cos(angle * 2);
 export function terrainHeight(x: number, z: number): number {
-  const u = (x + 18 + 0.16 * (z + 8)) / 108,
-    v = (z + 8) / 78;
-  const radius = Math.hypot(u, v) / outlineScale(Math.atan2(v, u));
+  const dx = x + 10,
+    dz = z + 2,
+    phi = Math.atan2(dz, dx) + 2.16;
+  const v = Math.atan2(Math.sin(phi), Math.cos(phi)) / 1.8;
+  const u = (Math.hypot(dx, dz) - 70) / 35,
+    w = v * Math.abs(v);
+  const radius = Math.hypot(u, w) / outlineScale(Math.atan2(w, u));
   return 94 * Math.exp(-1.8 * radius * radius) - 8;
 }
 export function pointOnTerrain(height: number, angle: number): Point3 {
   const h = Math.max(0, Math.min(83.7, height));
   const radius = Math.sqrt(-Math.log((h + 8) / 94) / 1.8) * outlineScale(angle);
-  const z = -8 + Math.sin(angle) * 78 * radius;
+  const w = Math.sin(angle) * radius,
+    v = Math.sign(w) * Math.sqrt(Math.abs(w));
+  const r = 70 + Math.cos(angle) * 35 * radius,
+    phi = -2.16 + v * 1.8;
   return [
-    -18 + Math.cos(angle) * 108 * radius - 0.16 * (z + 8),
+    -10 + r * Math.cos(phi),
     Math.floor(h / TERRAIN_STEP) * TERRAIN_STEP + 1.5,
-    z,
+    -2 + r * Math.sin(phi),
   ];
 }
 export function refinementElevation(position: number): number {

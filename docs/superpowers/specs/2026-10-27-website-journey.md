@@ -102,3 +102,8 @@ are illustrative and transient, not checkpoint markers or real record counts.
 No idle loop. Selection/content updates immediately; rapid selections retarget from
 the visible transition. Reduced motion is immediate. Hidden/offscreen states and
 context loss settle to the selected stage and release/cancel temporary motion.
+
+The user requested changing the terrain again. Replace the mound with a winding
+ridge: broad, bent lower terraces taper to an elongated upper crest. Keep elevation
+selection and the refinement animation. Shared inverse coordinates keep moving
+fragments on the reshaped terraces; full camera-envelope checks still apply.
