@@ -1,0 +1,38 @@
+---
+import { PHASES, SITES, SVG_WIDTH, SVG_HEIGHT, landscapeFaces, projectPoint, svgPath, terrainTop, trailPoints } from "../lib/memory-landscape";
+const faces = landscapeFaces();
+const titles = ["Conversation", ".lore.md", "Next session"];
+const pins = SITES.map(([x,z],index) => ({ phase: PHASES[index], base: projectPoint([x,terrainTop(x,z)+1.2,z]), head: projectPoint([x,terrainTop(x,z)+9.3,z]), label: projectPoint([x,terrainTop(x,z)+16.2,z]), title: titles[index] }));
+---
+<aside class="memory-example memory-landscape" data-active-phase="conversation" aria-labelledby="example-title">
+  <p class="eyebrow">Illustrative example · fictional project</p>
+  <h2 id="example-title">Follow a decision across sessions.</h2>
+  <div class="landscape-art" data-renderer="static" aria-hidden="true">
+    <svg class="landscape-fallback" viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`} fill="none">
+      <ellipse cx="300" cy="333" rx="171" ry="13" class="landscape-shadow" />
+      {faces.map(face => <path d={face.path} data-land-region={face.phase} class:list={["landscape-face", {"landscape-wall":face.wall}]} style={`--layer:${Math.round((.45+face.layer*.55)*100)}%;`} />)}
+      {[0,1].map(index => <path class="landscape-trail" data-trail={index} d={svgPath(trailPoints(index))} />)}
+      {pins.map(pin => <g data-land-region={pin.phase} class="landscape-pin">
+        <ellipse cx={pin.base[0]} cy={pin.base[1]} rx="5" ry="2" />
+        <path d={`M${pin.base[0]},${pin.base[1]} L${pin.head[0]},${pin.head[1]}`} />
+        <circle cx={pin.head[0]} cy={pin.head[1]} r="2.6" />
+
+      </g>)}
+    </svg>
+    <div class="landscape-labels">{pins.map(pin => <span data-marker={pin.phase} data-rest-style={`left:${pin.label[0]/SVG_WIDTH*100}%;top:calc(${pin.label[1]/SVG_HEIGHT*100}% - ${pin.phase === "knowledge" ? 15 : 0}px);`} style={`left:${pin.label[0]/SVG_WIDTH*100}%;top:calc(${pin.label[1]/SVG_HEIGHT*100}% - ${pin.phase === "knowledge" ? 15 : 0}px);`}>{pin.title}</span>)}</div>
+  </div>
+  <div class="landscape-toolbar">
+    <span class="landscape-hint">Choose a stage to explore.</span>
+    <div class="landscape-controls" hidden><label>Rotate <input class="landscape-rotate" type="range" min="-24" max="24" step="1" value="0" aria-label="Rotate landscape" /></label><button type="button" class="landscape-reset">Reset view</button></div>
+  </div>
+  <fieldset class="memory-stage-controls"><legend class="visually-hidden">Explore how Lore uses memory</legend>
+    {PHASES.map((phase,index) => <label><input type="radio" name="memory-stage" value={phase} checked={index === 0} aria-controls={`memory-stage-${phase}`} /><span>{index+1} {phase === "knowledge" ? "Knowledge" : phase === "recall" ? "Recall" : "Conversation"}</span></label>)}
+  </fieldset>
+  <div class="memory-stage-panels">
+    <section id="memory-stage-conversation"><h3>You explain a decision</h3><p>“Keep webhook handlers idempotent. The provider can deliver the same event twice.”</p></section>
+    <section id="memory-stage-knowledge"><h3>Lore curates project knowledge</h3><p class="file-label">.lore.md</p><blockquote><strong>Idempotent webhooks:</strong> Reuse the existing event-id check before applying a webhook.</blockquote></section>
+    <section id="memory-stage-recall"><h3>A later session has the context</h3><p>“I’ll reuse the event-id check for this handler.”</p></section>
+  </div>
+  <p class="small muted">Fictional example, not a live session. Review the knowledge Lore records.</p>
+</aside>
+<script>import "../scripts/memory-landscape";</script>

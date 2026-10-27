@@ -44,3 +44,13 @@ The example on the homepage is explicitly fictional. Published evaluation figure
 are scoped in `docs/benchmark.md`, while `docs/installation-reference.md` preserves
 the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
+
+The interactive homepage landscape lives in `MemoryLandscape.astro`. Shared terrain
+contours, region classification and orthographic projection are in
+`src/lib/memory-landscape.ts`; the SVG is rendered at build time. The controller
+lazily loads the pinned Three.js renderer only while visible, with normal motion
+and sufficient device memory. Native stage controls work without JavaScript; SVG
+region selection remains available when GPU rendering is disabled. The renderer
+handles terrain raycasting, bounded rotation, one-shot stage trails, context loss
+and resource disposal. Geometry and browser tests cover the shared boundaries,
+projection, selection and failure paths.

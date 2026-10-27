@@ -49,3 +49,27 @@ a woven, three-lobed 3D memory path built from small jade/ivory tiles and connec
 faceted anchors. Keep the graph concept, pointer depth, stage exploration, static
 fallback and motion safeguards. This supersedes the earlier requirement to retain
 literal concentric rings and a large round central hub. No letter sculpture.
+
+
+## Research-led interaction refinement
+
+The user requested online research and further improvement. Make the sculpture
+select actual example stages through a click/tap, with the matching native radio
+focused after touch compatibility events. Keep keyboard/static stage choices.
+Add bounded, damped local tile lift, softer edges and settling stage colours.
+Dragging or cancellation must preserve the current stage, and paused rendering
+must stop after feedback settles. Motion clarifies the selected example; content
+updates immediately on input.
+
+
+## Approved interactive landscape
+
+The user selected the refined memory landscape after comparing visual previews.
+This supersedes the sculpture directions above. Keep the three terraced hills,
+sage/jade/ivory palette, brass trail and landmark labels. Clicking or tapping a
+whole terrain region activates its corresponding Conversation, Knowledge or Recall
+stage and highlights that region. Native stage controls update the terrain in
+return. Dragging rotates without selecting, with keyboard rotation and reset
+controls. Use a brief trail for user-driven forward stage changes; no idle loop.
+The matching SVG and native controls cover reduced motion, low memory, unavailable
+WebGL and no JavaScript. Add this approved design to existing PR #2115.

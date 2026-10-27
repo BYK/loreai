@@ -9,13 +9,19 @@ The homepage presents the workflow, current Git-based sharing, one scoped histor
 benchmark and practical FAQs. Folk Lore is explicitly early access. The setup guide
 leads through client selection, installation, connection and verification; detailed
 installer/telemetry/uninstall content and old reference fragments remain reachable.
-The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The memory sculpture weaves 216 small jade/ivory tiles into a continuous
-three-lobed path, with nine faceted anchors and curved connections. It uses lazy
-WebGL depth, pointer response and a pause control; the tiles render in three
-instanced GPU batches. Native stage choices
-connect the sculpture to the fictional conversation → knowledge → recall example.
-A painter-sorted SVG built from the same tile rotations stays usable without JavaScript, under reduced motion or if WebGL
-fails. Offscreen/hidden states stop rendering and disposal releases GPU resources. Clipboard failure, release lookup failure,
+The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The homepage’s memory landscape has
+three terraced regions: Conversation, Knowledge, and Recall. Clicking or tapping
+any region selects its native stage control, highlights the terrain and updates
+the fictional example. Stage controls select the region in return. Dragging turns
+the landscape without changing the selected stage; a keyboard rotation slider
+and Reset view provide the same view controls. A brief brass trail traces forward
+stage selections, then stops. There is no idle animation.
+
+The server-rendered SVG shares the terrain contours, camera and region boundaries
+with WebGL. Native controls remain usable without JavaScript; clicking the SVG
+regions also works when reduced motion, low device memory or GPU failure keeps the
+static view. Labels stay at a readable CSS size on mobile. Hidden/offscreen states
+stop rendering, and disposal releases GPU resources. Clipboard failure, release lookup failure,
 signup timeout/retry and menu focus have explicit behavior and browser regressions.
 
 See [the website package](../../packages/website/README.md) for maintenance and tests.
@@ -36,10 +42,16 @@ or image edits were applied to the captures. Desktop is 1280×900; mobile is
 | Blog · desktop light | ![Before](screenshots/blog-desktop-light-before.png) | ![After](screenshots/blog-desktop-light-after.png) |
 
 
-The additional graph captures below use normal motion at 1280×1000 with the
-same fixed release response. Motion was paused through the visible control before
-capture; the dark image is a direct component screenshot. The comparison table
-above continues to use reduced motion so it also shows the SVG fallback.
+The additional landscape captures below use normal motion at 1280×1000 with the
+same fixed release response. The terrain is settled; the dark image is a direct
+component screenshot after selecting Knowledge through its terrain region. The
+comparison table above uses reduced motion and shows the SVG fallback.
 
-![Interactive round graph, desktop light](screenshots/graph-desktop-light.png)
-![Graph detail, dark](screenshots/graph-detail-dark.png)
+![Interactive landscape, desktop light](screenshots/landscape-desktop-light.png)
+![Landscape detail, dark](screenshots/landscape-detail-dark.png)
+
+The interaction draws on [Emil Kowalski’s pointer and easing examples](https://emilkowal.ski/ui/good-vs-great-animations)
+and [NN/G’s guidance on motion for comprehension](https://www.nngroup.com/articles/animation-usability/).
+These informed direct stage selection, damped feedback and immediate example text.
+Region picking uses the existing Three.js package’s
+[raycaster](https://threejs.org/manual/en/picking.html).
