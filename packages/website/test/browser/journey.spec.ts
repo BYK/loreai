@@ -27,15 +27,15 @@ test("benchmark evidence names the task, denominator and limitations", async ({
 }) => {
   await page.goto("/#evidence");
   const evidence = page.locator("#evidence");
-  await expect(evidence).toContainText("20 questions");
-  await expect(evidence).toContainText("13/20");
-  await expect(evidence).toContainText("5/20");
-  await expect(evidence).toContainText("single session");
-  await expect(
-    evidence.getByRole("link", { name: /methodology/i }),
-  ).toHaveAttribute("href", /benchmark/);
+  await expect(evidence.getByRole("link")).toHaveAttribute("href", /benchmark/);
   await expect(page.locator("#features")).toContainText("Available now");
   await expect(page.locator("#waitlist")).toContainText("Early access");
+  await evidence.getByRole("link").click();
+  const benchmark = page.locator("main");
+  await expect(benchmark).toContainText("Twenty authored questions");
+  await expect(benchmark).toContainText("13/20");
+  await expect(benchmark).toContainText("5/20");
+  await expect(benchmark).toContainText(/single session/i);
 });
 
 test("clipboard denial keeps the command readable and explains manual copying", async ({
@@ -46,7 +46,7 @@ test("clipboard denial keeps the command readable and explains manual copying", 
       value: { writeText: () => Promise.reject(new Error("denied")) },
     }),
   );
-  await page.goto("/");
+  await page.goto("/docs/install/");
   await page.getByRole("button", { name: "Copy installation command" }).click();
   await expect(page.locator(".copy-status")).toContainText(/select and copy/i);
   await expect(page.locator(".install-command")).toContainText(command);
@@ -91,7 +91,7 @@ test("signup preserves the email on error and provides a bounded success receipt
       await route.fulfill({ status: requests === 1 ? 503 : 200, json: {} });
     },
   );
-  await page.goto("/#waitlist");
+  await page.goto("/different/#waitlist");
   const email = page.getByRole("textbox", { name: "Email address" });
   await email.fill("reader@example.com");
   await page.getByRole("button", { name: "Join early access list" }).click();
@@ -190,7 +190,7 @@ test("pending signup is submitted once and its timeout offers recovery", async (
   await page.route("https://app.loops.so/api/newsletter-form/*", async () => {
     requests++;
   });
-  await page.goto("/#waitlist");
+  await page.goto("/different/#waitlist");
   await page
     .getByRole("textbox", { name: "Email address" })
     .fill("reader@example.com");

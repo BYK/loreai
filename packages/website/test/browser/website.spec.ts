@@ -144,6 +144,7 @@ test("keyboard theme controls and native installation copy button", async ({
       .first()
       .evaluate((summary) => getComputedStyle(summary).outlineStyle),
   ).toBe("solid");
+  await page.goto("/docs/install/");
   const copy = page.getByRole("button", { name: "Copy installation command" });
   await copy.focus();
   await page.keyboard.press("Enter");
@@ -226,7 +227,7 @@ test("content and native navigation remain available without JavaScript", async 
 test("newsletter input retains a visible keyboard focus ring", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("/different/#waitlist");
   const input = page.locator("#waitlist-email");
   await input.focus();
   expect(

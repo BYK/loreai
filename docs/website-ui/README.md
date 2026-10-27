@@ -5,8 +5,10 @@ self-hosted fonts. The first-use flow now leads with concrete product copy,
 installation and a clearly fictional memory example. Shared navigation and compact
 native theme menus give every section a consistent structure.
 
-The homepage keeps the adventurer camp and connects it to a real-app tour and a
-client-specific setup chooser. Campfire, scribe’s desk, and quest gate still select
+The homepage keeps the adventurer camp, one static app preview, a concise everyday
+workflow, practical questions, and an installation link. The full app tour lives
+at `/tour/`; the client-specific setup chooser lives in the installation guides.
+Benchmark details and the team signup stay on their dedicated pages. Campfire, scribe’s desk, and quest gate still select
 the native memory stages. The example now contrasts a durable webhook rule with an
 unrelated lunch plan; the relevance story is explicitly illustrative.
 
@@ -51,12 +53,17 @@ These informed direct selection, finite travel and immediate example text.
 Landmark picking uses the existing Three.js package’s
 [raycaster](https://threejs.org/manual/en/picking.html).
 
+The simplified homepage product section links to the full tour instead of placing
+its controls in the main page.
+
+![Homepage product preview](screenshots/home-product-light.png)
+
 ## Approved audit coverage
 
 | Idea | Delivered behavior |
 | --- | --- |
-| 1. Actual product | Sessions, Knowledge/source history, and model-activity captures from the built app |
-| 2. Agent selection | Six fixed setup choices, including separate Codex CLI/Desktop paths and Pi prerequisites |
+| 1. Actual product | One homepage Knowledge preview links to the full Sessions, Knowledge/source-history, and model-activity tour |
+| 2. Agent selection | Installation and first-session guides offer six fixed choices, separate Codex CLI/Desktop paths, and Pi prerequisites |
 | 3. First success | First-session guide checks a recorded message, with connection-to-verification links |
 | 4. Everyday use | Task guide for resuming, finding decisions, correcting knowledge, switching agents, and sharing |
 | 5. Camp relevance | The preserved camp follows the useful webhook rule and distinguishes unrelated conversation |
@@ -65,12 +72,12 @@ Landmark picking uses the existing Three.js package’s
 | 8. Search | Built Pagefind with root and prefixed-preview search-result navigation verified |
 | 9. Troubleshooting | Symptom-based checks and expected observations, plus safe issue-reporting guidance |
 | 10. Reference clarity | Curated task intros, friendly environment groups, cleaned source-comment artifacts, generator parity |
-| 11. Concrete benefits | Continue a bug fix, switch agents, or share a convention, each linked to a task |
+| 11. Concrete benefits | One concise homepage workflow links to the daily-use guide for resuming, switching agents, and sharing |
 | 12. Decision guide | Why Lore distinguishes instruction files, application memory infrastructure, agent frameworks, and existing-client memory |
 | 13. Data and costs | Local/provider/embedding/telemetry boundaries, opt-out, import preview, and estimated-versus-billed usage |
 | 14. Availability | Local/Git features and Folk Lore early access are explicit, including historical article notes |
 | 15. Concise copy | Redundant copy instructions and fictional-example disclaimers removed; setup prerequisites clarified |
-| 16. Hierarchy/navigation | Functional docs headings, compact setup choices, shared start/help/data links |
+| 16. Hierarchy/navigation | Short homepage overview; full tour, setup, evaluation, and team signup disclosed on destination pages; functional docs headings |
 | 17. Practical blog paths | Plain article kinds, takeaways, availability context, and specific next steps |
 | 18. Reproducible proof | Webhook conversation, illustrative knowledge diff, later task, and separate observable milestones |
 

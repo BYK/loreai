@@ -62,10 +62,11 @@ projection, landmark selection, finite animation and failure paths.
 
 ## Product journey and documentation
 
-The homepage keeps the adventurer camp and adds an actual-app tour, agent-specific
-connection commands, everyday use cases, and a reproducible example. `AgentSetup.astro`
-shares fixed definitions from `src/lib/agent-setup.ts` between the homepage and MDX
-guides. Native radios work without JavaScript; enhancement allowlists the `agent`
+The homepage keeps the adventurer camp and one actual-app preview, with a concise
+everyday workflow and installation entry. `/tour/` owns the full three-view app
+tour; benchmark details and team signup remain on their destination pages.
+`AgentSetup.astro` shares fixed definitions from `src/lib/agent-setup.ts` between
+the installation and first-session MDX guides. Native radios work without JavaScript; enhancement allowlists the `agent`
 query and enables click-only clipboard controls. Launch commands are tested against
 the owning gateway agent registry.
 

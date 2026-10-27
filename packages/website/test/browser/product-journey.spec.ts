@@ -4,6 +4,10 @@ test("setup chooser supplies the Desktop route and preserves it into the first-s
   page,
 }) => {
   await page.goto("/");
+  await page
+    .locator(".home-hero")
+    .getByRole("link", { name: "Install Lore", exact: true })
+    .click();
   const setup = page.locator(".agent-setup");
   await setup
     .getByRole("radio", { name: "Codex Desktop", exact: true })
@@ -70,6 +74,16 @@ test("product tour shows the actual app and an accessible next step", async ({
   page,
 }) => {
   await page.goto("/");
+  await expect(
+    page.locator(".agent-setup, .tour-picker, .signup, .page-sections"),
+  ).toHaveCount(0);
+  await page
+    .locator("#product")
+    .getByRole("link", { name: "Explore the app", exact: true })
+    .click();
+  await expect(page.locator("h1")).toContainText(
+    "See what your agent remembers",
+  );
   const tour = page.locator(".product-tour");
   await expect(tour).toContainText("Sample data");
   await tour

@@ -76,3 +76,26 @@ Files: Why Lore, header/footer, blog schema/list/article, historical post notes,
 - Two independent reviews found no outstanding website correctness/security issue after fixes.
 - Broader repository suite remains non-green: completed earlier run had 13,945 pass / 91 fail / 272 skipped, 16 untouched failing files, and two failed snapshots. No clean-base reproduction or full-suite pass is claimed.
 - The final step is committing and updating existing PR #2115 with current evidence; no merge or deployment is authorized.
+
+
+## Follow-up: reduce homepage density
+
+The user found the overall page too busy. Keep the approved camp and all delivered
+help, but use progressive disclosure: one static Knowledge preview links to `/tour/`,
+installation and first-session guides own agent choices, and benchmark/team signup
+links lead to their existing destinations. Remove the homepage section-navigation
+strip, repeated feature blocks, evaluation table, and signup form. Keep legacy
+fragment destinations and exercise the complete interactions on their owning pages.
+
+Follow-up verification: 254 browser tests passed with 6 conditional skips; 14
+website unit tests passed; Astro checked 39 files with zero diagnostics. Workspace
+typechecks, lint, formatting, generated-doc parity, and 37-page social metadata
+passed. The final prefixed build had no unprefixed HTML links and successful search
+and setup navigation at 320/1280px. Direct LinkChecker validation found 68 passing
+internal HTTP destinations and zero broken HTTP links, excluding external and
+non-HTTP discovery references; the standard link wrapper hit an existing Astro
+preview lock. Correctness and security reviews passed the incremental change after
+restoring the shared Why Lore navigation styles. Earlier broader root-test
+limitations remain unchanged. Site builds must run sequentially: a concurrent
+prefix build caused transient 404s in an earlier browser run; the isolated final
+run passed.
