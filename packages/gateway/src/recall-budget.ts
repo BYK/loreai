@@ -108,6 +108,15 @@ export class RecallChainBudget {
           );
   }
 
+  get requiresVerifiedContinuation(): boolean {
+    // Separately budgeted small principals keep the 128K floor. That numeric
+    // floor never exempts their follow-ups from identity, usage, or route caps.
+    return (
+      this.principalModel !== undefined ||
+      this.maxTokens > MAX_RECALL_CHAIN_TOKENS
+    );
+  }
+
   /** Record the sunk principal turn without charging it to the recall budget. */
   recordPrincipalUsage(
     usage: Partial<GatewayUsage> | undefined,
@@ -124,7 +133,7 @@ export class RecallChainBudget {
       validTokens(usage.cacheReadInputTokens) +
       validTokens(usage.cacheCreationInputTokens);
     // A routed provider can answer with a different, narrower model. Only
-    // matching principal identity can justify a budget above the old 128k cap.
+    // matching principal identity can separate its charge from recall spending.
     const matchesModel =
       completeUsage &&
       !!model.expectedModel &&
@@ -184,7 +193,7 @@ export class RecallChainBudget {
     usage: Partial<GatewayUsage> | undefined,
   ): RecallStopReason | undefined {
     if (!usage) {
-      if (this.maxTokens > MAX_RECALL_CHAIN_TOKENS) this.setStop("tokens");
+      if (this.requiresVerifiedContinuation) this.setStop("tokens");
       return this.stop;
     }
     this.inputTokens += validTokens(usage.inputTokens);
@@ -198,10 +207,10 @@ export class RecallChainBudget {
     return this.stop;
   }
 
-  /** Never use a principal's expanded budget for a different model or unmetered call. */
+  /** Never use a principal's separate budget for a different model or unmetered call. */
   continuationModelMatches(model: string | undefined): boolean {
     return (
-      this.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+      !this.requiresVerifiedContinuation ||
       (!!model && model === this.principalModel)
     );
   }
@@ -219,7 +228,7 @@ export class RecallChainBudget {
         validTokens(usage.cacheCreationInputTokens)
       : 0;
     if (
-      this.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+      this.requiresVerifiedContinuation &&
       (!this.continuationModelMatches(model) ||
         !completeUsage ||
         !Number.isSafeInteger(continuationTokens) ||
@@ -303,7 +312,7 @@ export class RecallChainBudget {
     return this.totalTokens() > this.maxTokens;
   }
 
-  /** A stopped chain may recover only when expanded calls were metered and fit their model. */
+  /** A stopped chain may recover only when separate calls were metered and fit their model. */
   canRecover(): boolean {
     return !this.invalidContinuation && !this.exceedsTokenCeiling();
   }
