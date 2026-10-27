@@ -1,0 +1,57 @@
+/* Controls shared by marketing, blog, and Starlight pages. */
+.theme-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--chrome);
+  font: 500 0.8rem/1.2 "DM Sans Variable", "DM Sans", sans-serif;
+}
+.theme-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.theme-toggle button:hover { color: var(--heading); }
+.theme-toggle button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--heading);
+  box-shadow: var(--shadow-soft);
+}
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+::selection { background: var(--accent-soft); color: var(--accent-soft-text); }
+@media (max-width: 1100px) {
+  .theme-label { display: none; }
+}
+@media (pointer: coarse), (max-width: 50rem) {
+  .theme-toggle button { min-width: 44px; min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .theme-toggle button[aria-pressed="true"] { outline: 2px solid Highlight; }
+}
+
+/* Logo images follow explicit themes and the no-script system fallback. */
+.logo .logo-img-light { display: block; }
+.logo .logo-img-dark { display: none; }
+:root[data-theme="dark"] .logo-img-light { display: none; }
+:root[data-theme="dark"] .logo-img-dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .logo-img-light { display: none; }
+  :root:not([data-theme]) .logo-img-dark { display: block; }
+}

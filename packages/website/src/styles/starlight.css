@@ -1,35 +1,26 @@
-:root {
-  --sl-font: "DM Sans", sans-serif;
-  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  --sl-color-accent-low: #c4ddc7;
-  --sl-color-accent: #3d6644;
-  --sl-color-accent-high: #8fba96;
-  /* Dark theme (default). Aligned with the marketing dark palette in
-   * public/theme.css so docs, blog, and home share one dark surface scale:
-   *   black  → page bg (--bg #0d1913)
-   *   gray-6 → nav / sidebar / code surface (near --nav-bg / --surface)
-   *   gray-1 → primary text (--text)
-   * Text greys descend gray-1..gray-6 from light text to dark surface. */
-  --sl-color-white: #f2f7ee;
-  --sl-color-gray-1: #e8f1e6;
-  --sl-color-gray-2: #c4ddc7;
-  --sl-color-gray-3: #9fbaa6;
-  --sl-color-gray-4: #5a7a63;
-  --sl-color-gray-5: #26402f;
-  --sl-color-gray-6: #14251b;
-  --sl-color-black: #0d1913;
-}
+@import "../../public/palette.css";
+@import "../../public/controls.css";
 
-html[data-theme="light"] {
-  --sl-color-white: #1a3320;
-  --sl-color-gray-1: #2a4d32;
-  --sl-color-gray-2: #3d6644;
-  --sl-color-gray-3: #5a8f63;
-  --sl-color-gray-4: #8fba96;
-  --sl-color-gray-5: #dfd5bb;
-  --sl-color-gray-6: #ede5d0;
-  --sl-color-gray-7: #f7f2e8;
-  --sl-color-black: #f7f2e8;
+:root {
+  --sl-font: "DM Sans Variable", "DM Sans", sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sl-color-accent-low: var(--accent-soft);
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: var(--accent-soft-text);
+  --sl-color-white: var(--heading);
+  --sl-color-gray-1: var(--text);
+  --sl-color-gray-2: var(--text);
+  --sl-color-gray-3: var(--muted);
+  --sl-color-gray-4: var(--palette-base-500);
+  --sl-color-gray-5: var(--line);
+  --sl-color-gray-6: var(--chrome);
+  --sl-color-gray-7: var(--surface);
+  --sl-color-black: var(--bg);
+  --sl-color-bg-nav: var(--surface);
+  --sl-color-bg-sidebar: var(--surface);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline: var(--line);
+  --sl-content-width: 48rem;
 }
 
 /* Logo (Logo.astro) — light/dark image swap and theme-aware text colors */
@@ -47,15 +38,6 @@ html[data-theme="light"] {
   display: block;
   max-height: 2.8rem;
 }
-.logo-img-light {
-  display: none;
-}
-:root[data-theme="light"] .logo-img-dark {
-  display: none;
-}
-:root[data-theme="light"] .logo-img-light {
-  display: block;
-}
 .logo-text {
   font-family: "Playfair Display", Georgia, serif;
   font-style: italic;
@@ -65,7 +47,7 @@ html[data-theme="light"] {
   color: var(--sl-color-white);
 }
 .logo-dot {
-  color: #8fba96;
+  color: var(--accent);
 }
 :root[data-theme="light"] .logo-text {
   /* Hardcoded dark green: this site inverts Starlight's color
@@ -73,10 +55,10 @@ html[data-theme="light"] {
      the foreground text. Without this override the logo would be
      cream on cream on the docs page (invisible except for the
      dot). Matches the marketing-page light-theme logo. */
-  color: #1a3320;
+  color: var(--heading);
 }
 :root[data-theme="light"] .logo-dot {
-  color: #3d6644;
+  color: var(--accent);
 }
 
 .hero h1,
@@ -100,4 +82,19 @@ html[data-theme="light"] {
   display: inline-block;
   max-width: 100%;
   height: auto;
+}
+
+/* Quiet app-like navigation and a comfortable, bounded reading column. */
+.sidebar-content a { border-radius: var(--radius-control); }
+.sidebar-content a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-soft-text); }
+.sl-markdown-content { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }
+.sl-markdown-content :is(h1, h2, h3, h4) { color: var(--heading); }
+.pagination-links a { border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-soft); }
+.right-sidebar-panel a[aria-current="true"] { color: var(--accent); }
+@media (max-width: 50rem), (pointer: coarse) {
+  .sidebar-content a { min-height: 44px; display: flex; align-items: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

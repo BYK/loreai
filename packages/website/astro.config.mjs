@@ -65,6 +65,8 @@ export default defineConfig({
       title: "Lore",
       components: {
         Header: "./src/components/SiteHeader.astro",
+        ThemeProvider: "./src/components/ThemeProvider.astro",
+        ThemeSelect: "./src/components/ThemeToggle.astro",
         MobileMenuFooter: "./src/components/MobileMenuFooter.astro",
       },
       // No `logo` config — SiteHeader.astro renders our <Logo> component

@@ -1,152 +1,44 @@
-/* Lore.AI shared theme — used by index.html, different.html, etc. */
+@import url("./palette.css");
+@import url("./controls.css");
 
+/* Website roles mapped to the local app's olive / amber design language. */
 :root {
-  color-scheme: light;
-
-  /* Raw brand palette. Fixed across themes — literal-cream / dark-block /
-   * logo / SVG uses rely on these staying put. Theme-dependent rules must
-   * use the semantic tokens below instead of these directly. */
-  --c0: #f7f2e8;
-  --c1: #ede5d0;
-  --c2: #dfd5bb;
-  --g0: #1a3320;
-  --g1: #2a4d32;
-  --g2: #3d6644;
-  --g3: #5a8f63;
-  --g4: #8fba96;
-  --g5: #c4ddc7;
-  --g6: #e8f2e9;
-  --ink: #1a2e1b;
-  --mid: #4a5f4c;
-  --serif: 'Playfair Display', Georgia, serif;
-  --sans: 'DM Sans', sans-serif;
+  --serif: "Playfair Display", Georgia, serif;
+  --sans: "DM Sans Variable", "DM Sans", sans-serif;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
-
-  /* Semantic tokens — light values alias the raw palette 1:1, so light
-   * mode is visually unchanged. Dark values are defined below. */
-  --bg: var(--c0);
-  --bg-alt: var(--c1);
-  --surface: var(--c0);
-  --surface-alt: var(--c1);
-  --border: var(--c2);
-  --input-bg: var(--c0);
-
-  --text: var(--ink);
-  --text-muted: var(--mid);
-  --heading: var(--g0);
-  --heading-accent: var(--g2);
-  --eyebrow: var(--g3);
-
-  --link: var(--g2);
-  --link-border: var(--g4);
-  --link-hover: var(--g0);
-
-  /* Deep emphasis green — headline stats, "Lore" comparison cells, CTA
-   * vision line, blog links/blockquotes. Light value is --g1 (one step
-   * darker than the --g2 accent) to preserve the original design exactly. */
-  --emphasis: var(--g1);
-
-  --highlight-bg: var(--g6);
-  --highlight-border: var(--g5);
-  --highlight-text: var(--g2);
-
-  /* Dark blocks that keep LIGHT text in both themes (nav, footer, ticker,
-   * filled buttons, code blocks, install block). */
-  --nav-bg: var(--ink);
-  --inverse-bg: var(--g0);
-  --inverse-bg-hover: var(--g1);
-  --inverse-text: var(--c0);
-  --inverse-text-dim: var(--g5);
-
-  --error: #8b3a3a;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-
-    --bg: #0d1913;
-    --bg-alt: #101f17;
-    --surface: #14251b;
-    --surface-alt: #1a3124;
-    --border: #26402f;
-    --input-bg: #14251b;
-
-    --text: #e8f1e6;
-    --text-muted: #9fbaa6;
-    --heading: #f2f7ee;
-    --heading-accent: #9ad3a4;
-    --eyebrow: #79ab84;
-
-    --link: #a6d6ae;
-    --link-border: #4a7a55;
-    --link-hover: #dcecdd;
-
-    --emphasis: #9ad3a4;
-
-    --highlight-bg: #172c20;
-    --highlight-border: #2a4634;
-    --highlight-text: #bfe0c4;
-
-    --nav-bg: #0a140e;
-    --inverse-bg: #1e3a29;
-    --inverse-bg-hover: #26492f;
-    --inverse-text: #f2f7ee;
-    --inverse-text-dim: #c4ddc7;
-
-    --error: #e39393;
-
-    /* Remap raw accent vars so inline style="" accents in .astro pages
-     * adapt with no HTML changes. Safe because every *surface* rule below
-     * has been routed onto the semantic tokens above — these four raw vars
-     * now serve only small text/accent uses (inline styles, cursor dot,
-     * ticker diamond). --g4 stays put: its light-green already reads fine
-     * on the dark canvas. */
-    --mid: #9fbaa6;
-    --g1: #8fc79a;
-    --g2: #a6d6ae;
-    --g3: #79ab84;
-  }
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --bg: #0d1913;
-  --bg-alt: #101f17;
-  --surface: #14251b;
-  --surface-alt: #1a3124;
-  --border: #26402f;
-  --input-bg: #14251b;
-
-  --text: #e8f1e6;
-  --text-muted: #9fbaa6;
-  --heading: #f2f7ee;
-  --heading-accent: #9ad3a4;
-  --eyebrow: #79ab84;
-
-  --link: #a6d6ae;
-  --link-border: #4a7a55;
-  --link-hover: #dcecdd;
-
-  --emphasis: #9ad3a4;
-
-  --highlight-bg: #172c20;
-  --highlight-border: #2a4634;
-  --highlight-text: #bfe0c4;
-
-  --nav-bg: #0a140e;
-  --inverse-bg: #1e3a29;
-  --inverse-bg-hover: #26492f;
-  --inverse-text: #f2f7ee;
-  --inverse-text-dim: #c4ddc7;
-
-  --error: #e39393;
-
-  --mid: #9fbaa6;
-  --g1: #8fc79a;
-  --g2: #a6d6ae;
-  --g3: #79ab84;
+  --bg-alt: var(--bg);
+  --surface-alt: var(--chrome);
+  --border: var(--line);
+  --input-bg: var(--surface);
+  --text-muted: var(--muted);
+  --heading-accent: var(--accent);
+  --eyebrow: var(--muted);
+  --link: var(--accent);
+  --link-border: var(--accent);
+  --link-hover: var(--accent-hover);
+  --emphasis: var(--text);
+  --highlight-bg: var(--accent-soft);
+  --highlight-border: var(--line);
+  --highlight-text: var(--accent-soft-text);
+  --nav-bg: var(--surface);
+  --inverse-bg: var(--accent);
+  --inverse-bg-hover: var(--accent-hover);
+  --inverse-text: var(--accent-contrast);
+  --inverse-text-dim: var(--accent-contrast);
+  --error: var(--danger);
+  /* Legacy inline accents; illustrative SVGs retain their original colours. */
+  --c0: var(--palette-base-50);
+  --c1: var(--palette-base-100);
+  --c2: var(--line);
+  --ink: var(--palette-base-950);
+  --mid: var(--muted);
+  --g0: var(--heading);
+  --g1: var(--text);
+  --g2: var(--accent);
+  --g3: var(--muted);
+  --g4: var(--accent);
+  --g5: var(--palette-base-200);
+  --g6: var(--accent-soft);
 }
 
 *,
@@ -165,40 +57,13 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
-  font-weight: 300;
+  font-weight: 400;
   font-size: 1.08rem;
   line-height: 1.75;
   overflow-x: hidden;
-  cursor: none;
+  cursor: auto;
 }
 
-.cursor {
-  position: fixed;
-  width: 8px;
-  height: 8px;
-  background: var(--link);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 9999;
-  transform: translate(-50%, -50%);
-  transition: width .3s var(--ease), height .3s var(--ease), background .3s;
-}
-
-.cursor.expand {
-  width: 36px;
-  height: 36px;
-  background: transparent;
-  border: 1px solid var(--eyebrow);
-}
-
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: url("/grain.svg");
-  pointer-events: none;
-  z-index: 0;
-}
 
 a {
   color: inherit;
@@ -217,8 +82,8 @@ a {
   justify-content: space-between;
   padding: .45rem 3rem;
   background: var(--nav-bg);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  color: var(--inverse-text);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
 }
 
 .nav-left {
@@ -229,21 +94,21 @@ a {
 .nav-right {
   display: flex;
   align-items: center;
-  gap: 2.4rem;
+  gap: 1rem;
 }
 
 .logo {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  color: var(--c0);
+  color: var(--heading);
   text-decoration: none;
   line-height: 1;
   transition: color 0.3s ease;
 }
 
 .logo:hover {
-  color: var(--g5);
+  color: var(--accent);
 }
 
 .logo-img {
@@ -254,16 +119,6 @@ a {
 
 /* When the Logo component is rendered with theme="auto", it emits two
  * <img> elements and CSS swaps between them based on [data-theme]. */
-.logo-img-light {
-  display: none;
-}
-:root[data-theme="light"] .logo-img-dark {
-  display: none;
-}
-:root[data-theme="light"] .logo-img-light {
-  display: block;
-}
-
 .logo-text {
   font-family: var(--serif);
   font-style: italic;
@@ -279,7 +134,7 @@ a.logo .logo-text {
 }
 
 .logo-dot {
-  color: var(--g5);
+  color: var(--accent);
 }
 
 :root[data-theme="light"] .logo-text {
@@ -291,11 +146,11 @@ a.logo .logo-text {
 
 .nav-links {
   display: flex;
-  gap: 2.2rem;
+  gap: 1.25rem;
   list-style: none;
   font-size: 1rem;
   font-family: var(--sans);
-  color: rgba(247, 242, 232, 0.8);
+  color: var(--muted);
   font-weight: 400;
 }
 
@@ -304,7 +159,7 @@ a.logo .logo-text {
 }
 
 .nav-links a:hover {
-  color: var(--inverse-text);
+  color: var(--accent);
 }
 
 .nav-socials {
@@ -319,16 +174,16 @@ a.logo .logo-text {
   justify-content: center;
   width: 2.25rem;
   height: 2.25rem;
-  border: 1px solid rgba(196, 221, 199, .22);
+  border: 1px solid var(--line);
   border-radius: 50%;
   color: inherit;
   transition: background .25s, border-color .25s, color .25s;
 }
 
 .social-link:hover {
-  background: rgba(247, 242, 232, .08);
-  border-color: rgba(196, 221, 199, .5);
-  color: var(--inverse-text);
+  background: var(--chrome);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .social-link svg {
@@ -338,27 +193,20 @@ a.logo .logo-text {
   display: block;
 }
 
-/* "Get Started" CTA pill. It sits on the always-dark nav bar (--nav-bg,
- * dark in both themes), so it is intentionally a cream pill with dark ink
- * text in BOTH themes — a constant high-contrast accent, not a
- * theme-switching surface. Raw --c0/--ink/--g5 are deliberate here (same
- * rationale as the .logo rules above); routing them through --bg/--text
- * would make it a dark pill on a dark bar. */
+/* Filled actions use the app's accent / contrast pair in both themes. */
 .nav-btn {
-  font-size: 1rem;
-  font-family: var(--sans);
-  font-weight: 400;
-  padding: .6rem 1.6rem;
-  background: var(--c0);
-  color: var(--ink);
-  border-radius: 3px;
-  transition: background .3s, color .3s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: .5rem 1rem;
+  border-radius: var(--radius-control);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font: 500 .875rem/1.4 var(--sans);
+  white-space: nowrap;
 }
-
-.nav-btn:hover {
-  background: var(--g5);
-  color: var(--ink);
-}
+.nav-btn:hover { background: var(--accent-hover); color: var(--accent-contrast); }
 
 /* HERO */
 .hero {
@@ -453,7 +301,7 @@ h1 em::after {
 .hero-install { margin-bottom: 2rem; }
 .install-block {
   display: inline-flex; align-items: center; gap: 1rem;
-  background: var(--inverse-bg); border-radius: 4px; padding: .9rem 1.4rem;
+  background: var(--inverse-bg); border-radius: var(--radius-control); padding: .9rem 1.4rem;
   cursor: pointer; position: relative; transition: background .2s;
 }
 .install-block:hover { background: var(--inverse-bg-hover); }
@@ -472,7 +320,7 @@ h1 em::after {
   margin-top: .7rem; font-size: .78rem; color: var(--text-muted);
 }
 .install-alt code {
-  font-size: .78rem; background: var(--highlight-bg); padding: .15em .45em; border-radius: 3px;
+  font-size: .78rem; background: var(--highlight-bg); padding: .15em .45em; border-radius: var(--radius-control);
 }
 
 .hero-actions {
@@ -504,7 +352,7 @@ h1 em::after {
   font-size: .78rem;
   letter-spacing: .12em;
   text-transform: uppercase;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   transition: background .3s, transform .2s var(--ease);
 }
 
@@ -606,7 +454,7 @@ h1 em::after {
   position: absolute;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-control);
   padding: .28rem .62rem;
   font-size: .62rem;
   letter-spacing: .07em;
@@ -634,7 +482,7 @@ h1 em::after {
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--radius-control);
   overflow: hidden;
   margin-top: 1rem;
 }
@@ -745,7 +593,7 @@ h1 em::after {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   overflow: hidden;
 }
 
@@ -808,7 +656,7 @@ h1 em::after {
 .bc {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   padding: 2.5rem;
   overflow: hidden;
   position: relative;
@@ -857,7 +705,7 @@ h1 em::after {
 .code-block {
   margin-top: 1.2rem;
   background: var(--inverse-bg);
-  border-radius: 3px;
+  border-radius: var(--radius-control);
   padding: 1.5rem;
 }
 
@@ -881,7 +729,7 @@ h1 em::after {
   font-size: .85em;
   background: var(--highlight-bg);
   padding: .15em .4em;
-  border-radius: 3px;
+  border-radius: var(--radius-control);
 }
 
 /* Compact hero variant (used by different.html) */
@@ -898,7 +746,7 @@ h1 em::after {
   max-width: 1100px;
   margin: 0 auto;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   overflow: hidden;
   background: var(--surface);
 }
@@ -1080,8 +928,7 @@ h1 em::after {
   padding: .85rem 1.3rem;
   background: var(--input-bg);
   border: 1px solid var(--border);
-  border-radius: 2px;
-  outline: none;
+  border-radius: var(--radius-control);
 }
 
 .cta-submit {
@@ -1089,7 +936,7 @@ h1 em::after {
   background: var(--inverse-bg);
   color: var(--inverse-text);
   border: none;
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: .1em;
@@ -1129,7 +976,7 @@ h1 em::after {
   padding: .6rem 1.6rem;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 2px;
+  border-radius: var(--radius-control);
   color: var(--heading);
   cursor: pointer;
   font-size: .82rem;
@@ -1142,21 +989,22 @@ h1 em::after {
 
 /* FOOTER */
 footer {
-  background: var(--inverse-bg);
-  color: var(--inverse-text-dim);
+  background: var(--surface);
+  color: var(--muted);
+  border-top: 1px solid var(--line);
   padding: 4rem 3rem 2rem;
   text-align: center;
 }
 
 .foot-bottom {
   padding-top: 1.8rem;
-  border-top: 1px solid rgba(196, 221, 199, .1);
+  border-top: 1px solid var(--line);
 }
 
-/* REVEAL — transition only on .in to prevent 1→0 fade-out animation */
-.sr {
-  opacity: 0;
-  transform: translateY(20px);
+/* Content stays readable with scripts blocked or reduced motion enabled. */
+.sr { opacity: 1; }
+@media (prefers-reduced-motion: no-preference) {
+  .reveal-ready .sr:not(.in) { opacity: 0; transform: translateY(20px); }
 }
 
 .sr.in {
@@ -1217,7 +1065,6 @@ footer {
 
 @media(pointer: coarse), (max-width: 768px) {
   body { cursor: auto; }
-  .cursor { display: none; }
 }
 
 /* Mobile navigation (hamburger) for the marketing pages.
@@ -1233,8 +1080,8 @@ footer {
   width: 2.6rem;
   height: 2.6rem;
   padding: 0 .55rem;
-  border: 1px solid rgba(196, 221, 199, .28);
-  border-radius: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
   cursor: pointer;
   box-sizing: border-box;
 }
@@ -1243,8 +1090,8 @@ footer {
   display: block;
   height: 2px;
   width: 100%;
-  background: var(--c0);
-  border-radius: 2px;
+  background: var(--text);
+  border-radius: var(--radius-control);
   transition: transform .25s var(--ease), opacity .2s ease;
 }
 .nav-mobile[open] .nav-burger span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
@@ -1260,10 +1107,10 @@ footer {
   right: 0;
   min-width: 220px;
   padding: .7rem;
-  background: var(--ink);
-  border: 1px solid rgba(255, 255, 255, .08);
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, .38);
+  box-shadow: var(--shadow-lifted);
 }
 .nav-mobile-panel ul {
   list-style: none;
@@ -1277,10 +1124,10 @@ footer {
   padding: .6rem .5rem;
   font-family: var(--sans);
   font-size: 1rem;
-  color: rgba(247, 242, 232, .85);
+  color: var(--text);
   transition: color .2s ease;
 }
-.nav-mobile-panel li a:hover { color: var(--c0); }
+.nav-mobile-panel li a:hover { color: var(--accent); background: var(--chrome); }
 .nav-mobile-cta {
   margin-top: .5rem;
   text-align: center;
@@ -1294,4 +1141,51 @@ footer {
   .nav-right > .nav-socials,
   .nav-right > .nav-btn { display: none; }
   .nav-right { gap: 1rem; }
+}
+
+/* Shared app-like surfaces, reading rhythm, and input affordances. */
+.bc { border-radius: var(--radius-card); box-shadow: var(--shadow-soft); }
+.steps, .hero-stats, .cmp-wrap { border-radius: var(--radius-card); }
+.btn-fill, .btn-ghost, .cta-submit, .cta-back, .cta-input { min-height: 44px; font: 500 .9375rem/1.5 var(--sans); }
+.cta-submit, .cta-back { text-transform: none; letter-spacing: 0; }
+.install-block { font: inherit; text-align: start; }
+.install-block code { overflow-wrap: anywhere; }
+.top-nav .logo-img { max-height: 40px; max-width: 40px; }
+.top-nav a.logo .logo-text { font-size: 1.5rem; }
+.top-nav { min-height: 64px; padding-inline: clamp(1rem, 3vw, 3rem); }
+.nav-socials { display: none; }
+html { scroll-padding-top: 6rem; }
+@media (max-width: 1250px) {
+  .nav-links { gap: .8rem; font-size: .875rem; }
+}
+@media (max-width: 1050px) {
+  .nav-links, .nav-right > .nav-btn { display: none; }
+  .nav-mobile { display: block; position: relative; }
+}
+@media (max-width: 50rem), (pointer: coarse) {
+  .nav-burger, .social-link { min-height: 44px; min-width: 44px; }
+  .nav-mobile-panel li a { min-height: 44px; }
+  .nav-right { gap: .5rem; }
+  .top-nav { padding: .5rem .75rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Code and the benchmark ticker keep a quiet dark surface, distinct from actions. */
+.install-block, .code-block, .ticker { background: var(--palette-base-900); border: 1px solid var(--palette-base-700); }
+.install-block:hover { background: var(--palette-base-800); }
+.install-block code, .code-block code, .ti { color: var(--palette-base-100); }
+.install-prompt, .code-block .ck { color: var(--palette-base-300); }
+.install-copy, .code-block .cv, .td { color: var(--palette-accent-300); }
+.hero h1 { font-size: clamp(2.6rem, 4.5vw, 4.75rem); }
+@media (max-width: 380px) {
+  .top-nav .logo-text, .blog-nav .logo-text { display: none; }
+}
+
+.footer-links { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+.footer-links a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .mg-edge { stroke-dashoffset: 0; }
 }

@@ -17,8 +17,9 @@
   justify-content: space-between;
   gap: 2rem;
   padding: .6rem 3rem;
-  background: var(--nav-bg);
-  color: var(--inverse-text);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
 }
 
 .blog-brand img {
@@ -67,15 +68,16 @@
 
 .blog-list {
   display: grid;
-  gap: 1px;
+  gap: 1rem;
   padding-bottom: 6rem;
-  border: 1px solid var(--border);
-  background: var(--border);
 }
 
 .blog-card {
   background: var(--surface);
   padding: 2rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-soft);
 }
 
 .blog-card time,
@@ -265,40 +267,6 @@
   font-size: .92em;
 }
 
-/* Astro 7.1.3's markdown.shikiConfig with themes: { light, dark } inlines
-   the dark palette as CSS variables on every token but does not emit a
-   per-theme <style> block for plain .md files (Starlight's Expressive
-   Code plugin does that, but the blog uses Astro's built-in markdown
-   processor, not Starlight). So we override the per-token CSS variables
-   in light mode to swap the palette to github-light, matching the
-   blog's light theme and the docs' light rendering.
-   Same per-token mapping as Shiki's github-light theme:
-     #82AAFF  → #0550AE  (keywords/commands - dark blue → dark blue, darker for contrast)
-     #D6DEEB  → #24292F  (default text - light grey → near-black)
-     #ECC48D  → #0A3069  (strings - warm tan → dark blue, conventional in light themes)
-     #7FDBCA  → #116329  (operators - cyan → green)
-   Background: github-light is essentially white #ffffff with a 1px
-   grey border, so the frame just needs the border + a light default. */
-@media (prefers-color-scheme: light) {
-  .blog-prose pre {
-    background: #ffffff;
-    color: #24292f;
-    border: 1px solid #d0d7de;
-  }
-  .blog-prose pre span[style*="--0:#82AAFF"] {
-    color: #0550ae;
-  }
-  .blog-prose pre span[style*="--0:#D6DEEB"] {
-    color: #24292f;
-  }
-  .blog-prose pre span[style*="--0:#ECC48D"] {
-    color: #0a3069;
-  }
-  .blog-prose pre span[style*="--0:#7FDBCA"] {
-    color: #116329;
-  }
-}
-
 @media (max-width: 780px) {
   .blog-nav {
     align-items: flex-start;
@@ -309,4 +277,21 @@
   .blog-nav nav {
     flex-wrap: wrap;
   }
+}
+
+.blog-nav { flex-wrap: wrap; gap: 1rem; }
+.blog-nav nav { flex-wrap: wrap; gap: .25rem 1rem; margin-inline-start: auto; }
+.blog-nav nav a { display: inline-flex; align-items: center; min-height: 44px; color: var(--muted); }
+.blog-nav nav a:hover { color: var(--accent); }
+.blog-nav .logo { color: var(--heading); }
+.blog-nav a.logo .logo-text { font-size: 1.5rem; }
+.blog-prose a { color: var(--accent); }
+@media (max-width: 780px) {
+  .blog-nav { flex-direction: row; align-items: center; gap: .5rem; }
+  .blog-nav nav { order: 3; width: 100%; margin: 0; justify-content: space-between; }
+  .blog-nav .theme-toggle { margin-inline-start: auto; }
+  .blog-hero { padding-top: 3rem; }
+  .blog-card { padding: 1.25rem; }
+  .blog-post { padding-top: 2rem; }
+  .blog-prose table { display: block; overflow-x: auto; }
 }

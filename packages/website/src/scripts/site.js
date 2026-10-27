@@ -1,39 +1,25 @@
-const cursor = document.getElementById("cur");
-
-if (cursor) {
-  document.addEventListener("mousemove", (event) => {
-    cursor.style.left = `${event.clientX}px`;
-    cursor.style.top = `${event.clientY}px`;
-  });
-
-  document.querySelectorAll("a,button").forEach((element) => {
-    element.addEventListener("mouseenter", () =>
-      cursor.classList.add("expand"),
-    );
-    element.addEventListener("mouseleave", () =>
-      cursor.classList.remove("expand"),
-    );
-  });
+if (
+  !window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
+  "IntersectionObserver" in window
+) {
+  document.documentElement.classList.add("reveal-ready");
 }
 
-const revealObserver = new IntersectionObserver(
-  (entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add("in");
-      }
-    });
-  },
-  { threshold: 0.1 },
-);
-
-document.querySelectorAll(".sr").forEach((element) => {
-  // Mark elements already in the viewport immediately to avoid flash of invisible content
-  if (element.getBoundingClientRect().top < window.innerHeight) {
-    element.classList.add("in");
-  }
-  revealObserver.observe(element);
-});
+if ("IntersectionObserver" in window) {
+  const revealObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) entry.target.classList.add("in");
+      });
+    },
+    { threshold: 0.1 },
+  );
+  document.querySelectorAll(".sr").forEach((element) => {
+    if (element.getBoundingClientRect().top < window.innerHeight)
+      element.classList.add("in");
+    revealObserver.observe(element);
+  });
+}
 
 void (async () => {
   const versionBadge = document.getElementById("version-badge");
@@ -152,4 +138,17 @@ form?.addEventListener("submit", async (event) => {
     button.textContent = "Join Waitlist";
     button.disabled = false;
   }
+});
+
+const mobileNav = document.querySelector(".nav-mobile");
+mobileNav?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && mobileNav.open) {
+    mobileNav.open = false;
+    mobileNav.querySelector("summary")?.focus();
+  }
+});
+mobileNav?.querySelectorAll("a").forEach((link) => {
+  link.addEventListener("click", () => {
+    mobileNav.open = false;
+  });
 });

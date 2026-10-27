@@ -1,0 +1,16 @@
+---
+const choices = [
+  { value: "auto", label: "System", icon: "◐" },
+  { value: "light", label: "Light", icon: "☀" },
+  { value: "dark", label: "Dark", icon: "☾" },
+];
+---
+
+<div class="theme-toggle" role="group" aria-label="Colour theme">
+  {choices.map(({ value, label, icon }) => (
+    <button type="button" data-theme-choice={value} aria-label={`${label} theme`} aria-pressed="false" title={`${label} theme`}>
+      <span aria-hidden="true">{icon}</span>
+      <span class="theme-label">{label}</span>
+    </button>
+  ))}
+</div>
