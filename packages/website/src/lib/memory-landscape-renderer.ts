@@ -7,10 +7,13 @@ import {
   landscapeView,
   bandAtHeight,
   terrainLevels,
+  pointOnTerrain,
+  refinementElevation,
+  refinementDetailCount,
   type MemoryPhase,
 } from "./memory-landscape";
 export interface LandscapeRenderer {
-  setPhase(phase: MemoryPhase): void;
+  setPhase(phase: MemoryPhase, animate?: boolean): void;
   setVisible(visible: boolean): void;
   dispose(): void;
 }
@@ -18,6 +21,7 @@ interface Events {
   select(phase: MemoryPhase): void;
   hover(phase: MemoryPhase | null): void;
   failure(): void;
+  refining(active: boolean): void;
 }
 export function mountLandscape(
   element: HTMLElement,
@@ -73,6 +77,9 @@ export function mountLandscape(
     renderer.forceContextLoss();
     canvas.remove();
     onReady(false);
+    delete element.dataset.refining;
+    delete element.dataset.detailCount;
+    events.refining(false);
     events.hover(null);
   }
   try {
@@ -116,8 +123,11 @@ export function mountLandscape(
     const materials: { material: THREE.MeshStandardMaterial; level: number }[] =
         [],
       tierMeshes: THREE.Mesh[] = [],
-      contourMaterials: { material: THREE.LineBasicMaterial; band: number }[] =
-        [];
+      contourMaterials: {
+        material: THREE.LineBasicMaterial;
+        band: number;
+        level: number;
+      }[] = [];
     for (const level of terrainLevels()) {
       const material = new THREE.MeshStandardMaterial({
         roughness: 0.89,
@@ -131,6 +141,7 @@ export function mountLandscape(
       contourMaterials.push({
         material: edgeMaterial,
         band: bandAtHeight(level.height),
+        level: level.height,
       });
       for (const loop of level.loops) {
         const shape = new THREE.Shape(
@@ -175,8 +186,38 @@ export function mountLandscape(
     shadow.position.y = -6;
     shadow.receiveShadow = true;
     scene.add(shadow);
+    const fragmentGeometry = new THREE.PlaneGeometry(5.4, 1.25);
+    fragmentGeometry.rotateX(-Math.PI / 2);
+    const fragments = Array.from({ length: 28 }, () => {
+      const mesh = new THREE.Mesh(
+        fragmentGeometry,
+        new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          toneMapped: false,
+          depthWrite: false,
+        }),
+      );
+      mesh.visible = false;
+      world.add(mesh);
+      return mesh;
+    });
+    const colors = {
+      low: new THREE.Color(),
+      mid: new THREE.Color(),
+      high: new THREE.Color(),
+      gold: new THREE.Color(),
+    };
     let phase = 0,
+      cursor = 0,
       hovered = -1;
+    let transition: {
+      from: number;
+      to: number;
+      started: number | null;
+      duration: number;
+    } | null = null;
     let orbit = 0,
       tilt = 0,
       targetOrbit = 0,
@@ -215,31 +256,58 @@ export function mountLandscape(
     function hover(next: number) {
       if (next === hovered) return;
       hovered = next;
-      palette();
+      paint();
+      schedule();
       events.hover(hovered < 0 ? null : PHASES[hovered]);
     }
     function palette() {
-      const low = color("--land-ivory", "#e4e7d5"),
-        mid = color("--land-sage", "#8eae83"),
-        high = color("--land-jade", "#37684b"),
-        gold = color("--land-brass", "#b28240");
+      colors.low.copy(color("--land-ivory", "#e4e7d5"));
+      colors.mid.copy(color("--land-sage", "#8eae83"));
+      colors.high.copy(color("--land-jade", "#37684b"));
+      colors.gold.copy(color("--land-brass", "#b28240"));
+      fragments.forEach((mesh) => mesh.material.color.copy(colors.gold));
+      paint();
+      schedule();
+    }
+    function paint() {
+      const { low, mid, high, gold } = colors;
       materials.forEach(({ material, level }) => {
         const t = level / 80,
-          band = bandAtHeight(level);
+          band = bandAtHeight(level),
+          weight = Math.max(0, 1 - Math.abs(band - cursor));
+        const selected = low.clone().lerp(high, 0.65 + t * 0.25);
         material.color
           .copy(low)
-          .lerp(
-            band === phase ? high : mid,
-            band === phase ? 0.65 + t * 0.25 : 0.18 + t * 0.3,
-          );
+          .lerp(mid, 0.18 + t * 0.3)
+          .lerp(selected, weight);
         if (band === hovered && band !== phase) material.color.lerp(gold, 0.16);
       });
-      contourMaterials.forEach(({ material, band }) => {
-        material.color.copy(high).multiplyScalar(0.66);
+      contourMaterials.forEach(({ material, band, level }) => {
+        const weight = Math.max(0, 1 - Math.abs(band - cursor));
+        const sweep = transition
+          ? Math.exp(-(((level - refinementElevation(cursor)) / 5) ** 2))
+          : 0;
+        material.color
+          .copy(high)
+          .multiplyScalar(0.66)
+          .lerp(gold, sweep * 0.75);
         material.opacity =
-          band === phase ? 0.3 : band === hovered ? 0.24 : 0.15;
+          0.15 +
+          weight * 0.15 +
+          sweep * 0.25 +
+          (band === hovered && band !== phase ? 0.06 : 0);
       });
-      schedule();
+    }
+    function finishTransition() {
+      transition = null;
+      cursor = phase;
+      fragments.forEach((mesh) => {
+        mesh.visible = false;
+      });
+      delete element.dataset.refining;
+      delete element.dataset.detailCount;
+      events.refining(false);
+      paint();
     }
     function stop() {
       cancelAnimationFrame(frame);
@@ -257,6 +325,7 @@ export function mountLandscape(
       pendingTap = false;
       targetX = targetY = 0;
       hover(-1);
+      finishTransition();
     }
     function fit() {
       if (disposed || lost) return;
@@ -271,7 +340,7 @@ export function mountLandscape(
       camera.updateProjectionMatrix();
       schedule();
     }
-    function render() {
+    function render(now: number) {
       frame = 0;
       if (disposed || lost || !visible || document.hidden) return;
       try {
@@ -282,6 +351,31 @@ export function mountLandscape(
         tilt += (targetTilt - tilt) * easing;
         world.rotation.y = REST_YAW + orbit + pointerX * 0.055;
         world.rotation.x = tilt + pointerY * 0.025;
+        if (transition) {
+          if (transition.started === null) transition.started = now;
+          const t = Math.min(
+              1,
+              (now - transition.started) / transition.duration,
+            ),
+            ease = t * t * (3 - 2 * t);
+          cursor = transition.from + (transition.to - transition.from) * ease;
+          const count = refinementDetailCount(cursor),
+            envelope = Math.sin(Math.PI * t) * 0.9;
+          element.dataset.detailCount = String(Math.ceil(count));
+          fragments.forEach((mesh, index) => {
+            mesh.material.opacity =
+              Math.min(1, Math.max(0, count - index)) * envelope;
+            mesh.visible = mesh.material.opacity > 0.01;
+            const angle = index * 2.3999632297 + cursor * 0.1;
+            mesh.position.set(
+              ...pointOnTerrain(refinementElevation(cursor), angle),
+            );
+            mesh.rotation.y = -angle;
+            mesh.scale.x = 1.4 - cursor * 0.35;
+          });
+          paint();
+          if (t === 1) finishTransition();
+        }
         world.updateMatrixWorld(true);
         renderer.render(scene, camera);
         if (!announced) {
@@ -289,11 +383,12 @@ export function mountLandscape(
           onReady(true);
         }
         if (
+          transition ||
           Math.abs(targetX - pointerX) +
             Math.abs(targetY - pointerY) +
             Math.abs(targetOrbit - orbit) +
             Math.abs(targetTilt - tilt) >
-          0.0015
+            0.0015
         )
           schedule();
       } catch {
@@ -305,11 +400,28 @@ export function mountLandscape(
       if (!frame && !disposed && !lost && visible && !document.hidden)
         frame = requestAnimationFrame(render);
     }
-    function setPhase(next: MemoryPhase) {
+    function setPhase(next: MemoryPhase, animate = true) {
       if (disposed) return;
       phase = PHASES.indexOf(next);
       element.dataset.selectedBand = next;
-      palette();
+      if (
+        animate &&
+        announced &&
+        visible &&
+        !lost &&
+        Math.abs(cursor - phase) > 0.001
+      ) {
+        transition = {
+          from: cursor,
+          to: phase,
+          started: null,
+          duration: Math.abs(cursor - phase) > 1 ? 1200 : 850,
+        };
+        element.dataset.refining = "true";
+        events.refining(true);
+      } else finishTransition();
+      paint();
+      schedule();
     }
     const raycaster = new THREE.Raycaster(),
       rayPointer = new THREE.Vector2();
@@ -468,7 +580,7 @@ export function mountLandscape(
     canvas.addEventListener("webglcontextrestored", contextRestored);
     fit();
     palette();
-    setPhase("conversation");
+    setPhase("conversation", false);
     return {
       setPhase,
       setVisible(next) {

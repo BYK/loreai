@@ -14,7 +14,8 @@ for (const root of document.querySelectorAll<HTMLElement>(
   let visible = false,
     loading = false,
     failed = false,
-    generation = 0;
+    generation = 0,
+    refining = false;
   const media = matchMedia("(prefers-reduced-motion: reduce)");
   const current = () =>
     (root.querySelector<HTMLInputElement>('input[name="memory-stage"]:checked')
@@ -39,13 +40,19 @@ for (const root of document.querySelectorAll<HTMLElement>(
   function hover(next: MemoryPhase | null) {
     if (next) element.dataset.targetPhase = next;
     else delete element.dataset.targetPhase;
-    help.textContent = next
-      ? {
-          conversation: "Lower layers · Conversation",
-          knowledge: "Middle layers · Distilled knowledge",
-          recall: "Upper layers · Relevant context",
-        }[next]
-      : "Click a lower, middle or upper layer to explore.";
+    help.textContent = refining
+      ? current() === "conversation"
+        ? "Returning to the conversation…"
+        : current() === "knowledge"
+          ? "Refining conversation into knowledge…"
+          : "Selecting context relevant to this task…"
+      : next
+        ? {
+            conversation: "Lower layers · Conversation",
+            knowledge: "Middle layers · Distilled knowledge",
+            recall: "Upper layers · Relevant context",
+          }[next]
+        : "Click a lower, middle or upper layer to explore.";
   }
   hover(null);
   root
@@ -96,6 +103,10 @@ for (const root of document.querySelectorAll<HTMLElement>(
       renderer = module.mountLandscape(element, ready, {
         select,
         hover,
+        refining(active) {
+          refining = active;
+          hover((element.dataset.targetPhase as MemoryPhase) ?? null);
+        },
         failure() {
           failed = true;
           renderer = null;
@@ -106,7 +117,7 @@ for (const root of document.querySelectorAll<HTMLElement>(
         failed = true;
         return;
       }
-      renderer.setPhase(current());
+      renderer.setPhase(current(), false);
       renderer.setVisible(true);
     } catch {
       failed = true;

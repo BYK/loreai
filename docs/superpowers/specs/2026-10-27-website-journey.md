@@ -90,3 +90,15 @@ Remove pins, floating peak labels and the inter-peak route. Show refinement in t
 example text, including an unrelated tangent that is absent from the selected
 stored knowledge. Describe relevance ranking and a context budget without claiming
 perfect filtering of every prompt or removal of recent raw conversation.
+
+## Animated refinement and a continuous terrain
+
+The user requested animated transitions that show conversation refining into relevant
+knowledge, and a different terrain shape. Replace the three-hill form with one
+asymmetric, terraced landform: broad lower contours taper into a single summit.
+On user selection, sweep the highlight between elevation bands and carry small
+abstract fragments upward; progressively fewer survive toward the summit. Fragments
+are illustrative and transient, not checkpoint markers or real record counts.
+No idle loop. Selection/content updates immediately; rapid selections retarget from
+the visible transition. Reduced motion is immediate. Hidden/offscreen states and
+context loss settle to the selected stage and release/cancel temporary motion.

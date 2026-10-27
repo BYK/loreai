@@ -12,14 +12,19 @@ installer/telemetry/uninstall content and old reference fragments remain reachab
 The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The homepage’s memory landscape uses elevation to explain refinement. Lower
 terraces represent the conversation, middle terraces distilled knowledge, and upper
 terraces context relevant to the current task. Clicking or tapping a terrace selects
-its native stage control and highlights the same elevation band across the hills;
+its native stage control and highlights the same elevation band across the landform;
 controls select the band in return. The example follows a webhook decision from a
 conversation containing an editor-theme tangent to a distilled fact and relevant
 context for adding retries. Other history stays searchable and recent conversation
 remains available. It illustrates selection within a context budget, without
 claiming perfect filtering. Peak markers, floating labels and checkpoint routes
-are removed. Dragging turns the terrain without changing the stage; it settles
-without idle animation.
+are removed. One asymmetric landform narrows from a broad base to a single summit.
+On selection, the band highlight sweeps between elevations while transient brass
+fragments climb and thin out. These are abstract details, not actual record counts.
+Rapid choices retarget the visible transition; hidden/offscreen/context-loss states
+settle immediately. Reduced motion uses the finished SVG state. Dragging turns the
+terrain without changing the stage; there is no idle animation. The camera fits the
+full drag and pointer-parallax envelope, including lower walls and bevels.
 
 The server-rendered SVG shares the terrain contours, camera and elevation bands
 with WebGL. Native controls remain usable without JavaScript; clicking the SVG

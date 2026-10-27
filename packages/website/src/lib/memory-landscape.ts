@@ -14,17 +14,33 @@ export const SVG_HEIGHT = 400;
 export function bandAtHeight(height: number): number {
   return height >= 50 ? 2 : height >= 25 ? 1 : 0;
 }
+const outlineScale = (angle: number) =>
+  1 + 0.09 * Math.sin(angle * 3) + 0.035 * Math.cos(angle * 2);
 export function terrainHeight(x: number, z: number): number {
-  return (
-    72 * Math.exp(-((x + 64) ** 2 / 3800 + (z + 8) ** 2 / 2400)) +
-    62 * Math.exp(-((x - 65) ** 2 / 3300 + (z + 30) ** 2 / 2200)) +
-    44 * Math.exp(-((x - 30) ** 2 / 1800 + (z - 60) ** 2 / 1600)) +
-    12 * Math.exp(-((x * x) / 15000 + (z * z) / 10000)) -
-    8 +
-    0.8 *
-      Math.sin(x * 0.065 + z * 0.04) *
-      Math.exp(-((x * x) / 24000 + (z * z) / 17000))
-  );
+  const u = (x + 18 + 0.16 * (z + 8)) / 108,
+    v = (z + 8) / 78;
+  const radius = Math.hypot(u, v) / outlineScale(Math.atan2(v, u));
+  return 94 * Math.exp(-1.8 * radius * radius) - 8;
+}
+export function pointOnTerrain(height: number, angle: number): Point3 {
+  const h = Math.max(0, Math.min(83.7, height));
+  const radius = Math.sqrt(-Math.log((h + 8) / 94) / 1.8) * outlineScale(angle);
+  const z = -8 + Math.sin(angle) * 78 * radius;
+  return [
+    -18 + Math.cos(angle) * 108 * radius - 0.16 * (z + 8),
+    Math.floor(h / TERRAIN_STEP) * TERRAIN_STEP + 1.5,
+    z,
+  ];
+}
+export function refinementElevation(position: number): number {
+  const p = Math.max(0, Math.min(2, position)),
+    index = Math.min(1, Math.floor(p));
+  const heights = [12.4, 37.2, 68.2];
+  return heights[index] + (heights[index + 1] - heights[index]) * (p - index);
+}
+export function refinementDetailCount(position: number): number {
+  const p = Math.max(0, Math.min(2, position));
+  return p <= 1 ? 28 - 16 * p : 12 - 8 * (p - 1);
 }
 export const TERRAIN_STEP = 3.1;
 let cachedLevels: readonly TerrainLevel[] | undefined;
@@ -191,10 +207,36 @@ export function landscapeView(): LandscapeView {
   });
   const px = projected.map((p) => p[0]),
     py = projected.map((p) => p[1]);
-  const halfHeight = Math.max(
+  let halfHeight = Math.max(
     (Math.max(...py) - Math.min(...py)) * 0.67,
     ((Math.max(...px) - Math.min(...px)) / (SVG_WIDTH / SVG_HEIGHT)) * 0.64,
   );
+  // Fit the entire drag/parallax envelope, with room for lower walls and bevels.
+  for (let yawStep = -4; yawStep <= 4; yawStep++)
+    for (let pitchStep = -2; pitchStep <= 2; pitchStep++) {
+      const yaw = REST_YAW + (yawStep * 0.475) / 4,
+        pitch = (pitchStep * 0.125) / 2;
+      const sy = Math.sin(yaw),
+        cy = Math.cos(yaw),
+        sx = Math.sin(pitch),
+        cx = Math.cos(pitch);
+      for (const [x, height, z] of points)
+        for (const y of [
+          height + 0.2,
+          height - (height === 0 ? 5.2 : TERRAIN_STEP - 0.22) - 0.2,
+        ]) {
+          const rz = -x * sy + z * cy;
+          const q = subtract(
+            [x * cy + z * sy, y * cx - rz * sx, y * sx + rz * cx],
+            focus,
+          );
+          halfHeight = Math.max(
+            halfHeight,
+            (Math.abs(dot(q, up)) + 1) * 1.04,
+            ((Math.abs(dot(q, right)) + 1) / (SVG_WIDTH / SVG_HEIGHT)) * 1.04,
+          );
+        }
+    }
   cachedView = { focus, right, up, forward, halfHeight };
   return cachedView;
 }
