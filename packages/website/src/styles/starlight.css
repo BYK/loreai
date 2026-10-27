@@ -64,8 +64,9 @@
 .hero h1,
 .sl-markdown-content h1,
 .sl-markdown-content h2 {
-  font-family: "Playfair Display", Georgia, serif;
-  font-weight: 400;
+  font-family: var(--sl-font);
+  font-weight: 600;
+  letter-spacing: -.025em;
 }
 
 /* Mermaid diagrams (architecture page). Center, contain, and let wide
@@ -105,7 +106,7 @@
 
 /* Task documentation uses the same functional typography as the local app. */
 :root { --sans:"DM Sans Variable","DM Sans",sans-serif;--serif:"Playfair Display",Georgia,serif; }
-.sl-markdown-content :is(h1,h2,h3) { font-family:var(--sans);font-weight:500;letter-spacing:-.015em; }
+.sl-markdown-content :is(h1,h2,h3) { font-family:var(--sans);font-weight:600;letter-spacing:-.015em; }
 .sl-markdown-content h2 { font-size:1.5rem;line-height:1.3;margin-top:2rem; }
 .sl-markdown-content h3 { font-size:1.125rem;line-height:1.4; }
 .sl-markdown-content { line-height:1.65; }
@@ -120,3 +121,6 @@
 
 /* Keep prose sibling margins out of the setup choice grid. */
 .sl-markdown-content .agent-setup .setup-picker > label { margin:0; }
+
+/* Document titles follow the local app’s functional heading style. */
+.content-panel h1 { font-family:var(--sl-font);font-weight:600;font-size:clamp(1.75rem,3vw,2.25rem);letter-spacing:-.025em;line-height:1.2; }

@@ -11,8 +11,11 @@ const shouldRenderSearch = config.pagefind || config.components.Search !== "@ast
 <script>import "../scripts/menus.js";</script>
 <style>
   .docs-site-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; height: 100%; }
-  .docs-site-header site-search { flex:1;min-width:0;max-width:14rem; }
-  .docs-site-header .primary-nav ul { gap:.25rem .875rem; }
+  .docs-primary { flex-shrink:0; }
+  .docs-site-header :global(button[data-open-modal]) { flex:1;min-width:44px;max-width:14rem; }
+  .docs-site-header :global(.primary-nav ul) { flex-wrap:nowrap;gap:.25rem; }
+  .docs-site-header :global(.primary-nav a) { padding-inline:.5rem; }
+  @media (max-width:58rem) { .docs-site-header :global(button[data-open-modal] > kbd) { display:none; } }
   .docs-controls { display: flex; align-items: center; gap: .75rem; margin-inline-start: auto; }
   @media (max-width: 50rem) { .docs-primary { display: none; } }
 </style>

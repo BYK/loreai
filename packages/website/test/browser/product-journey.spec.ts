@@ -175,10 +175,19 @@ test("documentation copy actions recover from a denied clipboard", async ({
 test("documentation header search and navigation never overlap at intermediate widths", async ({
   page,
 }) => {
-  for (const width of [900, 1024, 1280]) {
+  for (const width of [820, 834, 900, 1024, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/docs/install/");
     const header = page.locator(".docs-site-header");
+    const headerBox = await page.locator("header").first().boundingBox();
+    for (const control of await header.locator("a, button, summary").all()) {
+      if (!(await control.isVisible())) continue;
+      const box = await control.boundingBox();
+      expect(box!.y).toBeGreaterThanOrEqual(headerBox!.y - 1);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(
+        headerBox!.y + headerBox!.height + 1,
+      );
+    }
     const controls = header.locator(
       ".logo, .docs-primary, site-search, .docs-controls",
     );

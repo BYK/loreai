@@ -60,6 +60,14 @@ The renderer supports touch scrolling, interrupted travel, theme changes, contex
 restoration and resource disposal. Geometry and browser tests cover framing,
 projection, landmark selection, finite animation and failure paths.
 
+## Visual language
+
+Public pages, articles, and docs use the local app’s functional DM Sans headings,
+neutral title colors, olive surfaces, amber actions, subtle borders, and 6–14px
+control/pane radii. Playfair is reserved for the wordmark. The camp retains its
+approved geometry and native controls inside an app-like surface; styling must not
+change the art’s aspect ratio or picking coordinates.
+
 ## Product journey and documentation
 
 The homepage keeps the adventurer camp and one actual-app preview, with a concise

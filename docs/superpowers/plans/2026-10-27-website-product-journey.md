@@ -99,3 +99,24 @@ restoring the shared Why Lore navigation styles. Earlier broader root-test
 limitations remain unchanged. Site builds must run sequentially: a concurrent
 prefix build caused transient 404s in an earlier browser run; the isolated final
 run passed.
+
+
+## Follow-up: align the website with the local app
+
+The user identified a visual mismatch with the app UI from the earlier PR.
+The palette already matches the owning app CSS, but oversized serif headings and
+editorial spacing made the website feel unrelated. Use the app’s functional DM
+Sans headings and neutral text hierarchy across public pages, articles, and docs;
+keep serif for the wordmark. Frame the camp and product preview with the app’s
+existing surface, line, and radius roles. Use compact navigation selection fills
+and sentence-case labels. Preserve the short homepage, camp geometry, accessible
+controls, existing content, and all setup/help destinations.
+
+Verification for app-style alignment: 254 browser tests passed with 6 conditional
+skips, including the expanded tablet header containment check. The header defect
+reproduced before the fix; the final search-button constraint and non-wrapping nav
+fit the outer header at 820/834/900/1024/1280px. All 14 website unit tests passed.
+Workspace typechecks, lint, formatting, Astro checks, and internal HTTP link
+validation passed. Correctness/security reviews found no remaining scoped blocker.
+No app production source, camp scene/controller, dependencies, or data flow changed;
+prior broader root-suite limitations remain documented.

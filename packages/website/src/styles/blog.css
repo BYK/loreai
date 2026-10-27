@@ -13,27 +13,27 @@
 .blog-back { display: inline-flex; align-items: center; min-height: 44px; }
 .blog-post {
   width: min(720px, calc(100% - 3rem));
-  padding: 5rem 0 7rem;
+  padding: 2.5rem 0 4rem;
 }
 
 .blog-post header {
-  margin: 2rem 0 3.5rem;
+  margin: 1.5rem 0 2rem;
 }
 
 .blog-post h1 {
-  font-size: clamp(2.4rem, 5vw, 4rem);
-  line-height: 1.08;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.15;
 }
 
 .blog-post .blog-subtitle {
   margin: .8rem 0 0;
   max-width: none;
-  font-family: var(--serif);
-  font-style: italic;
+  font-family: var(--sans);
+  font-style: normal;
   font-weight: 400;
-  font-size: clamp(1.3rem, 3vw, 1.9rem);
+  font-size: clamp(1.0625rem, 2vw, 1.25rem);
   line-height: 1.2;
-  color: var(--heading-accent);
+  color: var(--muted);
 }
 
 .blog-post time {
@@ -73,18 +73,18 @@
 
 .blog-prose h2 {
   margin: 2.8rem 0 1rem;
-  font-family: var(--serif);
-  font-weight: 500;
-  font-size: 1.75rem;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 1.5rem;
   line-height: 1.2;
   color: var(--heading);
 }
 
 .blog-prose h3 {
   margin: 2.2rem 0 .8rem;
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-weight: 500;
-  font-size: 1.3rem;
+  font-size: 1.125rem;
   line-height: 1.25;
   color: var(--heading);
 }
@@ -124,9 +124,9 @@
   padding: .4rem 0 .4rem 1.3rem;
   border-left: 3px solid var(--eyebrow);
   color: var(--emphasis);
-  font-family: var(--serif);
-  font-style: italic;
-  font-size: 1.45rem;
+  font-family: var(--sans);
+  font-style: normal;
+  font-size: 1.05rem;
   line-height: 1.3;
 }
 

@@ -9,10 +9,10 @@
 .theme-options button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-soft-text); }
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 ::selection { background: var(--accent-soft); color: var(--accent-soft-text); }
-.primary-nav ul { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem 1.5rem; list-style: none; padding: 0; margin: 0; }
-.primary-nav a { display: inline-flex; align-items: center; min-height: 44px; color: var(--muted); font-size: .875rem; text-decoration: none; }
-.primary-nav a:hover { color: var(--accent); }
-.primary-nav a[aria-current] { color: var(--heading); text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 2px; text-underline-offset: .5em; }
+.primary-nav ul { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .25rem; list-style: none; padding: 0; margin: 0; }
+.primary-nav a { display: inline-flex; align-items: center; min-height: 44px; padding:.5rem .75rem; border-radius:var(--radius-control); color: var(--muted); font-size: .875rem; text-decoration: none; }
+.primary-nav a:hover { color: var(--heading); background:var(--chrome); }
+.primary-nav a[aria-current] { color:var(--accent-soft-text); background:var(--accent-soft); }
 .primary-nav-mobile ul { display: block; }
 .primary-nav-mobile a { display: flex; padding-inline: .75rem; }
 .primary-nav-mobile a:hover { background: var(--chrome); }

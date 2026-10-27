@@ -1,7 +1,10 @@
 # Website UI and first-use journey
 
 The website uses the local memory browser’s olive foundation, amber accents and
-self-hosted fonts. The first-use flow now leads with concrete product copy,
+self-hosted fonts. Functional headings use DM Sans at medium/semibold weights,
+with neutral titles, bounded panes, subtle borders, and compact selected navigation
+states drawn from the local app. Serif lettering is reserved for the brand mark.
+The first-use flow now leads with concrete product copy,
 installation and a clearly fictional memory example. Shared navigation and compact
 native theme menus give every section a consistent structure.
 
