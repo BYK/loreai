@@ -1,7 +1,7 @@
 ---
 import PublicLayout from "../layouts/PublicLayout.astro";
 import InstallCommand from "../components/InstallCommand.astro";
-import MemoryLandscape from "../components/MemoryLandscape.astro";
+import MemoryCamp from "../components/MemoryCamp.astro";
 import Waitlist from "../components/Waitlist.astro";
 const base = import.meta.env.BASE_URL;
 ---
@@ -13,7 +13,7 @@ const base = import.meta.env.BASE_URL;
       <InstallCommand />
       <p class="small muted">Already use npm? <a href={`${base}docs/install/#other-installation-options`}>See the npm option</a>. Client setup and your provider’s charges still apply.</p>
     </div>
-    <MemoryLandscape />
+    <MemoryCamp />
   </section>
   <nav class="page-sections section" aria-label="On this page"><a href="#how">How it works</a><a href="#features">What’s available</a><a href="#evidence">Evidence</a><a href="#questions">Questions</a></nav>
   <section class="section" id="how"><span id="unified" class="fragment-anchor" aria-hidden="true"></span><div class="section-heading"><p class="eyebrow">The workflow</p><h2>From conversation to reusable knowledge.</h2><p>Recent work stays in context. Older work can be distilled, and details remain searchable.</p></div><ol class="workflow">

@@ -45,12 +45,17 @@ are scoped in `docs/benchmark.md`, while `docs/installation-reference.md` preser
 the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
 
-The interactive homepage landscape lives in `MemoryLandscape.astro`. Shared terrain
-contours, region classification and orthographic projection are in
-`src/lib/memory-landscape.ts`; the SVG is rendered at build time. The controller
-lazily loads the pinned Three.js renderer only while visible, with normal motion
-and sufficient device memory. Native stage controls work without JavaScript; SVG
-region selection remains available when GPU rendering is disabled. The renderer
-handles terrain raycasting, bounded rotation, one-shot stage trails, context loss
-and resource disposal. Geometry and browser tests cover the shared boundaries,
-projection, selection and failure paths.
+The interactive homepage camp lives in `MemoryCamp.astro`. The campfire represents
+Conversation, the scribe’s desk represents curated Knowledge, and the quest gate
+represents context carried into the next session. Selecting a landmark or a native
+stage control updates the same fictional example. A traveller follows the path on
+pointer selections, then stops; keyboard selection updates immediately.
+
+`src/lib/memory-camp.ts` builds the shared geometry and orthographic camera;
+`memory-camp-fallback.ts` projects those meshes into an SVG at build time. The
+controller lazily loads pinned Three.js only while visible, with normal motion
+and sufficient device memory. Native stage controls work without JavaScript;
+static landmarks remain selectable when rendering is disabled or context is lost.
+The renderer supports touch scrolling, interrupted travel, theme changes, context
+restoration and resource disposal. Geometry and browser tests cover framing,
+projection, landmark selection, finite animation and failure paths.

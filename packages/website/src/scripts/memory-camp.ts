@@ -1,16 +1,19 @@
-import type { LandscapeRenderer } from "../lib/memory-landscape-renderer";
-import type { MemoryPhase } from "../lib/memory-landscape";
+import type { CampRenderer } from "../lib/memory-camp-renderer";
+import type { MemoryPhase } from "../lib/memory-camp";
 
 const phases: readonly MemoryPhase[] = ["conversation", "knowledge", "recall"];
-for (const root of document.querySelectorAll<HTMLElement>(
-  ".memory-landscape",
-)) {
-  const art = root.querySelector<HTMLElement>(".landscape-art");
-  const hint = root.querySelector<HTMLElement>(".landscape-hint");
+const titles = {
+  conversation: "Campfire",
+  knowledge: "Scribe’s desk",
+  recall: "Quest gate",
+};
+for (const root of document.querySelectorAll<HTMLElement>(".memory-camp")) {
+  const art = root.querySelector<HTMLElement>(".camp-art");
+  const hint = root.querySelector<HTMLElement>(".camp-hint");
   if (!art || !hint) continue;
   const element = art,
     help = hint;
-  let renderer: LandscapeRenderer | null = null;
+  let renderer: CampRenderer | null = null;
   let visible = false,
     loading = false,
     failed = false,
@@ -48,8 +51,8 @@ for (const root of document.querySelectorAll<HTMLElement>(
     if (next) element.dataset.targetPhase = next;
     else delete element.dataset.targetPhase;
     help.textContent = next
-      ? `Select ${next}`
-      : "Click a region to select its stage.";
+      ? `Select ${titles[next]}`
+      : "Choose the campfire, desk, or gate to explore.";
   }
   hover(null);
   root.addEventListener("keydown", () => {
@@ -72,22 +75,81 @@ for (const root of document.querySelectorAll<HTMLElement>(
       }),
     );
   // The same region selection works with the SVG when GPU rendering is unavailable.
-  const fallback = root.querySelector<SVGElement>(".landscape-fallback");
-  fallback?.addEventListener("click", (event) => {
-    const value = (event.target as Element).closest<SVGElement>(
-      "[data-land-region]",
-    )?.dataset.landRegion;
-    if (phases.includes(value as MemoryPhase)) select(value as MemoryPhase);
+  const fallback = root.querySelector<SVGElement>(".camp-fallback");
+  const fallbackPhase = (target: EventTarget | null) => {
+    const value = (target as Element | null)?.closest<SVGElement>(
+      "[data-camp-region]",
+    )?.dataset.campRegion;
+    return phases.includes(value as MemoryPhase)
+      ? (value as MemoryPhase)
+      : null;
+  };
+  let staticPress: {
+      id: number;
+      x: number;
+      y: number;
+      phase: MemoryPhase | null;
+      moved: boolean;
+    } | null = null,
+    staticTap: MemoryPhase | null = null;
+  fallback?.addEventListener("pointerdown", (event) => {
+    staticTap = null;
+    staticPress =
+      event.isPrimary && event.button === 0
+        ? {
+            id: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            phase: fallbackPhase(event.target),
+            moved: false,
+          }
+        : null;
+  });
+  fallback?.addEventListener("pointermove", (event) => {
+    if (
+      staticPress &&
+      staticPress.id === event.pointerId &&
+      Math.hypot(event.clientX - staticPress.x, event.clientY - staticPress.y) >
+        7
+    )
+      staticPress.moved = true;
+  });
+  fallback?.addEventListener("pointerup", (event) => {
+    if (!staticPress || staticPress.id !== event.pointerId) return;
+    staticTap =
+      !staticPress.moved &&
+      Math.hypot(
+        event.clientX - staticPress.x,
+        event.clientY - staticPress.y,
+      ) <= 7
+        ? staticPress.phase
+        : null;
+    staticPress = null;
+  });
+  fallback?.addEventListener("pointercancel", () => {
+    staticPress = null;
+    staticTap = null;
+  });
+  fallback?.addEventListener("click", () => {
+    const phase = staticTap;
+    staticTap = null;
+    if (phase) select(phase);
   });
   fallback?.addEventListener("pointerover", (event) => {
     const value = (event.target as Element).closest<SVGElement>(
-      "[data-land-region]",
-    )?.dataset.landRegion;
+      "[data-camp-region]",
+    )?.dataset.campRegion;
     hover(
       phases.includes(value as MemoryPhase) ? (value as MemoryPhase) : null,
     );
   });
-  fallback?.addEventListener("pointerleave", () => hover(null));
+  fallback?.addEventListener("pointerleave", () => {
+    if (staticPress) {
+      staticPress = null;
+      staticTap = null;
+    }
+    hover(null);
+  });
   async function sync() {
     if (!allowed()) {
       generation++;
@@ -105,10 +167,10 @@ for (const root of document.querySelectorAll<HTMLElement>(
     loading = true;
     const ticket = ++generation;
     try {
-      const module = await import("../lib/memory-landscape-renderer");
+      const module = await import("../lib/memory-camp-renderer");
       if (ticket !== generation || !allowed() || !visible || document.hidden)
         return;
-      renderer = module.mountLandscape(element, ready, {
+      renderer = module.mountCamp(element, ready, {
         select,
         hover,
         failure() {
