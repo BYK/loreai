@@ -64,16 +64,23 @@ import {
   type StreamingRequestSpec,
 } from "./streaming-request";
 
+import {
+  nativeResponsesEnvelope,
+  NATIVE_METADATA,
+  parseNativeResponsesTools,
+  responsesToolName,
+  orderNativeResponsesSourceBlocks,
+} from "./responses-native";
+
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 
 type ParsedInputItems = {
   messages: GatewayMessage[];
   instructions: string[];
-  elevatedItems: Array<{
-    type?: "message";
-    role: "system" | "developer";
-    content: string | Array<{ type: "input_text"; text: string }>;
-  }>;
+  elevatedItems: Array<Record<string, unknown>>;
+  itemPositions?: number[];
+  prefixEnd?: number;
+  nativeTools?: GatewayTool[];
   hasLateItems: boolean;
   boundarySafe: boolean;
 };
@@ -153,48 +160,54 @@ function parseOpenAIResponsesRequestInternal(
     throw new InvalidCrossProviderRequestError();
   }
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
-  const tools: GatewayTool[] = rawTools.map((t: unknown) => {
-    if (
-      !t ||
-      typeof t !== "object" ||
-      Array.isArray(t) ||
-      typeof (t as Record<string, unknown>).type !== "string"
-    ) {
-      // GatewayTool represents only functions. Dropping another tool would
-      // change the request without the client's consent.
-      throw new InvalidCrossProviderRequestError();
-    }
-    const tool = t as Record<string, unknown>;
-    if (tool.type === "web_search_preview") {
-      if (Object.keys(tool).some((key) => key !== "type")) {
+  const tools: GatewayTool[] = rawTools.flatMap(
+    (t: unknown): GatewayTool | GatewayTool[] => {
+      if (
+        !t ||
+        typeof t !== "object" ||
+        Array.isArray(t) ||
+        typeof (t as Record<string, unknown>).type !== "string"
+      ) {
+        // GatewayTool represents only functions. Dropping another tool would
+        // change the request without the client's consent.
+        throw new InvalidCrossProviderRequestError();
+      }
+      const tool = t as Record<string, unknown>;
+      if (tool.type === "namespace" || tool.type === "custom")
+        return parseNativeResponsesTools([tool], false);
+      if (tool.type === "web_search_preview") {
+        if (Object.keys(tool).some((key) => key !== "type")) {
+          throw new InvalidCrossProviderRequestError();
+        }
+        return {
+          name: "web_search_preview",
+          description: "",
+          inputSchema: {},
+          responsesBuiltin: "web_search_preview",
+        };
+      }
+      if (
+        tool.type !== "function" ||
+        Object.keys(tool).some(
+          (key) =>
+            !["type", "name", "description", "parameters", "strict"].includes(
+              key,
+            ),
+        ) ||
+        (tool.strict !== undefined && typeof tool.strict !== "boolean")
+      ) {
         throw new InvalidCrossProviderRequestError();
       }
       return {
-        name: "web_search_preview",
-        description: "",
-        inputSchema: {},
-        responsesBuiltin: "web_search_preview",
+        name: asString(tool.name),
+        description: asString(tool.description),
+        inputSchema: (tool.parameters as Record<string, unknown>) ?? {},
+        ...(tool.strict !== undefined ? { strict: tool.strict } : {}),
       };
-    }
-    if (
-      tool.type !== "function" ||
-      Object.keys(tool).some(
-        (key) =>
-          !["type", "name", "description", "parameters", "strict"].includes(
-            key,
-          ),
-      ) ||
-      (tool.strict !== undefined && typeof tool.strict !== "boolean")
-    ) {
-      throw new InvalidCrossProviderRequestError();
-    }
-    return {
-      name: asString(tool.name),
-      description: asString(tool.description),
-      inputSchema: (tool.parameters as Record<string, unknown>) ?? {},
-      ...(tool.strict !== undefined ? { strict: tool.strict } : {}),
-    };
-  });
+    },
+  );
+
+  tools.push(...(parsed.nativeTools ?? []));
 
   // Extract extras for passthrough
   const extras: GatewayRequest["extras"] = {};
@@ -238,6 +251,9 @@ function parseOpenAIResponsesRequestInternal(
       normalizedSystem: system,
       items: parsed.elevatedItems,
       hasLateItems: parsed.hasLateItems,
+      ...(parsed.itemPositions
+        ? { itemPositions: parsed.itemPositions, prefixEnd: parsed.prefixEnd }
+        : {}),
     };
   }
   if (raw.text !== undefined) {
@@ -460,6 +476,15 @@ function createInputItemsBuilder(): {
   const elevatedItems: ParsedInputItems["elevatedItems"] = [];
   const toolSearchItems: Record<string, unknown>[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
+  let pendingStart = 0;
+  let sourceIndex = 0;
+  let currentIndex = 0;
+  let nativeFormat = false;
+  let prefixEnd = 0;
+  const itemPositions: number[] = [];
+  const nativeTools: GatewayTool[] = [];
+  const ranges = new Map<GatewayMessage, { start: number; end: number }>();
+  const sourceIndices = new WeakMap<Record<string, unknown>, number>();
   let sawItem = false;
   let sawConversationItem = false;
   let elevatedAfterConversation = false;
@@ -471,6 +496,7 @@ function createInputItemsBuilder(): {
     provenanceContent?: GatewayContentBlock[],
     provenancePositions?: number[],
   ): GatewayMessage => {
+    const start = pendingReasoning.length ? pendingStart : currentIndex;
     const message: GatewayMessage = { role: "assistant", content };
     if (provenanceContent) {
       message.provenanceContent = [...pendingReasoning, ...provenanceContent];
@@ -486,12 +512,59 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     }
     messages.push(message);
+    ranges.set(message, {
+      start,
+      end: currentIndex,
+    });
     return message;
+  };
+
+  const flushPending = (): void => {
+    if (!pendingReasoning.length) return;
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [],
+      provenanceContent: pendingReasoning,
+      provenancePositions: [],
+    };
+    messages.push(message);
+    ranges.set(message, { start: pendingStart, end: currentIndex - 1 });
+    pendingReasoning = [];
   };
 
   const add = (item: unknown): void => {
     sawItem = true;
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      throw new InvalidCrossProviderRequestError();
     const raw = item as Record<string, unknown>;
+    currentIndex = sourceIndex++;
+    sourceIndices.set(raw, currentIndex);
+    const clean = nativeResponsesEnvelope(raw);
+    if (
+      Object.hasOwn(raw, NATIVE_METADATA) ||
+      raw.type === "additional_tools" ||
+      raw.namespace !== undefined ||
+      raw.type === "custom_tool_call" ||
+      raw.type === "custom_tool_call_output" ||
+      ((raw.role === "developer" || raw.role === "system") &&
+        raw.id !== undefined)
+    )
+      nativeFormat = true;
+    if (raw.type === "additional_tools") {
+      if (
+        (raw.role !== "developer" && raw.role !== "system") ||
+        Object.keys(clean).some(
+          (k) => !["type", "id", "role", "tools"].includes(k),
+        )
+      )
+        throw new InvalidCrossProviderRequestError();
+      nativeTools.push(...parseNativeResponsesTools(raw.tools, true));
+      elevatedItems.push(raw);
+      itemPositions.push(currentIndex);
+      if (!sawConversationItem) prefixEnd = sourceIndex;
+      if (sawConversationItem) elevatedAfterConversation = true;
+      return;
+    }
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
 
@@ -507,7 +580,8 @@ function createInputItemsBuilder(): {
       if (role === "user" && pendingReasoning.length > 0) {
         // The pending assistant items would otherwise be appended after this
         // user turn, changing the source item's order.
-        throw new InvalidCrossProviderRequestError();
+        if (nativeFormat) flushPending();
+        else throw new InvalidCrossProviderRequestError();
       }
       if (
         role === "user" &&
@@ -534,10 +608,16 @@ function createInputItemsBuilder(): {
       } else if (content.length > 0) {
         seamKind = "other";
       }
-    } else if (itemType === "function_call") {
+    } else if (
+      itemType === "function_call" ||
+      itemType === "custom_tool_call"
+    ) {
       seamHasPendingReasoning = false;
       seamKind = "tool-call";
-    } else if (itemType === "function_call_output") {
+    } else if (
+      itemType === "function_call_output" ||
+      itemType === "custom_tool_call_output"
+    ) {
       seamKind = "tool-result";
     } else {
       seamHasPendingReasoning = true;
@@ -555,8 +635,12 @@ function createInputItemsBuilder(): {
         // These items carry instructions, never user text. Other providers
         // have one system field, so preserve their priority there.
         if (
-          Object.keys(raw).some(
-            (key) => key !== "type" && key !== "role" && key !== "content",
+          Object.keys(clean).some(
+            (key) =>
+              key !== "type" &&
+              key !== "role" &&
+              key !== "content" &&
+              key !== "id",
           )
         ) {
           throw new InvalidCrossProviderRequestError();
@@ -590,15 +674,9 @@ function createInputItemsBuilder(): {
         }
         // Keep the original wire shape, including string content and an
         // omitted `type`. The joined text above is only for translation.
-        elevatedItems.push({
-          ...(raw.type === undefined ? {} : { type: "message" }),
-          role: msgRole,
-          content: Array.isArray(raw.content)
-            ? (raw.content as Array<{ type: "input_text"; text: string }>).map(
-                (part) => ({ ...part }),
-              )
-            : raw.content,
-        });
+        elevatedItems.push(raw);
+        itemPositions.push(currentIndex);
+        if (!sawConversationItem) prefixEnd = sourceIndex;
       } else if (msgRole === "assistant") {
         sawConversationItem = true;
         if (typeof raw.content !== "string" && !Array.isArray(raw.content)) {
@@ -623,7 +701,7 @@ function createInputItemsBuilder(): {
           role !== "user" ||
           (raw.status !== undefined && raw.status !== "completed") ||
           (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id)) ||
-          Object.keys(raw).some(
+          Object.keys(clean).some(
             (key) =>
               key !== "type" &&
               key !== "role" &&
@@ -662,13 +740,27 @@ function createInputItemsBuilder(): {
           ],
           provenancePositions: content.map(() => 0),
         });
+        ranges.set(messages[messages.length - 1], {
+          start: currentIndex,
+          end: currentIndex,
+        });
       }
       return;
     }
 
-    if (itemType === "function_call") {
+    if (itemType === "function_call" || itemType === "custom_tool_call") {
       sawConversationItem = true;
-      portableResponsesFunctionCall(raw);
+      const custom = itemType === "custom_tool_call";
+      if (custom) {
+        if (typeof raw.input !== "string")
+          throw new InvalidCrossProviderRequestError();
+        const { input: _input, ...envelope } = clean;
+        portableResponsesFunctionCall({
+          ...envelope,
+          type: "function_call",
+          arguments: "{}",
+        });
+      } else portableResponsesFunctionCall(clean);
       // Function call from assistant — maps to tool_use.
       //
       // The Responses API emits each parallel tool call as its OWN
@@ -683,8 +775,8 @@ function createInputItemsBuilder(): {
       const toolUseBlock: GatewayContentBlock = {
         type: "tool_use",
         id: asString(raw.call_id ?? raw.id),
-        name: asString(raw.name),
-        input: parseArguments(raw.arguments),
+        name: responsesToolName(raw, "request"),
+        input: custom ? raw.input : parseArguments(raw.arguments),
       };
       const provenanceBlock: GatewayContentBlock = {
         type: "opaque",
@@ -706,6 +798,7 @@ function createInputItemsBuilder(): {
         provenance.push(...pendingReasoning, provenanceBlock);
         positions.push(position);
         last.content.push(toolUseBlock);
+        ranges.get(last)!.end = currentIndex;
         last.provenanceContent = provenance;
         last.provenancePositions = positions;
         pendingReasoning = [];
@@ -715,14 +808,20 @@ function createInputItemsBuilder(): {
       return;
     }
 
-    if (itemType === "function_call_output") {
+    if (
+      itemType === "function_call_output" ||
+      itemType === "custom_tool_call_output"
+    ) {
       if (pendingReasoning.length > 0) {
         // A result cannot cross a pending assistant reasoning item: the
         // normalized tool pair cannot represent that native item order.
         throw new InvalidCrossProviderRequestError();
       }
       sawConversationItem = true;
-      assertResponsesToolOutputEnvelope(raw);
+      assertResponsesToolOutputEnvelope({
+        ...clean,
+        type: "function_call_output",
+      });
       if (Array.isArray(raw.output)) {
         raw.output.forEach(assertToolOutputPart);
       }
@@ -776,6 +875,7 @@ function createInputItemsBuilder(): {
           last.provenancePositions.push(last.content.length);
         }
         last.content.push(toolResultBlock);
+        ranges.get(last)!.end = currentIndex;
       } else {
         messages.push({
           role: "user",
@@ -783,12 +883,17 @@ function createInputItemsBuilder(): {
           provenanceContent: [provenanceBlock],
           provenancePositions: [0],
         });
+        ranges.set(messages[messages.length - 1], {
+          start: currentIndex,
+          end: currentIndex,
+        });
       }
       return;
     }
 
     if (itemType === "reasoning") {
       sawConversationItem = true;
+      if (!pendingReasoning.length) pendingStart = currentIndex;
       pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
       return;
     }
@@ -805,6 +910,7 @@ function createInputItemsBuilder(): {
     // gateway may not render an unknown item, but canonical replay must hash
     // the same full transcript on both the producing and consuming turns.
     sawConversationItem = true;
+    if (!pendingReasoning.length) pendingStart = currentIndex;
     pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
   };
 
@@ -816,25 +922,30 @@ function createInputItemsBuilder(): {
       sawItem &&
       // Elevated items live in req.system rather than the normalized message
       // prefix. A suffix request cannot reconstruct them from a checkpoint.
+      !nativeFormat &&
       elevatedItems.length === 0 &&
       !elevatedAfterConversation &&
       !seamHasPendingReasoning &&
       seamKind !== "tool-call" &&
       seamKind !== "tool-result";
-    if (pendingReasoning.length > 0) {
-      messages.push({
-        role: "assistant",
-        content: [],
-        provenanceContent: pendingReasoning,
-        provenancePositions: [],
-      });
-      pendingReasoning = [];
-    }
+    currentIndex = sourceIndex;
+    flushPending();
 
+    if (nativeFormat)
+      for (const message of messages) {
+        const range = ranges.get(message);
+        if (range) message.responsesSourceRange = range;
+        for (const block of message.provenanceContent ?? [])
+          if (block.type === "opaque" && block.responsesItem) {
+            const index = sourceIndices.get(block.raw);
+            if (index !== undefined) block.responsesSourceIndex = index;
+          }
+      }
     return {
       messages,
       instructions,
       elevatedItems,
+      ...(nativeFormat ? { itemPositions, prefixEnd, nativeTools } : {}),
       hasLateItems: elevatedAfterConversation,
       boundarySafe,
     };
@@ -1137,8 +1248,7 @@ export function buildOpenAIResponsesUpstreamRequest(
       .join("\n\n");
     if (instructions) body.instructions = instructions;
     body.input = [
-      ...nativeInstructions.items,
-      ...buildResponsesInput(req.messages, req.protocol),
+      ...buildResponsesInput(req.messages, req.protocol, nativeInstructions),
     ];
   } else {
     if (req.system) body.instructions = req.system;
@@ -1147,29 +1257,38 @@ export function buildOpenAIResponsesUpstreamRequest(
 
   // Add tools in Responses API format
   if (req.tools.length > 0) {
-    body.tools = req.tools.map((t) => {
+    body.tools = req.tools.flatMap((t): Record<string, unknown>[] => {
+      if (t.responsesNative)
+        return t.responsesNative.inputOnly || !t.responsesNative.definition
+          ? []
+          : [t.responsesNative.definition];
       if (t.responsesBuiltin === "web_search_preview") {
-        return { type: "web_search_preview" };
+        return [{ type: "web_search_preview" }];
       }
-      // The public gatewayOwned flag is caller-controlled; strict projection
-      // requires the exact tool branded by the gateway's private ownership check.
+      // Only the exact privately branded contract receives strict projection;
+      // caller-owned tools with matching names or flags remain ordinary tools.
       if (!hasGatewayRecallTool([t])) {
-        return {
+        return [
+          {
+            type: "function",
+            name: t.name,
+            description: t.description,
+            parameters: t.inputSchema,
+            ...(t.strict !== undefined ? { strict: t.strict } : {}),
+          },
+        ];
+      }
+      return [
+        {
           type: "function",
           name: t.name,
           description: t.description,
-          parameters: t.inputSchema,
-          ...(t.strict !== undefined ? { strict: t.strict } : {}),
-        };
-      }
-      return {
-        type: "function",
-        name: t.name,
-        description: t.description,
-        strict: true,
-        parameters: buildStrictRecallParameters(t.inputSchema),
-      };
+          strict: true,
+          parameters: buildStrictRecallParameters(t.inputSchema),
+        },
+      ];
     });
+    if ((body.tools as unknown[]).length === 0) delete body.tools;
   }
 
   // Forward extras
@@ -1404,6 +1523,7 @@ function assertToolOutputPart(part: unknown): void {
 function buildResponsesInput(
   messages: GatewayMessage[],
   source: GatewayRequest["protocol"],
+  native?: NonNullable<GatewayRequest["extras"]>["nativeInstructionPrefix"],
 ): Array<Record<string, unknown>> {
   const items: Array<Record<string, unknown>> = [];
   const synthesizedItemIndices = new Set<number>();
@@ -1430,8 +1550,32 @@ function buildResponsesInput(
     items.push(item);
   };
 
+  let contextIndex = 0;
+  const context = native?.items ?? [];
+  const positions = native?.itemPositions;
+  const flushContext = (before: number) => {
+    while (
+      contextIndex < context.length &&
+      (!positions || positions[contextIndex] < before)
+    ) {
+      appendItem(context[contextIndex++], true);
+    }
+  };
+  flushContext(positions ? (native?.prefixEnd ?? 0) : Infinity);
+  let lastSourceEnd = -1;
   for (const msg of messages) {
-    for (const block of msg.provenanceContent ?? msg.content) {
+    if (positions && msg.responsesSourceRange) {
+      const range = msg.responsesSourceRange;
+      if (range.start <= lastSourceEnd)
+        throw new InvalidCrossProviderRequestError();
+      flushContext(range.start + 1);
+      lastSourceEnd = range.end;
+    }
+    for (const block of orderNativeResponsesSourceBlocks(
+      msg.provenanceContent ?? msg.content,
+    )) {
+      if (positions && block.responsesSourceIndex !== undefined)
+        flushContext(block.responsesSourceIndex + 1);
       if (block.type === "text") {
         appendItem({
           type: "message",
@@ -1445,10 +1589,16 @@ function buildResponsesInput(
         });
       } else if (block.type === "tool_use") {
         appendItem({
-          type: "function_call",
+          ...block.raw,
+          type:
+            block.raw?.type === "custom_tool_call"
+              ? "custom_tool_call"
+              : "function_call",
           call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
+          name: block.raw?.name ?? block.name,
+          ...(block.raw?.type === "custom_tool_call"
+            ? { input: String(block.input) }
+            : { arguments: JSON.stringify(block.input) }),
         });
       } else if (block.type === "tool_result") {
         if (block.isError) throw new InvalidCrossProviderRequestError();
@@ -1465,7 +1615,11 @@ function buildResponsesInput(
           });
           output.forEach(assertToolOutputPart);
           appendItem({
-            type: "function_call_output",
+            ...block.nativeResponsesEnvelope,
+            type:
+              block.nativeResponsesEnvelope?.type === "custom_tool_call_output"
+                ? "custom_tool_call_output"
+                : "function_call_output",
             call_id: block.toolUseId,
             output,
           });
@@ -1476,7 +1630,11 @@ function buildResponsesInput(
         // Native multi-part results take the array path above, even when a
         // compaction boundary deliberately drops their source provenance.
         appendItem({
-          type: "function_call_output",
+          ...block.nativeResponsesEnvelope,
+          type:
+            block.nativeResponsesEnvelope?.type === "custom_tool_call_output"
+              ? "custom_tool_call_output"
+              : "function_call_output",
           call_id: block.toolUseId,
           output: blocksToText(block.content),
         });
@@ -1490,8 +1648,15 @@ function buildResponsesInput(
         }
         if (block.responsesItem) {
           if (block.raw.type === "item_reference") continue;
-          if (block.raw.type === "function_call_output") {
-            assertResponsesToolOutputEnvelope(block.raw);
+          if (
+            block.raw.type === "function_call_output" ||
+            block.raw.type === "custom_tool_call_output"
+          ) {
+            const clean = nativeResponsesEnvelope(block.raw);
+            assertResponsesToolOutputEnvelope({
+              ...clean,
+              type: "function_call_output",
+            });
             if (
               typeof block.raw.call_id !== "string" ||
               (typeof block.raw.output !== "string" &&
@@ -1502,7 +1667,10 @@ function buildResponsesInput(
             if (Array.isArray(block.raw.output)) {
               block.raw.output.forEach(assertToolOutputPart);
             } else {
-              portableResponsesToolOutput(block.raw);
+              portableResponsesToolOutput({
+                ...clean,
+                type: "function_call_output",
+              });
             }
           }
           let nativeItem = block.raw;
@@ -1560,8 +1728,11 @@ function buildResponsesInput(
         }
       }
     }
+    if (positions && msg.responsesSourceRange)
+      flushContext(msg.responsesSourceRange.end + 1);
   }
 
+  flushContext(Infinity);
   return items;
 }
 

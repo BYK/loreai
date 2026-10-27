@@ -191,16 +191,17 @@ const PacingControl: Component<{
           aria-checked={props.pacing.enabled}
           aria-label="Automatic pacing"
           disabled={!props.onSetPacing || busy()}
-          class={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-line transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
-            props.pacing.enabled ? "bg-accent" : "bg-soft"
-          }`}
+          aria-busy={busy()}
+          class="inline-flex size-11 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 md:h-5 md:w-9"
           onClick={() => void toggle()}
         >
           <span
-            class={`inline-block h-3.5 w-3.5 rounded-full bg-bg shadow transition-transform ${
-              props.pacing.enabled ? "translate-x-4" : "translate-x-0.5"
-            }`}
-          />
+            class={`pointer-events-none inline-flex h-5 w-9 items-center rounded-full border border-line ${props.pacing.enabled ? "bg-accent" : "bg-soft"}`}
+          >
+            <span
+              class={`inline-block h-3.5 w-3.5 rounded-full bg-bg shadow transition-transform ${props.pacing.enabled ? "translate-x-4" : "translate-x-0.5"}`}
+            />
+          </span>
         </button>
       </div>
       <Row label="Estimated extra request gap (informational)">

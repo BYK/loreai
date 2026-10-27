@@ -1,17 +1,23 @@
 import { createHash } from "node:crypto";
 import { db, isCurrentDatabase, projectId, withSavepoint } from "./db";
 import { currentTenantId } from "./tenant";
-import { estimateTokens, TOKEN_ESTIMATE_CACHE_VERSION } from "./tokenize";
+import { decodeTokenCounts, encodeTokenCounts } from "./token-count-codec";
+import {
+  estimateTokens,
+  TOKEN_ESTIMATE_CACHE_VERSION,
+  withTokenCountCache,
+  type EncodingName,
+} from "./tokenize";
 
 const VERSION = `${TOKEN_ESTIMATE_CACHE_VERSION}:hidden-input-v1`;
 export const SEMANTIC_TOKEN_CACHE_MAX_ENTRIES = 8192;
 export const SEMANTIC_TOKEN_CACHE_MAX_SESSIONS = 64;
+// Warm BPE is cheaper than another hash/cache lookup for these small inputs.
+export const VISIBLE_TOKEN_CACHE_MIN_LENGTH = 256;
 const MAX_PAYLOAD = 1_000_000;
-const digest = (text: string) =>
-  createHash("sha256").update(text).digest("hex");
 
 /**
- * Exact, disposable derived counts. This is NOT an ingestion frontier: saving
+ * Exact, disposable hidden-input and visible-text counts. This is NOT an ingestion frontier: saving
  * it cannot claim that a source message or response has been persisted.
  * Only hashes and integers survive the request. Current wire content always
  * remains authoritative; all bytes are checked, including encrypted data.
@@ -24,8 +30,17 @@ export class SemanticTokenCache {
     bpe_ms: 0,
     unavailable: 0,
   };
-  private readonly entries = new Map<string, number>();
-  private readonly used = new Map<string, number>();
+  readonly visibleStats = {
+    hits: 0,
+    misses: 0,
+    requested_bytes: 0,
+    bpe_bytes: 0,
+    bpe_ms: 0,
+  };
+  private entries = new Map<string, number>();
+  private used = new Map<string, { tokens: number; bytes: number }>();
+  private dirty = false;
+  private loaded = false;
   private readonly tenant = currentTenantId();
   private pid?: string;
   private readonly connection: ReturnType<typeof db> | undefined;
@@ -49,39 +64,46 @@ export class SemanticTokenCache {
           "SELECT total_changes() AS changes, data_version FROM pragma_data_version",
         )
         .get() as { changes: number; data_version: number };
+    } catch {
+      this.stats.unavailable++;
+    }
+  }
+
+  private load(): void {
+    if (
+      this.loaded ||
+      !this.connection ||
+      !this.pid ||
+      !this.revision ||
+      !isCurrentDatabase(this.connection) ||
+      currentTenantId() !== this.tenant
+    )
+      return;
+    this.loaded = true;
+    try {
       const row = this.connection
         .query(
-          "SELECT payload FROM semantic_token_cache WHERE project_id = ? AND session_id = ? AND length(payload) <= ?",
+          `SELECT payload FROM semantic_token_cache
+           WHERE project_id = ? AND session_id = ? AND length(payload) <= ?
+             AND total_changes() = ? AND (SELECT data_version FROM pragma_data_version) = ?`,
         )
-        .get(this.pid, scope.sessionID, MAX_PAYLOAD) as {
-        payload: string;
+        .get(
+          this.pid,
+          this.scope.sessionID,
+          MAX_PAYLOAD,
+          this.revision.changes,
+          this.revision.data_version,
+        ) as {
+        payload: string | Uint8Array;
       } | null;
       if (!row) return;
-      const decoded: unknown = JSON.parse(row.payload);
-      if (
-        !Array.isArray(decoded) ||
-        decoded.length !== 3 ||
-        decoded[0] !== VERSION ||
-        !Array.isArray(decoded[1]) ||
-        decoded[1].length > SEMANTIC_TOKEN_CACHE_MAX_ENTRIES
-      )
-        return;
-      const data: unknown[] = decoded[1];
-      if (decoded[2] !== digest(JSON.stringify(data))) return;
-      for (const entry of data) {
-        if (
-          !Array.isArray(entry) ||
-          entry.length !== 2 ||
-          typeof entry[0] !== "string" ||
-          !/^[a-f0-9]{64}$/.test(entry[0]) ||
-          !Number.isSafeInteger(entry[1]) ||
-          entry[1] < 0
-        ) {
-          this.entries.clear();
-          return;
-        }
-        this.entries.set(entry[0], entry[1]);
-      }
+      const entries = decodeTokenCounts(
+        row.payload,
+        VERSION,
+        SEMANTIC_TOKEN_CACHE_MAX_ENTRIES,
+        MAX_PAYLOAD,
+      );
+      if (entries) this.entries = entries;
     } catch {
       // Cache damage or unavailable storage must never fail a foreground turn.
       this.entries.clear();
@@ -90,6 +112,7 @@ export class SemanticTokenCache {
   }
 
   count(visibleJson: string, provenanceJson: string): number {
+    this.load();
     // Length framing prevents (a, bc) colliding with (ab, c). Existing source
     // IDs intentionally omit some fields and are unsuitable for cache keys.
     const key = createHash("sha256")
@@ -97,8 +120,9 @@ export class SemanticTokenCache {
       .update(visibleJson)
       .update(provenanceJson)
       .digest("hex");
-    let value = this.used.get(key) ?? this.entries.get(key);
+    let value = this.used.get(key)?.tokens ?? this.entries.get(key);
     if (value === undefined) {
+      this.dirty = true;
       this.stats.misses++;
       this.stats.bpe_bytes +=
         Buffer.byteLength(visibleJson) + Buffer.byteLength(provenanceJson);
@@ -109,10 +133,61 @@ export class SemanticTokenCache {
       );
       this.stats.bpe_ms += performance.now() - started;
     } else this.stats.hits++;
+    this.remember(key, value, visibleJson.length + provenanceJson.length);
+    return value;
+  }
+
+  private remember(key: string, tokens: number, bytes: number): void {
     this.used.delete(key);
-    this.used.set(key, value);
-    if (this.used.size > SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
-      this.used.delete(this.used.keys().next().value!);
+    this.used.set(key, { tokens, bytes });
+    // A sequential history larger than the cache must not evict every costly
+    // count before its next scan. Prioritize input size, including expensive
+    // provenance comparisons whose exact token difference is zero. Batch
+    // pruning keeps memory bounded and avoids sorting on every cache miss.
+    if (this.used.size > 2 * SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
+      this.used = new Map(
+        [...this.used]
+          .sort((a, b) => a[1].bytes - b[1].bytes)
+          .slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES),
+      );
+  }
+
+  /** Cache each original counting boundary, including generated/stripped text. */
+  runVisible<T>(fn: () => T): T {
+    return withTokenCountCache(this, fn);
+  }
+
+  countTokens(
+    text: string,
+    encoding: EncodingName,
+    compute: () => number,
+  ): number {
+    if (
+      text.length < VISIBLE_TOKEN_CACHE_MIN_LENGTH ||
+      currentTenantId() !== this.tenant
+    )
+      return compute();
+    this.load();
+    // Preserve lone surrogates too: UTF-8 would replace them before hashing.
+    // The domain cannot alias the length-framed provenance pair keys above.
+    const key = createHash("sha256")
+      .update(`visible-v1:${TOKEN_ESTIMATE_CACHE_VERSION}:${encoding}:`)
+      .update(text, "utf16le")
+      .digest("hex");
+    const bytes = Buffer.byteLength(text);
+    this.visibleStats.requested_bytes += bytes;
+    let value = this.used.get(key)?.tokens ?? this.entries.get(key);
+    if (value === undefined) {
+      this.dirty = true;
+      this.visibleStats.misses++;
+      this.visibleStats.bpe_bytes += bytes;
+      const started = performance.now();
+      // A thrown tokenizer call is handled by estimateTokens; never cache its
+      // heuristic fallback as an exact count, even for the rest of this request.
+      value = compute();
+      this.visibleStats.bpe_ms += performance.now() - started;
+    } else this.visibleStats.hits++;
+    this.remember(key, value, text.length);
     return value;
   }
 
@@ -122,7 +197,10 @@ export class SemanticTokenCache {
       !this.connection ||
       !this.pid ||
       !this.revision ||
-      !this.used.size
+      !this.used.size ||
+      // An unchanged retained window need not serialize/rewrite its entire
+      // derived-count payload just to refresh cache recency.
+      (this.scope.retainUnused && !this.dirty)
     )
       return;
     try {
@@ -133,19 +211,29 @@ export class SemanticTokenCache {
       )
         return;
       const retained = this.scope.retainUnused
-        ? new Map(this.entries)
-        : new Map<string, number>();
+        ? new Map(
+            // Older retained entries store only counts. Use that lower-bound
+            // work hint until this request observes their complete input size.
+            [...this.entries].map(([key, tokens]) => [
+              key,
+              { tokens, bytes: tokens },
+            ]),
+          )
+        : new Map<string, { tokens: number; bytes: number }>();
       for (const [key, value] of this.used) {
         retained.delete(key);
         retained.set(key, value);
       }
-      const data = [...retained].slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES);
-      const payload = JSON.stringify([
+      const data = [...retained]
+        .sort((a, b) => a[1].bytes - b[1].bytes)
+        .slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES)
+        .map(([key, { tokens }]) => [key, tokens] as const);
+      const payload = encodeTokenCounts(
         VERSION,
         data,
-        digest(JSON.stringify(data)),
-      ]);
-      if (payload.length > MAX_PAYLOAD) return;
+        SEMANTIC_TOKEN_CACHE_MAX_ENTRIES,
+      );
+      if (!payload || payload.length > MAX_PAYLOAD) return;
       const { timeout } = this.connection
         .query("PRAGMA busy_timeout")
         .get() as { timeout: number };

@@ -427,6 +427,28 @@ export function portableResponsesUserMessage(
   }
 }
 
+/**
+ * Copy of a wire block without `cache_control` (also on `tool_result` parts).
+ * Returns the block itself when there is nothing to drop; never mutates, since
+ * `raw` provenance is shared with the retained request.
+ */
+function withoutCacheControl(
+  block: Record<string, unknown>,
+): Record<string, unknown> {
+  const { cache_control: _client, ...rest } = block;
+  const parts = rest.content;
+  if (Array.isArray(parts)) {
+    rest.content = parts.map((p) =>
+      p && typeof p === "object" && !Array.isArray(p)
+        ? withoutCacheControl(p as Record<string, unknown>)
+        : p,
+    );
+  } else if (_client === undefined) {
+    return block;
+  }
+  return rest;
+}
+
 /** Convert a `GatewayContentBlock` back to Anthropic's wire format. */
 function toAnthropicBlock(
   block: GatewayContentBlock,
@@ -895,7 +917,13 @@ export function buildAnthropicRequest(
       content: (portableUserItem
         ? msg.content
         : (provenance ?? msg.content)
-      ).map((block) => toAnthropicBlock(block, req.protocol, msg.role)),
+      ).map((block) => {
+        const wire = toAnthropicBlock(block, req.protocol, msg.role);
+        // Anthropic allows at most 4 cache_control blocks per request. Lore's
+        // own conversation breakpoints use the slots, so a client-supplied
+        // marker (kept verbatim in provenance) would push the body past it.
+        return cache?.cacheConversation ? withoutCacheControl(wire) : wire;
+      }),
     };
   });
 

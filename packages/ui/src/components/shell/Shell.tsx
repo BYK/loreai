@@ -213,7 +213,14 @@ export const Shell: Component<ShellProps> = (props) => {
           </DialogContent>
         </Dialog>
       </Show>
-      <div class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] md:grid-cols-[60px_minmax(0,1fr)]">
+      <div
+        class="grid min-h-0 flex-1"
+        style={{
+          "grid-template-columns": wide()
+            ? "60px minmax(0,1fr)"
+            : "minmax(0,1fr)",
+        }}
+      >
         <Show when={wide()}>
           <Rail projectId={props.searchProjectId} />
         </Show>

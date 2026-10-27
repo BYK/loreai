@@ -274,6 +274,11 @@ import {
   buildOpenAIResponsesResponse,
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
+import { isImplicitChatGPTResponses } from "./codex-routing";
+import {
+  responsesToolName,
+  restoreNativeResponsesToolEnvelopes,
+} from "./translate/responses-native";
 import { InvalidCrossProviderRequestError } from "./translate/errors";
 import {
   responsesValidationCheck,
@@ -3255,7 +3260,13 @@ export function coalesceAdjacentAssistants(
   const merged: GatewayMessage[] = [];
   for (const m of messages) {
     const last = merged[merged.length - 1];
-    if (last && last.role === "assistant" && m.role === "assistant") {
+    if (
+      last &&
+      last.role === "assistant" &&
+      m.role === "assistant" &&
+      !last.responsesSourceRange &&
+      !m.responsesSourceRange
+    ) {
       // The knowledge-delta closer (`*🧠 Refreshed memory*`) must ALWAYS stay
       // as a separate assistant message — never coalesced into a real
       // assistant response. A harness would otherwise render the closer inline
@@ -8038,6 +8049,7 @@ function captureLegacyGlobalAuth(
     return undefined;
   }
   const route = resolveRequestUpstreamRoute(req, config);
+  if (route.providerID === "openai-codex") return undefined;
   const providerID =
     route.effectiveProtocol === "anthropic"
       ? "anthropic"
@@ -8083,7 +8095,12 @@ function resolveRequestUpstreamRoute(
       "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
     );
   }
-  let providerID = providerHeader;
+  let providerID =
+    providerHeader ??
+    (req.protocol === "openai-responses" &&
+    isImplicitChatGPTResponses(req.rawHeaders, config)
+      ? "openai-codex"
+      : undefined);
   let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
   if (!providerRoute && providerID) {
     // Explicit request routing is cache-only. An unknown untrusted provider
@@ -8216,6 +8233,12 @@ function assertCrossProviderRequestControls(
   effectiveProtocol: EffectiveUpstreamProtocol,
 ): void {
   const extras = req.extras;
+  if (
+    effectiveProtocol !== "openai-responses" &&
+    (req.tools.some((tool) => tool.responsesNative !== undefined) ||
+      extras?.nativeInstructionPrefix?.itemPositions)
+  )
+    throw new InvalidCrossProviderRequestError();
   if (
     ((req.protocol === "openai" && effectiveProtocol !== "openai") ||
       (req.protocol === "openai-responses" &&
@@ -8468,7 +8491,7 @@ async function forwardToUpstream(
       ? req.extras?.nativeInstructionPrefix
       : undefined;
   if (
-    nativeInstructions?.hasLateItems ||
+    (nativeInstructions?.hasLateItems && !nativeInstructions.itemPositions) ||
     (req.protocol === "openai" &&
       req.extras?.nativeChatInstructionPrefix?.hasLateItems) ||
     (effectiveProtocol !== "openai-responses" &&
@@ -9794,7 +9817,7 @@ export function buildStreamingResponse(
                 if (streamSignal.aborted) throw error;
                 if (
                   finalRecallRound ||
-                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                  recallBudget.requiresVerifiedContinuation
                 )
                   throw new RecallContinuationFailure("follow_up_setup");
                 reportRecallDiagnostic(
@@ -9825,7 +9848,7 @@ export function buildStreamingResponse(
               if (!streamingFollowUp.ok) {
                 if (
                   finalRecallRound ||
-                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                  recallBudget.requiresVerifiedContinuation
                 )
                   throw new RecallContinuationFailure("follow_up_failed");
                 reportRecallDiagnostic(
@@ -9898,7 +9921,7 @@ export function buildStreamingResponse(
 
               const finalTerminalEvents: string[] = [];
               // Usage arrives at the terminal event. Until it is validated,
-              // expanded-budget continuation text must not reach the client.
+              // separately budgeted continuation text must not reach the client.
               const heldContinuation = { events: [] as string[], bytes: 0 };
               const continuationValidator = new AnthropicSSEValidator();
               streamPhase = "follow_up_stream";
@@ -9935,7 +9958,7 @@ export function buildStreamingResponse(
                     // Forward non-recall, non-held-back events to client.
                     // message_delta usage scaling is handled by a separate pass
                     // below only for the final continuation's terminal events.
-                    if (recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS) {
+                    if (recallBudget.requiresVerifiedContinuation) {
                       heldContinuation.bytes += Buffer.byteLength(forwarded);
                       if (
                         heldContinuation.bytes > MAX_FOREGROUND_RESPONSE_BYTES
@@ -9976,7 +9999,7 @@ export function buildStreamingResponse(
                   continuationResp.usageComplete === true,
                 );
               if (
-                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                recallBudget.requiresVerifiedContinuation &&
                 continuationResp.usageComplete !== true
               ) {
                 throw new RecallContinuationFailure("follow_up_failed");
@@ -10911,7 +10934,8 @@ export function streamResponsesRecallAware(
     const rawItem = acc.rawItems.get(outputIndex);
     if (
       rawItem?.type !== "function_call" ||
-      rawItem.name !== RECALL_TOOL_NAME
+      rawItem.name !== RECALL_TOOL_NAME ||
+      rawItem.namespace !== undefined
     ) {
       return false;
     }
@@ -11276,6 +11300,7 @@ export function streamResponsesRecallAware(
       if (
         item.type === "function_call" &&
         item.name === RECALL_TOOL_NAME &&
+        item.namespace === undefined &&
         item.status !== undefined &&
         item.status !== "in_progress" &&
         item.status !== "completed"
@@ -11779,6 +11804,7 @@ export function streamResponsesRecallAware(
           }
           if (
             item.name === RECALL_TOOL_NAME &&
+            item.namespace === undefined &&
             item?.status !== undefined &&
             item.status !== "completed"
           ) {
@@ -14027,7 +14053,9 @@ export function streamResponsesRecallAware(
                 event === "response.output_item.done") &&
               (parsed.item as Record<string, unknown> | undefined)?.type ===
                 "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+              (parsed.item as Record<string, unknown>).name ===
+                RECALL_TOOL_NAME &&
+              (parsed.item as Record<string, unknown>).namespace === undefined
             ) {
               recallDetected = true;
             }
@@ -14067,7 +14095,8 @@ export function streamResponsesRecallAware(
               (index, item) => {
                 if (
                   item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
+                  item.name !== RECALL_TOOL_NAME ||
+                  item.namespace !== undefined
                 ) {
                   return;
                 }
@@ -14105,12 +14134,16 @@ export function streamResponsesRecallAware(
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
                 item?.type === "function_call" &&
-                item?.name === RECALL_TOOL_NAME;
+                item?.name === RECALL_TOOL_NAME &&
+                item?.namespace === undefined;
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
                 resolvingRecallTool = true;
-              } else if (item?.type === "function_call") {
+              } else if (
+                item?.type === "function_call" ||
+                item?.type === "custom_tool_call"
+              ) {
                 if (
                   event === "response.output_item.added" &&
                   opts.validation === "codex" &&
@@ -14266,7 +14299,9 @@ export function streamResponsesRecallAware(
                     !Array.isArray(item) &&
                     (item as Record<string, unknown>).type ===
                       "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                    (item as Record<string, unknown>).name ===
+                      RECALL_TOOL_NAME &&
+                    (item as Record<string, unknown>).namespace === undefined,
                 )
               ) {
                 recallDetected = true;
@@ -14279,6 +14314,7 @@ export function streamResponsesRecallAware(
                     if (
                       item.type !== "function_call" ||
                       item.name !== RECALL_TOOL_NAME ||
+                      item.namespace !== undefined ||
                       (!recallIndices.has(outputIndex) &&
                         !unresolvedToolIndices.has(outputIndex))
                     ) {
@@ -14291,8 +14327,15 @@ export function streamResponsesRecallAware(
                     promoteDeferredCandidate(outputIndex);
                   },
                   (outputIndex, item) => {
-                    if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
+                    if (
+                      item.type !== "function_call" &&
+                      item.type !== "custom_tool_call"
+                    )
+                      return;
+                    if (
+                      item.name === RECALL_TOOL_NAME &&
+                      item.namespace === undefined
+                    ) {
                       collectCompletedRecall(
                         state,
                         outputIndex,
@@ -14853,11 +14896,15 @@ export function streamResponsesRecallAware(
                               | undefined;
                             if (
                               item?.type === "function_call" &&
-                              item.name === RECALL_TOOL_NAME
+                              item.name === RECALL_TOOL_NAME &&
+                              item.namespace === undefined
                             ) {
                               contRecallIndices.add(ci);
                               resolvingRecallTool = true;
-                            } else if (item?.type === "function_call") {
+                            } else if (
+                              item?.type === "function_call" ||
+                              item?.type === "custom_tool_call"
+                            ) {
                               if (
                                 ce === "response.output_item.added" &&
                                 opts.validation === "codex" &&
@@ -14998,7 +15045,8 @@ export function streamResponsesRecallAware(
                                 (outputIndex, item) => {
                                   if (
                                     item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
+                                    item.name !== RECALL_TOOL_NAME ||
+                                    item.namespace !== undefined
                                   ) {
                                     return;
                                   }
@@ -15008,8 +15056,15 @@ export function streamResponsesRecallAware(
                                   promoteContinuationCandidate(outputIndex);
                                 },
                                 (outputIndex, item) => {
-                                  if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
+                                  if (
+                                    item.type !== "function_call" &&
+                                    item.type !== "custom_tool_call"
+                                  )
+                                    return;
+                                  if (
+                                    item.name === RECALL_TOOL_NAME &&
+                                    item.namespace === undefined
+                                  ) {
                                     collectCompletedRecall(
                                       contState,
                                       outputIndex,
@@ -15131,7 +15186,7 @@ export function streamResponsesRecallAware(
                         if (
                           error instanceof SSEStreamTransportError &&
                           !continuationFollowUpInput.finalRecallRound &&
-                          (recallBudget.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+                          (!recallBudget.requiresVerifiedContinuation ||
                             recallBudget.canRecover()) &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
@@ -15204,7 +15259,7 @@ export function streamResponsesRecallAware(
                       };
                       chargeContinuationUsage();
                       if (
-                        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                        recallBudget.requiresVerifiedContinuation &&
                         !contState.usageComplete
                       ) {
                         throw new RecallContinuationFailure(
@@ -15799,7 +15854,7 @@ export function streamResponsesRecallAware(
                 rawRecovered.usage ?? ZERO_USAGE,
               );
               if (
-                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                recallBudget.requiresVerifiedContinuation &&
                 (!recallBudget.continuationModelMatches(rawRecovered.model) ||
                   rawRecovered.usageComplete !== true)
               ) {
@@ -16154,7 +16209,8 @@ export function streamResponsesRecallAware(
           failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
             (item) =>
               item.type !== "function_call" ||
-              (item.name !== RECALL_TOOL_NAME &&
+              ((item.name !== RECALL_TOOL_NAME ||
+                item.namespace !== undefined) &&
                 ![item.id, item.call_id].some(
                   (identity) =>
                     typeof identity === "string" &&
@@ -17112,9 +17168,17 @@ export function accumulateResponsesNonStreamJSON(
             }
           }
         }
-      } else if (item.type === "function_call") {
-        let input: unknown = {};
-        if (typeof item.arguments === "string") {
+      } else if (
+        item.type === "function_call" ||
+        item.type === "custom_tool_call"
+      ) {
+        let input: unknown = item.type === "custom_tool_call" ? item.input : {};
+        if (item.type === "custom_tool_call" && typeof item.input !== "string")
+          throw new Error("malformed Responses custom tool input");
+        if (
+          item.type === "function_call" &&
+          typeof item.arguments === "string"
+        ) {
           try {
             input = JSON.parse(item.arguments);
           } catch {
@@ -17129,8 +17193,11 @@ export function accumulateResponsesNonStreamJSON(
         content.push({
           type: "tool_use",
           id,
-          name: asString(item.name),
+          name: responsesToolName(item, "response"),
           input,
+          ...(item.type === "custom_tool_call" || item.namespace !== undefined
+            ? { raw: item }
+            : {}),
         });
       }
     }
@@ -17430,6 +17497,7 @@ export function recordCacheTurnUsage(
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
   endSpan?: () => void,
+  request?: Pick<GatewayRequest, "messages" | "tools" | "extras">,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -17439,8 +17507,23 @@ export function recordCacheTurnUsage(
   // body to analyze); left undefined when the body is missing so the
   // recordCacheUsage call below falls through to the legacy "count it"
   // behavior on the rare no-body path.
+  // Native envelopes carry opaque metadata and tool declarations. Prefix
+  // diagnostics export values and field paths, so omit their raw bodies and
+  // clear any comparison retained by an earlier turn. Usage accounting below
+  // still consumes the provider's numeric cache counters.
+  const nativeRequest =
+    request?.messages.some(
+      (message) => message.responsesSourceRange !== undefined,
+    ) ||
+    request?.tools.some((tool) => tool.responsesNative !== undefined) ||
+    request?.extras?.nativeInstructionPrefix?.itemPositions !== undefined;
+  if (nativeRequest) {
+    sessionState.cacheAnalytics.lastRequestBody = null;
+    sessionState.cacheAnalytics.lastNormalizedBody = null;
+    sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+  }
   let bustCause: CacheBustCause | undefined;
-  if (requestBody) {
+  if (requestBody && !nativeRequest) {
     // Read the unified cache strategy so the cache-analytics warn path can
     // skip the dramatic-drop alert for cool-* sessions (those strategies
     // explicitly chose to let the prefix go cold; the alert is just noise).
@@ -17708,6 +17791,7 @@ function postResponseForTenant(
       suppressTemporalStorage ? undefined : requestBody,
       genAiSpan,
       endSpan,
+      req,
     );
     // Admin credentials are authorized at dispatch time and never retained in
     // session snapshots. The idle warmer still receives gateway-global extras,
@@ -22100,8 +22184,15 @@ async function handleConversationTurnPrepared(
     ? knownCodexContextLimit(req.model)
     : undefined;
   const verifiedRecallContext = canonicalCodexRecallRoute
-    ? providerRecallContext !== undefined && codexRecallContext !== undefined
-      ? Math.min(providerRecallContext, codexRecallContext)
+    ? providerRecallContext !== undefined
+      ? Math.min(
+          providerRecallContext,
+          // New Codex models may precede the bundled catalog. Keep each call
+          // within the conservative window, but let verified, metered calls
+          // spend separate recall budget instead of counting the sunk principal
+          // twice and rejecting an otherwise valid continuation.
+          codexRecallContext ?? MAX_RECALL_CHAIN_TOKENS,
+        )
       : undefined
     : providerRecallContext;
   const recallModelContextTokens =
@@ -22981,6 +23072,7 @@ async function handleConversationTurnPrepared(
       sessionID,
       budget: modelBudget,
       sourceWindow,
+      noStore: suppressTemporalStorage,
     });
   } catch (error) {
     if (!(error instanceof FullSourceRequired) || !sourceWindow) throw error;
@@ -23011,6 +23103,7 @@ async function handleConversationTurnPrepared(
       projectPath,
       sessionID,
       budget: modelBudget,
+      noStore: suppressTemporalStorage,
     });
   }
   // Transform stats ride along so postResponse can stamp them into the
@@ -23869,6 +23962,10 @@ async function handleConversationTurnPrepared(
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
     copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+    preparationTiming.metric(
+      "context_boundary_offered",
+      contextBoundaryHeader && response.ok ? 1 : 0,
+    );
     if (contextBoundaryHeader && response.ok) {
       response.headers.set(CONTEXT_BOUNDARY_HEADER, contextBoundaryHeader);
     }
@@ -24307,7 +24404,7 @@ async function handleConversationTurnPrepared(
             ),
           );
           if (
-            recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+            recallBudget.requiresVerifiedContinuation &&
             (!recallBudget.continuationModelMatches(
               recovery.continuation.model,
             ) ||
@@ -24462,7 +24559,7 @@ async function handleConversationTurnPrepared(
       if (!recallBudget.continuationModelMatches(continuationResp.model))
         return recoverRecallContinuation("follow_up_failed");
       if (
-        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+        recallBudget.requiresVerifiedContinuation &&
         continuationResp.usageComplete !== true
       ) {
         return failRecall("follow_up_failed");
@@ -25281,7 +25378,10 @@ export function loreMessagesToGateway(
     string,
     Pick<
       GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
+      | "content"
+      | "provenanceContent"
+      | "provenancePositions"
+      | "responsesSourceRange"
     >
   > = new Map(),
   allowProvenance = true,
@@ -25410,6 +25510,16 @@ export function loreMessagesToGateway(
 
     const message: GatewayMessage = { role: msg.info.role, content };
     let candidate = provenanceByMessageId.get(msg.info.id);
+    // Restoring native envelopes adds request-only fields to tool blocks.
+    // Compare before restoration so those fields cannot discard unchanged
+    // source provenance, including reasoning between parallel tool calls.
+    const nativeContentUnchanged =
+      candidate?.responsesSourceRange !== undefined &&
+      JSON.stringify(content) === JSON.stringify(candidate.content);
+    if (candidate?.responsesSourceRange) {
+      message.responsesSourceRange = candidate.responsesSourceRange;
+      restoreNativeResponsesToolEnvelopes(message, candidate);
+    }
     const userNativeProvenance =
       allowNativeUserProvenance &&
       msg.info.role === "user" &&
@@ -25510,7 +25620,9 @@ export function loreMessagesToGateway(
           block.type === "opaque" &&
           block.responsesItem === true &&
           block.requestOnly !== true &&
-          block.raw.type === "function_call_output",
+          ["function_call_output", "custom_tool_call_output"].includes(
+            String(block.raw.type),
+          ),
       );
     const provenance =
       allowProvenance ||
@@ -25535,7 +25647,8 @@ export function loreMessagesToGateway(
       });
     if (
       provenance?.provenanceContent &&
-      (JSON.stringify(content) === JSON.stringify(provenance.content) ||
+      (nativeContentUnchanged ||
+        JSON.stringify(content) === JSON.stringify(provenance.content) ||
         chatNativeTextProvenance ||
         toolResultsUnchanged)
     ) {
@@ -26349,7 +26462,8 @@ async function handleRequestInner(
       assertCrossProviderProvenance(req, route.effectiveProtocol);
       if (
         req.extras?.nativeChatInstructionPrefix?.hasLateItems ||
-        req.extras?.nativeInstructionPrefix?.hasLateItems
+        (req.extras?.nativeInstructionPrefix?.hasLateItems &&
+          !req.extras.nativeInstructionPrefix.itemPositions)
       ) {
         throw new InvalidCrossProviderRequestError();
       }

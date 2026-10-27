@@ -358,6 +358,7 @@ test.describe("duplicate apply (MEM-02)", () => {
       `Private copy content for dd-apply-${viewport}-${run}.`,
     );
     await expect(document).toContainText("Shared");
+    await document.getByText("Source & history", { exact: true }).click();
     const previousVersion = page.getByTestId("knowledge-version-1");
     await previousVersion.locator("summary").click();
     await expect(previousVersion).toContainText(sharedTitle);

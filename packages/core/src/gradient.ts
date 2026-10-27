@@ -19,6 +19,7 @@ import { offloadAllOrTimeout, requireReadRows } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import { SemanticTokenCache } from "./semantic-token-cache";
 
 type MessageWithParts = LoreMessageWithParts;
 
@@ -4181,6 +4182,28 @@ export function transform(input: {
    * running request's. Omit to use whatever the module globals currently hold
    * (legacy/test path).
    */
+  budget?: ModelBudget;
+  /** Only explicitly storage-enabled requests may read/publish derived counts. */
+  noStore?: boolean;
+}): TransformResult {
+  const cache = new SemanticTokenCache({
+    projectPath: input.projectPath,
+    sessionID: input.sessionID ?? input.messages[0]?.info.sessionID ?? "",
+    noStore: input.noStore !== false,
+    retainUnused: true,
+  });
+  try {
+    return cache.runVisible(() => transformWithCounts(input));
+  } finally {
+    cache.persist();
+  }
+}
+
+function transformWithCounts(input: {
+  sourceWindow?: SourceWindow;
+  messages: MessageWithParts[];
+  projectPath: string;
+  sessionID?: string;
   budget?: ModelBudget;
 }): TransformResult {
   // Apply the per-request budget synchronously before transformInner so no

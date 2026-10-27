@@ -1,3 +1,7 @@
+import {
+  PROJECT_MEMORY_SEARCH_LABEL,
+  WORKSPACE_KNOWLEDGE_SEARCH_LABEL,
+} from "~/lib/search-labels";
 import type { Component, JSX } from "solid-js";
 import { Show } from "solid-js";
 import { useLocation } from "@solidjs/router";
@@ -35,7 +39,10 @@ export const AppBar: Component<{
       return "Sessions";
     if (path.includes("/imports")) return "Imports";
     if (path.includes("/duplicates")) return "Find duplicates";
-    if (path.includes("/search")) return "Search";
+    if (path.includes("/search"))
+      return props.searchProjectId
+        ? PROJECT_MEMORY_SEARCH_LABEL
+        : WORKSPACE_KNOWLEDGE_SEARCH_LABEL;
     return props.searchProjectId ? "Overview" : "Projects";
   };
   return (

@@ -1,3 +1,8 @@
+import {
+  knowledgeVisibilityDescription,
+  knowledgeVisibilityLabel,
+} from "~/lib/knowledge-visibility";
+import { LIST_FILTER_LABEL } from "~/lib/search-labels";
 import type { Component } from "solid-js";
 import { A } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
@@ -44,18 +49,6 @@ const scopeOptions: Array<NonNullable<KnowledgeQuery["scope"]> | ""> = [
   "",
   ...KNOWLEDGE_SCOPES,
 ];
-const scopeLabels: Record<string, string> = {
-  "": "This project",
-  project: "Project-only",
-  shared: "Shared knowledge",
-  all: "Project + shared",
-};
-const scopeDescriptions: Record<string, string> = {
-  "": "Entries owned by this project, including ones marked as shared.",
-  project: "Entries in this project that are not marked as shared.",
-  shared: "Shared entries from any project and global knowledge.",
-  all: "This project's entries plus shared and global knowledge.",
-};
 const sorts: Record<string, string> = {
   "updated_at:desc": "Recently updated",
   "updated_at:asc": "Least recently updated",
@@ -99,7 +92,7 @@ export const KnowledgeListToolbar: Component<{
   ]);
   const active = () => [
     ...(props.query.q
-      ? [{ key: "q" as const, label: `Search: ${props.query.q}` }]
+      ? [{ key: "q" as const, label: `Text: ${props.query.q}` }]
       : []),
     ...(props.query.category
       ? [
@@ -113,7 +106,7 @@ export const KnowledgeListToolbar: Component<{
       ? [
           {
             key: "scope" as const,
-            label: `Scope: ${scopeLabels[props.query.scope]}`,
+            label: `Scope: ${knowledgeVisibilityLabel(props.query.scope)}`,
           },
         ]
       : []),
@@ -207,20 +200,20 @@ export const KnowledgeListToolbar: Component<{
           onChange={(value) => setScope(value || null)}
           itemComponent={(item) => (
             <SelectItem item={item.item} class="min-h-11 md:min-h-8">
-              {scopeLabels[item.item.rawValue]}
+              {knowledgeVisibilityLabel(item.item.rawValue)}
             </SelectItem>
           )}
         >
           <SelectLabel class="mb-1.5 block text-xs">Scope</SelectLabel>
           <SelectTrigger class="h-11 bg-bg text-sm md:h-9 md:text-xs">
             <SelectValue<string>>
-              {(state) => scopeLabels[state.selectedOption()]}
+              {(state) => knowledgeVisibilityLabel(state.selectedOption())}
             </SelectValue>
           </SelectTrigger>
           <SelectContent class="max-h-[var(--kb-popper-content-available-height)] overflow-y-auto overscroll-contain" />
         </Select>
         <p class="text-xs leading-5 text-muted">
-          {scopeDescriptions[scope() ?? ""]}
+          {knowledgeVisibilityDescription(scope())}
         </p>
       </div>
       <div
@@ -292,7 +285,7 @@ export const KnowledgeListToolbar: Component<{
         <form
           class="flex min-w-0 items-center gap-1.5"
           role="search"
-          aria-label="Search knowledge list"
+          aria-label={LIST_FILTER_LABEL}
           onSubmit={(event) => {
             event.preventDefault();
             const raw = new FormData(event.currentTarget).get("q");
@@ -310,8 +303,8 @@ export const KnowledgeListToolbar: Component<{
           >
             <TextFieldInput
               name="q"
-              aria-label="Filter knowledge list"
-              placeholder="Search knowledge…"
+              aria-label={LIST_FILTER_LABEL}
+              placeholder={`${LIST_FILTER_LABEL}…`}
               class="h-11 bg-surface px-3 text-base md:h-9 md:text-xs"
             />
           </TextField>
@@ -320,7 +313,7 @@ export const KnowledgeListToolbar: Component<{
             size="icon"
             variant="outline"
             class="size-11 shrink-0 md:size-9"
-            aria-label="Search knowledge"
+            aria-label={LIST_FILTER_LABEL}
           >
             <Icon name="search" />
           </Button>

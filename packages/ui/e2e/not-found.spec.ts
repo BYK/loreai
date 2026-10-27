@@ -58,7 +58,7 @@ for (const theme of ["light", "dark"] as const) {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/ui\/search\?q=$/);
     await expect(
-      page.getByRole("heading", { name: "Search all knowledge" }),
+      page.getByRole("heading", { name: "Search knowledge across projects" }),
     ).toBeVisible();
   });
 

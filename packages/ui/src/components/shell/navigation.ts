@@ -8,6 +8,21 @@ import {
 } from "~/lib/href";
 import type { IconName } from "./Icon";
 
+export const REVIEW_DESTINATIONS = {
+  proposals: {
+    label: "Team proposals",
+    description: "Review knowledge proposed for your team.",
+  },
+  instructions: {
+    label: "Conflicting instructions",
+    description: "Review knowledge entries that give opposing instructions.",
+  },
+  recovery: {
+    label: "Sync recovery",
+    description: "Review local knowledge versions replaced by cloud sync.",
+  },
+} as const;
+
 export const SECONDARY_LINKS: {
   href: string;
   label: string;
@@ -24,14 +39,14 @@ export const SECONDARY_LINKS: {
   },
   {
     href: "/contradictions",
-    label: "Contradictions",
+    label: REVIEW_DESTINATIONS.instructions.label,
     icon: "warning",
     id: "nav-contradictions",
     group: "Knowledge tools",
   },
   {
     href: "/promotions",
-    label: "Promotions",
+    label: REVIEW_DESTINATIONS.proposals.label,
     icon: "promote",
     id: "nav-promotions",
     group: "Knowledge tools",
@@ -45,7 +60,7 @@ export const SECONDARY_LINKS: {
   },
   {
     href: "/conflicts",
-    label: "Conflicts",
+    label: REVIEW_DESTINATIONS.recovery.label,
     icon: "conflict",
     id: "nav-conflicts",
     group: "Collaboration",

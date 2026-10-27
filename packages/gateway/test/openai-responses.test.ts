@@ -1528,7 +1528,7 @@ describe("streamed Responses ingress", () => {
     expect(metric).toHaveBeenCalledWith("source_converted_messages", 2);
   });
 
-  test("orders EOF publication across stale replay and the next continuation", async () => {
+  test.each([false, true])("EOF lifecycle (direct=%s)", async (direct) => {
     const projectPath = process.cwd();
     const sessionID = "codex-boundary-lifecycle";
     harness = await createHarness({
@@ -1648,13 +1648,19 @@ describe("streamed Responses ingress", () => {
       }),
     });
 
-    const codexURL = "https://chatgpt.com/backend-api/codex/responses";
+    const codexURL = direct
+      ? `${harness.baseURL}/v1/codex/responses`
+      : "https://chatgpt.com/backend-api/codex/responses";
     const start = (input: unknown[]) =>
       fetch(codexURL, {
         method: "POST",
         headers: {
           authorization: "Bearer test-key",
           "content-type": "application/json",
+          "x-lore-session-id": sessionID,
+          "x-lore-project": projectPath,
+          "x-lore-provider": "openai-codex",
+          originator: "pi",
         },
         body: JSON.stringify({
           model: "gpt-5.6-codex",
@@ -1753,6 +1759,9 @@ describe("streamed Responses ingress", () => {
     });
     expect(gatewayCalls[thirdCallStart]?.boundary).toEqual(expect.any(String));
     expect(metric).toHaveBeenCalledWith("source_converted_messages", 2);
+    expect(metric).toHaveBeenCalledWith("context_boundary_capable", 1);
+    expect(metric).toHaveBeenCalledWith("context_boundary_suffix", 1);
+    expect(metric).toHaveBeenCalledWith("context_boundary_offered", 1);
     expect(upstreamBodies).toHaveLength(3);
   });
 });

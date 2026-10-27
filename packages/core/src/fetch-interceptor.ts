@@ -372,6 +372,17 @@ function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
   return undefined;
 }
 
+function stripUntrustedContextBoundaryHeaders(headers: Headers): boolean {
+  // Only this interceptor may attach boundary claims after validating a full
+  // transcript; caller-supplied values never authorize replay.
+  const hadBoundaryClaim =
+    headers.has(CONTEXT_BOUNDARY_HEADER) ||
+    headers.has(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  headers.delete(CONTEXT_BOUNDARY_HEADER);
+  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  return hadBoundaryClaim;
+}
+
 type PreparedBoundaryRequest = {
   boundaryKey?: string;
   attached: boolean;
@@ -390,10 +401,7 @@ function prepareBoundaryRequest(
   init: RequestInit | undefined,
 ): PreparedBoundaryRequest {
   // Only process-local, gateway-issued boundaries participate in elision.
-  headers.delete(CONTEXT_BOUNDARY_HEADER);
-  // Do not let caller-provided capability claims opt auxiliary endpoints into
-  // the source-checkpoint namespace reserved for generation requests.
-  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  stripUntrustedContextBoundaryHeaders(headers);
   const endpoint = boundaryEndpoint(pathname);
   if (!endpoint) {
     return {
@@ -779,6 +787,69 @@ function observeRequestHeaders(
   }
 }
 
+/** Share negotiation, accepted-EOF publication and one full replay on every path. */
+async function fetchWithContextBoundary(
+  originalFetch: typeof fetch,
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  headers: Headers,
+  pathname: string,
+  config: FetchInterceptorConfig,
+): Promise<Response> {
+  // Fetch consumes URL/options synchronously. A later retry must not observe
+  // an SDK reusing its URL or init object while the first response is pending.
+  const requestInput = input instanceof URL ? input.href : input;
+  const requestInit = { ...init };
+  const prepared = prepareBoundaryRequest(
+    headers,
+    config.gatewayBase,
+    pathname,
+    requestInput,
+    requestInit,
+  );
+  // Only an attached suffix can need replay. Own mutable byte bodies at that
+  // point, preserving view offsets; strings already provide an immutable copy.
+  const body = requestInit.body;
+  const replayInit = prepared.attached
+    ? {
+        ...requestInit,
+        body:
+          body instanceof ArrayBuffer
+            ? body.slice(0)
+            : ArrayBuffer.isView(body)
+              ? new Uint8Array(
+                  body.buffer,
+                  body.byteOffset,
+                  body.byteLength,
+                ).slice()
+              : body,
+      }
+    : undefined;
+  observeRequestHeaders(new Headers(prepared.init.headers), config);
+  let response = await originalFetch(requestInput, prepared.init);
+  if (
+    prepared.attached &&
+    prepared.boundaryKey &&
+    response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
+  ) {
+    // A stale or unpublished checkpoint is only a hint. Replay the original,
+    // complete body once; never expose the internal mismatch to the SDK.
+    contextBoundaries.delete(prepared.boundaryKey);
+    void response.body?.cancel().catch(() => {});
+    const fullHeaders = new Headers(headers);
+    fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
+    response = await originalFetch(requestInput, {
+      ...replayInit,
+      headers: fullHeaders,
+    });
+  }
+  return updateContextBoundary(
+    response,
+    prepared.boundaryKey,
+    boundaryEndpoint(pathname)?.protocol,
+  );
+}
+
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
@@ -822,11 +893,17 @@ export function installFetchInterceptor(
           ? input.headers
           : undefined),
     );
+    const strippedBoundaryClaims =
+      stripUntrustedContextBoundaryHeaders(requestHeaders);
 
     // Credentialed direct gateway routes include management and compaction
     // endpoints that are not LLM paths. Check those before the fast exit so a
     // cross-origin redirect cannot forward gateway or provider credentials.
-    if (!couldBeLlmRequest && !hasCredentialHeaders(requestHeaders)) {
+    if (
+      !couldBeLlmRequest &&
+      !hasCredentialHeaders(requestHeaders) &&
+      !strippedBoundaryClaims
+    ) {
       return originalFetch(input, init);
     }
 
@@ -841,11 +918,27 @@ export function installFetchInterceptor(
       );
     }
 
-    // Never intercept requests already going to the gateway, but still observe
-    // their auth so in-process extensions can scope side-channel requests.
-    // Parsed origin and path checks avoid treating a hostile prefix host as the gateway.
+    // Never rewrite requests already targeting the gateway. Keep direct gateway
+    // routes on their original URL while negotiating context boundaries for
+    // supported generation endpoints.
     if (isDirectGatewayRequest(upstream, gatewayBase)) {
+      if (boundaryEndpoint(upstream.pathname)) {
+        return fetchWithContextBoundary(
+          originalFetch,
+          typeof input === "string" || input instanceof URL ? url : input,
+          init,
+          requestHeaders,
+          upstream.pathname,
+          config,
+        );
+      }
       observeRequestHeaders(requestHeaders, config);
+      // Preserve the caller's exact init for safe direct requests. Rebuild it
+      // only when credentials need redirect protection or boundary claims were
+      // removed above.
+      if (!hasCredentialHeaders(requestHeaders) && !strippedBoundaryClaims) {
+        return originalFetch(input, init);
+      }
       return originalFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders),
@@ -893,50 +986,16 @@ export function installFetchInterceptor(
         rewrite.upstreamPath,
         config,
       );
-      const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
-      const prepared = prepareBoundaryRequest(
-        headers,
-        gatewayBase,
-        boundaryPathname,
-        input,
-        init,
-      );
-      observeRequestHeaders(new Headers(prepared.init.headers), config);
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
-      const response = await originalFetch(
+      return fetchWithContextBoundary(
+        originalFetch,
         rewrittenFetchInput(input, rewrite.gatewayUrl),
-        prepared.init,
-      );
-      if (
-        prepared.attached &&
-        prepared.boundaryKey &&
-        response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
-      ) {
-        // The gateway could not prove that its retained Lore checkpoint still
-        // matches this prefix (restart, edited history, or a stale client
-        // boundary). Replay once without the hint so the normal full-body
-        // parser can recover. The response is deliberately not exposed to the
-        // provider, which otherwise sees an opaque 409 instead of recovering.
-        contextBoundaries.delete(prepared.boundaryKey);
-        void response.body?.cancel().catch(() => {});
-        const fullHeaders = new Headers(headers);
-        fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
-        const retry = await originalFetch(
-          rewrittenFetchInput(input, rewrite.gatewayUrl),
-          prepareGatewayFetchInit(input, init, fullHeaders),
-        );
-        return updateContextBoundary(
-          retry,
-          prepared.boundaryKey,
-          boundaryEndpoint(boundaryPathname)?.protocol,
-        );
-      }
-      return updateContextBoundary(
-        response,
-        prepared.boundaryKey,
-        boundaryEndpoint(boundaryPathname)?.protocol,
+        init,
+        headers,
+        new URL(rewrite.gatewayUrl).pathname,
+        config,
       );
     }
 
@@ -957,43 +1016,16 @@ export function installFetchInterceptor(
           rewrite.upstreamPath,
           config,
         );
-        const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
-        const prepared = prepareBoundaryRequest(
-          headers,
-          gatewayBase,
-          boundaryPathname,
-          input,
-          init,
-        );
-        observeRequestHeaders(new Headers(prepared.init.headers), config);
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
-        const response = await originalFetch(
+        return fetchWithContextBoundary(
+          originalFetch,
           rewrittenFetchInput(input, rewrite.gatewayUrl),
-          prepared.init,
-        );
-        if (
-          prepared.attached &&
-          prepared.boundaryKey &&
-          response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
-        ) {
-          contextBoundaries.delete(prepared.boundaryKey);
-          void response.body?.cancel().catch(() => {});
-          const retry = await originalFetch(
-            rewrittenFetchInput(input, rewrite.gatewayUrl),
-            prepareGatewayFetchInit(input, init, headers),
-          );
-          return updateContextBoundary(
-            retry,
-            prepared.boundaryKey,
-            boundaryEndpoint(boundaryPathname)?.protocol,
-          );
-        }
-        return updateContextBoundary(
-          response,
-          prepared.boundaryKey,
-          boundaryEndpoint(boundaryPathname)?.protocol,
+          init,
+          headers,
+          new URL(rewrite.gatewayUrl).pathname,
+          config,
         );
       }
 

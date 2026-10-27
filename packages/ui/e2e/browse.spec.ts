@@ -50,11 +50,24 @@ test.describe("real data browsing", () => {
     expect(detail.ok()).toBe(true);
     expect((await detail.json()).id).toBe(knowledgeId);
 
-    await doc.getByText("More actions", { exact: true }).click();
+    await expect(doc.getByText("More actions", { exact: true })).toHaveCount(0);
+    await expect(
+      doc.getByRole("button", { name: "Edit", exact: true }),
+    ).toBeEnabled();
+    const source = doc.getByText("Source & history", { exact: true });
+    await expect(source).toBeVisible();
+    await expect(source.locator("..")).not.toHaveAttribute("open");
+    await expect(doc.getByTestId("knowledge-source-summary")).toBeVisible();
+    await expect(
+      doc.getByRole("heading", { name: "History", exact: true }),
+    ).toBeHidden();
+    await source.click();
+    await expect(
+      doc.getByRole("heading", { name: "History", exact: true }),
+    ).toBeVisible();
     for (const label of FUTURE_ACTIONS) {
       const button = doc.getByRole("button", { name: new RegExp(`^${label}`) });
-      await expect(button).toBeDisabled();
-      await expect(button).toContainText("not available yet");
+      await expect(button).toHaveCount(0);
     }
   });
 
@@ -107,7 +120,9 @@ test.describe("real data browsing", () => {
       });
     await expect(page).toHaveURL("/ui/search?q=SQLite");
     await expect(
-      page.getByRole("textbox", { name: "Search all knowledge" }),
+      page
+        .getByRole("main")
+        .getByRole("textbox", { name: "Search knowledge across projects" }),
     ).toHaveValue("SQLite");
     await expect(page.getByTestId("search-hit").first()).toBeVisible();
   });

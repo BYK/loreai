@@ -51,6 +51,57 @@ function mount(client: ApiClient, path = "/entities") {
 }
 
 describe("EntitiesPage", () => {
+  it("shows recorded aliases, meaningful project scope and correct plurals without detail requests", async () => {
+    const getEntity = vi.fn();
+    mount(
+      clientWith({
+        getEntity,
+        listProjects: async () =>
+          [
+            { id: "p-1", name: "Engine workspace", path: "/tmp/engine" },
+          ] as never,
+        listEntities: async () => ({
+          entities: [
+            makeEntity({ project_id: "p-1" }),
+            makeEntity({ id: "e-2", canonical_name: "", aliases: [] }),
+          ],
+          next_cursor: null,
+          total: 2,
+        }),
+      }),
+    );
+    await screen.findByText("Ada Lovelace");
+    expect(screen.getByText("2 entities")).toBeInTheDocument();
+    expect(
+      screen.getByText("Also known as ada@example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Engine workspace")).toBeInTheDocument();
+    expect(screen.getByText("Across projects")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /Unnamed entity/ }),
+    ).toBeInTheDocument();
+    expect(getEntity).not.toHaveBeenCalled();
+  });
+
+  it("clears an empty type filter to return to available entities", async () => {
+    const listEntities = vi
+      .fn<ApiClient["listEntities"]>()
+      .mockResolvedValue({ entities: [], next_cursor: null, total: 0 });
+    mount(clientWith({ listEntities }), "/entities?type=person");
+    expect(
+      await screen.findByText("No entities match this filter"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear entity filter" }),
+    );
+    await waitFor(() =>
+      expect(listEntities).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: null, page: null }),
+        expect.anything(),
+      ),
+    );
+  });
+
   it("shows a loading state then the list", async () => {
     let resolve: ((v: unknown) => void) | undefined;
     const client = clientWith({
@@ -129,7 +180,7 @@ describe("EntitiesPage", () => {
         total: 2,
       });
     mount(clientWith({ listEntities }));
-    const next = await screen.findByRole("button", { name: "Next" });
+    const next = await screen.findByRole("button", { name: "Next page" });
     await waitFor(() => expect(next).toBeEnabled());
     fireEvent.click(next);
     await waitFor(() =>

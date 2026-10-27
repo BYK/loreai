@@ -1,30 +1,10 @@
-import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createSignal, Show } from "solid-js";
 import type { Component } from "solid-js";
 
 import type { KnowledgeVersion } from "~/contracts";
 import { ToggleGroup, ToggleGroupItem } from "~/components/ui/toggle-group";
 import { diffText } from "~/lib/text-diff";
-import type { TextChange } from "~/lib/text-diff";
-
-const ChangedText: Component<{ changes: TextChange[] }> = (props) => (
-  <For each={props.changes}>
-    {(part) => (
-      <Switch>
-        <Match when={part.kind === "added"}>
-          <ins class="rounded-sm bg-emerald-100 text-emerald-950 decoration-emerald-700 dark:bg-emerald-950 dark:text-emerald-100 dark:decoration-emerald-300">
-            {part.text}
-          </ins>
-        </Match>
-        <Match when={part.kind === "removed"}>
-          <del class="rounded-sm bg-rose-100 text-rose-950 decoration-rose-700 dark:bg-rose-950 dark:text-rose-100 dark:decoration-rose-300">
-            {part.text}
-          </del>
-        </Match>
-        <Match when={part.kind === "equal"}>{part.text}</Match>
-      </Switch>
-    )}
-  </For>
-);
+import { TextChanges } from "./TextChanges";
 
 export const VersionDiff: Component<{
   version: KnowledgeVersion;
@@ -93,7 +73,7 @@ export const VersionDiff: Component<{
         data-testid="version-title"
       >
         <Show when={!fullText() && comparison()} fallback={props.version.title}>
-          {(value) => <ChangedText changes={value().title} />}
+          {(value) => <TextChanges changes={value().title} />}
         </Show>
       </div>
       <p
@@ -104,7 +84,7 @@ export const VersionDiff: Component<{
           when={!fullText() && comparison()}
           fallback={props.version.content}
         >
-          {(value) => <ChangedText changes={value().content} />}
+          {(value) => <TextChanges changes={value().content} />}
         </Show>
       </p>
     </div>

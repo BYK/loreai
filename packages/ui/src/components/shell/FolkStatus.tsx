@@ -75,7 +75,7 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
       connection: ws.connection.state(),
       account: account(),
       accountError: folk.account.error(),
-      sync: folk.sync.data(),
+      sync: folk.confirmedSync(),
       syncError: folk.sync.error(),
     }),
   );

@@ -135,7 +135,7 @@ const cases: Array<{
       sync: idle(0),
     },
     state: "sync_on",
-    label: "Sync on",
+    label: "Sync enabled",
     detail: "No local changes are waiting to upload.",
   },
   {
@@ -146,7 +146,7 @@ const cases: Array<{
       sync: idle(3),
     },
     state: "sync_on",
-    label: "Sync on · 3 pending",
+    label: "Sync enabled · 3 pending",
     detail: "3 local changes are waiting",
   },
   {
@@ -157,7 +157,7 @@ const cases: Array<{
       sync: idle(1),
     },
     state: "sync_on",
-    label: "Sync on · 1 pending",
+    label: "Sync enabled · 1 pending",
     detail: "1 local change is waiting",
   },
   {
@@ -168,7 +168,8 @@ const cases: Array<{
       sync: idle(null),
     },
     state: "sync_on",
-    label: "Sync on",
+    label: "Sync enabled",
+    detail: "pending-change count is unavailable",
   },
 ];
 

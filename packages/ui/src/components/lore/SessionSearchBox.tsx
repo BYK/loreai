@@ -30,12 +30,13 @@ export const SessionSearchBox: Component<{
         <TextFieldInput
           type="search"
           name="q"
+          class="h-11 md:h-10"
           value={props.q}
           aria-label="Search sessions"
           placeholder="Search sessions by title or id"
         />
       </TextField>
-      <Button type="submit" size="sm">
+      <Button type="submit" size="sm" class="h-11 md:h-9">
         Search
       </Button>
     </form>

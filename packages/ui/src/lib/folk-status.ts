@@ -147,14 +147,19 @@ export function summarizeFolkStatus(input: FolkStatusInput): ShellFolkSummary {
         "Signed in, but cloud sync is disabled. Run `lore sync enable` to turn it on.",
     };
   }
-  const pending = sync.pending_changes ?? 0;
+  const pending = sync.pending_changes;
   return {
     state: "sync_on",
-    label: pending > 0 ? `Sync on · ${pending} pending` : "Sync on",
+    label:
+      pending !== null && pending > 0
+        ? `Sync enabled · ${pending} pending`
+        : "Sync enabled",
     tone: "accent",
     detail:
-      pending > 0
+      pending !== null && pending > 0
         ? `${pending} local ${pending === 1 ? "change is" : "changes are"} waiting to upload.`
-        : "No local changes are waiting to upload.",
+        : pending === null
+          ? "Sync is configured; the pending-change count is unavailable."
+          : "No local changes are waiting to upload.",
   };
 }

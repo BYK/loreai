@@ -1,5 +1,5 @@
 import type { Component, JSX } from "solid-js";
-import { createMemo, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createUniqueId, For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { Badge } from "~/components/ui/badge";
@@ -24,8 +24,12 @@ import type { Loader } from "~/lib/loader";
 import type { KnowledgeVersionHistory } from "~/contracts";
 import { errorStateFor } from "./ErrorState";
 
-import { DocHeader, ScopeLabel, type Participant } from "./Document";
-import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
+import {
+  DOCUMENT_COLUMN_CLASS,
+  DocHeader,
+  ScopeLabel,
+  type Participant,
+} from "./Document";
 import { KnowledgeFiles } from "./KnowledgeFiles";
 import { RetainedSummary } from "./RetainedSummary";
 import { VersionHistory } from "./VersionHistory";
@@ -52,9 +56,9 @@ const Meta: Component<{ label: string; value: string | null | undefined }> = (
 ) => (
   <Show when={props.value}>
     <div class="contents">
-      <dt class="text-muted">{props.label}</dt>
+      <dt class="max-w-[12ch] text-muted sm:max-w-none">{props.label}</dt>
       <dd
-        class="m-0 truncate font-mono text-xs"
+        class="m-0 min-w-0 whitespace-pre-wrap font-mono text-xs [overflow-wrap:anywhere]"
         title={props.value ?? undefined}
       >
         {props.value}
@@ -76,11 +80,38 @@ export const KnowledgeDocument: Component<{
   actions?: JSX.Element;
   renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
+  const detailsDescriptionId = createUniqueId();
   const isShared = () =>
     props.entry.project_id == null ||
     props.entry.cross_project === true ||
     props.entry.cross_project === 1;
   const sourceSession = () => props.entry.source_session;
+  const sourceProjectUnavailable = () =>
+    !props.project &&
+    props.evidence &&
+    !props.evidence.data() &&
+    !props.evidence.error() &&
+    !props.evidence.loading();
+  const sourceProjectMessage =
+    "Source project unavailable; source availability cannot be checked.";
+  const sourceSummary = () => {
+    if (!sourceSession()) return "No source session recorded.";
+    const evidence = props.evidence;
+    if (!evidence) return "Source session recorded; availability unknown.";
+    if (evidence.error()) return "Source availability could not be checked.";
+    if (sourceProjectUnavailable()) return sourceProjectMessage;
+    if (evidence.loading() || !evidence.data()) return "Checking source…";
+    switch (evidence.data()?.state) {
+      case "available":
+        return "Source session available · exact message not recorded.";
+      case "summary_only":
+        return "Original messages expired; retained summary only.";
+      case "unavailable":
+        return "Source session no longer available.";
+      default:
+        return "Source session recorded; availability unknown.";
+    }
+  };
   const currentVersion = () =>
     props.versions?.data()?.versions.find((version) => version.is_current);
   const projectId = () =>
@@ -99,6 +130,7 @@ export const KnowledgeDocument: Component<{
     >
       <DocHeader
         compact
+        class={DOCUMENT_COLUMN_CLASS}
         crumb={[
           props.project?.name || props.project?.path || "Project",
           "Knowledge",
@@ -108,48 +140,72 @@ export const KnowledgeDocument: Component<{
         scope={<ScopeLabel scope={isShared() ? "shared" : "project"} />}
         trailing={`Updated ${formatWhen(props.entry.updated_at ?? props.entry.created_at)}`}
       >
-        <div class="mt-3 flex flex-wrap items-center gap-2">
-          <Badge variant="teal" data-testid="category">
-            {props.entry.category}
-          </Badge>
-          <Badge variant="outline">
-            Confidence {formatConfidence(props.entry.confidence)}
-          </Badge>
-          <Show
-            when={
-              props.entry.sensitivity && props.entry.sensitivity !== "normal"
-            }
-          >
-            <Badge variant="gold">{props.entry.sensitivity}</Badge>
-          </Show>
-          <Show
-            when={
-              props.entry.approval_status &&
-              props.entry.approval_status !== "approved"
-            }
-          >
-            <Badge variant="outline">{props.entry.approval_status}</Badge>
-          </Show>
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge variant="teal" data-testid="category">
+              {props.entry.category}
+            </Badge>
+            <Badge
+              variant="outline"
+              data-testid="knowledge-confidence"
+              title="Recorded value, not a probability of correctness"
+            >
+              Recorded confidence {formatConfidence(props.entry.confidence)}
+            </Badge>
+            <Show
+              when={
+                props.entry.sensitivity && props.entry.sensitivity !== "normal"
+              }
+            >
+              <Badge variant="gold">{props.entry.sensitivity}</Badge>
+            </Show>
+            <Show
+              when={
+                props.entry.approval_status &&
+                props.entry.approval_status !== "approved"
+              }
+            >
+              <Badge variant="outline">{props.entry.approval_status}</Badge>
+            </Show>
+          </div>
           <Show when={props.actions}>
-            <div class="ml-auto flex items-center gap-2">{props.actions}</div>
+            <div class="flex shrink-0 items-center gap-2 [&_button]:min-h-11 sm:[&_button]:min-h-9">
+              {props.actions}
+            </div>
           </Show>
         </div>
       </DocHeader>
 
-      <div class="mx-auto max-w-[800px] px-6 py-7 sm:px-7">
+      <div class={`${DOCUMENT_COLUMN_CLASS} py-7`}>
         <div class="text-[15px] leading-[1.75] [overflow-wrap:anywhere] [&_p]:my-0 [&_p+p]:mt-4">
           <For each={paragraphs(props.entry.content)}>{(p) => <p>{p}</p>}</For>
         </div>
 
-        <details open class="mt-8 rounded-lg border border-line bg-bg">
-          <summary class="cursor-pointer px-4 py-3 text-xs font-medium text-muted">
-            Source &amp; details
+        <p
+          data-testid="knowledge-source-summary"
+          class="mt-5 text-xs leading-relaxed text-muted [overflow-wrap:anywhere]"
+        >
+          {sourceSummary()}
+        </p>
+
+        <details class="mt-6 min-w-0 rounded-lg border border-line bg-bg">
+          <summary
+            aria-label="Source & history"
+            aria-describedby={detailsDescriptionId}
+            class="min-h-11 cursor-pointer rounded-lg px-4 py-3 text-xs font-medium text-muted outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span>Source &amp; history</span>
+            <span
+              id={detailsDescriptionId}
+              class="mt-1 block text-[11px] font-normal leading-relaxed"
+            >
+              Source, files, confidence, versions and technical details
+            </span>
           </summary>
           <section
-            class="border-t border-line px-4 py-4 text-xs"
+            class="min-w-0 border-t border-line px-4 py-4 text-xs [overflow-wrap:anywhere]"
             data-testid="trust-section"
           >
-            <div class="eyebrow mb-2">Why trust this</div>
             <div class="grid gap-4 sm:grid-cols-2">
               <div>
                 <div class="font-semibold">Source</div>
@@ -196,9 +252,11 @@ export const KnowledgeDocument: Component<{
                   <Show when={props.evidence}>
                     {(evidence) => (
                       <Show
-                        when={props.project}
+                        when={!sourceProjectUnavailable()}
                         fallback={
-                          <div class="mt-2 text-muted">Checking source…</div>
+                          <div class="mt-2 text-muted">
+                            {sourceProjectMessage}
+                          </div>
                         }
                       >
                         <div class="mt-2 text-muted">
@@ -324,114 +382,108 @@ export const KnowledgeDocument: Component<{
               </div>
             </div>
           </section>
-        </details>
 
-        <Show when={props.versions}>
-          {(versions) => (
-            <VersionHistory
-              loader={versions()}
-              projectId={
-                props.project?.id ?? props.entry.project_id ?? undefined
-              }
-              renderRestore={props.renderRestore}
-            />
-          )}
-        </Show>
-
-        <details class="mt-7 rounded-lg border border-line px-4 py-3 text-xs">
-          <summary class="cursor-pointer font-semibold">
-            Technical details
-          </summary>
-          <dl class="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5">
-            <Meta label="ID" value={props.entry.id} />
-            <Meta label="Logical ID" value={props.entry.logical_id} />
-            <Meta label="Project ID" value={props.entry.project_id} />
-            <Meta label="Title" value={props.entry.title} />
-            <Meta label="Category" value={props.entry.category} />
-            <Meta
-              label="Cross project"
-              value={
-                props.entry.cross_project === true ||
-                props.entry.cross_project === 1
-                  ? "true"
-                  : "false"
-              }
-            />
-            <Meta label="Created by" value={props.entry.created_by} />
-            <Meta label="Updated by" value={props.entry.updated_by} />
-            <Meta
-              label="Created"
-              value={formatFullDate(props.entry.created_at)}
-            />
-            <Meta
-              label="Updated"
-              value={formatFullDate(props.entry.updated_at)}
-            />
-            <Meta label="Promotion" value={props.entry.promotion_status} />
-            <Show when={props.entry.last_reinforced_at}>
-              <Meta
-                label="Last reinforced"
-                value={formatFullDate(props.entry.last_reinforced_at)}
-              />
+          <div class="border-t border-line px-4 pb-4">
+            <Show when={props.versions}>
+              {(versions) => (
+                <VersionHistory
+                  loader={versions()}
+                  projectId={
+                    props.project?.id ?? props.entry.project_id ?? undefined
+                  }
+                  renderRestore={props.renderRestore}
+                />
+              )}
             </Show>
-            <Show when={props.versions?.data()}>
-              {(history) => {
-                const head = () =>
-                  history().versions.find((version) => version.is_current);
-                return (
-                  <>
-                    <Meta label="Version ID" value={head()?.version_id} />
-                    <Meta
-                      label="Current version ID"
-                      value={history().current_version_id}
-                    />
-                    <Meta
-                      label="Source user"
-                      value={
-                        head()?.source_refs.user_id
-                          ? "Identity unavailable"
-                          : undefined
-                      }
-                    />
-                    <Meta
-                      label="Source entry"
-                      value={head()?.source_refs.entry_id}
-                    />
-                    <Meta
-                      label="Source created by"
-                      value={head()?.source_refs.created_by}
-                    />
-                    <Meta
-                      label="Source updated by"
-                      value={head()?.source_refs.updated_by}
-                    />
-                    <Meta
-                      label="Worker provider"
-                      value={head()?.source_refs.worker_provider_id}
-                    />
-                    <Meta
-                      label="Worker model"
-                      value={head()?.source_refs.worker_model_id}
-                    />
-                  </>
-                );
-              }}
-            </Show>
-          </dl>
-        </details>
 
-        <details class="mt-6 border-t border-line pt-4">
-          <summary class="cursor-pointer text-xs font-medium text-muted">
-            More actions
-          </summary>
-          <div class="pt-3">
-            <p class="m-0 text-xs text-muted">
-              Edits and deletions are revision-checked; restores create a new
-              version.
-            </p>
-            <FutureActionRow actions={FUTURE_ACTIONS} primary="Ask agent" />
+            <details class="mt-5 min-w-0 border-t border-line pt-4 text-xs">
+              <summary class="min-h-11 cursor-pointer py-3 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0 sm:py-0">
+                Technical details
+              </summary>
+              <dl class="mt-3 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5">
+                <Meta label="ID" value={props.entry.id} />
+                <Meta label="Logical ID" value={props.entry.logical_id} />
+                <Meta label="Project ID" value={props.entry.project_id} />
+                <Meta label="Title" value={props.entry.title} />
+                <Meta label="Category" value={props.entry.category} />
+                <Meta
+                  label="Cross project"
+                  value={
+                    props.entry.cross_project === true ||
+                    props.entry.cross_project === 1
+                      ? "true"
+                      : "false"
+                  }
+                />
+                <Meta label="Created by" value={props.entry.created_by} />
+                <Meta label="Updated by" value={props.entry.updated_by} />
+                <Meta
+                  label="Created"
+                  value={formatFullDate(props.entry.created_at)}
+                />
+                <Meta
+                  label="Updated"
+                  value={formatFullDate(props.entry.updated_at)}
+                />
+                <Meta label="Promotion" value={props.entry.promotion_status} />
+                <Show when={props.entry.last_reinforced_at}>
+                  <Meta
+                    label="Last reinforced"
+                    value={formatFullDate(props.entry.last_reinforced_at)}
+                  />
+                </Show>
+                <Show when={props.versions?.data()}>
+                  {(history) => {
+                    const head = () =>
+                      history().versions.find((version) => version.is_current);
+                    return (
+                      <>
+                        <Meta label="Version ID" value={head()?.version_id} />
+                        <Meta
+                          label="Current version ID"
+                          value={history().current_version_id}
+                        />
+                        <Meta
+                          label="Source user"
+                          value={
+                            head()?.source_refs.user_id
+                              ? "Identity unavailable"
+                              : undefined
+                          }
+                        />
+                        <Meta
+                          label="Source entry"
+                          value={head()?.source_refs.entry_id}
+                        />
+                        <Meta
+                          label="Source created by"
+                          value={head()?.source_refs.created_by}
+                        />
+                        <Meta
+                          label="Source updated by"
+                          value={head()?.source_refs.updated_by}
+                        />
+                        <Meta
+                          label="Worker provider"
+                          value={head()?.source_refs.worker_provider_id}
+                        />
+                        <Meta
+                          label="Worker model"
+                          value={head()?.source_refs.worker_model_id}
+                        />
+                      </>
+                    );
+                  }}
+                </Show>
+              </dl>
+            </details>
           </div>
         </details>
+
+        <p class="mt-6 border-t border-line pt-4 text-xs text-muted">
+          Edits and deletions are revision-checked; restores create a new
+          version.
+        </p>
       </div>
     </article>
   );

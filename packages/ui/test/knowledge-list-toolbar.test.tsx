@@ -124,7 +124,7 @@ describe.each(["desktop", "mobile"] as const)(
         cursor: null,
       });
       expect(
-        screen.getByRole("textbox", { name: "Filter knowledge list" }),
+        screen.getByRole("textbox", { name: "Filter this list" }),
       ).toHaveValue("");
     });
 

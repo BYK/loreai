@@ -34,7 +34,7 @@ test.describe("knowledge table routes", () => {
   test("knowledge q filters stay on the table view", async ({ page }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     await search.fill("SQLite");
     await search.press("Enter");
     await expect(page).toHaveURL(/\/knowledge\?q=SQLite/);
@@ -47,7 +47,7 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     // Typo of the seeded "Use cursor pagination" title.
     await search.fill("curosr pagin");
     await search.press("Enter");
@@ -69,7 +69,7 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/knowledge`);
-    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    const search = page.getByRole("textbox", { name: "Filter this list" });
     await search.fill("cursor pagination");
     await search.press("Enter");
     const row = page
@@ -98,11 +98,21 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/sessions`);
-    await page
-      .getByRole("link")
-      .filter({ hasText: /messages/ })
-      .first()
-      .click();
+    const title = page.getByRole("link", {
+      name: /Refactor the sync outbox pruning/,
+    });
+    await expect(title).toHaveAttribute(
+      "href",
+      `/ui/projects/${projectId}/sessions/e2e-session-sqlite`,
+    );
+    const processing = title.locator("..").locator("details");
+    await expect(processing).not.toHaveAttribute("open");
+    await expect(
+      processing.getByText("Processing details", { exact: true }),
+    ).toBeVisible();
+    await expect(title.locator("summary, button, details")).toHaveCount(0);
+    await expect(title).not.toContainText(/messages|distilled/);
+    await title.click();
     await expect(page).toHaveURL(
       new RegExp(`/projects/${projectId}/sessions/[^/]+$`),
     );
@@ -114,7 +124,9 @@ test.describe("knowledge table routes", () => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/search?q=SQLite`);
     await page.getByRole("button", { name: "Search scope" }).click();
-    await page.getByRole("option", { name: "knowledge" }).click();
+    await page
+      .getByRole("option", { name: "Knowledge and memory files" })
+      .click();
     await page
       .getByRole("search")
       .getByRole("button", { name: "Search", exact: true })
@@ -126,3 +138,37 @@ test.describe("knowledge table routes", () => {
     ).toHaveAttribute("href", /\/knowledge\//);
   });
 });
+
+for (const width of [800, 700, 320]) {
+  test(`responsive knowledge sorting stays usable at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.setViewportSize({ width, height: 480 });
+    const projectId = await loreProjectId(page);
+    await page.goto(
+      `/ui/projects/${projectId}/knowledge?category=gotcha&sort=title%3Adesc%2Ccreated_at%3Aasc%2Cconfidence%3Aasc`,
+    );
+    // Include headers and their responsive equivalents: at least one visible,
+    // keyboard-operable control for each server sort must survive every width.
+    for (const label of ["Confidence", "Updated", "Title"]) {
+      const control = page
+        .getByRole("button", { name: new RegExp(`Sort by ${label}`) })
+        .filter({ visible: true })
+        .first();
+      await expect(control).toBeVisible();
+      await control.focus();
+      await expect(control).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page).toHaveURL(
+        new RegExp(
+          `category=gotcha.*sort=${label === "Confidence" ? "confidence%3Adesc%2Ctitle%3Adesc%2Ccreated_at%3Aasc" : label === "Updated" ? "updated_at%3Adesc%2Cconfidence%3Adesc%2Ctitle%3Adesc" : "title%3Aasc%2Cupdated_at%3Adesc%2Cconfidence%3Adesc"}`,
+        ),
+      );
+    }
+    const size = await page
+      .locator("main")
+      .evaluate((el) => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+    expect(size.scroll).toBeLessThanOrEqual(size.client + 1);
+  });
+}

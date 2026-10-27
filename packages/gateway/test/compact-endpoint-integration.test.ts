@@ -105,7 +105,7 @@ async function chatWithSession(
   sessionID: string,
   providerID = "anthropic",
 ): Promise<Response> {
-  return harness.chat(body, "test-key", {
+  const response = await harness.chat(body, "test-key", {
     "x-lore-session-id": sessionID,
     // Real Pi / OpenCode / Claude Code clients send `x-lore-provider` so the
     // gateway can resolve the provider-qualified model entry (which carries
@@ -115,6 +115,24 @@ async function chatWithSession(
     // assertions. We send it here to mirror production traffic.
     "x-lore-provider": providerID,
   });
+  await response.clone().arrayBuffer();
+  return response;
+}
+
+function expectTemporalSessionMessages(
+  harness: Harness,
+  sessionID: string,
+  projectPath: string,
+): void {
+  const [row] = harness.queryDB<{ count: number }>(
+    `SELECT COUNT(*) AS count
+     FROM temporal_messages AS messages
+     JOIN session_state AS state ON state.session_id = messages.session_id
+     JOIN projects ON projects.id = messages.project_id
+     WHERE state.header_session_id = ? AND projects.path = ?`,
+    [sessionID, projectPath],
+  );
+  expect(row?.count ?? 0).toBeGreaterThan(0);
 }
 
 /**
@@ -438,6 +456,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
           )
         ).status,
       ).toBe(200);
+      expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
       await harness.restartPipeline();
 
       const response = await postCompact(
@@ -523,6 +542,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(chatResp.status).toBe(200);
+    expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
 
     // 873_000 tokens exceeds the 872K budget by 1. The gateway should fall
     // through to the summary path. The summary itself may be null (worker
@@ -595,6 +615,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       "openai",
     );
     expect(chatResp.status).toBe(200);
+    expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
 
     // 100K fits in 111_616 budget → cancel.
     const cancelResp = await postCompact(

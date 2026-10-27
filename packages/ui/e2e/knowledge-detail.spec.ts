@@ -44,6 +44,97 @@ async function fileLinkProjectAndEntry(page: Page) {
 }
 
 test.describe("knowledge detail provenance and history", () => {
+  for (const width of [320, 1280]) {
+    test(`reader aligns sections and exposes complete technical values at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const { project, live } = await projectAndEntry(page);
+      const first = "Full stored paragraph " + "word ".repeat(70).trim();
+      const last = "Final stored paragraph remains complete and readable.";
+      const model = "provider/" + "long-recorded-model-".repeat(18);
+      const mutations: string[] = [];
+      page.on("request", (request) => {
+        if (
+          ["POST", "PUT", "PATCH", "DELETE"].includes(request.method()) &&
+          new URL(request.url()).pathname.startsWith("/api/v1/")
+        )
+          mutations.push(request.method() + " " + request.url());
+      });
+      await page.route(`**/api/v1/knowledge/${live.id}`, async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          json: {
+            ...(await response.json()),
+            content: first + "\n\n" + last,
+            confidence: 0.45,
+          },
+        });
+      });
+      await page.route(
+        `**/api/v1/knowledge/${live.id}/versions`,
+        async (route) => {
+          const response = await route.fetch();
+          const history = await response.json();
+          for (const version of history.versions)
+            version.source_refs.worker_model_id = model;
+          await route.fulfill({ response, json: history });
+        },
+      );
+      await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+      const paragraph = page.getByText(first, { exact: true });
+      await expect(paragraph).toBeVisible();
+      await expect(page.getByText(last, { exact: true })).toBeVisible();
+      const header = await page
+        .getByRole("heading", { name: live.title, exact: true })
+        .boundingBox();
+      const body = await paragraph.boundingBox();
+      const promotion = await page.getByTestId("promotion-panel").boundingBox();
+      if (!header || !body || !promotion)
+        throw new Error("Missing reader geometry");
+      expect(Math.abs(header.x - body.x)).toBeLessThan(2);
+      expect(Math.abs(promotion.x - body.x)).toBeLessThan(2);
+      const edit = await page
+        .getByRole("button", { name: "Edit", exact: true })
+        .boundingBox();
+      const remove = await page
+        .getByRole("button", { name: "Delete", exact: true })
+        .boundingBox();
+      if (!edit || !remove) throw new Error("Missing reader actions");
+      expect(
+        Math.abs(edit.y + edit.height / 2 - remove.y - remove.height / 2),
+      ).toBeLessThan(2);
+      expect(remove.x - edit.x - edit.width).toBeGreaterThanOrEqual(8);
+      if (width === 320) {
+        expect(edit.height).toBeGreaterThanOrEqual(44);
+        expect(remove.height).toBeGreaterThanOrEqual(44);
+      }
+      await page.getByText("Source & history", { exact: true }).click();
+      const technical = page
+        .getByText("Technical details", { exact: true })
+        .locator("..");
+      await technical.locator("summary").click();
+      const value = technical.getByText(model, { exact: true });
+      await expect(value).toBeVisible();
+      const fits = await value.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return (
+          element.scrollWidth <= element.clientWidth &&
+          Array.from(range.getClientRects()).every(
+            (rect) => rect.left >= box.left - 1 && rect.right <= box.right + 1,
+          )
+        );
+      });
+      expect(fits).toBe(true);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBe(width);
+      expect(mutations).toEqual([]);
+    });
+  }
   test("compares consecutive versions and offers a keyboard-accessible full-text view", async ({
     page,
   }) => {
@@ -62,6 +153,7 @@ test.describe("knowledge detail provenance and history", () => {
       },
     );
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const current = page.getByTestId("knowledge-version-2");
     await current.locator("summary").click();
     const content = current.getByTestId("version-content");
@@ -121,6 +213,7 @@ test.describe("knowledge detail provenance and history", () => {
       },
     );
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const current = page.getByTestId("knowledge-version-2");
     await current.locator("summary").click();
     await expect(current).toContainText(
@@ -140,6 +233,7 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, live } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const history = page.getByTestId("version-history");
     await expect(history).toBeVisible();
     await expect(history.getByText("Current")).toHaveCount(1);
@@ -148,9 +242,35 @@ test.describe("knowledge detail provenance and history", () => {
     await expect(history).toContainText("Portability is a requirement");
   });
 
+  test("explains unavailable project context for a workspace source", async ({
+    page,
+  }) => {
+    const { live } = await projectAndEntry(page);
+    await page.route(`**/api/v1/knowledge/${live.id}`, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        json: { ...(await response.json()), project_id: null },
+      });
+    });
+    await page.goto(`/ui/knowledge/${live.id}`);
+    const message =
+      "Source project unavailable; source availability cannot be checked.";
+    await expect(page.getByTestId("knowledge-source-summary")).toHaveText(
+      message,
+    );
+    await page.getByText("Source & history", { exact: true }).click();
+    await expect(page.getByTestId("trust-section")).toContainText(message);
+    await expect(page.getByText("Checking source…")).toHaveCount(0);
+    await expect(
+      page.getByRole("link", { name: "Distilled from session" }),
+    ).toHaveCount(0);
+  });
+
   test("links live source evidence to the exact session", async ({ page }) => {
     const { project, live } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${live.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const source = page.getByRole("link", {
       name: "Distilled from session",
     });
@@ -169,6 +289,7 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, entry } = await fileLinkProjectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     await expect(page.getByRole("heading", { name: "Files" })).toBeVisible();
     await expect(
       page.getByText("packages/ui/src/contracts/url.ts"),
@@ -186,8 +307,9 @@ test.describe("knowledge detail provenance and history", () => {
   }) => {
     const { project, expired } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${expired.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     await expect(
-      page.getByText("Source session no longer available"),
+      page.getByText("Source session no longer available", { exact: true }),
     ).toBeVisible();
     await expect(page.getByText("e2e-session-expired").first()).toBeVisible();
   });
@@ -195,7 +317,10 @@ test.describe("knowledge detail provenance and history", () => {
   test("opens retained summary text for expired evidence", async ({ page }) => {
     const { project, summary } = await projectAndEntry(page);
     await page.goto(`/ui/projects/${project.id}/knowledge/${summary.id}`);
-    await expect(page.getByText("retained summary only")).toBeVisible();
+    await expect(page.getByTestId("knowledge-source-summary")).toContainText(
+      "retained summary only",
+    );
+    await page.getByText("Source & history", { exact: true }).click();
     await page.getByText("Show retained summary").click();
     await expect(
       page.getByText(

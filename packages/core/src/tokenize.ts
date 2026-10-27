@@ -20,12 +20,28 @@
  * Encoding *data* (BPE rank tables) is imported eagerly at module load — that
  * memory is unavoidable in a CJS bundle.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Tokenizer } from "ai-tokenizer";
 import * as cl100k_base_encoding from "ai-tokenizer/encoding/cl100k_base";
 import * as o200k_base_encoding from "ai-tokenizer/encoding/o200k_base";
 import * as claude_encoding from "ai-tokenizer/encoding/claude";
 
 export type EncodingName = "cl100k_base" | "o200k_base" | "claude";
+
+interface TokenCountCache {
+  countTokens(
+    text: string,
+    encoding: EncodingName,
+    compute: () => number,
+  ): number;
+}
+
+const countCache = new AsyncLocalStorage<TokenCountCache>();
+
+/** Request-local counting only: never installs a process-wide content cache. */
+export function withTokenCountCache<T>(cache: TokenCountCache, fn: () => T): T {
+  return countCache.run(cache, fn);
+}
 
 // Durable derived counts must miss after an encoding/tokenizer-policy change.
 // The contract test checks this against the installed tokenizer version.
@@ -76,7 +92,10 @@ export function estimateTokens(
 ): number {
   if (!text) return 0;
   try {
-    return getTokenizer(encodingForModel(opts)).count(text);
+    const encoding = encodingForModel(opts);
+    const compute = () => getTokenizer(encoding).count(text);
+    const active = countCache.getStore();
+    return active ? active.countTokens(text, encoding, compute) : compute();
   } catch {
     return Math.ceil(text.length / 3);
   }

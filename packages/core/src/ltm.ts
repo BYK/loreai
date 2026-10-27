@@ -2953,7 +2953,101 @@ export function evictLowestValue(
   return victims;
 }
 
-type Scored = { entry: KnowledgeEntry; score: number };
+// Relevance/fallback ranking needs only these headers. Content and metadata
+// cross the reader boundary only after a candidate earns eligibility.
+const SELECTION_COLUMNS = [
+  "id",
+  "category",
+  "project_id",
+  "cross_project",
+  "confidence",
+  "updated_at",
+] as const;
+const SELECTION_SCOPE_COLUMNS = [
+  "id",
+  "category",
+  "project_id",
+  "cross_project",
+] as const;
+type SelectionCandidate = Pick<
+  KnowledgeEntry,
+  (typeof SELECTION_COLUMNS)[number]
+>;
+type Scored<T extends SelectionCandidate = KnowledgeEntry> = {
+  entry: T;
+  score: number;
+};
+
+type SelectionScope = {
+  tenantId: string;
+  projectId: string;
+  categoryClause: string;
+  categoryParams: string[];
+  signal?: AbortSignal;
+};
+
+/** Required hydration: a stale/failed read must never freeze a partial pin. */
+async function hydrateSelectionCandidates(
+  candidates: readonly SelectionCandidate[],
+  scope: SelectionScope,
+): Promise<KnowledgeEntry[]> {
+  scope.signal?.throwIfAborted();
+  if (!candidates.length) return [];
+  const ids = [...new Set(candidates.map((candidate) => candidate.id))];
+  const result = await offloadAllOrTimeout(
+    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+       WHERE tenant_id = ? AND confidence > 0.2
+         AND (project_id = ? OR project_id IS NULL OR cross_project = 1)${scope.categoryClause}
+         AND id IN (SELECT value FROM json_each(?))`,
+    [
+      scope.tenantId,
+      scope.projectId,
+      ...scope.categoryParams,
+      JSON.stringify(ids),
+    ],
+    { signal: scope.signal },
+  );
+  scope.signal?.throwIfAborted();
+  const rows = requireReadRows(result, "knowledge") as Record<
+    string,
+    unknown
+  >[];
+  const entries = new Map(
+    rows.map((row) => {
+      const entry = hydrateKnowledgeEntry(row) as KnowledgeEntry;
+      return [entry.id, entry] as const;
+    }),
+  );
+  // Restore original pool order before bounded body-evidence ranking. Current
+  // IDs can disappear on update/delete; merges and sharing changes can move an
+  // unchanged ID. Retry instead of changing the selected/overflow set silently.
+  return candidates.map((candidate) => {
+    const entry = entries.get(candidate.id);
+    if (
+      !entry ||
+      entry.tenant_id !== scope.tenantId ||
+      SELECTION_SCOPE_COLUMNS.some(
+        (column) => entry[column] !== candidate[column],
+      )
+    ) {
+      throw new ReadPreparationUnavailableError("knowledge", "unavailable");
+    }
+    // Confidence feedback and metadata-only reconfirmations can advance these
+    // ranking fields without replacing the current version. Keep this request's
+    // header snapshot instead of making ordinary background updates fail a turn.
+    // The query still rejects retired/below-floor entries and changed versions.
+    if (
+      entry.confidence === candidate.confidence &&
+      entry.updated_at === candidate.updated_at
+    )
+      return entry;
+    return {
+      ...entry,
+      confidence: candidate.confidence,
+      updated_at: candidate.updated_at,
+    };
+  });
+}
 
 /** BM25 column weights for knowledge_fts: title, content, category.
  *  Reads from config().search.ftsWeights, falling back to defaults. */
@@ -2980,7 +3074,7 @@ const PROJECT_SAFETY_NET = 5;
  *    only ever appropriate when it relevance-matches the current session.
  */
 function crossEntryClass(
-  entry: KnowledgeEntry,
+  entry: Pick<KnowledgeEntry, "project_id">,
   pid: string,
 ): "global" | "own" | "foreign" {
   if (entry.project_id === null) return "global";
@@ -2995,7 +3089,10 @@ function crossEntryClass(
  * scoring. This is the guard that stops one project's knowledge (e.g. lore's
  * own engineering directives) from leaking into every other project's context.
  */
-function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
+function isBlanketEligible(
+  entry: Pick<KnowledgeEntry, "project_id">,
+  pid: string,
+): boolean {
   return crossEntryClass(entry, pid) !== "foreign";
 }
 
@@ -3255,7 +3352,8 @@ export async function forSession(
     throw new Error("Invalid architecture injection mode");
   }
   const pid = ensureProject(projectPath);
-  const categoryFilter = options?.categories;
+  const categoryFilter = options?.categories?.slice();
+  const excludedCategories = options?.excludeCategories?.slice();
 
   // Build optional SQL category clauses (include / exclude are mutually exclusive)
   let categoryClause = "";
@@ -3263,21 +3361,24 @@ export async function forSession(
   if (categoryFilter?.length) {
     categoryClause = ` AND category IN (${categoryFilter.map(() => "?").join(",")})`;
     categoryParams = categoryFilter;
-  } else if (options?.excludeCategories?.length) {
-    categoryClause = ` AND category NOT IN (${options.excludeCategories.map(() => "?").join(",")})`;
-    categoryParams = options.excludeCategories;
+  } else if (excludedCategories?.length) {
+    categoryClause = ` AND category NOT IN (${excludedCategories.map(() => "?").join(",")})`;
+    categoryParams = excludedCategories;
   }
 
-  // --- 1 & 2. Load project-specific + cross-project candidates ---
-  // These two unbounded `knowledge_current` scans are the heaviest synchronous
-  // reads on this per-turn path. Offload them to the read-worker pool and run
-  // them in parallel, so the main event loop stays
-  // free while a worker scans. Knowledge is not written on the hot per-message
-  // path, so a worker's read-only snapshot is safe (staleness-tolerant). #966 B.
-  const projectSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+  const selectionScope: SelectionScope = {
+    tenantId: currentTenantId(),
+    projectId: pid,
+    categoryClause,
+    categoryParams,
+    signal: options?.signal,
+  };
+  // Keep pool/fallback ordering, but do not marshal every stored body and
+  // metadata object onto the foreground thread merely to reject it by score.
+  const projectSql = `SELECT ${SELECTION_COLUMNS.join(", ")} FROM knowledge_current
        WHERE tenant_id = ? AND project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`;
-  const crossSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+  const crossSql = `SELECT ${SELECTION_COLUMNS.join(", ")} FROM knowledge_current
        WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`;
   const [projectRows, crossRows] = await timer.await(
@@ -3296,12 +3397,14 @@ export async function forSession(
   // If EITHER scan fails, reject before injecting or freezing a partial set.
   // The caller can retry once the worker recovers; no synchronous scan or
   // authoritative "no knowledge" decision runs on this failure path.
-  const projectEntries = (
-    requireReadRows(projectRows, "knowledge") as Record<string, unknown>[]
-  ).map(hydrateKnowledgeEntry) as KnowledgeEntry[];
-  const crossEntries = (
-    requireReadRows(crossRows, "knowledge") as Record<string, unknown>[]
-  ).map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+  const projectEntries = requireReadRows(
+    projectRows,
+    "knowledge",
+  ) as SelectionCandidate[];
+  const crossEntries = requireReadRows(
+    crossRows,
+    "knowledge",
+  ) as SelectionCandidate[];
 
   // Empty-knowledge fast path (new project, or all entries below the
   // confidence floor). Emit before returning so the FASTEST path is
@@ -3359,7 +3462,7 @@ export async function forSession(
       ...crossEntries.filter((e) => isBlanketEligible(e, pid)),
     ];
     const foreignPrefs = crossEntries.filter((e) => !isBlanketEligible(e, pid));
-    let relevantForeign: KnowledgeEntry[] = [];
+    let relevantForeign: SelectionCandidate[] = [];
     if (foreignPrefs.length && options?.contextHint?.trim()) {
       const ftsScores = await scoreEntriesFTS(
         options.contextHint,
@@ -3370,14 +3473,17 @@ export async function forSession(
       );
     }
 
-    const allPrefs = [...blanketPrefs, ...relevantForeign];
-    allPrefs.sort((a, b) => {
+    const prefCandidates = [...blanketPrefs, ...relevantForeign];
+    prefCandidates.sort((a, b) => {
       if (a.confidence !== b.confidence) return b.confidence - a.confidence;
       if (a.updated_at !== b.updated_at) return b.updated_at - a.updated_at;
       // Deterministic id tiebreak — keeps preference ordering byte-stable.
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
 
+    const allPrefs = await timer.await(
+      hydrateSelectionCandidates(prefCandidates, selectionScope),
+    );
     let used = KNOWLEDGE_HEADER_OVERHEAD_TOKENS;
     const result: KnowledgeEntry[] = [];
     for (const entry of allPrefs) {
@@ -3486,8 +3592,8 @@ export async function forSession(
   }
 
   // --- 4. Score both pools by relevance ---
-  let scoredProject: Scored[];
-  let scoredCross: Scored[];
+  let scoredProject: Scored<SelectionCandidate>[];
+  let scoredCross: Scored<SelectionCandidate>[];
   // Hoisted so the optional context-source fold (step 5b) can reuse the same
   // embedded context vector — keeping distillation/temporal on the identical
   // cosine scale as knowledge (no separate embed, no scale mismatch).
@@ -3553,7 +3659,7 @@ export async function forSession(
         embedding.vectorSearch(
           contextVec,
           50,
-          options?.excludeCategories,
+          excludedCategories,
           "knowledge",
           {
             signal: options?.signal,
@@ -3600,7 +3706,7 @@ export async function forSession(
           return true;
         return (ftsScores.get(id) ?? 0) > 0;
       };
-      const scoreOf = (entry: KnowledgeEntry): number => {
+      const scoreOf = (entry: SelectionCandidate): number => {
         // Rank by the STRONGER of the two normalized signals (both are 0–1:
         // cosine, and BM25 min-max normalized). An entry that qualified via a
         // high FTS keyword score but has a present-but-below-floor cosine must
@@ -3669,7 +3775,19 @@ export async function forSession(
   // In reserved mode, architecture gets the established first-pass allocation.
   // Ranked mode lets it compete for shared slots. Neither mode changes
   // on-demand recall or the hard token budget.
-  const allScored = [...scoredProject, ...scoredCross];
+  // Hydrate every eligible candidate: body evidence, oversized-entry skipping,
+  // reserved architecture and the complete overflow tail must stay unchanged.
+  const candidates = [...scoredProject, ...scoredCross];
+  const entries = await timer.await(
+    hydrateSelectionCandidates(
+      candidates.map(({ entry }) => entry),
+      selectionScope,
+    ),
+  );
+  const allScored: Scored[] = candidates.map(({ score }, index) => ({
+    entry: entries[index],
+    score,
+  }));
 
   // --- 5b. Fold in relevance-ranked context sources (distillation/temporal) ---
   // Makes in-session facts "just there" (no recall-tool call needed). Scored on
@@ -4213,12 +4331,12 @@ async function loadContextSourceCandidates(
 }
 
 /** Score entries using FTS5 BM25 — extracted for reuse in the vector-fallback path. */
-function scoreFTS(
-  projectEntries: KnowledgeEntry[],
-  crossEntries: KnowledgeEntry[],
+function scoreFTS<T extends SelectionCandidate>(
+  projectEntries: T[],
+  crossEntries: T[],
   ftsScores: Map<string, number>,
-): { scoredProject: Scored[]; scoredCross: Scored[] } {
-  const rawScored: Scored[] = projectEntries.map((entry) => ({
+): { scoredProject: Scored<T>[]; scoredCross: Scored<T>[] } {
+  const rawScored: Scored<T>[] = projectEntries.map((entry) => ({
     entry,
     score: (ftsScores.get(entry.id) ?? 0) * entry.confidence,
   }));

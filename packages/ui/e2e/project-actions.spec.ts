@@ -146,7 +146,23 @@ test.describe("project actions (UI-08)", () => {
     ).toContainText("Moved 1 session");
 
     await page.goto(`/ui/projects/${loreId}/sessions`);
-    await expect(page.getByRole("link", { name: sessionId })).toBeVisible();
+    const moved = page.getByRole("link", {
+      name: new RegExp(
+        `Scratch session ${run} for ${tag === "mobile" ? "Mobile" : "Desktop"}`,
+      ),
+    });
+    await expect(moved).toBeVisible();
+    await expect(moved).toHaveAttribute(
+      "href",
+      `/ui/projects/${loreId}/sessions/${sessionId}`,
+    );
+    const processing = moved.locator("..").locator("details");
+    await expect(processing).not.toHaveAttribute("open");
+    await expect(processing.getByText(sessionId, { exact: true })).toBeHidden();
+    await processing.locator("summary").click();
+    await expect(
+      processing.getByText(sessionId, { exact: true }),
+    ).toBeVisible();
   });
 
   test("move dialog keeps focus trapped after the target picker closes", async ({

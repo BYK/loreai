@@ -218,6 +218,28 @@
   }
 }
 
+/* Keep native menu arrows inset even when a control uses a px-* utility.
+   Listboxes and Kobalte's hidden native selects retain their own styling. */
+select:not([multiple], [size], [aria-hidden="true"]) {
+  appearance: none;
+  padding-inline-end: 2.25rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23808080' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 0.75rem center;
+  background-repeat: no-repeat;
+  background-size: 1rem;
+}
+
+select:not([multiple], [size], [aria-hidden="true"]):dir(rtl) {
+  background-position: left 0.75rem center;
+}
+
+@media (forced-colors: active) {
+  select:not([multiple], [size], [aria-hidden="true"]) {
+    appearance: auto;
+    background-image: none;
+  }
+}
+
 @layer utilities {
   .eyebrow {
     text-transform: uppercase;

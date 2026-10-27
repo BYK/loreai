@@ -1,6 +1,13 @@
+import { RECALL_SCOPES } from "~/contracts";
+import {
+  PROJECT_MEMORY_SEARCH_LABEL,
+  RECALL_SCOPE_DETAILS,
+  recallScopeLabel,
+} from "~/lib/search-labels";
 import type { Component } from "solid-js";
 import {
   Match,
+  Show,
   Switch,
   createEffect,
   createMemo,
@@ -15,7 +22,7 @@ import { Button } from "../ui/button";
 import { ResponsiveSelect } from "../ui/responsive-select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 import { useWorkspace } from "~/routes/workspace";
-import { searchHref } from "~/lib/href";
+import { knowledgeListHref, searchHref } from "~/lib/href";
 
 export const SearchResults: Component<{
   project: ProjectSummary;
@@ -37,6 +44,9 @@ export const SearchResults: Component<{
   );
   return (
     <div class="p-5 sm:p-7.5">
+      <h1 class="mb-4 text-[25px] font-semibold">
+        {PROJECT_MEMORY_SEARCH_LABEL}
+      </h1>
       <form
         role="search"
         class="mb-5 flex flex-wrap items-center gap-2"
@@ -53,6 +63,7 @@ export const SearchResults: Component<{
             name="q"
             value={props.q}
             aria-label="Search query"
+            placeholder={PROJECT_MEMORY_SEARCH_LABEL}
             class="h-11 md:h-10"
           />
         </TextField>
@@ -64,8 +75,9 @@ export const SearchResults: Component<{
           onChange={(value) => {
             if (value) setScope(value as RecallScope);
           }}
-          options={["all", "session", "project", "knowledge"]}
-          triggerClass="h-10 w-28"
+          options={RECALL_SCOPES}
+          optionLabel={recallScopeLabel}
+          triggerClass="h-11 w-full sm:w-60 md:h-10"
         />
         <Button
           type="submit"
@@ -75,6 +87,12 @@ export const SearchResults: Component<{
           Search
         </Button>
       </form>
+      <p class="mb-2 text-sm" data-testid="recall-search-scope">
+        Scope: {recallScopeLabel(props.scope)}
+      </p>
+      <p class="mb-3 text-xs text-muted">
+        {RECALL_SCOPE_DETAILS[props.scope].description}
+      </p>
       <p class="mb-4 text-xs text-muted">
         Search results are the recall output an agent would receive; query
         expansion is disabled so no model is called.
@@ -84,6 +102,14 @@ export const SearchResults: Component<{
           <StateCard
             kind="empty"
             title="Type a query to search this project's memory"
+            action={
+              <A
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                href={knowledgeListHref(props.project.id)}
+              >
+                Browse project knowledge
+              </A>
+            }
           />
         </Match>
         <Match when={search.loader.loading() && !search.loader.data()}>
@@ -98,7 +124,28 @@ export const SearchResults: Component<{
             "No results found for this query."
           }
         >
-          <StateCard kind="empty" title="No results" />
+          <StateCard
+            kind="empty"
+            title="No results"
+            action={
+              <A
+                class="inline-flex min-h-11 items-center text-accent underline md:min-h-0"
+                href={knowledgeListHref(props.project.id)}
+              >
+                Browse project knowledge
+              </A>
+            }
+          >
+            <Show when={props.scope !== "all"} fallback="Try different words.">
+              Try different words or search all memory.
+              <A
+                class="ml-2 text-accent underline"
+                href={searchHref(props.project.id, props.q, "all")}
+              >
+                Search all memory
+              </A>
+            </Show>
+          </StateCard>
         </Match>
         <Match when={search.loader.data()}>
           <div>

@@ -1,0 +1,64 @@
+# Pagination Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+
+**Goal:** Replace scattered pagination links with consistent text/icon controls in existing PR #2110.
+
+**Architecture:** One presentational PaginationControls component consumes existing callbacks and disabled states. Callers retain every navigation/history decision. Existing Button/Icon/Tooltip primitives supply semantics and theme behavior.
+
+**Tech Stack:** Solid, TypeScript, Kobalte, Tailwind, Vitest, Playwright.
+
+**Spec:** docs/superpowers/specs/2026-10-26-pagination-design.md
+
+## Global Constraints
+
+- Main views use First, Previous and Next text with direction icons and full accessible page labels. The reader session sidebar uses icon-only controls with accessible labels and hover/focus tooltips.
+- Preserve all cursor/history, filtering, sort, URL base, selected transcript and source-anchor behavior. Expose only existing actions; no page numbers or invented totals.
+- Use 44px mobile targets, visible keyboard focus and real disabled buttons. Reuse existing primitives; no API/backend/dependency changes or sidebar expansion.
+- Keep append-style Load more actions unchanged. Add screenshots to PR #2110, keep ready for review and do not merge.
+
+## Review Focus
+
+- Direct cursor links without history must not acquire a fictitious Previous action.
+- Paging preserves encoded filters, sort, project/UI base and reader anchors.
+- Terminal/empty pages keep Next disabled and callbacks guarded.
+- Compact controls support keyboard activation and accessible labels/tooltips without nested buttons.
+- All supported controls fit at 320px with 44px mobile hit targets.
+
+### Task 1: Shared controls and caller integration
+
+**Files:** Create packages/ui/src/components/lore/PaginationControls.tsx; modify KnowledgeTable.tsx, SessionList.tsx, SessionContextList.tsx, EntitiesPage.tsx, ImportHistoryPage.tsx and shell/Icon.tsx. Extend existing pagination/caller tests and add focused production browser coverage.
+
+**Interfaces:** PaginationControls props: label:string; onFirst?:()=>void; onPrevious?:()=>void; onNext:()=>void; previousDisabled?:boolean; nextDisabled:boolean; compact?:boolean; class?:string. No cursor ownership in the component.
+
+- [x] Add integration regressions for named navigation landmarks, main text/icons and compact accessible controls while retaining existing URL/filter/anchor assertions. Run focused tests RED before source changes.
+- [x] Implement the shared component and migrate all five callers using their unchanged callbacks/history logic. Use ghost buttons, right-aligned grouping and a first-page double-chevron icon.
+- [x] Run focused and complete UI suites GREEN, workspace typecheck/lint/format and production build. Add/run desktop/mobile browser paging, terminal state, keyboard, tooltip and 320px geometry cases; update existing caller assertions only for intended accessible names.
+- [x] Commit source/tests. Obtain independent adversarial correctness and security reviews of the increment since ed2d66ea; retain prior full-PR review and green hosted checks as context. Resolve confirmed defects and verify fixes.
+
+### Task 2: Screenshots and publication
+
+**Files:** docs/ui-redesign/README.md and this plan; screenshot artifacts outside tracked source.
+
+**Interfaces:** Consume Task1 final UI and existing fictional preview API. Preserve all46existing remote screenshot URLs in the PR description.
+
+- [x] Capture and inspect matched real-frontend before/after screenshots of main pagination and narrow sidebar, including mobile. No DOM/CSS/image editing or real user data.
+- [x] Update docs/PR with new screenshots and exact validation results; push the same branch, verify hosted head/ready state/review threads/current checks. Do not merge.
+
+### Task 3: Newly reported Seer UI states
+
+**Files:** KnowledgeDocument.tsx, TeamParityActions.tsx, TeamPage.tsx only if needed; existing knowledge-document and folk03 unit/browser tests.
+
+**Interfaces:** Preserve current loader/API/mutation/owner guards. Source summaries use recorded loader state and project context only; no new requests. TeamParityActions onStatusError remains an optional string callback; caller-owned errors must clear on unmount and ignore late async replies.
+
+- [x] Reproduce PRRT_kwDORU1hfc6wPQvZ with a workspace knowledge entry having project_id=null and source_session, evidence loader idle/loading=false/data/error undefined, project unavailable. Both summary and expanded Source & history must state source project/availability cannot be checked instead of perpetual Checking source. Preserve project-present initial loader pending, available/summary-only/missing/error/no-source states and all existing source links/history.
+- [x] Reproduce PRRT_kwDORU1hfc6wPQvW: no-team closed settings errors remain visible, opening controls or ready-team Settings shows each underlying status error once, and unmount/retry/loading/error/account transitions clear parent advancedError. Standalone parity actions without a parent callback still expose their inline errors; late async replies cannot resurrect stale status. Preserve create/join/discovery/domain actions, permissions and owner guards.
+- [x] Run focused RED/GREEN, complete UI, typecheck/lint/format and built production affected desktop/mobile cases. Commit minimal fixes, write exact report, obtain separate scoped correctness/security review, then publish and resolve verified threads. Do not change pagination or parent screenshots/docs, push, or edit GitHub from the implementer.
+
+### Task 4: Final overview/search review comments
+
+**Files:** ProjectPage.tsx, SearchResults.tsx and their existing unit tests.
+
+- [x] Reproduce Seer PRRT_kwDORU1hfc6wR5Wy: recent overview entries must use existing previewOf so the link contains only a bounded first-line preview, retaining its entry URL and full document accessibility after navigation.
+- [x] Reproduce Seer PRRT_kwDORU1hfc6wR5W5: an empty all-scope search offers different words and browsing without a same-scope Search all memory link. All three narrower scopes retain a broader search with the original encoded query.
+- [x] Run focused RED/GREEN, complete UI and production browser matrix; verify types/lint/format/build, obtain scoped independent correctness/security review, publish on the same PR and resolve these verified threads.

@@ -1,3 +1,7 @@
+import {
+  WORKSPACE_KNOWLEDGE_SEARCH_LABEL,
+  WORKSPACE_KNOWLEDGE_SEARCH_DESCRIPTION,
+} from "~/lib/search-labels";
 import type { Component } from "solid-js";
 import { For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -28,7 +32,9 @@ export const WorkspaceSearch: Component<{
     response()?.items.filter((hit) => hit.match === "fuzzy").length ?? 0;
   return (
     <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
-      <h1 class="mb-3 text-[25px] font-semibold">Search all knowledge</h1>
+      <h1 class="mb-3 text-[25px] font-semibold">
+        {WORKSPACE_KNOWLEDGE_SEARCH_LABEL}
+      </h1>
       <form
         role="search"
         class="mb-5 flex gap-2"
@@ -43,8 +49,8 @@ export const WorkspaceSearch: Component<{
           <TextFieldInput
             name="q"
             value={props.q}
-            aria-label="Search all knowledge"
-            placeholder="Search all knowledge"
+            aria-label={WORKSPACE_KNOWLEDGE_SEARCH_LABEL}
+            placeholder={WORKSPACE_KNOWLEDGE_SEARCH_LABEL}
           />
         </TextField>
         <Button type="submit" size="sm">
@@ -52,7 +58,7 @@ export const WorkspaceSearch: Component<{
         </Button>
       </form>
       <p class="mb-5 text-xs text-muted">
-        Knowledge only — sessions and distillations are searched per project.
+        {WORKSPACE_KNOWLEDGE_SEARCH_DESCRIPTION}
       </p>
       <Switch>
         <Match when={!props.q}>

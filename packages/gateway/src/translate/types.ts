@@ -75,6 +75,8 @@ export type GatewayToolResultBlock = {
   content: GatewayContentBlock[];
   /** Responses output was an array, even when it contained one text part. */
   nativeResponsesOutputArray?: true;
+  /** Request-only envelope retained when rebuilding a native tool result. */
+  nativeResponsesEnvelope?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -101,12 +103,16 @@ export type GatewayOpaqueBlock = {
   requestOnly?: boolean;
 };
 
-export type GatewayContentBlock =
+export type GatewayContentBlock = (
   | GatewayTextBlock
   | GatewayThinkingBlock
   | GatewayToolUseBlock
   | GatewayToolResultBlock
-  | GatewayOpaqueBlock;
+  | GatewayOpaqueBlock
+) & {
+  /** Original native Responses item ordinal, kept only in request provenance. */
+  responsesSourceIndex?: number;
+};
 
 /**
  * Project a content-block array down to a plain-text representation.
@@ -198,6 +204,8 @@ export function opaquePlaceholder(raw: Record<string, unknown>): string {
 
 /** Normalized message — system messages are extracted to `GatewayRequest.system`. */
 export type GatewayMessage = {
+  /** Original Responses input ordinals; never persisted as memory content. */
+  responsesSourceRange?: { start: number; end: number };
   role: "user" | "assistant";
   content: GatewayContentBlock[];
   /**
@@ -226,6 +234,11 @@ export type GatewayTool = {
   responsesBuiltin?: "web_search_preview";
   /** True only for tools injected and owned by the gateway. */
   gatewayOwned?: boolean;
+  /** Native tools are indexed here but replayed as their original definitions. */
+  responsesNative?: {
+    inputOnly: boolean;
+    definition?: Record<string, unknown>;
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -289,11 +302,10 @@ export type GatewayRequest = {
       normalizedSystem: string;
       /** Replaying these items before the conversation would change their order. */
       hasLateItems: boolean;
-      items: Array<{
-        type?: "message";
-        role: "system" | "developer";
-        content: string | Array<{ type: "input_text"; text: string }>;
-      }>;
+      items: Array<Record<string, unknown>>;
+      /** Source ordinals enable native context replay around compressed history. */
+      itemPositions?: number[];
+      prefixEnd?: number;
     };
     /** Chat developer content must not inherit another provider's system tier. */
     chatDeveloperInstruction?: boolean;

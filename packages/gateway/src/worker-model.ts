@@ -573,7 +573,7 @@ export function knownModelContextLimit(
 
 /** Codex's own model catalog, not OpenAI API metadata, bounds ChatGPT turns.
  * https://github.com/openai/codex/blob/b1e72963c3b71a9265a551e54beff078384efed9/codex-rs/models-manager/models.json
- * Unknown/new models retain the conservative recall budget until verified. */
+ * Unknown/new models retain a conservative per-call window. */
 const CODEX_272K_CONTEXT_MODELS = Object.freeze([
   "gpt-5.6-sol",
   "gpt-5.6-terra",

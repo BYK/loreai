@@ -31,12 +31,14 @@ for (const theme of ["light", "dark"] as const) {
     const sessionRow = page.getByRole("link", {
       name: /Refactor the sync outbox pruning/,
     });
-    const idCopy = sessionRow.getByRole("button", { name: "Copy session id" });
+    const record = sessionRow.locator("..");
+    await record.getByText("Processing details", { exact: true }).click();
+    const idCopy = record.getByRole("button", { name: "Copy session id" });
     await idCopy.click();
     await expect(idCopy).toBeDisabled();
     const copyBox = (await idCopy.boundingBox())!;
     // Hit-test the disabled control with real pointer input: a pending copy
-    // nested in a session link must never click through and navigate away.
+    // in processing details must never navigate away while pending.
     await page.mouse.click(
       copyBox.x + copyBox.width / 2,
       copyBox.y + copyBox.height / 2,

@@ -12,10 +12,10 @@ import {
   Show,
   Switch,
 } from "solid-js";
-import { useNavigate, useSearchParams } from "@solidjs/router";
+import { A, useNavigate, useSearchParams } from "@solidjs/router";
 
 import type { EntityRebuildResult } from "~/contracts";
-import { formatWhen, pluralize } from "~/lib/format";
+import { formatWhen } from "~/lib/format";
 import { entitiesHref, entityHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Badge } from "~/components/ui/badge";
@@ -23,8 +23,8 @@ import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";
 import { ResponsiveSelect } from "~/components/ui/responsive-select";
 import { errorStateFor } from "./ErrorState";
-import { ListRow } from "./Panes";
 import { StateCard } from "./StateCard";
+import { PaginationControls } from "./PaginationControls";
 
 export const ENTITY_TYPES = [
   "self",
@@ -73,6 +73,7 @@ const RebuildCard: Component = () => {
             <Button
               variant="outline"
               size="sm"
+              class="h-11 md:h-9"
               disabled={entities.rebuild().phase === "cancelling"}
               onClick={() => void entities.cancelRebuild()}
             >
@@ -102,6 +103,7 @@ const RebuildCard: Component = () => {
                 <Button
                   variant="outline"
                   size="sm"
+                  class="h-11 md:h-9"
                   onClick={() => entities.resetRebuild()}
                 >
                   Dismiss
@@ -119,6 +121,7 @@ const RebuildCard: Component = () => {
             <Button
               variant="outline"
               size="sm"
+              class="h-11 md:h-9"
               onClick={() => void entities.checkRebuildStatus()}
             >
               Retry status check
@@ -143,6 +146,7 @@ const RebuildCard: Component = () => {
             <Button
               variant="outline"
               size="sm"
+              class="h-11 md:h-9"
               disabled={entities.rebuild().phase === "checking"}
               onClick={() => void entities.startRebuild(true)}
             >
@@ -150,6 +154,7 @@ const RebuildCard: Component = () => {
             </Button>
             <Button
               size="sm"
+              class="h-11 md:h-9"
               disabled={entities.rebuild().phase === "checking"}
               onClick={() => setConfirmRebuild(true)}
             >
@@ -280,7 +285,7 @@ export const EntitiesPage: Component = () => {
         <Show when={list.loader.data()}>
           {(page) => (
             <span class="text-xs text-muted">
-              {pluralize(page().total, "entity")}
+              {page().total} {page().total === 1 ? "entity" : "entities"}
             </span>
           )}
         </Show>
@@ -296,9 +301,27 @@ export const EntitiesPage: Component = () => {
           <StateCard kind="loading" title="Loading entities" />
         </Match>
         <Match when={rows()?.length === 0}>
-          <StateCard kind="empty" title="No entities yet">
-            Entities appear after conversations are distilled.{" "}
-            <Show when={typeFilter()}>No entities of this type.</Show>
+          <StateCard
+            kind="empty"
+            title={
+              typeFilter() ? "No entities match this filter" : "No entities yet"
+            }
+            action={
+              typeFilter() ? (
+                <Button
+                  size="sm"
+                  class="h-11 md:h-9"
+                  variant="outline"
+                  onClick={() => setType(null)}
+                >
+                  Clear entity filter
+                </Button>
+              ) : undefined
+            }
+          >
+            {typeFilter()
+              ? "Clear the type filter to browse available entities."
+              : "Entities appear after conversations are distilled."}
           </StateCard>
         </Match>
         <Match when={rows()}>
@@ -312,41 +335,42 @@ export const EntitiesPage: Component = () => {
               <div class="rounded-lg border border-line">
                 <For each={items()}>
                   {(entity) => (
-                    <ListRow
+                    <A
                       href={entityHref(entity.id)}
-                      title={entity.canonical_name}
-                      footLeft={
-                        <>
+                      class="block min-w-0 border-b border-line px-4 py-3 text-sm [overflow-wrap:anywhere] hover:bg-soft/70 focus-visible:outline-2 focus-visible:outline-accent"
+                      data-testid="entity-row"
+                    >
+                      <div class="font-medium">
+                        {entity.canonical_name || "Unnamed entity"}
+                      </div>
+                      <Show when={entity.aliases.length > 0}>
+                        <p class="mt-1 text-xs text-muted">
+                          Also known as {entity.aliases.join(", ")}
+                        </p>
+                      </Show>
+                      <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                        <span class="min-w-0">
                           <Badge variant="teal">{entity.entity_type}</Badge>{" "}
                           {entity.project_id === null
-                            ? "cross-project"
-                            : "project"}
-                        </>
-                      }
-                      footRight={formatWhen(entity.updated_at)}
-                      testId="entity-row"
-                    />
+                            ? "Across projects"
+                            : ws.projectById(entity.project_id)?.name ||
+                              ws.projectById(entity.project_id)?.path ||
+                              entity.project_id}
+                        </span>
+                        <span>{formatWhen(entity.updated_at)}</span>
+                      </div>
+                    </A>
                   )}
                 </For>
               </div>
-              <div class="mt-3 flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={history().length === 0}
-                  onClick={goPrev}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!nextCursor()}
-                  onClick={goNext}
-                >
-                  Next
-                </Button>
-              </div>
+              <PaginationControls
+                label="Entities pagination"
+                class="mt-3"
+                onPrevious={goPrev}
+                previousDisabled={history().length === 0}
+                onNext={goNext}
+                nextDisabled={!nextCursor()}
+              />
             </>
           )}
         </Match>

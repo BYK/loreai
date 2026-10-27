@@ -18,6 +18,8 @@ import {
   SPECULATIVE_SOURCE_MAX_MESSAGES,
 } from "./speculative-source";
 import type { GatewayMessage, GatewayRequest } from "./translate/types";
+import { supportsContextBoundary } from "./context-boundary";
+import { detectHarness } from "./harness";
 
 type Stage =
   | "awaiting"
@@ -65,13 +67,29 @@ export class PreparationTiming {
     protocol: string;
     codex: boolean;
     streaming: boolean;
+    harness: string;
   };
-  constructor(request: Pick<GatewayRequest, "protocol" | "codex" | "stream">) {
+  constructor(
+    request: Pick<GatewayRequest, "protocol" | "codex" | "stream"> &
+      Partial<Pick<GatewayRequest, "rawHeaders" | "sourceInput">>,
+  ) {
+    const headers = request.rawHeaders ?? {};
     this.attributes = {
       protocol: request.protocol,
       codex: request.codex === true,
       streaming: request.stream,
+      harness: detectHarness(headers) ?? "unknown",
     };
+    // Emit before preparation so rejected suffixes remain in the denominator.
+    // Means of these 0/1 distributions give capability and suffix adoption.
+    this.metric(
+      "context_boundary_capable",
+      supportsContextBoundary(headers) ? 1 : 0,
+    );
+    this.metric(
+      "context_boundary_suffix",
+      request.sourceInput?.sourcePrefix ? 1 : 0,
+    );
   }
   measure<T>(stage: Stage, fn: () => T): T {
     const started = performance.now();
@@ -222,13 +240,22 @@ export function responsesProvenanceByMessageId(
   loreMessages: LoreMessageWithParts[],
 ): ReadonlyMap<
   string,
-  Pick<GatewayMessage, "content" | "provenanceContent" | "provenancePositions">
+  Pick<
+    GatewayMessage,
+    | "content"
+    | "provenanceContent"
+    | "provenancePositions"
+    | "responsesSourceRange"
+  >
 > {
   const result = new Map<
     string,
     Pick<
       GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
+      | "content"
+      | "provenanceContent"
+      | "provenancePositions"
+      | "responsesSourceRange"
     >
   >();
   for (let i = 0; i < loreMessages.length; i++) {
@@ -238,6 +265,9 @@ export function responsesProvenanceByMessageId(
         content: original.content,
         provenanceContent: original.provenanceContent,
         provenancePositions: original.provenancePositions,
+        ...(original.responsesSourceRange
+          ? { responsesSourceRange: original.responsesSourceRange }
+          : {}),
       });
   }
   return result;
@@ -272,13 +302,30 @@ export async function prepareSemanticMessages(input: {
   const started = performance.now();
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
-  if (input.sourcePrefix && (input.noStore || !input.protocol)) {
+  // Native context ordinals and private metadata are request-local. Neither
+  // durable checkpoints nor speculative source caches may retain these envelopes.
+  const nativeSource = input.messages.some(
+    (message) => message.responsesSourceRange !== undefined,
+  );
+  if (
+    input.sourcePrefix &&
+    (input.noStore || !input.protocol || nativeSource)
+  ) {
+    timing.metric("source_delta_unavailable", 1);
+    timing.metric(
+      `source_delta_unavailable_${input.noStore ? "disabled" : "protocol"}`,
+      1,
+    );
     throw new SourceDeltaUnavailableError(
       "A context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
     );
   }
   const speculative =
-    input.protocol && !input.noStore && !input.sourcePrefix && !input.forceFull
+    input.protocol &&
+    !input.noStore &&
+    !input.sourcePrefix &&
+    !input.forceFull &&
+    !nativeSource
       ? findSpeculativeSource({
           sessionID: input.sessionID,
           projectPath: input.projectPath,
@@ -287,7 +334,7 @@ export async function prepareSemanticMessages(input: {
         })
       : undefined;
   const checkpoint =
-    input.protocol && !input.noStore
+    input.protocol && !input.noStore && !nativeSource
       ? new SourceCheckpoint({
           ...input,
           protocol: input.checkpointProtocol ?? input.protocol,
@@ -425,17 +472,19 @@ export async function prepareSemanticMessages(input: {
   );
   if (checkpoint)
     timing.measure("checkpoint_capture", () =>
-      checkpoint.capture(
-        raw,
-        loreMessages,
-        ids,
-        provenanceByMessageId,
-        reuse
-          ? {
-              rawLength: reuse.raw.length,
-              resolvedTokens: reuse.resolvedTokens,
-            }
-          : undefined,
+      tokenCache.runVisible(() =>
+        checkpoint.capture(
+          raw,
+          loreMessages,
+          ids,
+          provenanceByMessageId,
+          reuse
+            ? {
+                rawLength: reuse.raw.length,
+                resolvedTokens: reuse.resolvedTokens,
+              }
+            : undefined,
+        ),
       ),
     );
   input.signal?.throwIfAborted();

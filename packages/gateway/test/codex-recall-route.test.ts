@@ -11,11 +11,23 @@ import { setUpstreamInterceptor } from "../src/pipeline";
 import { RECALL_TOOL_NAME } from "../src/recall";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 
+type RecallRouteCase = {
+  route: "provider" | "interceptor";
+  model: string;
+  principalTokens: number;
+  continuationTokens: number;
+  contextTokens?: number;
+  qualified?: boolean;
+  succeeds?: boolean;
+  continuationModel?: string;
+  continuationUsage?: "complete" | "missing" | "input-only";
+};
+
 function event(type: string, data: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 }
 
-function recallResponse(inputTokens: number): string {
+function recallResponse(inputTokens: number, model = "gpt-6-sol"): string {
   const item = {
     type: "function_call",
     id: "fc_codex_principal",
@@ -31,7 +43,7 @@ function recallResponse(inputTokens: number): string {
     event("response.created", {
       response: {
         id: "resp_codex_principal",
-        model: "gpt-6-sol",
+        model,
         status: "in_progress",
       },
     }) +
@@ -48,7 +60,7 @@ function recallResponse(inputTokens: number): string {
     event("response.completed", {
       response: {
         id: "resp_codex_principal",
-        model: "gpt-6-sol",
+        model,
         status: "completed",
         output: [item],
         usage: { input_tokens: inputTokens, output_tokens: 10 },
@@ -57,7 +69,11 @@ function recallResponse(inputTokens: number): string {
   );
 }
 
-function finalResponse(inputTokens: number): string {
+function finalResponse(
+  inputTokens: number,
+  model = "gpt-6-sol",
+  usage: "complete" | "missing" | "input-only" = "complete",
+): string {
   const item = {
     type: "message",
     id: "msg_codex_answer",
@@ -69,7 +85,7 @@ function finalResponse(inputTokens: number): string {
     event("response.created", {
       response: {
         id: "resp_codex_answer",
-        model: "gpt-6-sol",
+        model,
         status: "in_progress",
       },
     }) +
@@ -98,10 +114,17 @@ function finalResponse(inputTokens: number): string {
     event("response.completed", {
       response: {
         id: "resp_codex_answer",
-        model: "gpt-6-sol",
+        model,
         status: "completed",
         output: [item],
-        usage: { input_tokens: inputTokens, output_tokens: 10 },
+        ...(usage === "missing"
+          ? {}
+          : {
+              usage: {
+                input_tokens: inputTokens,
+                ...(usage === "complete" ? { output_tokens: 10 } : {}),
+              },
+            }),
       },
     })
   );
@@ -129,20 +152,100 @@ describe("Codex recall through the real ingress and forwarding path", () => {
     clearModelDataCache();
   });
 
-  it.each([
+  it.each<RecallRouteCase>([
     {
       route: "provider",
+      model: "gpt-6-sol",
       principalTokens: 240_000,
       continuationTokens: 241_000,
     },
     {
       route: "interceptor",
+      model: "gpt-6-sol",
       principalTokens: 70_000,
       continuationTokens: 90_000,
     },
+    {
+      route: "provider",
+      model: "gpt-6.1-terra",
+      principalTokens: 83_000,
+      continuationTokens: 84_000,
+    },
+    {
+      route: "interceptor",
+      model: "gpt-6.1-terra",
+      principalTokens: 83_000,
+      continuationTokens: 84_000,
+    },
+    {
+      route: "provider",
+      model: "gpt-6.1-terra",
+      principalTokens: 83_000,
+      continuationTokens: 129_000,
+      succeeds: false,
+    },
+    {
+      route: "interceptor",
+      model: "gpt-6.1-terra",
+      principalTokens: 70_000,
+      continuationTokens: 90_000,
+      contextTokens: 80_000,
+      succeeds: false,
+    },
+    {
+      route: "provider",
+      model: "gpt-6.1-terra",
+      principalTokens: 83_000,
+      continuationTokens: 84_000,
+      qualified: false,
+      succeeds: false,
+    },
+    ...(["provider", "interceptor"] as const).flatMap((route) => [
+      {
+        route,
+        model: "gpt-6.1-terra",
+        principalTokens: 30_000,
+        continuationTokens: 110_000,
+        contextTokens: 80_000,
+        succeeds: false,
+      },
+      {
+        route,
+        model: "gpt-6.1-terra",
+        principalTokens: 30_000,
+        continuationTokens: 31_000,
+        continuationModel: "gpt-6.1-sol",
+        succeeds: false,
+      },
+      ...(["missing", "input-only"] as const).map((continuationUsage) => ({
+        route,
+        model: "gpt-6.1-terra",
+        principalTokens: 30_000,
+        continuationTokens: 31_000,
+        continuationUsage,
+        succeeds: false,
+      })),
+      {
+        route,
+        model: "gpt-6.1-terra",
+        principalTokens: 30_000,
+        continuationTokens: 31_000,
+        contextTokens: 80_000,
+      },
+    ]),
   ])(
-    "forwards both $route recall turns to Codex within its verified window",
-    async ({ route, principalTokens, continuationTokens }) => {
+    "bounds $route $model recall with $continuationTokens continuation tokens (qualified=$qualified, context=$contextTokens, model=$continuationModel, usage=$continuationUsage, succeeds=$succeeds)",
+    async ({
+      route,
+      model,
+      principalTokens,
+      continuationTokens,
+      contextTokens = 1_050_000,
+      qualified = true,
+      succeeds = true,
+      continuationModel = model,
+      continuationUsage = "complete",
+    }) => {
       mock = new MockAgent();
       mock.disableNetConnect();
       setUpstreamDispatcherForTest(mock);
@@ -151,12 +254,12 @@ describe("Codex recall through the real ingress and forwarding path", () => {
       originalQueryExpansion = core.config().search.queryExpansion;
       core.config().search.queryExpansion = false;
       const modelEntry = {
-        id: "gpt-6-sol",
-        limit: { context: 1_050_000, output: 128_000 },
+        id: model,
+        limit: { context: contextTokens, output: 128_000 },
       };
       _setModelDataForTest(
-        { "gpt-6-sol": modelEntry },
-        { "openai/gpt-6-sol": modelEntry },
+        { [model]: modelEntry },
+        qualified ? { [`openai/${model}`]: modelEntry } : {},
       );
       const gatewayInputTypes: string[][] = [];
       setUpstreamInterceptor((body, _model, _stream, makeReal) => {
@@ -170,8 +273,8 @@ describe("Codex recall through the real ingress and forwarding path", () => {
       const codex = mock.get("https://chatgpt.com");
       const forwardedInputTypes: string[][] = [];
       for (const body of [
-        recallResponse(principalTokens),
-        finalResponse(continuationTokens),
+        recallResponse(principalTokens, model),
+        finalResponse(continuationTokens, continuationModel, continuationUsage),
       ]) {
         codex
           .intercept({ path: "/backend-api/codex/responses", method: "POST" })
@@ -212,7 +315,7 @@ describe("Codex recall through the real ingress and forwarding path", () => {
             : {}),
         },
         body: JSON.stringify({
-          model: "gpt-6-sol",
+          model,
           stream: true,
           store: false,
           input: [
@@ -244,9 +347,14 @@ describe("Codex recall through the real ingress and forwarding path", () => {
         ["unknown"],
         ["unknown", "function_call", "function_call_output"],
       ]);
-      expect(output).toContain("answer after recall");
-      expect(output).toContain("response.completed");
-      expect(output).not.toContain("response.failed");
+      if (succeeds) {
+        expect(output).toContain("answer after recall");
+        expect(output).toContain("response.completed");
+        expect(output).not.toContain("response.failed");
+      } else {
+        expect(output).toContain("response.failed");
+        expect(output).not.toContain("answer after recall");
+      }
     },
   );
 });

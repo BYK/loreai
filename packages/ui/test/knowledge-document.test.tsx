@@ -130,6 +130,20 @@ function renderDocument(
   ));
 }
 
+it("keeps recorded confidence visible and describes the closed details", () => {
+  renderDocument({ entry: { ...entry("Ada"), confidence: 0.45 } });
+  expect(screen.getByTestId("knowledge-confidence")).toBeVisible();
+  expect(screen.getByTestId("knowledge-confidence")).toHaveTextContent(
+    "Recorded confidence 45%",
+  );
+  const summary = screen.getByText("Source & history").closest("summary");
+  if (!summary) throw new Error("Missing source disclosure");
+  expect(summary).toHaveAccessibleDescription(
+    "Source, files, confidence, versions and technical details",
+  );
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+});
+
 describe("authorOf", () => {
   it("attributes entries without an author to the Curator agent", () => {
     for (const missing of [undefined, null, ""]) {
@@ -159,6 +173,76 @@ describe("authorOf", () => {
 });
 
 describe("KnowledgeDocument", () => {
+  it.each([
+    [
+      "available",
+      loader<EvidenceResult>({ state: "available" }),
+      "Source session available",
+    ],
+    [
+      "summary only",
+      loader<EvidenceResult>({ state: "summary_only" }),
+      "Original messages expired; retained summary only",
+    ],
+    [
+      "missing",
+      loader<EvidenceResult>({ state: "unavailable" }),
+      "Source session no longer available",
+    ],
+    ["checking", loader<EvidenceResult>(undefined), "Checking source…"],
+    [
+      "failed",
+      loader<EvidenceResult>(undefined, new Error("offline")),
+      "Source availability could not be checked",
+    ],
+    ["unknown", undefined, "Source session recorded; availability unknown"],
+  ])(
+    "summarizes %s evidence before a closed Source & history disclosure",
+    (_label, evidence, text) => {
+      const view = renderDocument({
+        evidence,
+        entry: { ...entry("Ada"), confidence: 0.12, source_session: "s-1" },
+      });
+      expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+        text,
+      );
+      const details = screen.getByText("Source & history").closest("details");
+      if (!details) throw new Error("Missing details disclosure");
+      expect(details).not.toHaveAttribute("open");
+      expect(details).toContainElement(screen.getByText("History"));
+      expect(details).toContainElement(screen.getByText("Technical details"));
+      expect(details).toHaveTextContent(
+        "12% — recorded value, not a probability of correctness",
+      );
+      expect(
+        view.container.querySelector("a button, summary button"),
+      ).toBeNull();
+      if (evidence) expect(evidence.reload).not.toHaveBeenCalled();
+      expect(screen.queryByText("Why trust this")).toBeNull();
+    },
+  );
+
+  it("does not imply source evidence for an entry without a recorded source", () => {
+    renderDocument({
+      entry: entry("Ada"),
+      evidence: loader({ state: "available" }),
+    });
+    expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+      "No source session recorded",
+    );
+  });
+
+  it("keeps provenance and history without advertising unavailable actions", () => {
+    renderDocument();
+    expect(screen.getByTestId("trust-section")).toBeInTheDocument();
+    expect(screen.getByText("History")).toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("button", {
+        name: /Ask agent|Save note|Explore separately|Start with selected context|Share finding/,
+      }),
+    ).toHaveLength(0);
+  });
+
   it("renders content before the trust and history sections", () => {
     const view = renderDocument();
     const article = view.getByTestId("knowledge-document");
@@ -171,9 +255,9 @@ describe("KnowledgeDocument", () => {
       screen.queryByText(/Nothing on this page writes to memory/),
     ).not.toBeInTheDocument();
     expect(article.textContent?.indexOf("c")).toBeLessThan(
-      article.textContent?.indexOf("Why trust this") ?? 0,
+      article.textContent?.indexOf("Source & history") ?? 0,
     );
-    expect(article.textContent?.indexOf("Why trust this")).toBeLessThan(
+    expect(article.textContent?.indexOf("Source & history")).toBeLessThan(
       article.textContent?.indexOf("History") ?? 0,
     );
   });
@@ -226,11 +310,14 @@ describe("KnowledgeDocument", () => {
       evidence: loader(evidence as unknown as EvidenceResult),
     });
     if (_label === "summary-only") {
-      expect(screen.getByText(/Original messages expired/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Original messages expired/)).toHaveLength(2);
       expect(screen.getByText(/2 distillations/)).toBeInTheDocument();
       expect(screen.getByText(/gen 0/)).toBeInTheDocument();
       expect(screen.getByText(/gen 1/)).toBeInTheDocument();
       expect(screen.getAllByText(/2 distillations/)).toHaveLength(1);
+      const details = screen.getByText("Source & history").closest("details");
+      if (!details) throw new Error("Missing source disclosure");
+      details.open = true;
       const readerLink = screen.getByRole("link", { name: "session reader." });
       expect(readerLink).toHaveAttribute("href", "/projects/p/sessions/s-1");
       expect(screen.queryByText("observer")).not.toBeInTheDocument();
@@ -410,6 +497,44 @@ describe("KnowledgeDocument", () => {
     ).toBeNull();
   });
 
+  it("explains why an idle workspace source cannot be checked without its project", () => {
+    renderDocument({
+      project: undefined,
+      entry: { ...entry("Ada"), project_id: null, source_session: "s-1" },
+      evidence: loader<EvidenceResult>(undefined),
+    });
+    const message =
+      "Source project unavailable; source availability cannot be checked.";
+    expect(screen.getByTestId("knowledge-source-summary")).toHaveTextContent(
+      message,
+    );
+    expect(screen.getByTestId("trust-section")).toHaveTextContent(message);
+    expect(screen.queryByText("Checking source…")).toBeNull();
+  });
+
+  it.each([
+    [
+      loader<EvidenceResult>({ state: "available" }),
+      "Source session available",
+    ],
+    [
+      loader<EvidenceResult>({ state: "summary_only" }),
+      "retained summary only",
+    ],
+    [
+      loader<EvidenceResult>({ state: "unavailable" }),
+      "Source session no longer available",
+    ],
+    [
+      loader<EvidenceResult>(undefined, new Error("offline")),
+      "Source session unavailable",
+    ],
+  ])("keeps recorded evidence without project context", (evidence, message) => {
+    renderDocument({ project: undefined, evidence });
+    expect(screen.getByTestId("trust-section")).toHaveTextContent(message);
+    expect(screen.queryByText("Checking source…")).toBeNull();
+  });
+
   it("shows pending states before the loaders' effects mark them loading", () => {
     // createLoader flips `loading` inside a createEffect, so on the very first
     // render data, error and loading are all falsy — never render blank there.
@@ -417,7 +542,7 @@ describe("KnowledgeDocument", () => {
       evidence: loader<EvidenceResult>(undefined),
       versions: loader<KnowledgeVersionHistory>(undefined),
     });
-    expect(screen.getByText("Checking source…")).toBeInTheDocument();
+    expect(screen.getAllByText("Checking source…")).toHaveLength(2);
     expect(screen.getByText("Loading version history")).toBeInTheDocument();
   });
 
@@ -447,7 +572,7 @@ describe("KnowledgeDocument", () => {
         ],
       }),
     });
-    expect(screen.getByText("No source session recorded.")).toBeInTheDocument();
+    expect(screen.getAllByText("No source session recorded.")).toHaveLength(2);
     expect(view.container.querySelector("a")).toBeNull();
   });
 

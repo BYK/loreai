@@ -217,6 +217,51 @@ describe("RecallChainBudget", () => {
     expect(unverified.maxTokens).toBe(128_000);
   });
 
+  test.each([
+    { inputTokens: 110_000, model: "small", completeUsage: true },
+    { inputTokens: 31_000, model: "other", completeUsage: true },
+    { inputTokens: 31_000, model: "small", completeUsage: false },
+    { inputTokens: undefined, model: "small", completeUsage: false },
+  ])(
+    "validates small-principal continuations at the 128K floor ($inputTokens, $model, complete=$completeUsage)",
+    ({ inputTokens, model, completeUsage }) => {
+      const budget = new RecallChainBudget({ modelContextTokens: 80_000 });
+      expect(
+        budget.recordPrincipalUsage(
+          { inputTokens: 30_000, outputTokens: 10 },
+          { expectedModel: "small", actualModel: "small" },
+          true,
+        ),
+      ).toBeUndefined();
+      expect(budget.maxTokens).toBe(128_000);
+      expect(
+        budget.recordContinuationUsage(
+          inputTokens === undefined
+            ? undefined
+            : { inputTokens, outputTokens: 10 },
+          model,
+          completeUsage,
+        ),
+      ).toBe("tokens");
+      expect(budget.exceedsTokenCeiling()).toBe(false);
+      expect(budget.canRecover()).toBe(false);
+      expect(budget.admit(1)).toBe("tokens");
+    },
+  );
+
+  test("stops unmetered small-principal continuations at the 128K floor", () => {
+    const budget = new RecallChainBudget({ modelContextTokens: 80_000 });
+    budget.recordPrincipalUsage(
+      { inputTokens: 30_000, outputTokens: 10 },
+      { expectedModel: "small", actualModel: "small" },
+      true,
+    );
+    expect(budget.maxTokens).toBe(128_000);
+    expect(budget.continuationModelMatches("other")).toBe(false);
+    expect(budget.recordUsage(undefined)).toBe("tokens");
+    expect(budget.admit(1)).toBe("tokens");
+  });
+
   test("charges a smaller mismatched principal against the conservative budget", () => {
     const budget = new RecallChainBudget({ modelContextTokens: 1_000_000 });
     expect(

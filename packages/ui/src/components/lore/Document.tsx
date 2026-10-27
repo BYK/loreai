@@ -20,6 +20,10 @@ export interface Participant {
   kind: AvatarKind;
 }
 
+/** Shared gutter and reading width for knowledge headers, content and actions. */
+export const DOCUMENT_COLUMN_CLASS =
+  "mx-auto w-full max-w-[800px] px-6 sm:px-7";
+
 export const DocHeader: Component<{
   crumb: readonly string[];
   title: string;

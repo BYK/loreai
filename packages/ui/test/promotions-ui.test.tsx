@@ -1,3 +1,4 @@
+import { MemoryRouter, Route } from "@solidjs/router";
 import {
   fireEvent,
   render,
@@ -132,9 +133,16 @@ function renderPanel(client: ApiClient) {
 
 function renderPage(client: ApiClient) {
   return render(() => (
-    <WorkspaceProvider client={client} db={Promise.resolve(null)}>
-      <PromotionsPage />
-    </WorkspaceProvider>
+    <MemoryRouter>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+            <PromotionsPage />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
   ));
 }
 
@@ -301,6 +309,38 @@ describe("PromotionPanel", () => {
 });
 
 describe("PromotionsPage", () => {
+  it("separates no-team recovery from its explanation", async () => {
+    renderPage(
+      clientWith({ getTeams: async () => ({ hosted: false, teams: [] }) }),
+    );
+    const action = await screen.findByRole("link", {
+      name: "Open team settings",
+    });
+    expect(action).toHaveAttribute("href", "/team?section=settings");
+    expect(action.parentElement).not.toHaveTextContent(
+      "Join a team before reviewing proposal requests.",
+    );
+  });
+
+  it("scopes an empty proposal queue to the current view and offers useful content", async () => {
+    renderPage(
+      clientWith({
+        listPromotions: async () => ({ ...listResponse([]), complete: false }),
+      }),
+    );
+    expect(
+      await screen.findByText("No proposals in this view"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Team proposals" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Browse knowledge" }).parentElement,
+    ).not.toHaveTextContent(/No proposals match|New pairs appear/);
+    expect(
+      screen.getByRole("link", { name: "Browse knowledge" }),
+    ).toHaveAttribute("href", "/knowledge");
+  });
   it("allows an admin to decide their own pending request", async () => {
     renderPage(
       clientWith({

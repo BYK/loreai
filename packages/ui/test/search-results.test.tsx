@@ -37,6 +37,40 @@ const recallClient = {
 } as unknown as ApiClient;
 
 describe("SearchResults", () => {
+  it.each(["session", "project", "knowledge"] as const)(
+    "offers a broader search from %s while preserving the query",
+    async (scope) => {
+      render(() => (
+        <MemoryRouter>
+          <Route
+            path="*"
+            component={() => (
+              <WorkspaceProvider
+                client={recallClient}
+                db={Promise.resolve(null)}
+              >
+                <SearchResults
+                  project={project}
+                  q="SQLite & history"
+                  scope={scope}
+                />
+              </WorkspaceProvider>
+            )}
+          />
+        </MemoryRouter>
+      ));
+      const link = await screen.findByRole("link", {
+        name: "Search all memory",
+      });
+      const url = new URL(link.getAttribute("href") ?? "", "http://local");
+      expect(url.pathname).toBe("/projects/p-1/search");
+      expect(url.searchParams.get("q")).toBe("SQLite & history");
+      expect(url.searchParams.get("scope")).toBe("all");
+      expect(
+        screen.getByRole("link", { name: "Browse project knowledge" }),
+      ).toHaveAttribute("href", "/projects/p-1/knowledge");
+    },
+  );
   it("prompts for a query before making recall output", () => {
     render(() => (
       <MemoryRouter>
@@ -92,7 +126,12 @@ describe("SearchResults", () => {
     ).toBeInTheDocument();
   });
 
-  it("submits the selected recall scope", async () => {
+  it.each([
+    ["all", "All memory"],
+    ["session", "Conversation history"],
+    ["project", "Project memory"],
+    ["knowledge", "Knowledge and memory files"],
+  ])("submits the raw recall scope %s shown as %s", async (value, label) => {
     const history = createMemoryHistory();
     history.set({ value: "/projects/p-1/search?q=SQLite&scope=all" });
     render(() => (
@@ -114,11 +153,11 @@ describe("SearchResults", () => {
         pointerType: "mouse",
       },
     );
-    fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
+    fireEvent.click(await screen.findByRole("option", { name: label }));
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() =>
       expect(history.get()).toBe(
-        "/projects/p-1/search?q=SQLite&scope=knowledge",
+        `/projects/p-1/search?q=SQLite&scope=${value}`,
       ),
     );
   });
@@ -189,6 +228,14 @@ describe("SearchResults", () => {
       </MemoryRouter>
     ));
     expect(await screen.findByText("No results")).toBeInTheDocument();
+    expect(screen.getByText(/Scope: All memory/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Search all memory" }),
+    ).toBeNull();
+    expect(screen.getByText("Try different words.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Browse project knowledge" }),
+    ).toHaveAttribute("href", "/projects/p-1/knowledge");
   });
 
   it("renders a loading state before recall resolves", () => {

@@ -493,7 +493,7 @@ describe("shell: project navigation and real-data path", () => {
         "knowledge",
         "/projects/p-lore/knowledge/k-sqlite",
         "textbox",
-        "Filter knowledge list",
+        "Filter this list",
       ],
       [
         "sessions",
@@ -622,10 +622,14 @@ describe("shell: project navigation and real-data path", () => {
     );
     expect(within(doc).getByTestId("category")).toHaveTextContent("gotcha");
     expect(within(doc).getByText("shared")).toBeInTheDocument();
-    expect(within(doc).getByText("Confidence 60%")).toBeInTheDocument();
     expect(
-      within(doc).getByText("No source session recorded."),
-    ).toBeInTheDocument();
+      within(doc).getByText("Recorded confidence").parentElement,
+    ).toHaveTextContent(
+      "60% — recorded value, not a probability of correctness",
+    );
+    expect(
+      within(doc).getByTestId("knowledge-source-summary"),
+    ).toHaveTextContent("No source session recorded.");
     const selectedRows = await screen.findAllByTestId("knowledge-row");
     expect(selectedRows[1]).toHaveAttribute("aria-current", "page");
     expect(selectedRows[0]).not.toHaveAttribute("aria-current");
@@ -653,7 +657,7 @@ describe("shell: project navigation and real-data path", () => {
     mount("/projects/p-lore/knowledge?q=Keep", fakeClient());
     expect(await screen.findAllByTestId("knowledge-row")).toHaveLength(2);
     expect(
-      screen.getByRole("textbox", { name: "Knowledge search" }),
+      screen.getByRole("textbox", { name: "Filter this list" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Recall Results")).toBeNull();
   });
@@ -755,25 +759,14 @@ describe("shell: project navigation and real-data path", () => {
     expect(row).toHaveAttribute("aria-current", "page");
   });
 
-  it("renders the future actions disabled with the exact wording", async () => {
+  it("offers the real knowledge actions without roadmap placeholders", async () => {
     mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
     const doc = await screen.findByTestId("knowledge-document");
-    const buttons = within(doc).getAllByRole("button", {
-      name: /not available yet/,
-    });
     expect(
-      buttons.map((b) => b.textContent?.replace(NOT_AVAILABLE_YET, "").trim()),
-    ).toEqual([
-      "Save note",
-      "Ask agent",
-      "Explore separately",
-      "Start with selected context",
-      "Share finding",
-    ]);
-    for (const button of buttons) {
-      expect(button).toBeDisabled();
-      expect(button).toHaveTextContent(NOT_AVAILABLE_YET);
-    }
+      within(doc).queryAllByRole("button", { name: /not available yet/ }),
+    ).toHaveLength(0);
+    expect(within(doc).getByText("Source & history")).toBeInTheDocument();
+    expect(within(doc).getByText("History")).toBeInTheDocument();
   });
 
   it("does not interpret entry content as HTML", async () => {
@@ -1092,9 +1085,9 @@ describe("shell: workspace knowledge and search", () => {
     ).toBeInTheDocument();
     await screen.findAllByTestId("knowledge-row");
     const table = screen.getByRole("table");
-    expect(within(table).getAllByText("Lore workspace")).toHaveLength(2);
-    expect(within(table).getByText("/home/me/empty")).toBeInTheDocument();
-    expect(within(table).getByText("No project")).toBeInTheDocument();
+    expect(within(table).getAllByText("Lore workspace")).toHaveLength(4);
+    expect(within(table).getAllByText("/home/me/empty")[0]).toBeInTheDocument();
+    expect(within(table).getAllByText("No project")[0]).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", { name: "Primary navigation" });
     const allKnowledge = within(nav).getByTestId("rail-knowledge");
@@ -1216,7 +1209,9 @@ describe("shell: workspace knowledge and search", () => {
     const { history } = mount("/search?q=SQLite", client);
     expect(screen.getByRole("search")).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Search all knowledge" }),
+      within(screen.getByRole("main")).getByRole("textbox", {
+        name: "Search knowledge across projects",
+      }),
     ).toHaveValue("SQLite");
     expect(await screen.findByTestId("search-hit")).toHaveAttribute(
       "href",
@@ -1230,7 +1225,7 @@ describe("shell: workspace knowledge and search", () => {
     );
     expect(
       screen.getByText(
-        "Knowledge only — sessions and distillations are searched per project.",
+        "Knowledge only. Search a project's memory to include its conversations and summaries.",
       ),
     ).toBeInTheDocument();
     expect(searchOpts[0]).toEqual(
@@ -1950,8 +1945,13 @@ describe("shell: search entry, theme and fixture", () => {
 
   it("submits a workspace search from the header", async () => {
     const { history } = mount("/", fakeClient());
-    const input = screen.getByRole("textbox", { name: "Search" });
-    expect(input).toHaveAttribute("placeholder", "Search all knowledge…");
+    const input = screen.getByRole("textbox", {
+      name: "Search knowledge across projects",
+    });
+    expect(input).toHaveAttribute(
+      "placeholder",
+      "Search knowledge across projects…",
+    );
     fireEvent.input(input, { target: { value: "SQLite" } });
     const form = input.closest("form");
     if (!form) throw new Error("workspace search form missing");
@@ -2004,6 +2004,7 @@ describe("shell: search entry, theme and fixture", () => {
       addEventListener: (_: string, cb: (e: { matches: boolean }) => void) => {
         if (query === "(prefers-color-scheme: dark)") onChange = cb;
       },
+      removeEventListener: vi.fn(),
     }));
     resetThemeStoreForTests();
     mount("/", fakeClient());
@@ -2261,7 +2262,7 @@ describe("Knowledge reader toolbar", () => {
     );
     await screen.findByTestId("knowledge-document");
     const search = screen.getByRole("textbox", {
-      name: "Filter knowledge list",
+      name: "Filter this list",
     });
     fireEvent.input(search, { target: { value: "SQLite" } });
     fireEvent.submit(search.closest("form")!);
@@ -2359,11 +2360,13 @@ it("clears reader filters while preserving the selected entry and sort", async (
 it("filters project cards and can recover from an empty result", async () => {
   mount("/", fakeClient());
   await screen.findAllByTestId("project-card");
-  const filter = screen.getByRole("textbox", { name: "Filter project cards" });
+  const filter = screen.getByRole("textbox", { name: "Filter projects" });
   fireEvent.input(filter, { target: { value: "not-a-project" } });
-  expect(screen.getByText("No projects match")).toBeInTheDocument();
+  expect(await screen.findByText("No projects match")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Clear project filter" }));
-  expect(screen.getAllByTestId("project-card")).toHaveLength(2);
+  await waitFor(() =>
+    expect(screen.getAllByTestId("project-card")).toHaveLength(2),
+  );
 });
 
 it("restores context focus at narrow breakpoints without stealing reader input focus", async () => {
@@ -2386,7 +2389,9 @@ it("restores context focus at narrow breakpoints without stealing reader input f
   await waitFor(() =>
     expect(screen.getByTestId("context-toggle")).toHaveFocus(),
   );
-  const search = screen.getByRole("textbox", { name: "Search" });
+  const search = screen.getByRole("textbox", {
+    name: "Search this project's memory",
+  });
   search.focus();
   media.matches = true;
   for (const listener of listeners) listener({ matches: true });
@@ -2406,7 +2411,7 @@ it("keeps scoped recall searches on their route without mounting hidden reader f
     "/projects/p-lore/search?q=SQLite&scope=knowledge",
   );
   expect(
-    screen.queryByRole("textbox", { name: "Filter knowledge list" }),
+    screen.queryByRole("textbox", { name: "Filter this list" }),
   ).toBeNull();
   expect(
     screen.getByRole("textbox", { name: "Search query" }),
@@ -2441,7 +2446,7 @@ it("keeps narrow context open after reader filter submissions", async () => {
   );
   await screen.findByTestId("knowledge-document");
   fireEvent.click(screen.getByRole("button", { name: "Expand context pane" }));
-  const input = screen.getByRole("textbox", { name: "Filter knowledge list" });
+  const input = screen.getByRole("textbox", { name: "Filter this list" });
   fireEvent.input(input, { target: { value: "SQLite" } });
   fireEvent.submit(input.closest("form")!);
   await waitFor(() => expect(history.get()).toContain("q=SQLite"));
@@ -2500,10 +2505,10 @@ it("uses rail destinations consistently and exposes workspace tools directly", a
   );
   for (const name of [
     "Entities",
-    "Contradictions",
-    "Promotions",
+    "Conflicting instructions",
+    "Team proposals",
     "Team",
-    "Conflicts",
+    "Sync recovery",
     "Cache warming",
     "Cost intelligence",
     "Model usage",
@@ -2600,4 +2605,91 @@ it("restores toolbar focus when a narrow reader context opens the full table", a
   await waitFor(() =>
     expect(screen.getByTestId("project-picker-trigger")).toHaveFocus(),
   );
+});
+
+it.each([null, "broken", "false", "true"])(
+  "keeps desktop navigation mini regardless of the old preference %s",
+  async (value) => {
+    if (value !== null)
+      localStorage.setItem("lore.ui.navigationCompact", value);
+    mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+    await screen.findByTestId("knowledge-document");
+    const rail = screen.getByTestId("icon-rail");
+    expect(within(rail).getByTestId("rail-projects").textContent).toBe("");
+    expect(within(rail).getByTestId("logo").lastElementChild).toHaveClass(
+      "sr-only",
+    );
+    expect(screen.queryByTestId("navigation-compact-toggle")).toBeNull();
+    expect(localStorage.getItem("lore.ui.navigationCompact")).toBe(value);
+    expect(localStorage.getItem("lore.ui.sidebarCollapsed")).toBeNull();
+    const toggle = screen.getByTestId("context-toggle");
+    fireEvent.click(toggle);
+    expect(within(rail).getByTestId("rail-projects").textContent).toBe("");
+  },
+);
+
+it.each([
+  "bogus",
+  "",
+  "__proto__",
+  "constructor",
+  "toString",
+  "ALL",
+  "knowledge ",
+])(
+  "recovers invalid recall scope %s through the project search route",
+  async (rawScope) => {
+    const recall = vi.fn<ApiClient["recall"]>(async (opts) => ({
+      query: opts.q,
+      scope: opts.scope,
+      projectPath: opts.project.path,
+      result: "No results found for this query.",
+    }));
+    const { history } = mount(
+      `/projects/p-lore/search?q=SQLite&scope=${encodeURIComponent(rawScope)}`,
+      fakeClient({ recall }),
+    );
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Search scope/ }),
+    ).toHaveTextContent("All memory");
+    expect(screen.getByTestId("recall-search-scope")).toHaveTextContent(
+      "Scope: All memory",
+    );
+    expect(recall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: "SQLite", scope: "all" }),
+      expect.anything(),
+    );
+    fireEvent.submit(screen.getByRole("search"));
+    await waitFor(() =>
+      expect(history.get()).toBe("/projects/p-lore/search?q=SQLite&scope=all"),
+    );
+  },
+);
+
+it("labels every mini rail destination through keyboard tooltips", async () => {
+  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+  await screen.findByTestId("knowledge-document");
+  const rail = screen.getByTestId("icon-rail");
+  const destinations = [
+    ...rail.querySelectorAll<HTMLAnchorElement>("a[data-testid]"),
+  ];
+  expect(destinations.length).toBeGreaterThan(10);
+  for (const link of destinations) {
+    const label = link.getAttribute("aria-label");
+    if (!label) throw new Error("Missing navigation label");
+    expect(link.textContent).toBe("");
+    expect(link).toHaveAttribute("href");
+    link.focus();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+    expect(link).toHaveAttribute(
+      "aria-describedby",
+      screen.getByRole("tooltip").id,
+    );
+    fireEvent.keyDown(link, { key: "Escape" });
+    link.blur();
+    await waitFor(() =>
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+    );
+  }
 });

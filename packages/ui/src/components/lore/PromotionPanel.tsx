@@ -135,7 +135,7 @@ export const PromotionPanel: Component<{
 
   return (
     <section
-      class="mt-6 rounded-lg border border-line bg-bg p-4 sm:p-5"
+      class="rounded-lg border border-line bg-bg p-4 sm:p-5"
       data-testid="promotion-panel"
     >
       <h2 class="text-base font-semibold">Propose to team</h2>

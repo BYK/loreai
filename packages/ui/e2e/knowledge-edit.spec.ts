@@ -228,6 +228,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     expect(edit.ok()).toBe(true);
 
     await page.goto(`/ui/projects/${projectId}/knowledge/${entry.id}`);
+    await page.getByText("Source & history", { exact: true }).click();
     const history = page.getByTestId("version-history");
     const firstVersion = history.getByTestId("knowledge-version-1");
     await expect(firstVersion).toBeVisible();
