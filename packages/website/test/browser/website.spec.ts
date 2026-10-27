@@ -190,13 +190,17 @@ test("disabled storage still permits an explicit in-memory theme", async ({
 test("content and native navigation remain available without JavaScript", async ({
   browser,
   baseURL,
+  viewport,
+  colorScheme,
   isMobile,
+  hasTouch,
 }) => {
   const context = await browser.newContext({
     javaScriptEnabled: false,
-    viewport: isMobile
-      ? { width: 320, height: 844 }
-      : { width: 1280, height: 900 },
+    viewport,
+    colorScheme,
+    isMobile,
+    hasTouch,
   });
   const page = await context.newPage();
   await page.goto(`${baseURL}/`);
