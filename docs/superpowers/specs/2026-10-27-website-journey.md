@@ -123,3 +123,12 @@ The user preferred the original rolling, multi-peak terrain. Restore that exact
 height profile on both islands (mirrored for the receiving project), preserving
 the two-project transfer story. Use front-slope surface paths and mesh-derived
 upper crests for launch/arrival; keep camera and footprint-clearance checks.
+
+## Restore the original checkpoint landscape
+
+The user asked to return to a single island with its original checkpoints. This
+supersedes the two-project islands and elevation-refinement treatment. Restore the
+Conversation → Knowledge → Recall landmarks and connecting trails, keeping terrain
+and checkpoint selection synchronized with native tabs. Keep the earlier removal
+of the Rotate slider/Reset view button and retain precise pointer-hit selection,
+rotation-safe framing, static fallback, reduced motion and lifecycle cleanup.

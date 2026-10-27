@@ -15,7 +15,7 @@ for (const root of document.querySelectorAll<HTMLElement>(
     loading = false,
     failed = false,
     generation = 0,
-    refining = false;
+    keyboard = false;
   const media = matchMedia("(prefers-reduced-motion: reduce)");
   const current = () =>
     (root.querySelector<HTMLInputElement>('input[name="memory-stage"]:checked')
@@ -27,6 +27,13 @@ for (const root of document.querySelectorAll<HTMLElement>(
   };
   function ready(value: boolean) {
     element.dataset.renderer = value ? "webgl" : "static";
+    if (!value) {
+      element
+        .querySelectorAll<HTMLElement>("[data-rest-style]")
+        .forEach((label) => {
+          label.style.cssText = label.dataset.restStyle ?? "";
+        });
+    }
   }
   function select(next: MemoryPhase) {
     const input = root.querySelector<HTMLInputElement>(
@@ -40,27 +47,28 @@ for (const root of document.querySelectorAll<HTMLElement>(
   function hover(next: MemoryPhase | null) {
     if (next) element.dataset.targetPhase = next;
     else delete element.dataset.targetPhase;
-    help.textContent = refining
-      ? current() === "conversation"
-        ? "Returning to the conversation…"
-        : current() === "knowledge"
-          ? "Refining conversation into knowledge…"
-          : "Carrying relevant knowledge to Orders…"
-      : next
-        ? {
-            conversation: "Lower layers · Conversation",
-            knowledge: "Middle layers · Distilled knowledge",
-            recall: "Upper layers · Relevant context",
-          }[next]
-        : "Click a lower, middle or upper layer to explore.";
+    help.textContent = next
+      ? `Select ${next}`
+      : "Click a region to select its stage.";
   }
   hover(null);
+  root.addEventListener("keydown", () => {
+    keyboard = true;
+  });
+  root.addEventListener(
+    "pointerdown",
+    () => {
+      keyboard = false;
+    },
+    { passive: true },
+  );
   root
     .querySelectorAll<HTMLInputElement>('input[name="memory-stage"]')
     .forEach((input) =>
       input.addEventListener("change", () => {
         root.dataset.activePhase = current();
-        renderer?.setPhase(current());
+        renderer?.setPhase(current(), !keyboard);
+        keyboard = false;
       }),
     );
   // The same region selection works with the SVG when GPU rendering is unavailable.
@@ -103,10 +111,6 @@ for (const root of document.querySelectorAll<HTMLElement>(
       renderer = module.mountLandscape(element, ready, {
         select,
         hover,
-        refining(active) {
-          refining = active;
-          hover((element.dataset.targetPhase as MemoryPhase) ?? null);
-        },
         failure() {
           failed = true;
           renderer = null;

@@ -46,16 +46,11 @@ the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
 
 The interactive homepage landscape lives in `MemoryLandscape.astro`. Shared terrain
-contours, elevation classification and orthographic projection are in
+contours, region classification and orthographic projection are in
 `src/lib/memory-landscape.ts`; the SVG is rendered at build time. The controller
 lazily loads the pinned Three.js renderer only while visible, with normal motion
 and sufficient device memory. Native stage controls work without JavaScript; SVG
-terrace selection remains available when GPU rendering is disabled. The renderer
-handles terrain raycasting, bounded rotation, a finite refinement transition, context loss
-and resource disposal. Geometry and browser tests cover the shared elevation bands,
-projection, selection and failure paths. Two separate project islands reuse the original multi-peak terrain and share refinement bands. Retained fragments move
-from the source crest to the receiving crest along the shared transfer path. Pure surface/transfer/retention helpers place transient fragments; their
-illustrative count falls during upward transitions. Colors are cached outside the
-frame loop. Rapid inputs retarget the displayed state; interruption settles it.
-Camera bounds cover drag, parallax, bevels, lower walls and the transfer arc. Rendered-contour footprint clearance keeps fragments above the terraces; dense
-footprint tests cover the entire animation.
+region selection remains available when GPU rendering is disabled. The renderer
+handles terrain raycasting, bounded rotation, one-shot stage trails, context loss
+and resource disposal. Geometry and browser tests cover the shared boundaries,
+projection, selection and failure paths.

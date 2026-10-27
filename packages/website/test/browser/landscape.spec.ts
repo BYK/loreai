@@ -1,13 +1,4 @@
 import { expect, test } from "@playwright/test";
-import {
-  PHASES,
-  pointOnTerrain,
-  refinementElevation,
-  projectPoint,
-  SVG_WIDTH,
-  SVG_HEIGHT,
-  TERRAIN_STEP,
-} from "../../src/lib/memory-landscape";
 
 test.beforeEach(async ({ page }) => {
   await page.route(
@@ -35,21 +26,13 @@ test("the landscape and native stage controls work without JavaScript", async ({
   await page.goto(`${baseURL}/`);
   const graph = page.locator(".memory-landscape");
   await expect(graph.locator("svg.landscape-fallback")).toBeVisible();
-  await expect(graph.locator(".landscape-pin, [data-marker]")).toHaveCount(0);
-  await expect(graph.locator(".landscape-projects")).toContainText("Payments");
-  await expect(graph.locator(".landscape-projects")).toContainText("Orders");
-  const connection = graph.locator(".landscape-transfer");
-  const quiet = await connection.evaluate(
-    (path) => getComputedStyle(path).opacity,
-  );
-  await graph.getByRole("radio", { name: "2 Distilled", exact: true }).check();
+  await expect(graph.locator(".landscape-pin")).toHaveCount(3);
+  await graph.getByRole("radio", { name: "2 Knowledge", exact: true }).check();
   await expect(graph.locator("#memory-stage-knowledge")).toBeVisible();
   await expect(graph.locator("#memory-stage-knowledge")).toContainText(
     ".lore.md",
   );
-  await graph.getByRole("radio", { name: "3 Relevant", exact: true }).check();
-  await expect(connection).not.toHaveCSS("opacity", quiet);
-  await expect(graph.locator("#memory-stage-recall")).toContainText("Orders");
+  await graph.getByRole("radio", { name: "3 Recall", exact: true }).check();
   await expect(graph.locator("#memory-stage-recall")).toBeVisible();
   await expect(graph.getByRole("button", { name: /motion/i })).toHaveCount(0);
   await context.close();
@@ -67,22 +50,15 @@ test("reduced motion retains the landscape and loads no GPU renderer", async ({
   await page.goto("/");
   await expect(page.locator(".landscape-fallback")).toBeVisible();
   await expect(page.locator(".memory-landscape canvas")).toHaveCount(0);
-  const upperFace = page
-    .locator('.landscape-face[data-land-region="recall"]:not(.landscape-wall)')
-    .first();
-  const initialFill = await upperFace.evaluate(
-    (face) => getComputedStyle(face).fill,
-  );
-  await page.getByRole("radio", { name: "2 Distilled", exact: true }).focus();
+  await page.getByRole("radio", { name: "2 Knowledge", exact: true }).focus();
   await page.keyboard.press("ArrowRight");
   await expect(
-    page.getByRole("radio", { name: "3 Relevant", exact: true }),
+    page.getByRole("radio", { name: "3 Recall", exact: true }),
   ).toBeChecked();
   await expect(page.locator("#memory-stage-recall")).toBeVisible();
   await expect(
-    page.getByRole("radio", { name: "3 Relevant", exact: true }).locator(".."),
+    page.getByRole("radio", { name: "3 Recall", exact: true }).locator(".."),
   ).toHaveCSS("outline-style", "solid");
-  await expect(upperFace).not.toHaveCSS("fill", initialFill);
   expect(gpuRequests).toEqual([]);
 });
 
@@ -107,7 +83,7 @@ test("blocked WebGL retains a usable static landscape and readable example", asy
     "static",
   );
   await expect(page.locator(".landscape-fallback")).toBeVisible();
-  await page.getByRole("radio", { name: "2 Distilled", exact: true }).check();
+  await page.getByRole("radio", { name: "2 Knowledge", exact: true }).check();
   await expect(page.locator("#memory-stage-knowledge")).toBeVisible();
   await expect(page.locator(".memory-landscape canvas")).toHaveCount(0);
 });
@@ -120,13 +96,11 @@ test("native stage selection highlights the terrain, and motion preference chang
   const art = page.locator(".landscape-art");
   await art.scrollIntoViewIfNeeded();
   await expect(art).toHaveAttribute("data-renderer", "webgl");
-  const canvas = art.locator("canvas");
-  const lowerBand = await canvas.screenshot();
-  await page.getByRole("radio", { name: "2 Distilled", exact: true }).check();
-  await expect
-    .poll(async () => !(await canvas.screenshot()).equals(lowerBand))
-    .toBe(true);
-  await expect(art).toHaveAttribute("data-selected-band", "knowledge");
+  await page.getByRole("radio", { name: "2 Knowledge", exact: true }).check();
+  await expect(page.locator('[data-marker="knowledge"]')).toHaveAttribute(
+    "data-selected",
+    "true",
+  );
   await expect(page.locator("#memory-stage-knowledge")).toBeVisible();
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(art).toHaveAttribute("data-renderer", "static");
@@ -134,9 +108,12 @@ test("native stage selection highlights the terrain, and motion preference chang
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await expect(art).toHaveAttribute("data-renderer", "webgl");
   await expect(
-    page.getByRole("radio", { name: "2 Distilled", exact: true }),
+    page.getByRole("radio", { name: "2 Knowledge", exact: true }),
   ).toBeChecked();
-  await expect(art).toHaveAttribute("data-selected-band", "knowledge");
+  await expect(page.locator('[data-marker="knowledge"]')).toHaveAttribute(
+    "data-selected",
+    "true",
+  );
 });
 
 test("failed GPU initialization releases its partial canvas", async ({
@@ -194,7 +171,7 @@ test("WebGL context loss shows the fallback and restores the selected stage", as
   const graph = page.locator(".landscape-art");
   await graph.scrollIntoViewIfNeeded();
   await expect(graph).toHaveAttribute("data-renderer", "webgl");
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
+  await page.getByRole("radio", { name: "3 Recall", exact: true }).check();
   const supported = await graph
     .locator("canvas")
     .evaluate((canvas: HTMLCanvasElement) => {
@@ -210,7 +187,6 @@ test("WebGL context loss shows the fallback and restores the selected stage", as
     });
   expect(supported).toBe(true);
   await expect(graph).toHaveAttribute("data-renderer", "static");
-  await expect(graph).not.toHaveAttribute("data-refining");
   await expect(graph.locator(".landscape-fallback")).toBeVisible();
   await page.evaluate(() =>
     (
@@ -229,30 +205,29 @@ async function regionPoint(
   const art = page.locator(".landscape-art");
   const bounds = await art.boundingBox();
   if (!bounds) throw new Error("Landscape has no layout bounds");
-  // Sample exposed terrace centres first, and verify them through the real raycaster.
-  const index = PHASES.indexOf(phase as (typeof PHASES)[number]);
-  for (const angle of [0.85, 0.55, 1.15, 0.25, 1.45]) {
-    const height = refinementElevation(index),
-      surface = pointOnTerrain(height, angle);
-    const [x, y] = projectPoint([
-      surface[0],
-      Math.floor(height / TERRAIN_STEP) * TERRAIN_STEP + 1.5,
-      surface[2],
-    ]);
-    const point = {
-      x: bounds.x + (bounds.width * x) / SVG_WIDTH,
-      y: bounds.y + (bounds.height * y) / SVG_HEIGHT,
-    };
-    await page.mouse.move(point.x, point.y);
-    if ((await art.getAttribute("data-target-phase")) === phase) return point;
-  }
-  // Broad terrace samples exercise actual terrain raycasting without peak markers.
-  for (let y = 0.22; y <= 0.82; y += 0.06)
+  // Broad terrain samples: exclude the label area to exercise the terrain raycaster.
+  for (let y = 0.4; y <= 0.78; y += 0.06)
     for (let x = 0.25; x <= 0.78; x += 0.06) {
       const point = {
         x: bounds.x + bounds.width * x,
         y: bounds.y + bounds.height * y,
       };
+      if (
+        await page.locator(".landscape-labels span").evaluateAll(
+          (labels, p) =>
+            labels.some((label) => {
+              const b = label.getBoundingClientRect();
+              return (
+                p.x >= b.left - 10 &&
+                p.x <= b.right + 10 &&
+                p.y >= b.top - 10 &&
+                p.y <= b.bottom + 10
+              );
+            }),
+          point,
+        )
+      )
+        continue;
       await page.mouse.move(point.x, point.y);
       if ((await art.getAttribute("data-target-phase")) === phase) return point;
     }
@@ -271,8 +246,8 @@ test("clicking each broad terrain region selects and highlights its correspondin
   await art.scrollIntoViewIfNeeded();
   await expect(art).toHaveAttribute("data-renderer", "webgl");
   for (const [phase, name] of [
-    ["knowledge", "2 Distilled"],
-    ["recall", "3 Relevant"],
+    ["knowledge", "2 Knowledge"],
+    ["recall", "3 Recall"],
     ["conversation", "1 Conversation"],
   ]) {
     const point = await regionPoint(page, phase);
@@ -281,7 +256,10 @@ test("clicking each broad terrain region selects and highlights its correspondin
     await expect(page.getByRole("radio", { name, exact: true })).toBeChecked();
     await expect(page.getByRole("radio", { name, exact: true })).toBeFocused();
     await expect(page.locator(`#memory-stage-${phase}`)).toBeVisible();
-    await expect(art).toHaveAttribute("data-selected-band", phase);
+    await expect(page.locator(`[data-marker="${phase}"]`)).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
   }
   expect(errors).toEqual([]);
 });
@@ -308,17 +286,10 @@ test("dragging away and back preserves selection without extra view controls", a
   await expect(
     page.getByRole("button", { name: "Reset view", exact: true }),
   ).toHaveCount(0);
-  await expect
-    .poll(async () => {
-      const first = await art.locator("canvas").screenshot();
-      await page.waitForTimeout(100);
-      return (await art.locator("canvas").screenshot()).equals(first);
-    })
-    .toBe(true);
   const target = await regionPoint(page, "recall");
   await page.mouse.click(target.x, target.y);
   await expect(
-    page.getByRole("radio", { name: "3 Relevant", exact: true }),
+    page.getByRole("radio", { name: "3 Recall", exact: true }),
   ).toBeChecked();
 });
 
@@ -357,7 +328,7 @@ test("static terrain regions are selectable and the canvas is never loaded on lo
   expect(selected).not.toBeNull();
   await page.mouse.click(selected!.x, selected!.y);
   await expect(
-    page.getByRole("radio", { name: "2 Distilled", exact: true }),
+    page.getByRole("radio", { name: "2 Knowledge", exact: true }),
   ).toBeChecked();
   await expect(art.locator("canvas")).toHaveCount(0);
   expect(requests).toEqual([]);
@@ -382,7 +353,7 @@ test("a shader failure restores the static terrain and usable stage controls", a
   );
   await expect(page.locator(".landscape-fallback")).toBeVisible();
   await expect(page.locator(".landscape-art canvas")).toHaveCount(0);
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
+  await page.getByRole("radio", { name: "3 Recall", exact: true }).check();
   await expect(page.locator("#memory-stage-recall")).toBeVisible();
 });
 
@@ -404,7 +375,7 @@ test("leaving and re-entering the canvas cancels an un-dragged region press", as
   ).toBeChecked();
 });
 
-test("elevation selection updates the highlighted band and settles without idle motion", async ({
+test("forward stage selection traces once, then the terrain settles without idle motion", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -412,31 +383,9 @@ test("elevation selection updates the highlighted band and settles without idle 
   const art = page.locator(".landscape-art");
   await art.scrollIntoViewIfNeeded();
   await expect(art).toHaveAttribute("data-renderer", "webgl");
-  const observed = await art.evaluateHandle((element) => {
-    const counts: number[] = [];
-    const observer = new MutationObserver((records) => {
-      for (const record of records)
-        if (record.oldValue !== null) counts.push(Number(record.oldValue));
-      if (element.getAttribute("data-detail-count") !== null)
-        counts.push(Number(element.getAttribute("data-detail-count")));
-    });
-    observer.observe(element, {
-      attributes: true,
-      attributeOldValue: true,
-      attributeFilter: ["data-detail-count"],
-    });
-    return { counts, observer };
-  });
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
-  await expect(art).toHaveAttribute("data-selected-band", "recall");
-  await expect(art).toHaveAttribute("data-refining", "true");
-  await expect(art).not.toHaveAttribute("data-refining");
-  const counts = await observed.evaluate((state) => {
-    state.observer.disconnect();
-    return state.counts;
-  });
-  expect(Math.max(...counts)).toBeGreaterThan(20);
-  expect(Math.min(...counts)).toBe(4);
+  await page.getByRole("radio", { name: "3 Recall", exact: true }).check();
+  await expect(art).toHaveAttribute("data-tracing", "2");
+  await expect(art).not.toHaveAttribute("data-tracing");
   await page.mouse.move(0, 0);
   await page.waitForTimeout(500);
   const canvas = art.locator("canvas"),
@@ -448,9 +397,9 @@ test("elevation selection updates the highlighted band and settles without idle 
     .focus();
   await page.keyboard.press("ArrowRight");
   await expect(
-    page.getByRole("radio", { name: "2 Distilled", exact: true }),
+    page.getByRole("radio", { name: "2 Knowledge", exact: true }),
   ).toBeChecked();
-  await expect(art).toHaveAttribute("data-selected-band", "knowledge");
+  await expect(art).not.toHaveAttribute("data-tracing");
 });
 
 test("mobile horizontal swipes rotate, while vertical gestures still scroll", async ({
@@ -504,53 +453,30 @@ test("mobile horizontal swipes rotate, while vertical gestures still scroll", as
   await session.detach();
 });
 
-test("rapid stage changes retarget the refinement and settle at the last choice", async ({
+test("the restored island checkpoints select their matching native tabs", async ({
   page,
+  isMobile,
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/");
   const art = page.locator(".landscape-art");
   await art.scrollIntoViewIfNeeded();
   await expect(art).toHaveAttribute("data-renderer", "webgl");
-  await page.getByRole("radio", { name: "2 Distilled", exact: true }).check();
-  await expect(art).toHaveAttribute("data-refining", "true");
-  await page.waitForTimeout(200);
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
-  await expect(art).toHaveAttribute("data-refining", "true");
-  await page.waitForTimeout(200);
-  await page
-    .getByRole("radio", { name: "1 Conversation", exact: true })
-    .check();
-  await expect(art).toHaveAttribute("data-selected-band", "conversation");
-  await expect(art).not.toHaveAttribute("data-refining");
-  await expect(art).not.toHaveAttribute("data-detail-count");
-  await expect(page.locator("#memory-stage-conversation")).toBeVisible();
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
-  await expect(art).toHaveAttribute("data-refining", "true");
-  await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(art).toHaveAttribute("data-renderer", "static");
-  await expect(art).not.toHaveAttribute("data-refining");
-  await expect(
-    page.getByRole("radio", { name: "3 Relevant", exact: true }),
-  ).toBeChecked();
-});
-
-test("leaving the viewport settles refinement and does not replay it on return", async ({
-  page,
-}) => {
-  await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.goto("/");
-  const art = page.locator(".landscape-art");
-  await art.scrollIntoViewIfNeeded();
-  await expect(art).toHaveAttribute("data-renderer", "webgl");
-  await page.getByRole("radio", { name: "3 Relevant", exact: true }).check();
-  await expect(art).toHaveAttribute("data-refining", "true");
-  await page.locator("#waitlist").scrollIntoViewIfNeeded();
-  await expect(art).not.toHaveAttribute("data-refining");
-  await art.scrollIntoViewIfNeeded();
-  await expect(art).toHaveAttribute("data-selected-band", "recall");
-  await expect(art).not.toHaveAttribute("data-refining");
-  await expect(
-    page.getByRole("radio", { name: "3 Relevant", exact: true }),
-  ).toBeChecked();
+  await page.evaluate(() => document.fonts.ready);
+  await expect(page.locator(".landscape-projects")).toHaveCount(0);
+  for (const [phase, name] of [
+    ["knowledge", "2 Knowledge"],
+    ["recall", "3 Recall"],
+    ["conversation", "1 Conversation"],
+  ]) {
+    const marker = page.locator(`[data-marker="${phase}"]`),
+      bounds = await marker.boundingBox();
+    if (!bounds) throw new Error("Checkpoint label missing");
+    const x = bounds.x + bounds.width / 2,
+      y = bounds.y + bounds.height / 2;
+    if (isMobile) await page.touchscreen.tap(x, y);
+    else await page.mouse.click(x, y);
+    await expect(page.getByRole("radio", { name, exact: true })).toBeChecked();
+    await expect(marker).toHaveAttribute("data-selected", "true");
+  }
 });

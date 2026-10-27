@@ -3,14 +3,13 @@ import {
   CAMERA_POSITION,
   PHASES,
   REST_YAW,
+  SITES,
   TERRAIN_STEP,
   landscapeView,
-  bandAtHeight,
+  regionAt,
   terrainLevels,
-  transferPoint,
-  transferPath,
-  refinementElevation,
-  refinementDetailCount,
+  terrainTop,
+  trailPoints,
   type MemoryPhase,
 } from "./memory-landscape";
 export interface LandscapeRenderer {
@@ -22,7 +21,6 @@ interface Events {
   select(phase: MemoryPhase): void;
   hover(phase: MemoryPhase | null): void;
   failure(): void;
-  refining(active: boolean): void;
 }
 export function mountLandscape(
   element: HTMLElement,
@@ -78,9 +76,6 @@ export function mountLandscape(
     renderer.forceContextLoss();
     canvas.remove();
     onReady(false);
-    delete element.dataset.refining;
-    delete element.dataset.detailCount;
-    events.refining(false);
     events.hover(null);
   }
   try {
@@ -121,29 +116,62 @@ export function mountLandscape(
     const fill = new THREE.DirectionalLight(0xdce8d4, 0.6);
     fill.position.set(200, 130, -220);
     scene.add(fill);
+    const regionUniforms = {
+      uLandSites: { value: SITES.map(([x, z]) => new THREE.Vector2(x, z)) },
+      uLandActive: { value: 0 },
+      uLandHover: { value: -1 },
+      uLandMuted: { value: new THREE.Color() },
+      uLandSelected: { value: new THREE.Color() },
+      uLandBrass: { value: new THREE.Color() },
+    };
+    function regionMaterial(material: THREE.MeshStandardMaterial) {
+      material.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, regionUniforms);
+        shader.vertexShader = "varying vec2 vLandXZ;\n" + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvLandXZ = position.xz;",
+        );
+        shader.fragmentShader =
+          "varying vec2 vLandXZ; uniform vec2 uLandSites[3]; uniform float uLandActive; uniform float uLandHover; uniform vec3 uLandMuted; uniform vec3 uLandSelected; uniform vec3 uLandBrass;\n" +
+          shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <color_fragment>",
+          `#include <color_fragment>
+   vec2 a0=vLandXZ-uLandSites[0],a1=vLandXZ-uLandSites[1],a2=vLandXZ-uLandSites[2];
+   float d0=dot(a0,a0),d1=dot(a1,a1),d2=dot(a2,a2);
+   float regionId=(d0<=d1 && d0<=d2)?0.0:(d1<=d2?1.0:2.0);
+   float landSelection=1.0-step(0.5,abs(regionId-uLandActive));
+   vec3 quiet=mix(diffuseColor.rgb,uLandMuted,0.70);
+   vec3 chosen=mix(diffuseColor.rgb,uLandSelected,0.40);
+   diffuseColor.rgb=mix(quiet,chosen,landSelection);
+   float hover=(1.0-step(0.5,abs(regionId-uLandHover)))*(1.0-landSelection);
+   diffuseColor.rgb=mix(diffuseColor.rgb,uLandBrass,hover*0.16);
+   float nearest=min(d0,min(d1,d2));
+   float second=max(min(d0,d1),min(max(d0,d1),d2));
+   float seam=1.0-smoothstep(0.0,240.0,second-nearest);
+   diffuseColor.rgb=mix(diffuseColor.rgb,uLandBrass,seam*0.32);
+  `,
+        );
+      };
+      material.customProgramCacheKey = () => "lore-terrain-regions-v1";
+    }
     const materials: { material: THREE.MeshStandardMaterial; level: number }[] =
         [],
       tierMeshes: THREE.Mesh[] = [],
-      contourMaterials: {
-        material: THREE.LineBasicMaterial;
-        band: number;
-        level: number;
-      }[] = [];
+      contourMaterials: THREE.LineBasicMaterial[] = [];
     for (const level of terrainLevels()) {
       const material = new THREE.MeshStandardMaterial({
         roughness: 0.89,
         metalness: 0.03,
       });
+      regionMaterial(material);
       materials.push({ material, level: level.height });
       const edgeMaterial = new THREE.LineBasicMaterial({
         transparent: true,
         opacity: 0.21,
       });
-      contourMaterials.push({
-        material: edgeMaterial,
-        band: bandAtHeight(level.height),
-        level: level.height,
-      });
+      contourMaterials.push(edgeMaterial);
       for (const loop of level.loops) {
         const shape = new THREE.Shape(
           loop.map(([x, z]) => new THREE.Vector2(x, -z)),
@@ -163,7 +191,6 @@ export function mountLandscape(
           0,
         );
         const mesh = new THREE.Mesh(geometry, material);
-        mesh.userData.band = bandAtHeight(level.height);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         world.add(mesh);
@@ -179,20 +206,6 @@ export function mountLandscape(
         world.add(edge);
       }
     }
-    const connection = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints(
-        transferPath().map((point) => new THREE.Vector3(...point)),
-      ),
-      new THREE.LineDashedMaterial({
-        transparent: true,
-        opacity: 0.16,
-        dashSize: 3,
-        gapSize: 3,
-        toneMapped: false,
-      }),
-    );
-    connection.computeLineDistances();
-    world.add(connection);
     const shadow = new THREE.Mesh(
       new THREE.PlaneGeometry(850, 850),
       new THREE.ShadowMaterial({ opacity: 0.13 }),
@@ -201,42 +214,108 @@ export function mountLandscape(
     shadow.position.y = -6;
     shadow.receiveShadow = true;
     scene.add(shadow);
-    const fragmentGeometry = new THREE.PlaneGeometry(5.4, 1.25);
-    fragmentGeometry.rotateX(-Math.PI / 2);
-    const fragments = Array.from({ length: 28 }, () => {
-      const mesh = new THREE.Mesh(
-        fragmentGeometry,
-        new THREE.MeshBasicMaterial({
-          transparent: true,
-          opacity: 0,
-          side: THREE.DoubleSide,
-          toneMapped: false,
-          depthWrite: false,
-        }),
-      );
-      mesh.visible = false;
-      world.add(mesh);
-      return mesh;
-    });
-    const colors = {
-      low: new THREE.Color(),
-      mid: new THREE.Color(),
-      high: new THREE.Color(),
-      gold: new THREE.Color(),
-    };
     let phase = 0,
       cursor = 0,
       hovered = -1;
-    let transition: {
+    const top = terrainTop;
+    const sites = SITES;
+    const pins = sites.map(([x, z], i) => {
+      const group = new THREE.Group();
+      group.position.set(x, top(x, z) + 1.2, z);
+      world.add(group);
+      const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(4.5, 4.8, 0.9, 32),
+        new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.4 }),
+      );
+      base.position.y = 0.45;
+      group.add(base);
+      const stem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.65, 0.65, 7, 12),
+        base.material,
+      );
+      stem.position.y = 4.4;
+      group.add(stem);
+      const head = new THREE.Mesh(
+        new THREE.SphereGeometry(2.25, 16, 12),
+        base.material,
+      );
+      head.position.y = 8.1;
+      group.add(head);
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(7.3, 8.2, 48),
+        new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: i === phase ? 0.9 : 0.16,
+          side: THREE.DoubleSide,
+        }),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.2;
+      group.add(ring);
+      return {
+        group,
+        base,
+        ring,
+        label: element.querySelector<HTMLElement>(
+          `[data-marker="${PHASES[i]}"]`,
+        )!,
+      };
+    });
+    const routes: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial>[] =
+        [],
+      routeCurves: THREE.CatmullRomCurve3[] = [],
+      baseRoutes: THREE.Mesh<THREE.TubeGeometry, THREE.MeshBasicMaterial>[] =
+        [];
+    for (let route = 0; route < 2; route++) {
+      const points = trailPoints(route).map(
+        (point) => new THREE.Vector3(...point),
+      );
+      const routeCurve = new THREE.CatmullRomCurve3(
+        points,
+        false,
+        "centripetal",
+        0.5,
+      );
+      const base = new THREE.Mesh(
+        new THREE.TubeGeometry(routeCurve, 350, 0.34, 6, false),
+        new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0.34,
+          toneMapped: false,
+        }),
+      );
+      world.add(base);
+      baseRoutes.push(base);
+      const material = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.98,
+        toneMapped: false,
+      });
+      const mesh = new THREE.Mesh(
+        new THREE.TubeGeometry(routeCurve, 350, 0.57, 6, false),
+        material,
+      );
+      world.add(mesh);
+      routes.push(mesh);
+      routeCurves.push(routeCurve);
+    }
+    const courier = new THREE.Mesh(
+      new THREE.SphereGeometry(1.65, 16, 12),
+      new THREE.MeshBasicMaterial({ toneMapped: false }),
+    );
+    courier.visible = false;
+    world.add(courier);
+
+    let orbit = 0,
+      tilt = 0,
+      targetOrbit = 0,
+      targetTilt = 0;
+    let travel: {
       from: number;
       to: number;
       started: number | null;
       duration: number;
     } | null = null;
-    let orbit = 0,
-      tilt = 0,
-      targetOrbit = 0,
-      targetTilt = 0;
     let press: {
       id: number;
       x: number;
@@ -265,64 +344,53 @@ export function mountLandscape(
         return new THREE.Color(fallback);
       }
     }
+    function applyTrail(position: number) {
+      routes.forEach((route, index) => {
+        const fraction = clamp(position - index, 0, 1);
+        route.geometry.setDrawRange(
+          0,
+          Math.floor((route.geometry.index!.count * fraction) / 36) * 36,
+        );
+      });
+    }
     function hover(next: number) {
       if (next === hovered) return;
       hovered = next;
-      paint();
-      schedule();
+      regionUniforms.uLandHover.value = hovered;
+      pins.forEach(
+        (pin, index) =>
+          (pin.ring.material.opacity =
+            index === phase ? 0.92 : index === hovered ? 0.62 : 0.16),
+      );
       events.hover(hovered < 0 ? null : PHASES[hovered]);
     }
     function palette() {
-      colors.low.copy(color("--land-ivory", "#e4e7d5"));
-      colors.mid.copy(color("--land-sage", "#8eae83"));
-      colors.high.copy(color("--land-jade", "#37684b"));
-      colors.gold.copy(color("--land-brass", "#b28240"));
-      fragments.forEach((mesh) => mesh.material.color.copy(colors.gold));
-      connection.material.color.copy(colors.gold);
-      paint();
-      schedule();
-    }
-    function paint() {
-      const { low, mid, high, gold } = colors;
-      connection.material.opacity =
-        0.12 + Math.max(0, Math.min(1, cursor - 1)) * 0.5;
+      const low = color("--land-ivory", "#e4e7d5"),
+        mid = color("--land-sage", "#8eae83"),
+        high = color("--land-jade", "#37684b"),
+        gold = color("--land-brass", "#b28240");
+      regionUniforms.uLandMuted.value.copy(mid);
+      regionUniforms.uLandSelected.value.copy(high);
+      regionUniforms.uLandBrass.value.copy(gold);
       materials.forEach(({ material, level }) => {
-        const t = level / 80,
-          band = bandAtHeight(level),
-          weight = Math.max(0, 1 - Math.abs(band - cursor));
-        const selected = low.clone().lerp(high, 0.65 + t * 0.25);
-        material.color
-          .copy(low)
-          .lerp(mid, 0.18 + t * 0.3)
-          .lerp(selected, weight);
-        if (band === hovered && band !== phase) material.color.lerp(gold, 0.16);
+        const t = level / 80;
+        material.color.copy(
+          t < 0.2
+            ? low.clone().lerp(mid, t / 0.2)
+            : mid.clone().lerp(high, (t - 0.2) / 0.8),
+        );
       });
-      contourMaterials.forEach(({ material, band, level }) => {
-        const weight = Math.max(0, 1 - Math.abs(band - cursor));
-        const sweep = transition
-          ? Math.exp(-(((level - refinementElevation(cursor)) / 5) ** 2))
-          : 0;
-        material.color
-          .copy(high)
-          .multiplyScalar(0.66)
-          .lerp(gold, sweep * 0.75);
-        material.opacity =
-          0.15 +
-          weight * 0.15 +
-          sweep * 0.25 +
-          (band === hovered && band !== phase ? 0.06 : 0);
+      contourMaterials.forEach((material) =>
+        material.color.copy(high).multiplyScalar(0.66),
+      );
+      pins.forEach((pin) => {
+        pin.base.material.color.copy(gold);
+        pin.ring.material.color.copy(gold);
       });
-    }
-    function finishTransition() {
-      transition = null;
-      cursor = phase;
-      fragments.forEach((mesh) => {
-        mesh.visible = false;
-      });
-      delete element.dataset.refining;
-      delete element.dataset.detailCount;
-      events.refining(false);
-      paint();
+      routes.forEach((route) => route.material.color.copy(gold));
+      baseRoutes.forEach((route) => route.material.color.copy(mid));
+      courier.material.color.copy(gold);
+      schedule();
     }
     function stop() {
       cancelAnimationFrame(frame);
@@ -339,7 +407,11 @@ export function mountLandscape(
       release();
       pendingTap = null;
       hover(-1);
-      finishTransition();
+      travel = null;
+      cursor = phase;
+      courier.visible = false;
+      applyTrail(cursor);
+      delete element.dataset.tracing;
     }
     function fit() {
       if (disposed || lost) return;
@@ -354,6 +426,17 @@ export function mountLandscape(
       camera.updateProjectionMatrix();
       schedule();
     }
+    function updateLabels() {
+      const { width, height } = element.getBoundingClientRect();
+      pins.forEach(({ group, label }, index) => {
+        const point = group
+          .localToWorld(new THREE.Vector3(0, 15, 0))
+          .project(camera);
+        const half = label.offsetWidth / 2;
+        label.style.left = `${clamp(((point.x + 1) * width) / 2, half + 8, width - half - 8)}px`;
+        label.style.top = `${clamp(((1 - point.y) * height) / 2 - (index === 1 ? 15 : 0), 30, height - 20)}px`;
+      });
+    }
     function render(now: number) {
       frame = 0;
       if (disposed || lost || !visible || document.hidden) return;
@@ -363,38 +446,37 @@ export function mountLandscape(
         tilt += (targetTilt - tilt) * easing;
         world.rotation.y = REST_YAW + orbit;
         world.rotation.x = tilt;
-        if (transition) {
-          if (transition.started === null) transition.started = now;
-          const t = Math.min(
-              1,
-              (now - transition.started) / transition.duration,
-            ),
+        if (travel) {
+          if (travel.started === null) travel.started = now;
+          const t = Math.min(1, (now - travel.started) / travel.duration),
             ease = t * t * (3 - 2 * t);
-          cursor = transition.from + (transition.to - transition.from) * ease;
-          const count = refinementDetailCount(cursor),
-            envelope = Math.sin(Math.PI * t) * 0.9;
-          element.dataset.detailCount = String(Math.ceil(count));
-          fragments.forEach((mesh, index) => {
-            mesh.material.opacity =
-              Math.min(1, Math.max(0, count - index)) * envelope;
-            mesh.visible = mesh.material.opacity > 0.01;
-            if (!mesh.visible) return;
-            const angle = index * 2.3999632297 + cursor * 0.1;
-            mesh.position.set(...transferPoint(cursor, angle));
-            mesh.rotation.y = -angle;
-            mesh.scale.x = 1.4 - cursor * 0.35;
-          });
-          paint();
-          if (t === 1) finishTransition();
+          cursor = travel.from + (travel.to - travel.from) * ease;
+          applyTrail(cursor);
+          const leg = Math.min(
+            routeCurves.length - 1,
+            Math.floor(Math.min(cursor, travel.to - 0.00001)),
+          );
+          courier.position.copy(
+            routeCurves[leg].getPointAt(clamp(cursor - leg, 0, 1)),
+          );
+          courier.position.y += 1.4;
+          courier.visible = t < 1;
+          if (t === 1) {
+            travel = null;
+            cursor = phase;
+            applyTrail(cursor);
+            delete element.dataset.tracing;
+          }
         }
         world.updateMatrixWorld(true);
         renderer.render(scene, camera);
+        updateLabels();
         if (!announced) {
           announced = true;
           onReady(true);
         }
         if (
-          transition ||
+          travel ||
           Math.abs(targetOrbit - orbit) + Math.abs(targetTilt - tilt) > 0.0015
         )
           schedule();
@@ -409,30 +491,32 @@ export function mountLandscape(
     }
     function setPhase(next: MemoryPhase, animate = true) {
       if (disposed) return;
+      const previous = phase;
       phase = PHASES.indexOf(next);
-      element.dataset.selectedBand = next;
-      if (
-        animate &&
-        announced &&
-        visible &&
-        !lost &&
-        Math.abs(cursor - phase) > 0.001
-      ) {
-        transition = {
-          from: cursor,
+      regionUniforms.uLandActive.value = phase;
+      if (animate && announced && !lost && phase > 0 && phase >= previous) {
+        let from = phase === previous ? phase - 1 : Math.min(cursor, phase);
+        if (from >= phase - 0.001) from = phase - 1;
+        cursor = from;
+        travel = {
+          from,
           to: phase,
           started: null,
-          duration:
-            phase > 1 || cursor > 1
-              ? Math.abs(cursor - phase) > 1
-                ? 2300
-                : 1700
-              : 850,
+          duration: phase - from > 1 ? 900 : 650,
         };
-        element.dataset.refining = "true";
-        events.refining(true);
-      } else finishTransition();
-      paint();
+        element.dataset.tracing = String(phase);
+      } else {
+        travel = null;
+        cursor = phase;
+        courier.visible = false;
+        delete element.dataset.tracing;
+      }
+      applyTrail(cursor);
+      pins.forEach((pin, index) => {
+        pin.ring.material.opacity =
+          index === phase ? 0.92 : index === hovered ? 0.62 : 0.16;
+        pin.label.dataset.selected = String(index === phase);
+      });
       schedule();
     }
     const raycaster = new THREE.Raycaster(),
@@ -447,6 +531,16 @@ export function mountLandscape(
         clientY > r.bottom
       )
         return -1;
+      for (let index = 0; index < pins.length; index++) {
+        const b = pins[index].label.getBoundingClientRect();
+        if (
+          clientX >= b.left &&
+          clientX <= b.right &&
+          clientY >= b.top &&
+          clientY <= b.bottom
+        )
+          return index;
+      }
       rayPointer.set(
         ((clientX - r.left) / r.width) * 2 - 1,
         1 - ((clientY - r.top) / r.height) * 2,
@@ -455,7 +549,8 @@ export function mountLandscape(
       raycaster.setFromCamera(rayPointer, camera);
       const hit = raycaster.intersectObjects(tierMeshes, false)[0];
       if (!hit) return -1;
-      return hit.object.userData.band as number;
+      const local = world.worldToLocal(hit.point.clone());
+      return regionAt(local.x, local.z);
     }
     function down(event: PointerEvent) {
       if (!event.isPrimary || event.button !== 0) {
@@ -473,7 +568,7 @@ export function mountLandscape(
         moved: false,
         dragging: false,
         touch: event.pointerType !== "mouse",
-        // Click events may round coordinates; preserve the precise pointer hit.
+        // Click coordinates can be rounded; keep the precise pointer hit.
         selection: locate(event.clientX, event.clientY),
       };
     }
