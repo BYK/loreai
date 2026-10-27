@@ -6,31 +6,13 @@ export interface TerrainLevel {
   readonly loops: readonly (readonly Point2[])[];
 }
 export const PHASES = ["conversation", "knowledge", "recall"] as const;
-export const SITES: readonly Point2[] = Object.freeze(
-  [
-    [30, 60],
-    [-64, -8],
-    [65, -30],
-  ].map((point) => Object.freeze(point) as Point2),
-);
 export const REST_YAW = (-8 * Math.PI) / 180;
 export const CAMERA_POSITION: Point3 = [310, 350, 460];
 export const SVG_WIDTH = 600;
 export const SVG_HEIGHT = 400;
-export function phaseIndex(phase: MemoryPhase): number {
-  return PHASES.indexOf(phase);
-}
-export function regionAt(x: number, z: number): number {
-  let region = 0,
-    nearest = Infinity;
-  SITES.forEach(([sx, sz], index) => {
-    const distance = (x - sx) ** 2 + (z - sz) ** 2;
-    if (distance < nearest) {
-      nearest = distance;
-      region = index;
-    }
-  });
-  return region;
+// Each complete terrace belongs to one stage, including its bevel and wall.
+export function bandAtHeight(height: number): number {
+  return height >= 50 ? 2 : height >= 25 ? 1 : 0;
 }
 export function terrainHeight(x: number, z: number): number {
   return (
@@ -156,48 +138,6 @@ export function terrainLevels(): readonly TerrainLevel[] {
   return cachedLevels;
 }
 
-export function terrainTop(x: number, z: number): number {
-  return (
-    Math.floor(Math.max(0, terrainHeight(x, z)) / TERRAIN_STEP) * TERRAIN_STEP
-  );
-}
-export const ROUTE_WAYPOINTS: readonly (readonly Point2[])[] = [
-  [
-    [30, 60],
-    [12, 46],
-    [-12, 30],
-    [-40, 12],
-    [-64, -8],
-  ],
-  [
-    [-64, -8],
-    [-30, -20],
-    [4, -32],
-    [34, -40],
-    [65, -30],
-  ],
-];
-export function trailPoints(route: number): Point3[] {
-  const path = ROUTE_WAYPOINTS[route];
-  return Array.from({ length: 180 }, (_, index) => {
-    const progress = (index / 179) * (path.length - 1),
-      segment = Math.min(path.length - 2, Math.floor(progress)),
-      t = progress - segment;
-    const a = path[Math.max(0, segment - 1)],
-      b = path[segment],
-      c = path[segment + 1],
-      d = path[Math.min(path.length - 1, segment + 2)];
-    const at = (axis: 0 | 1) =>
-      0.5 *
-      (2 * b[axis] +
-        (-a[axis] + c[axis]) * t +
-        (2 * a[axis] - 5 * b[axis] + 4 * c[axis] - d[axis]) * t * t +
-        (-a[axis] + 3 * b[axis] - 3 * c[axis] + d[axis]) * t * t * t);
-    const x = at(0),
-      z = at(1);
-    return [x, terrainTop(x, z) + 1.25, z];
-  });
-}
 const dot = (a: Point3, b: Point3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const subtract = (a: Point3, b: Point3): Point3 => [
   a[0] - b[0],
@@ -239,7 +179,7 @@ export function landscapeView(): LandscapeView {
     zs = points.map((p) => p[2]);
   const focus: Point3 = [
     (Math.min(...xs) + Math.max(...xs)) / 2,
-    (-5.2 + Math.max(...SITES.map(([x, z]) => terrainTop(x, z) + 10))) / 2,
+    (-5.2 + Math.max(...points.map((point) => point[1]))) / 2,
     (Math.min(...zs) + Math.max(...zs)) / 2,
   ];
   const forward = normalize(subtract(CAMERA_POSITION, focus)),
@@ -277,37 +217,6 @@ export function svgPath(points: readonly Point3[], close = false): string {
       .join(" ") + (close ? " Z" : "")
   );
 }
-export function clipRegion(
-  polygon: readonly Point2[],
-  region: number,
-): Point2[] {
-  let result = [...polygon];
-  const [sx, sz] = SITES[region];
-  for (let other = 0; other < SITES.length; other++) {
-    if (other === region) continue;
-    const [ox, oz] = SITES[other],
-      a = 2 * (ox - sx),
-      b = 2 * (oz - sz),
-      limit = ox * ox + oz * oz - sx * sx - sz * sz;
-    const input = result;
-    result = [];
-    for (let index = 0; index < input.length; index++) {
-      const current = input[index],
-        previous = input[(index + input.length - 1) % input.length],
-        v = a * current[0] + b * current[1] - limit,
-        p = a * previous[0] + b * previous[1] - limit;
-      if (v <= 0 !== p <= 0) {
-        const t = p / (p - v);
-        result.push([
-          previous[0] + (current[0] - previous[0]) * t,
-          previous[1] + (current[1] - previous[1]) * t,
-        ]);
-      }
-      if (v <= 0) result.push(current);
-    }
-  }
-  return result;
-}
 export interface LandscapeFace {
   path: string;
   phase: MemoryPhase;
@@ -322,45 +231,42 @@ export function landscapeFaces(): readonly LandscapeFace[] {
     for (const loop of level.loops) {
       const lower =
         level.height - (level.height === 0 ? 5.2 : TERRAIN_STEP - 0.22);
-      for (let region = 0; region < 3; region++) {
-        const polygon = clipRegion(loop, region);
-        if (polygon.length < 3) continue;
-        // Wall segments share the same region clipping as the top surface.
-        const walls: string[] = [];
-        for (let i = 0; i < polygon.length; i++) {
-          const a = polygon[i],
-            b = polygon[(i + 1) % polygon.length];
-          const normal: Point3 = [b[1] - a[1], 0, a[0] - b[0]];
-          if (dot(restRotate(normal), landscapeView().forward) <= 0) continue;
-          walls.push(
-            svgPath(
-              [
-                [a[0], level.height, a[1]],
-                [a[0], lower, a[1]],
-                [b[0], lower, b[1]],
-                [b[0], level.height, b[1]],
-              ],
-              true,
-            ),
-          );
-        }
-        if (walls.length)
-          faces.push({
-            path: walls.join(" "),
-            phase: PHASES[region],
-            layer: level.height / 80,
-            wall: true,
-          });
-        faces.push({
-          path: svgPath(
-            polygon.map(([x, z]): Point3 => [x, level.height, z]),
+      const polygon = loop;
+      const phase = PHASES[bandAtHeight(level.height)];
+      const walls: string[] = [];
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i],
+          b = polygon[(i + 1) % polygon.length];
+        const normal: Point3 = [b[1] - a[1], 0, a[0] - b[0]];
+        if (dot(restRotate(normal), landscapeView().forward) <= 0) continue;
+        walls.push(
+          svgPath(
+            [
+              [a[0], level.height, a[1]],
+              [a[0], lower, a[1]],
+              [b[0], lower, b[1]],
+              [b[0], level.height, b[1]],
+            ],
             true,
           ),
-          phase: PHASES[region],
-          layer: level.height / 80,
-          wall: false,
-        });
+        );
       }
+      if (walls.length)
+        faces.push({
+          path: walls.join(" "),
+          phase,
+          layer: level.height / 80,
+          wall: true,
+        });
+      faces.push({
+        path: svgPath(
+          polygon.map(([x, z]): Point3 => [x, level.height, z]),
+          true,
+        ),
+        phase,
+        layer: level.height / 80,
+        wall: false,
+      });
     }
   cachedFaces = Object.freeze(faces);
   return cachedFaces;

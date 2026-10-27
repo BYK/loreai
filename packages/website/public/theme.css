@@ -143,32 +143,22 @@ th { font-weight: 500; }
   .evidence th, .evidence td { padding: .75rem .5rem; overflow-wrap: anywhere; }
 }
 
-/* The landscape and its static SVG share the same terrain and region boundaries. */
-.memory-landscape { padding:0; border:0; background:transparent; box-shadow:none; --land-paper:var(--bg); --land-ivory:#e4e7d5; --land-sage:#8eae83; --land-jade:#37684b; --land-brass:#b28240; }
+/* Terrain elevation represents conversation, distilled knowledge and relevant context. */
+.memory-landscape { padding:0; border:0; background:transparent; box-shadow:none; --land-ivory:#e4e7d5; --land-sage:#8eae83; --land-jade:#37684b; --land-brass:#b28240; }
 :root[data-theme="dark"] .memory-landscape { --land-ivory:#c4d0b3; --land-sage:#91af82; --land-jade:#537e58; --land-brass:#d6ac6c; }
 .memory-landscape h2 { font-size:1.5rem; }
 .landscape-art { position:relative; width:100%; aspect-ratio:3 / 2; touch-action:pan-y pinch-zoom; }
 .landscape-art svg, .landscape-art canvas { display:block; position:absolute; inset:0; width:100%; height:100%; }
 .landscape-art[data-renderer="webgl"] .landscape-fallback { visibility:hidden; }
-.landscape-labels { z-index:1; display:block; position:absolute; inset:0; pointer-events:none; }
-.landscape-labels span { position:absolute; transform:translate(-50%,-100%); padding:1px 5px 9px; white-space:nowrap; background:var(--land-paper); border-radius:2px; color:var(--muted); font-size:11px; line-height:1.5; }
-.landscape-labels span::after { content:""; position:absolute; bottom:0; left:50%; width:1px; height:6px; background:var(--muted); opacity:.5; }
-.landscape-labels span[data-selected="true"] { color:var(--text); font-weight:500; }
 .landscape-shadow { fill:var(--text); opacity:.05; }
-.landscape-face { --region-color:var(--land-sage); fill:color-mix(in oklch, var(--land-ivory), var(--region-color) var(--layer)); stroke:color-mix(in oklch, var(--land-jade) 25%, transparent); stroke-width:.45; cursor:pointer; }
+.landscape-face { --layer:var(--base-layer); --region-color:var(--land-sage); fill:color-mix(in oklch, var(--land-ivory), var(--region-color) var(--layer)); stroke:color-mix(in oklch, var(--land-jade) 25%, transparent); stroke-width:.45; cursor:pointer; }
 .landscape-wall { fill:color-mix(in oklch, color-mix(in oklch, var(--land-ivory), var(--region-color) var(--layer)) 78%, black); stroke:none; }
-.landscape-trail { stroke:var(--land-brass); stroke-width:1.2; opacity:.35; pointer-events:none; }
-.landscape-pin { cursor:pointer; }
-.landscape-pin ellipse, .landscape-pin circle { fill:var(--land-brass); }
-.landscape-pin path { stroke:var(--land-brass); stroke-width:1; }
 .landscape-hint { margin-block:.5rem; color:var(--muted); font-size:.6875rem; }
 .landscape-art[data-renderer="webgl"]:not([data-target-phase]) canvas { cursor:grab; }
 .landscape-art[data-target-phase] canvas { cursor:pointer; }
 .memory-landscape:has(input[value="conversation"]:checked) .landscape-face[data-land-region="conversation"],
 .memory-landscape:has(input[value="knowledge"]:checked) .landscape-face[data-land-region="knowledge"],
-.memory-landscape:has(input[value="recall"]:checked) .landscape-face[data-land-region="recall"] { --region-color:var(--land-jade); }
-.memory-landscape:has(input[value="knowledge"]:checked) .landscape-trail[data-trail="0"],
-.memory-landscape:has(input[value="recall"]:checked) .landscape-trail { opacity:1; }
+.memory-landscape:has(input[value="recall"]:checked) .landscape-face[data-land-region="recall"] { --region-color:var(--land-jade); --layer:var(--selected-layer); }
 .memory-stage-controls { display: flex; flex-wrap: wrap; border: 0; border-bottom: 1px solid var(--line); padding: 0; margin: .75rem 0 0; }
 .memory-stage-controls label { display: flex; flex: 1; align-items: center; justify-content: center; min-height: 44px; border-bottom: 2px solid transparent; padding: .5rem .375rem; cursor: pointer; font-size: .8125rem; }
 .memory-stage-controls input { position: absolute; width: 1px; height: 1px; opacity: 0; }
@@ -180,3 +170,5 @@ th { font-weight: 500; }
 .memory-landscape:has(input[value="conversation"]:checked) #memory-stage-conversation,
 .memory-landscape:has(input[value="knowledge"]:checked) #memory-stage-knowledge,
 .memory-landscape:has(input[value="recall"]:checked) #memory-stage-recall { visibility: visible; }
+
+.memory-stage-panels .memory-tangent { font-size:.75rem; margin-top:.5rem; }

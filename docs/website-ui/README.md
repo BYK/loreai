@@ -9,18 +9,23 @@ The homepage presents the workflow, current Git-based sharing, one scoped histor
 benchmark and practical FAQs. Folk Lore is explicitly early access. The setup guide
 leads through client selection, installation, connection and verification; detailed
 installer/telemetry/uninstall content and old reference fragments remain reachable.
-The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The homepage’s memory landscape has
-three terraced regions: Conversation, Knowledge, and Recall. Clicking or tapping
-any region selects its native stage control, highlights the terrain and updates
-the fictional example. Stage controls select the region in return. Dragging turns
-the landscape without changing the selected stage. A brief brass trail traces forward
-stage selections, then stops. There is no idle animation.
+The blog uses compact article rows and noninteractive topic metadata. The ticker and scroll reveals are removed. The homepage’s memory landscape uses elevation to explain refinement. Lower
+terraces represent the conversation, middle terraces distilled knowledge, and upper
+terraces context relevant to the current task. Clicking or tapping a terrace selects
+its native stage control and highlights the same elevation band across the hills;
+controls select the band in return. The example follows a webhook decision from a
+conversation containing an editor-theme tangent to a distilled fact and relevant
+context for adding retries. Other history stays searchable and recent conversation
+remains available. It illustrates selection within a context budget, without
+claiming perfect filtering. Peak markers, floating labels and checkpoint routes
+are removed. Dragging turns the terrain without changing the stage; it settles
+without idle animation.
 
-The server-rendered SVG shares the terrain contours, camera and region boundaries
+The server-rendered SVG shares the terrain contours, camera and elevation bands
 with WebGL. Native controls remain usable without JavaScript; clicking the SVG
-regions also works when reduced motion, low device memory or GPU failure keeps the
-static view. Labels stay at a readable CSS size on mobile. Hidden/offscreen states
-stop rendering, and disposal releases GPU resources. Clipboard failure, release lookup failure,
+terraces also works when reduced motion, low device memory or GPU failure keeps the
+static view. Hidden/offscreen states stop rendering, and disposal releases GPU
+resources. Clipboard failure, release lookup failure,
 signup timeout/retry and menu focus have explicit behavior and browser regressions.
 
 See [the website package](../../packages/website/README.md) for maintenance and tests.
@@ -43,7 +48,7 @@ or image edits were applied to the captures. Desktop is 1280×900; mobile is
 
 The additional landscape captures below use normal motion at 1280×1000 with the
 same fixed release response. The terrain is settled; the dark image is a direct
-component screenshot after selecting Knowledge through its terrain region. The
+component screenshot after selecting the middle band through the terrain. The
 comparison table above uses reduced motion and shows the SVG fallback.
 
 ![Interactive landscape, desktop light](screenshots/landscape-desktop-light.png)

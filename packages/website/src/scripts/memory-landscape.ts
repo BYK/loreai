@@ -14,8 +14,7 @@ for (const root of document.querySelectorAll<HTMLElement>(
   let visible = false,
     loading = false,
     failed = false,
-    generation = 0,
-    keyboard = false;
+    generation = 0;
   const media = matchMedia("(prefers-reduced-motion: reduce)");
   const current = () =>
     (root.querySelector<HTMLInputElement>('input[name="memory-stage"]:checked')
@@ -27,13 +26,6 @@ for (const root of document.querySelectorAll<HTMLElement>(
   };
   function ready(value: boolean) {
     element.dataset.renderer = value ? "webgl" : "static";
-    if (!value) {
-      element
-        .querySelectorAll<HTMLElement>("[data-rest-style]")
-        .forEach((label) => {
-          label.style.cssText = label.dataset.restStyle ?? "";
-        });
-    }
   }
   function select(next: MemoryPhase) {
     const input = root.querySelector<HTMLInputElement>(
@@ -48,27 +40,20 @@ for (const root of document.querySelectorAll<HTMLElement>(
     if (next) element.dataset.targetPhase = next;
     else delete element.dataset.targetPhase;
     help.textContent = next
-      ? `Select ${next}`
-      : "Click a region to select its stage.";
+      ? {
+          conversation: "Lower layers · Conversation",
+          knowledge: "Middle layers · Distilled knowledge",
+          recall: "Upper layers · Relevant context",
+        }[next]
+      : "Click a lower, middle or upper layer to explore.";
   }
   hover(null);
-  root.addEventListener("keydown", () => {
-    keyboard = true;
-  });
-  root.addEventListener(
-    "pointerdown",
-    () => {
-      keyboard = false;
-    },
-    { passive: true },
-  );
   root
     .querySelectorAll<HTMLInputElement>('input[name="memory-stage"]')
     .forEach((input) =>
       input.addEventListener("change", () => {
         root.dataset.activePhase = current();
-        renderer?.setPhase(current(), !keyboard);
-        keyboard = false;
+        renderer?.setPhase(current());
       }),
     );
   // The same region selection works with the SVG when GPU rendering is unavailable.
@@ -121,7 +106,7 @@ for (const root of document.querySelectorAll<HTMLElement>(
         failed = true;
         return;
       }
-      renderer.setPhase(current(), false);
+      renderer.setPhase(current());
       renderer.setVisible(true);
     } catch {
       failed = true;

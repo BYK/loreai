@@ -76,3 +76,17 @@ WebGL and no JavaScript. Add this approved design to existing PR #2115.
 
 The user subsequently requested removing the Rotate slider and Reset view button.
 Keep drag rotation and region/stage selection; remove the extra view controls.
+
+## Elevation as refinement
+
+The user requested removing peak checkpoints and using lower, middle and upper
+terrain to explain refinement and task relevance. Preserve the approved landscape
+silhouette and drag interaction. My implementation choice is three elevation bands
+across all hills (below 25, 25–50, and 50+ scene units), rather than assigning a
+stage to each hill. Lower layers represent conversation, middle layers distilled
+knowledge, and upper layers context relevant to a current task. Click/tap a band
+to select its native stage; native controls highlight the band in return.
+Remove pins, floating peak labels and the inter-peak route. Show refinement in the
+example text, including an unrelated tangent that is absent from the selected
+stored knowledge. Describe relevance ranking and a context budget without claiming
+perfect filtering of every prompt or removal of recent raw conversation.
