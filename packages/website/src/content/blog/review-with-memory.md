@@ -9,6 +9,11 @@ tags:
   - code review
   - ci
   - agents
+kind: "Engineering"
+takeaway: "Review the knowledge behind a semantic-linter finding. Treat an LLM judge as evidence to inspect, rather than a deterministic rule engine."
+nextStep:
+  label: "Set up the semantic linter"
+  href: "/docs/guides/semantic-linter/"
 ---
 
 About ten years ago, when machine learning got good enough that you could train a real classifier

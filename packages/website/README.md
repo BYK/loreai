@@ -59,3 +59,32 @@ static landmarks remain selectable when rendering is disabled or context is lost
 The renderer supports touch scrolling, interrupted travel, theme changes, context
 restoration and resource disposal. Geometry and browser tests cover framing,
 projection, landmark selection, finite animation and failure paths.
+
+## Product journey and documentation
+
+The homepage keeps the adventurer camp and adds an actual-app tour, agent-specific
+connection commands, everyday use cases, and a reproducible example. `AgentSetup.astro`
+shares fixed definitions from `src/lib/agent-setup.ts` between the homepage and MDX
+guides. Native radios work without JavaScript; enhancement allowlists the `agent`
+query and enables click-only clipboard controls. Launch commands are tested against
+the owning gateway agent registry.
+
+Starlight search uses its built-in Pagefind integration. It indexes public static
+documentation locally; it does not query a running gateway or private conversations.
+Task guides precede integrations and advanced reference in the sidebar. Both doc
+generators own their curated introductions and generated fields; run `pnpm check:docs`
+after changing them.
+
+### Reproduce the product tour captures
+
+```bash
+pnpm --filter @loreai/ui build
+node packages/website/scripts/capture-product-tour.mjs
+```
+
+The capture script serves the built Solid app on an ephemeral loopback port and
+fulfills API requests with fixed synthetic responses based on UI contract fixtures.
+It opens no gateway, account, provider connection, or production database, and blocks
+all nonlocal browser requests. Captures contain a fictional webhook project and
+sample counts; they are UI examples, not measurements or a live curation run. Both
+appearance variants are saved under `public/product-tour/`, with no DOM/CSS/image edits.

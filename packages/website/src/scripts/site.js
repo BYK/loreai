@@ -1,25 +1,4 @@
 // Public-page interactions. Commands and destination URLs remain static markup.
-document.querySelectorAll("[data-copy-install]").forEach((button) => {
-  // oxlint-disable-next-line typescript/no-misused-promises -- DOM event callbacks ignore the returned promise
-  button.addEventListener("click", async () => {
-    const box = button.closest(".install-box");
-    const status = box?.querySelector(".copy-status");
-    const command = box?.querySelector("code")?.textContent;
-    if (!command || !status || button.disabled) return;
-    button.disabled = true;
-    try {
-      await navigator.clipboard.writeText(command.trim());
-      status.textContent =
-        "Copied. Paste the command into your terminal to install Lore.";
-    } catch {
-      status.textContent =
-        "Clipboard unavailable. Select and copy the command above, then paste it into your terminal.";
-    } finally {
-      button.disabled = false;
-    }
-  });
-});
-
 const releaseLinks = document.querySelectorAll(".release-link");
 if (releaseLinks.length) {
   void (async () => {

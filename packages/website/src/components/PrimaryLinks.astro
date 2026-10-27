@@ -6,6 +6,7 @@ const links = [
   { label: "Docs", href: `${base}docs/` },
   { label: "Why Lore", href: `${base}different/` },
   { label: "Blog", href: `${base}blog/` },
+  { label: "Get started", href: `${base}docs/install/` },
   { label: "GitHub", href: "https://github.com/BYK/loreai", external: true },
 ];
 const current = (href: string) => Astro.url.pathname === href ? "page" : Astro.url.pathname.startsWith(href) ? "true" : undefined;

@@ -5,7 +5,7 @@ const surfaces = [
   {
     name: "comparison",
     path: "/different/",
-    heading: "Context for the work in progress.",
+    heading: "Keep the decisions behind the code.",
   },
   { name: "docs", path: "/docs/install/", heading: "Install Lore" },
   {
@@ -59,6 +59,7 @@ for (const surface of surfaces) {
     await expect(page.locator("h1")).toContainText(surface.heading, {
       ignoreCase: true,
     });
+    await page.evaluate(() => document.fonts.load('16px "Playfair Display"'));
     await page.evaluate(() => document.fonts.ready);
     expect(
       await page.evaluate(() =>

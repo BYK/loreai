@@ -17,10 +17,10 @@ const faces = campFallback();
     {PHASES.map((phase,index) => <label><input type="radio" name="memory-stage" value={phase} checked={index === 0} aria-label={`${TITLES[index]} · ${phase === "knowledge" ? "Knowledge" : phase === "recall" ? "Next session" : "Conversation"}`} aria-controls={`memory-stage-${phase}`} /><span><strong>{TITLES[index]}</strong><small>{phase === "knowledge" ? "Knowledge" : phase === "recall" ? "Next session" : "Conversation"}</small></span></label>)}
   </fieldset>
   <div class="memory-stage-panels" aria-live="polite">
-    <section id="memory-stage-conversation"><h3>You explain a decision</h3><p>“Keep webhook handlers idempotent. The provider can deliver the same event twice.”</p></section>
-    <section id="memory-stage-knowledge"><h3>Lore curates project knowledge</h3><p class="file-label">.lore.md</p><blockquote><strong>Idempotent webhooks:</strong> Reuse the existing event-id check before applying a webhook.</blockquote></section>
-    <section id="memory-stage-recall"><h3>A later session has the context</h3><p>“I’ll reuse the event-id check for this handler.”</p></section>
+    <section id="memory-stage-conversation"><h3>You explain a decision</h3><p>“Keep webhook handlers idempotent. The provider can deliver the same event twice. Also, let’s get lunch at noon.”</p></section>
+    <section id="memory-stage-knowledge"><h3>The project rule becomes knowledge</h3><p class="file-label">.lore.md</p><blockquote><strong>Idempotent webhooks:</strong> Reuse the existing event-id check before applying a webhook.</blockquote></section>
+    <section id="memory-stage-recall"><h3>A later session has the context</h3><p><strong>Task:</strong> Add retries to the webhook handler.</p><p>“I’ll reuse the event-id check.” The lunch plan is unrelated to this task.</p></section>
   </div>
-  <p class="small muted">Fictional example, not a live session. Review the knowledge Lore records.</p>
+  <a class="small" href={`${import.meta.env.BASE_URL}docs/example/`}>Try this workflow in a sample project →</a>
 </aside>
 <script>import "../scripts/memory-camp";</script>

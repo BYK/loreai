@@ -7,7 +7,17 @@ sidebar:
 
 <!-- Auto-generated from packages/core/src/config.ts. Hand-edit the header above; the reference below regenerates via pnpm generate:docs. Do not hand-edit field tables. -->
 
-Lore's configuration has three layers, in order of precedence (highest first):
+Most projects can start with the built-in defaults. Change one setting for a specific need, then restart Lore and verify its effect. The [day-to-day guide](/docs/using-lore/) covers normal use; [data and costs](/docs/data-and-costs/) explains provider calls and usage estimates. The budget field below allocates context space, not a dollar spending cap.
+
+## Choose a setting for your task
+
+- [Tune relevant knowledge](/docs/guides/tune-knowledge-injection/) when the supplied context needs adjustment.
+- [Local inference](/docs/guides/local-inference/) for an existing local model server.
+- [Custom upstreams](/docs/guides/custom-upstreams/) for a corporate proxy or alternate endpoint.
+
+## Configuration precedence
+
+Configuration has three layers, in order of precedence for settings with an environment override (highest first):
 
 1. **Environment variables** (the LORE_* family — see the env-vars reference page) — process-level overrides, used by the gateway CLI and runtime.
 2. The .lore.json file in the project root — per-project, JSONC-parseable, the primary config surface for memory behavior, budget, distillation, search, knowledge, and cross-project settings. This page documents it.
@@ -25,8 +35,7 @@ The file is **JSONC** (JSON with // line comments and slash-star block comments,
 
 ```jsonc
 {
-  // Use a cheaper worker model for distillation
-  "workerModel": { "providerID": "anthropic", "modelID": "claude-3-5-haiku-latest" },
+  // An optional example: allow up to 30 active curated entries.
   "curator": { "enabled": true, "maxEntries": 30 },
 }
 ```

@@ -177,3 +177,9 @@
   .blog-post header { margin-bottom: 2rem; }
   .blog-prose table { display: block; overflow-x: auto; }
 }
+.post-row .post-kind { color:var(--muted);font-size:.75rem;margin-bottom:.375rem; }
+.article-takeaway { margin:0 0 2rem;padding:1.25rem;border-left:2px solid var(--accent);background:var(--surface);font-size:.9375rem; }
+.article-takeaway p { margin:.5rem 0; }
+.article-takeaway a { font-size:.8125rem; }
+.article-next { display:flex;flex-direction:column;align-items:flex-start;gap:.75rem;border-top:1px solid var(--line);padding-top:2rem;margin-top:3rem; }
+.article-next h2 { font:500 1.25rem/1.4 var(--sans);margin:0; }

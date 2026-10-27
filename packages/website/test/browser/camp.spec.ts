@@ -315,8 +315,12 @@ test("each camp landmark selects its matching native stage with a mouse or touch
     const point = await landmarkPoint(page, phase);
     if (isMobile) await page.touchscreen.tap(point.x, point.y);
     else await page.mouse.click(point.x, point.y);
-    await expect(page.locator(`input[value="${phase}"]`)).toBeChecked();
-    await expect(page.locator(`input[value="${phase}"]`)).toBeFocused();
+    await expect(
+      page.locator(`.memory-camp input[value="${phase}"]`),
+    ).toBeChecked();
+    await expect(
+      page.locator(`.memory-camp input[value="${phase}"]`),
+    ).toBeFocused();
     await expect(page.locator(`#memory-stage-${phase}`)).toBeVisible();
   }
   expect(errors).toEqual([]);
@@ -340,7 +344,9 @@ test("dragging away and returning never selects a landmark or rotates the camp",
   await page.mouse.move(point.x, point.y);
   await page.mouse.up();
   await page.mouse.move(0, 0);
-  await expect(page.locator("input[value=conversation]")).toBeChecked();
+  await expect(
+    page.locator(".memory-camp input[value=conversation]"),
+  ).toBeChecked();
   expect((await art.locator("canvas").screenshot()).equals(before)).toBe(true);
   await expect(page.getByRole("slider")).toHaveCount(0);
   await expect(
@@ -366,7 +372,9 @@ test("static camp landmarks select stages without loading GPU code on low-memory
     const point = await staticLandmarkPoint(page, phase);
     expect(point).not.toBeNull();
     await page.mouse.click(point!.x, point!.y);
-    await expect(page.locator(`input[value="${phase}"]`)).toBeChecked();
+    await expect(
+      page.locator(`.memory-camp input[value="${phase}"]`),
+    ).toBeChecked();
   }
   await expect(art.locator("canvas")).toHaveCount(0);
   expect(requests).toEqual([]);
@@ -387,15 +395,15 @@ test("rapid forward and reverse choices settle on the latest stage, including of
     "recall",
     "knowledge",
   ])
-    await page.locator(`input[value="${phase}"]`).check();
+    await page.locator(`.memory-camp input[value="${phase}"]`).check();
   await expect(art).not.toHaveAttribute("data-tracing");
   await expect(page.locator("#memory-stage-knowledge")).toBeVisible();
-  await page.locator("input[value=recall]").check();
+  await page.locator(".memory-camp input[value=recall]").check();
   await expect(art).toHaveAttribute("data-tracing", "2");
   await page.locator("footer").last().scrollIntoViewIfNeeded();
   await expect(art).not.toHaveAttribute("data-tracing");
   await page
-    .locator("input[value=conversation]")
+    .locator(".memory-camp input[value=conversation]")
     .evaluate((input: HTMLInputElement) => {
       input.checked = true;
       input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -436,7 +444,9 @@ test("vertical touch gestures scroll over the camp without choosing a stage", as
   await expect
     .poll(() => page.evaluate(() => scrollY))
     .toBeGreaterThan(before + 10);
-  await expect(page.locator("input[value=conversation]")).toBeChecked();
+  await expect(
+    page.locator(".memory-camp input[value=conversation]"),
+  ).toBeChecked();
   await session.detach();
 });
 
@@ -494,7 +504,9 @@ test("lost WebGL context exposes selectable fallback landmarks before restoratio
   const point = await staticLandmarkPoint(page, "knowledge");
   expect(point).not.toBeNull();
   await page.mouse.click(point!.x, point!.y);
-  await expect(page.locator("input[value=knowledge]")).toBeChecked();
+  await expect(
+    page.locator(".memory-camp input[value=knowledge]"),
+  ).toBeChecked();
   await expect(page.locator("#memory-stage-knowledge")).toBeVisible();
 });
 
@@ -511,12 +523,16 @@ test("leaving a static landmark cancels the press while completed touch taps rem
   await page.mouse.move(0, 0);
   await page.mouse.move(point!.x, point!.y);
   await page.mouse.up();
-  await expect(page.locator("input[value=conversation]")).toBeChecked();
+  await expect(
+    page.locator(".memory-camp input[value=conversation]"),
+  ).toBeChecked();
   // A mouse drag to the viewport edge may scroll the page. Tap the current landmark.
   await page.locator(".camp-art").scrollIntoViewIfNeeded();
   const target = await staticLandmarkPoint(page, "knowledge");
   expect(target).not.toBeNull();
   if (isMobile) await page.touchscreen.tap(target!.x, target!.y);
   else await page.mouse.click(target!.x, target!.y);
-  await expect(page.locator("input[value=knowledge]")).toBeChecked();
+  await expect(
+    page.locator(".memory-camp input[value=knowledge]"),
+  ).toBeChecked();
 });

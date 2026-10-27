@@ -9,7 +9,7 @@ Claude Code is Anthropic's terminal-based AI coding agent. Lore's gateway is the
 
 ## Install
 
-The hosted install script sets up Lore and Claude Code in one step:
+Have Claude Code installed and authenticated first. This command installs Lore:
 
 ```bash
 curl -fsSL https://withlore.ai/install | bash
@@ -54,6 +54,9 @@ Every Claude Code conversation is captured in Lore's three-tier memory. Distilla
 Your project knowledge (`.lore.md`, `AGENTS.md`, the SQLite database at `~/.local/share/lore/lore.db`) is shared across every supported harness. Switching from Claude Code to Pi or OpenCode on the same project preserves curated knowledge, distillations, and the AGENTS.md sync.
 
 ## Next steps
+
+- [Verify a recorded session](/docs/first-session/?agent=claude-code#verify).
+- [Use Lore day to day](/docs/using-lore/).
 
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](/docs/configuration/) — full reference for `.lore.json`.

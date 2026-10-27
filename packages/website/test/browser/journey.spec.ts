@@ -131,7 +131,9 @@ test("installation guides lead through connection and verification before refere
     headings.findIndex((text) => text.includes("Verify the connection")),
   ).toBeLessThan(headings.findIndex((text) => text.includes("Reference")));
   await expect(
-    page.getByRole("link", { name: "Codex", exact: true }).last(),
+    page
+      .locator('[data-setup-panel="codex"] a')
+      .filter({ hasText: "Codex CLI guide" }),
   ).toHaveAttribute("href", /with-codex/);
 });
 

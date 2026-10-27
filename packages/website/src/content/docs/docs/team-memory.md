@@ -20,7 +20,7 @@ When the curator records a durable fact, Lore exports it to a `.lore.md` file at
 
 - **Export.** After curation, Lore writes `.lore.md` — skipping the write entirely when nothing changed, so it never churns your working tree.
 - **Import.** On the next session, Lore reads `.lore.md` back. A teammate's merged entry — or a hand-written one — is imported into the local database and injected into the agent's context. A known marker with changed content updates that entry; an unknown marker creates a new one.
-- **Hand edits are first-class.** Edit `.lore.md` directly: fix a wrong fact, delete a stale one, or add a convention by hand. It's imported on the next run.
+- **Hand edits are first-class.** Correct an entry's wording or add a convention in `.lore.md`, keeping its identity markers intact. Present entries are imported on the next run. Removing text from the file alone does not remove the existing database entry; use **Delete** in the local Knowledge view to retire active knowledge, then inspect the exported diff.
 
 This is the team-memory path that works **today**, with nothing but your existing git workflow.
 
@@ -38,13 +38,13 @@ Because `.lore.md` is just a tracked file:
 
 To keep shared knowledge inside an existing `AGENTS.md` instead of a standalone file, pair `loreFile.enabled=false` with `agentsFile.enabled=true`.
 
-## Folk Lore — live team sync (coming soon)
+## Folk Lore — live team sync (early access)
 
 `.lore.md` shares knowledge through git: reviewable and durable, but it converges at the speed of commits and merges. **Folk Lore** is the upcoming hosted layer for teams that want **live** shared memory — knowledge that converges across every teammate's machine continuously, with promotion workflows for deciding what becomes shared truth, and integration with your existing team structure (GitHub Teams, repo collaborators).
 
 The two are complementary:
 
-| | `.lore.md` (today) | Folk Lore (coming soon) |
+| | `.lore.md` (today) | Folk Lore (early access) |
 |---|---|---|
 | Transport | Git (commit + PR) | Live hosted sync |
 | Review | Pull request | Promotion workflow |

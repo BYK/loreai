@@ -5,23 +5,19 @@ self-hosted fonts. The first-use flow now leads with concrete product copy,
 installation and a clearly fictional memory example. Shared navigation and compact
 native theme menus give every section a consistent structure.
 
-The homepage presents the workflow, current Git-based sharing, one scoped historical
-benchmark and practical FAQs. Folk Lore is explicitly early access. The setup guide
-leads through client selection, installation, connection and verification; detailed
-installer/telemetry/uninstall content and old reference fragments remain reachable.
-The blog uses compact article rows and noninteractive topic metadata. The ticker
-and scroll reveals are removed. The homepage’s adventurer camp connects three
-landmarks: campfire (Conversation), scribe’s desk (Knowledge), and quest gate
-(Next session). Clicking or tapping a landmark selects its native stage control
-and updates the fictional example; the controls select the landmark in return.
-A small traveller carries a scroll along the stone path when pointer selections
-change, then stops. Keyboard selection is immediate. The camera stays fixed.
+The homepage keeps the adventurer camp and connects it to a real-app tour and a
+client-specific setup chooser. Campfire, scribe’s desk, and quest gate still select
+the native memory stages. The example now contrasts a durable webhook rule with an
+unrelated lunch plan; the relevance story is explicitly illustrative.
 
-The server-rendered SVG uses the same camp meshes and camera as WebGL. Native
-controls work without JavaScript; static landmarks remain clickable with reduced
-motion, low device memory, or unavailable/lost WebGL. Hidden/offscreen states stop
-rendering, and disposal releases GPU resources. Clipboard failure, release lookup
-failure, signup timeout/retry and menu focus have explicit browser regressions.
+The tour uses captures of the actual built Solid app with synthetic API fixtures.
+It does not open a gateway or a production database. Native tour/setup choices work
+without JavaScript; enhancement handles allowlisted setup links and clipboard feedback.
+Docs guide a first recorded session, everyday use, troubleshooting, memory concepts,
+data/costs, and a reproducible example. Pagefind search stays local to static public docs.
+Task navigation precedes integrations and advanced references; generated references
+retain their source-of-truth checks. Why Lore presents decision criteria, and blog
+articles expose a practical takeaway, current availability, and a relevant next step.
 
 See [the website package](../../packages/website/README.md) for maintenance and tests.
 
@@ -54,3 +50,30 @@ and [NN/G’s guidance on motion for comprehension](https://www.nngroup.com/arti
 These informed direct selection, finite travel and immediate example text.
 Landmark picking uses the existing Three.js package’s
 [raycaster](https://threejs.org/manual/en/picking.html).
+
+## Approved audit coverage
+
+| Idea | Delivered behavior |
+| --- | --- |
+| 1. Actual product | Sessions, Knowledge/source history, and model-activity captures from the built app |
+| 2. Agent selection | Six fixed setup choices, including separate Codex CLI/Desktop paths and Pi prerequisites |
+| 3. First success | First-session guide checks a recorded message, with connection-to-verification links |
+| 4. Everyday use | Task guide for resuming, finding decisions, correcting knowledge, switching agents, and sharing |
+| 5. Camp relevance | The preserved camp follows the useful webhook rule and distinguishes unrelated conversation |
+| 6. Memory concepts | Stored history, distillations, knowledge, and supplied context have distinct explanations |
+| 7. Docs structure | Get started, Use Lore, Integrations, Advanced/reference, and Contributors groups |
+| 8. Search | Built Pagefind with root and prefixed-preview search-result navigation verified |
+| 9. Troubleshooting | Symptom-based checks and expected observations, plus safe issue-reporting guidance |
+| 10. Reference clarity | Curated task intros, friendly environment groups, cleaned source-comment artifacts, generator parity |
+| 11. Concrete benefits | Continue a bug fix, switch agents, or share a convention, each linked to a task |
+| 12. Decision guide | Why Lore distinguishes instruction files, application memory infrastructure, agent frameworks, and existing-client memory |
+| 13. Data and costs | Local/provider/embedding/telemetry boundaries, opt-out, import preview, and estimated-versus-billed usage |
+| 14. Availability | Local/Git features and Folk Lore early access are explicit, including historical article notes |
+| 15. Concise copy | Redundant copy instructions and fictional-example disclaimers removed; setup prerequisites clarified |
+| 16. Hierarchy/navigation | Functional docs headings, compact setup choices, shared start/help/data links |
+| 17. Practical blog paths | Plain article kinds, takeaways, availability context, and specific next steps |
+| 18. Reproducible proof | Webhook conversation, illustrative knowledge diff, later task, and separate observable milestones |
+
+No new backend behavior, dependencies, accounts, permissions, or guaranteed performance
+claims are introduced. The command contract test caught the incorrect `claude-code`
+launch token before it was corrected to the actual `claude` executable.

@@ -1,38 +1,31 @@
 ---
-title: Lore Documentation
-description: Set up your coding agent with Lore, verify recorded sessions, and manage project knowledge.
-sidebar:
-  order: 0
+title: Start with Lore
+description: Connect your coding agent, verify a recorded session, and learn to use project memory.
 ---
 
-Lore records coding conversations locally, manages working context, and curates
-project knowledge you can inspect and edit.
+Lore runs alongside your existing coding agent. It records conversations locally,
+manages working context, and curates project knowledge you can inspect and review in Git.
 
-## Set up your first session
+## Connect your agent
 
-[Start the installation guide](/docs/install/): choose your agent, install Lore,
-connect a session, and verify it appears in the local memory browser.
+[Choose your setup and install Lore](/docs/install/). You need a supported agent
+already installed and authenticated. Codex Desktop has a different connection path
+from terminal clients.
 
-Already installed? Go straight to [connection and verification](/docs/install/#3-connect-from-your-project).
+Already have Lore? [Connect and verify your first session](/docs/first-session/).
+Success means a conversation appears in your project's **Sessions** list.
 
-## Work with your memory
+## Use your memory
 
-- [Import conversations](/docs/import/) from supported local clients.
-- [Review and share knowledge](/docs/team-memory/) through `.lore.md` and Git.
-- [Configure behavior](/docs/configuration/) or look up [environment variables](/docs/environment/).
+- [Day-to-day guide](/docs/using-lore/) — find an earlier decision, review knowledge, or switch agents.
+- [What Lore stores and supplies to your agent](/docs/memory/) — conversation history, summaries, knowledge, and current context.
+- [Import earlier work](/docs/import/) — preview supported local conversation sources.
+- [Share knowledge through Git](/docs/team-memory/) — review `.lore.md` like code.
+- [Try a sample workflow](/docs/example/) — follow a webhook decision into a later task.
 
-## Understand the system
+## Get help or go deeper
 
-- [Architecture](/docs/architecture/) — storage, distillation, knowledge, and context management.
-- [Benchmark methodology](/docs/benchmark/) — the scope and limitations of the published recall evaluation.
-- [Installer and uninstall reference](/docs/installation-reference/) — paths, telemetry, runtime options, and cleanup.
-
-## Start Here
-
-[Follow the guided setup](/docs/install/) for a first local session, or choose
-[client-specific instructions](/docs/install/#1-choose-your-agent).
-
-## Site Sections
-
-[Why Lore](/different/) explains the approach; the [blog](/blog/) covers product
-notes and engineering. [Return to the homepage](/).
+[Something missing? Start with troubleshooting](/docs/troubleshooting/).
+[Data and costs](/docs/data-and-costs/) explains storage, providers, telemetry,
+and usage. The [configuration reference](/docs/configuration/) and
+[architecture](/docs/architecture/) cover advanced behavior.

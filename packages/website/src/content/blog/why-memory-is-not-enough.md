@@ -8,6 +8,11 @@ tags:
   - memory
   - context management
   - agents
+kind: "Engineering"
+takeaway: "Lore combines management of the current conversation with persistent project knowledge. Read the request context and sources when exact details matter."
+nextStep:
+  label: "Understand history and current context"
+  href: "/docs/memory/"
 ---
 
 Ask anyone building agents what "memory" means and you'll get the same answer: a place to

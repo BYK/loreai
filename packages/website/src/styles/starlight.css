@@ -102,3 +102,21 @@
 /* Informational setup notes stay quiet beside the task steps. */
 .starlight-aside--note { border-color: var(--line); background: var(--surface); color: var(--text); }
 .starlight-aside--note .starlight-aside__title { color: var(--heading); }
+
+/* Task documentation uses the same functional typography as the local app. */
+:root { --sans:"DM Sans Variable","DM Sans",sans-serif;--serif:"Playfair Display",Georgia,serif; }
+.sl-markdown-content :is(h1,h2,h3) { font-family:var(--sans);font-weight:500;letter-spacing:-.015em; }
+.sl-markdown-content h2 { font-size:1.5rem;line-height:1.3;margin-top:2rem; }
+.sl-markdown-content h3 { font-size:1.125rem;line-height:1.4; }
+.sl-markdown-content { line-height:1.65; }
+.agent-setup .small { font-size:.8125rem;line-height:1.6;color:var(--muted); }
+.agent-setup .button { display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.65rem 1rem;border:1px solid var(--line);border-radius:var(--radius-control);font:500 .875rem/1.4 var(--sans);text-decoration:none;background:var(--surface);color:var(--text);cursor:pointer; }
+.agent-setup .button-primary { background:var(--accent);border-color:var(--accent);color:var(--accent-contrast); }
+.agent-setup .install-command { display:flex;align-items:center;gap:.75rem;flex-wrap:wrap; }
+.agent-setup .install-command code { min-width:0;overflow-wrap:anywhere; }
+.agent-setup .install-box { padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-control); }
+.agent-setup .copy-status { font-size:.8125rem;color:var(--muted);margin-top:.5rem; }
+.agent-setup .visually-hidden { position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap; }
+
+/* Keep prose sibling margins out of the setup choice grid. */
+.sl-markdown-content .agent-setup .setup-picker > label { margin:0; }

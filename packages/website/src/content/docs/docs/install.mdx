@@ -1,0 +1,90 @@
+---
+title: Install Lore
+description: Choose your coding agent, install Lore, connect a session, and verify that it is recorded.
+---
+import AgentSetup from '../../../components/AgentSetup.astro';
+
+Connect the coding agent you already use. Have it installed and signed in before
+you begin; the hosted installer installs **Lore**, not your coding agent.
+
+## 1. Choose your agent
+
+<AgentSetup id="install-setup" />
+
+## 2. Install and check the executable
+
+After running the installation command above, check:
+
+```bash
+lore --version
+```
+
+You should see a version, rather than “command not found.” If your terminal cannot
+find Lore, open a new terminal and check the installer's printed directory.
+[More installation help](/docs/troubleshooting/#lore-command-not-found).
+
+## 3. Connect from your project
+
+Use the connection command for your selected agent above from the project directory.
+For terminal clients, keep the launched agent running. For Codex Desktop, keep the
+local gateway running, fully quit the Desktop app, then open it again.
+Persistent setup saves a backup; [setup undo](/docs/setup/#undoing-setup) restores
+settings Lore changed.
+
+For remote gateways or custom providers, use the
+[setup reference](/docs/setup/) and [custom upstream guide](/docs/guides/custom-upstreams/).
+
+## 4. Verify the connection
+
+Send a normal message, open the **Dashboard URL printed by Lore**, select your
+project, and open **Sessions**. A recorded session confirms that activity reached
+Lore. [Follow the first-session walkthrough](/docs/first-session/#verify).
+
+A knowledge file can take longer to appear: distillation and curation run in the
+background. [What to expect next](/docs/first-session/#knowledge-comes-later).
+
+## Next steps
+
+- [Connect and verify a first session](/docs/first-session/).
+- [Use Lore day to day](/docs/using-lore/).
+- [Import existing conversations](/docs/import/) or [share knowledge through Git](/docs/team-memory/).
+
+## Reference
+
+The [installer and uninstall reference](/docs/installation-reference/) lists paths,
+configuration effects, runtime options, and cleanup behavior.
+
+### Operational telemetry
+
+Production telemetry is enabled by default. Set `SENTRY_ENABLED=0` before starting
+Lore to opt out. [Data, providers, telemetry, and costs](/docs/data-and-costs/).
+
+### What the installer writes
+
+The installer downloads the executable and may update your shell's `PATH`.
+[See the full path reference](/docs/installation-reference/#what-the-installer-writes).
+
+### Uninstall
+
+Preview the plan with `lore uninstall --dry-run`.
+[Read preservation and cleanup details](/docs/installation-reference/#uninstall).
+
+### Other installation options
+
+With a supported Node.js runtime, run Lore through npm:
+
+```bash
+npx @loreai/gateway
+```
+
+Node.js 22.16+ in the 22.x line, or Node.js 24+, is required; Node.js 23 is excluded.
+This uses Lore's default launch flow. Follow your agent's connection instructions.
+
+### Slimmer installs (remote embeddings)
+
+[Read about optional local runtimes and remote embeddings](/docs/installation-reference/#slimmer-installs-remote-embeddings).
+
+### Existing Conversations
+
+Use `lore import --dry-run` to inspect available sources before importing.
+[Read the import guide](/docs/import/).
