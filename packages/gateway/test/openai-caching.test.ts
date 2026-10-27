@@ -12,7 +12,10 @@
  */
 import { describe, expect, test } from "vitest";
 import type { AnthropicCacheOptions } from "../src/translate/anthropic";
-import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
+import {
+  buildOpenAIUpstreamRequest,
+  parseOpenAIRequest,
+} from "../src/translate/openai";
 import type { GatewayMessage, GatewayRequest } from "../src/translate/types";
 
 const BASE = "https://openrouter.ai/api";
@@ -514,5 +517,102 @@ describe("buildOpenAIUpstreamRequest — intermediate anchor breakpoint (#961)",
     const body = getBody(req, { ...cacheOpts, cacheTools: true });
     const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
     expect(count).toBe(4);
+  });
+});
+
+describe("buildOpenAIUpstreamRequest — client-supplied cache_control", () => {
+  // opencode / ai-sdk-openrouter mark their first 2 system messages and last 2
+  // conversation messages. Those survive parsing as provenance (`raw`) and are
+  // re-emitted, on top of Lore's own breakpoints → past Anthropic's cap of 4.
+  const mark = { type: "ephemeral" };
+  const part = (text: string, marked: boolean) => ({
+    type: "text",
+    text,
+    ...(marked ? { cache_control: mark } : {}),
+  });
+  function clientBody(n: number) {
+    const messages: unknown[] = [
+      { role: "system", content: [part("sys one", true)] },
+      { role: "system", content: [part("sys two", true)] },
+    ];
+    for (let i = 0; i < n; i++) {
+      messages.push({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: [part(`m${i}`, i >= n - 2)],
+      });
+    }
+    return {
+      model: "anthropic/claude-opus-4.8",
+      stream: true,
+      messages,
+      tools: [
+        {
+          type: "function",
+          function: { name: "t", description: "d", parameters: {} },
+        },
+      ],
+    };
+  }
+  const cacheOpts: AnthropicCacheOptions = {
+    systemTTL: "1h",
+    cacheTools: true,
+    cacheConversation: true,
+    conversationTTL: "5m",
+  };
+
+  test.each([4, 24])(
+    "never exceeds 4 cache_control blocks (%i messages)",
+    (n) => {
+      const req = parseOpenAIRequest(clientBody(n), { "x-api-key": "k" });
+      const body = getBody(req, cacheOpts);
+      const count = (JSON.stringify(body).match(/"cache_control"/g) ?? [])
+        .length;
+      expect(count).toBeLessThanOrEqual(4);
+    },
+  );
+
+  test("Lore still fills the slots the client leaves free", () => {
+    const b = clientBody(24);
+    // Client marks only its final message; strip the other client markers.
+    for (const m of b.messages as Array<{ role: string; content: unknown }>) {
+      if (m.role === "system") m.content = "plain";
+    }
+    const msgs = b.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+    for (const m of msgs.slice(2, -1)) delete m.content[0].cache_control;
+    const body = getBody(
+      parseOpenAIRequest(b, { "x-api-key": "k" }),
+      cacheOpts,
+    );
+    const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
+    expect(count).toBe(4); // 1 client + tools + system + anchor (tail already marked)
+    const out = messagesOf(body);
+    const last = out[out.length - 1].content as Array<Record<string, unknown>>;
+    expect(last[0].cache_control).toEqual({ type: "ephemeral" }); // client's own
+  });
+
+  test("client markers are kept when Lore adds no conversation breakpoints", () => {
+    const req = parseOpenAIRequest(clientBody(4), { "x-api-key": "k" });
+    const body = getBody(req, { cacheConversation: false });
+    const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
+    expect(count).toBe(4); // 2 system + 2 tail, untouched passthrough
+  });
+
+  test("does not mutate the retained client block when annotating", () => {
+    const raw = { type: "image_url", image_url: { url: "https://x/y.png" } };
+    const req = makeRequest({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "opaque", raw }],
+        },
+      ],
+    });
+    getBody(req, cacheOpts);
+    expect(raw).toEqual({
+      type: "image_url",
+      image_url: { url: "https://x/y.png" },
+    });
   });
 });
