@@ -53,8 +53,9 @@ and sufficient device memory. Native stage controls work without JavaScript; SVG
 terrace selection remains available when GPU rendering is disabled. The renderer
 handles terrain raycasting, bounded rotation, a finite refinement transition, context loss
 and resource disposal. Geometry and browser tests cover the shared elevation bands,
-projection, selection and failure paths. The open crescent ridge narrows from wrapping lower terraces to an upper
-crest. Pure surface/retention helpers place transient fragments on terraces; their
+projection, selection and failure paths. Two separate project islands reuse the original multi-peak terrain and share refinement bands. Retained fragments move
+from the source crest to the receiving crest along the shared transfer path. Pure surface/transfer/retention helpers place transient fragments; their
 illustrative count falls during upward transitions. Colors are cached outside the
 frame loop. Rapid inputs retarget the displayed state; interruption settles it.
-Camera bounds cover drag, parallax, bevels and lower walls.
+Camera bounds cover drag, parallax, bevels, lower walls and the transfer arc. Rendered-contour footprint clearance keeps fragments above the terraces; dense
+footprint tests cover the entire animation.

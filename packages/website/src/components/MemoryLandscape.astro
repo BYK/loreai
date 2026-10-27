@@ -1,40 +1,42 @@
 ---
-import { PHASES, SVG_WIDTH, SVG_HEIGHT, landscapeFaces } from "../lib/memory-landscape";
+import { PHASES, SVG_WIDTH, SVG_HEIGHT, landscapeFaces, ISLANDS, projectPoint, transferPath, svgPath } from "../lib/memory-landscape";
 const faces = landscapeFaces();
 const stageLabels = ["Conversation", "Distilled", "Relevant"];
 ---
 <aside class="memory-example memory-landscape" data-active-phase="conversation" aria-labelledby="example-title">
-  <p class="eyebrow">Illustrative example · fictional project</p>
-  <h2 id="example-title">From conversation to relevant context.</h2>
+  <p class="eyebrow">Illustrative example · two projects</p>
+  <h2 id="example-title">Useful knowledge travels between projects.</h2>
   <div class="landscape-art" data-renderer="static" aria-hidden="true">
     <svg class="landscape-fallback" viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`} fill="none">
-      <ellipse cx="300" cy="333" rx="171" ry="13" class="landscape-shadow" />
+      {ISLANDS.map(island => { const [x,y]=projectPoint([island.x,-5.2,island.z]); return <ellipse cx={x} cy={y} rx="85" ry="9" class="landscape-shadow" />; })}
       {faces.map(face => <path d={face.path} data-land-region={face.phase} class:list={["landscape-face", {"landscape-wall":face.wall}]} style={`--base-layer:${Math.round((.18+face.layer*.30)*100)}%;--selected-layer:${Math.round((.65+face.layer*.25)*100)}%;`} />)}
+      <path class="landscape-transfer" d={svgPath(transferPath())} />
     </svg>
   </div>
+  <div class="landscape-projects" aria-label="Example projects"><span><strong>Payments</strong><small>Source project</small></span><span aria-hidden="true">→</span><span><strong>Orders</strong><small>Current project</small></span></div>
   <p class="landscape-hint">Explore the lower, middle and upper layers.</p>
   <fieldset class="memory-stage-controls"><legend class="visually-hidden">Explore how Lore refines context</legend>
     {PHASES.map((phase,index) => <label><input type="radio" name="memory-stage" value={phase} checked={index === 0} aria-controls={`memory-stage-${phase}`} /><span>{index+1} {stageLabels[index]}</span></label>)}
   </fieldset>
   <div class="memory-stage-panels">
     <section id="memory-stage-conversation">
-      <h3>Lower layers · The conversation</h3>
-      <p>Decisions, experiments and tangents start here.</p>
+      <h3>Lower layers · Payments</h3>
+      <p>A webhook decision starts in the Payments project.</p>
       <blockquote>“Keep webhook handlers idempotent. The provider can deliver the same event twice.”</blockquote>
       <p class="memory-tangent">Also discussed: editor themes.</p>
     </section>
     <section id="memory-stage-knowledge">
-      <h3>Middle layers · Distilled knowledge</h3>
-      <p>Lore summarizes older turns and extracts reusable project knowledge into <code>.lore.md</code>.</p>
-      <blockquote><strong>Idempotent webhooks:</strong> Reuse the event-id check before applying a webhook.</blockquote>
+      <h3>Middle layers · Reusable knowledge</h3>
+      <p>Lore curates project knowledge into <code>.lore.md</code>. In this example, the general pattern is also available across projects.</p>
+      <blockquote><strong>Idempotent webhooks:</strong> Record processed event IDs to safely ignore repeat deliveries.</blockquote>
     </section>
     <section id="memory-stage-recall">
-      <h3>Upper layers · Context for this task</h3>
-      <p><strong>Current task:</strong> Add retries to the webhook handler.</p>
-      <blockquote>Reuse the event-id check before applying a webhook.</blockquote>
-      <p>Lore prioritizes stored knowledge relevant to this task within a context budget. Other history stays searchable.</p>
+      <h3>Upper layers · Orders</h3>
+      <p><strong>Current task:</strong> Add webhooks for order updates.</p>
+      <blockquote>Check whether an event ID was processed before applying an order update.</blockquote>
+      <p>Orders can recall the relevant shared pattern. Other project-specific context stays scoped.</p>
     </section>
   </div>
-  <p class="small muted">Illustrative refinement, not a live session. Recent conversation remains available.</p>
+  <p class="small muted">Fictional projects. Cross-project reuse depends on knowledge scope and configuration.</p>
 </aside>
 <script>import "../scripts/memory-landscape";</script>

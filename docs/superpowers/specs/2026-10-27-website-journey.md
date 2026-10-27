@@ -107,3 +107,19 @@ The user requested changing the terrain again. Replace the mound with a winding
 ridge: broad, bent lower terraces taper to an elongated upper crest. Keep elevation
 selection and the refinement animation. Shared inverse coordinates keep moving
 fragments on the reshaped terraces; full camera-envelope checks still apply.
+
+## Two project islands
+
+The user requested two islands with terrain showing knowledge moving between
+projects. Use distinct Payments and Orders landforms separated by a visible gap.
+Keep elevation refinement; when Relevant is selected, carry the retained fragments
+from Payments across a quiet arc to Orders. Labels sit below the islands, without
+peak checkpoints. The fictional example shares an idempotency pattern, not a claim
+that one project's private transcript or code is copied into another. Cross-project
+reuse depends on knowledge scope and configuration. Preserve native/static controls,
+reduced motion, interruption handling and full camera-envelope coverage.
+
+The user preferred the original rolling, multi-peak terrain. Restore that exact
+height profile on both islands (mirrored for the receiving project), preserving
+the two-project transfer story. Use front-slope surface paths and mesh-derived
+upper crests for launch/arrival; keep camera and footprint-clearance checks.

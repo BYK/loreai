@@ -14,30 +14,206 @@ export const SVG_HEIGHT = 400;
 export function bandAtHeight(height: number): number {
   return height >= 50 ? 2 : height >= 25 ? 1 : 0;
 }
-const outlineScale = (angle: number) =>
-  1 + 0.09 * Math.sin(angle * 3) + 0.035 * Math.cos(angle * 2);
-export function terrainHeight(x: number, z: number): number {
-  const dx = x + 10,
-    dz = z + 2,
-    phi = Math.atan2(dz, dx) + 2.16;
-  const v = Math.atan2(Math.sin(phi), Math.cos(phi)) / 1.8;
-  const u = (Math.hypot(dx, dz) - 70) / 35,
-    w = v * Math.abs(v);
-  const radius = Math.hypot(u, w) / outlineScale(Math.atan2(w, u));
-  return 94 * Math.exp(-1.8 * radius * radius) - 8;
+export const ISLANDS = Object.freeze(
+  [
+    { name: "Payments", x: -86, z: 40, scale: 0.43, mirror: 1 },
+    { name: "Orders", x: 80, z: -40, scale: 0.43, mirror: -1 },
+  ].map((island) => Object.freeze(island)),
+);
+function originalTerrainHeight(x: number, z: number): number {
+  return (
+    72 * Math.exp(-((x + 64) ** 2 / 3800 + (z + 8) ** 2 / 2400)) +
+    62 * Math.exp(-((x - 65) ** 2 / 3300 + (z + 30) ** 2 / 2200)) +
+    44 * Math.exp(-((x - 30) ** 2 / 1800 + (z - 60) ** 2 / 1600)) +
+    12 * Math.exp(-((x * x) / 15000 + (z * z) / 10000)) -
+    8 +
+    0.8 *
+      Math.sin(x * 0.065 + z * 0.04) *
+      Math.exp(-((x * x) / 24000 + (z * z) / 17000))
+  );
 }
-export function pointOnTerrain(height: number, angle: number): Point3 {
-  const h = Math.max(0, Math.min(83.7, height));
-  const radius = Math.sqrt(-Math.log((h + 8) / 94) / 1.8) * outlineScale(angle);
-  const w = Math.sin(angle) * radius,
-    v = Math.sign(w) * Math.sqrt(Math.abs(w));
-  const r = 70 + Math.cos(angle) * 35 * radius,
-    phi = -2.16 + v * 1.8;
+function islandHeight(x: number, z: number, index: number): number {
+  const island = ISLANDS[index];
+  return originalTerrainHeight(
+    ((x - island.x) / island.scale) * island.mirror,
+    (z - island.z) / island.scale,
+  );
+}
+export function terrainHeight(x: number, z: number): number {
+  return Math.max(islandHeight(x, z, 0), islandHeight(x, z, 1));
+}
+export function islandAt(x: number, z: number): number {
+  return (x - ISLANDS[0].x) ** 2 + (z - ISLANDS[0].z) ** 2 <=
+    (x - ISLANDS[1].x) ** 2 + (z - ISLANDS[1].z) ** 2
+    ? 0
+    : 1;
+}
+interface Footprint {
+  height: number;
+  loop: readonly Point2[];
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+let cachedFootprints: readonly Footprint[] | undefined;
+function fragmentClearance(x: number, z: number): number {
+  if (!cachedFootprints)
+    cachedFootprints = terrainLevels()
+      .flatMap((level) =>
+        level.loops.map((loop) => ({
+          height: level.height,
+          loop,
+          minX: Math.min(...loop.map((p) => p[0])),
+          maxX: Math.max(...loop.map((p) => p[0])),
+          minZ: Math.min(...loop.map((p) => p[1])),
+          maxZ: Math.max(...loop.map((p) => p[1])),
+        })),
+      )
+      .sort((a, b) => b.height - a.height);
+  // Covers the largest rotated fragment, plus the outward bevel.
+  const extent = 4.8,
+    minX = x - extent,
+    maxX = x + extent,
+    minZ = z - extent,
+    maxZ = z + extent;
+  for (const face of cachedFootprints) {
+    if (
+      face.maxX < minX ||
+      face.minX > maxX ||
+      face.maxZ < minZ ||
+      face.minZ > maxZ
+    )
+      continue;
+    let inside = false;
+    for (let i = 0, j = face.loop.length - 1; i < face.loop.length; j = i++) {
+      const a = face.loop[i],
+        b = face.loop[j];
+      if (a[0] >= minX && a[0] <= maxX && a[1] >= minZ && a[1] <= maxZ)
+        return face.height + 1.66;
+      if (
+        a[1] > z !== b[1] > z &&
+        x < ((b[0] - a[0]) * (z - a[1])) / (b[1] - a[1]) + a[0]
+      )
+        inside = !inside;
+      let start = 0,
+        end = 1,
+        intersects = true;
+      for (const [origin, delta, low, high] of [
+        [a[0], b[0] - a[0], minX, maxX],
+        [a[1], b[1] - a[1], minZ, maxZ],
+      ]) {
+        if (Math.abs(delta) < 1e-12) {
+          if (origin < low || origin > high) intersects = false;
+        } else {
+          const first = (low - origin) / delta,
+            last = (high - origin) / delta;
+          start = Math.max(start, Math.min(first, last));
+          end = Math.min(end, Math.max(first, last));
+        }
+      }
+      if (intersects && start <= end) return face.height + 1.66;
+    }
+    if (inside) return face.height + 1.66;
+  }
+  return 1.66;
+}
+export function pointOnTerrain(
+  height: number,
+  angle: number,
+  index = 0,
+): Point3 {
+  const island = ISLANDS[index],
+    h = Math.max(0, Math.min(originalTerrainHeight(-64, -8) - 0.01, height));
+  const direction = 1.75 + 0.5 * Math.sin(angle),
+    dx = Math.cos(direction),
+    dz = Math.sin(direction);
+  let low = 0,
+    high = 2;
+  while (
+    high < 500 &&
+    originalTerrainHeight(-64 + dx * high, -8 + dz * high) > h
+  ) {
+    low = high;
+    high += 2;
+  }
+  for (let iteration = 0; iteration < 34; iteration++) {
+    const middle = (low + high) / 2;
+    if (originalTerrainHeight(-64 + dx * middle, -8 + dz * middle) > h)
+      low = middle;
+    else high = middle;
+  }
+  const radius = (low + high) / 2;
+  const x = island.x + (-64 + dx * radius) * island.scale * island.mirror,
+    z = island.z + (-8 + dz * radius) * island.scale;
+  return [x, fragmentClearance(x, z), z];
+}
+let cachedCrests: readonly Point3[] | undefined;
+export function crestPoint(index: number, angle: number): Point3 {
+  if (!cachedCrests) {
+    cachedCrests = ISLANDS.map((_, island) => {
+      let crest: Point3 = [0, 0, 0];
+      for (const level of terrainLevels())
+        for (const loop of level.loops) {
+          if (
+            islandAt(...loop[0]) !== island ||
+            level.height + 1.66 <= crest[1]
+          )
+            continue;
+          crest = [
+            loop.reduce((sum, point) => sum + point[0], 0) / loop.length,
+            level.height + 1.66,
+            loop.reduce((sum, point) => sum + point[1], 0) / loop.length,
+          ];
+        }
+      return Object.freeze(crest);
+    });
+  }
+  const base = cachedCrests[index];
   return [
-    -10 + r * Math.cos(phi),
-    Math.floor(h / TERRAIN_STEP) * TERRAIN_STEP + 1.5,
-    -2 + r * Math.sin(phi),
+    base[0] + Math.cos(angle) * 1.2,
+    base[1],
+    base[2] + Math.sin(angle) * 1.2,
   ];
+}
+export function transferPoint(position: number, angle: number): Point3 {
+  const p = Math.max(0, Math.min(2, position));
+  if (p <= 1) return pointOnTerrain(refinementElevation(p), angle, 0);
+  if (p <= 1.35) {
+    const t = Math.min(1, (p - 1) / 0.35),
+      blend = Math.max(0, (t - 0.8) / 0.2) ** 2;
+    const surface = pointOnTerrain(
+        37.2 + (originalTerrainHeight(-64, -8) - 0.01 - 37.2) * t,
+        angle,
+        0,
+      ),
+      crest = crestPoint(0, angle);
+    const x = surface[0] + (crest[0] - surface[0]) * blend,
+      z = surface[2] + (crest[2] - surface[2]) * blend;
+    return [
+      x,
+      Math.max(
+        surface[1] + (crest[1] - surface[1]) * blend,
+        fragmentClearance(x, z),
+      ),
+      z,
+    ];
+  }
+  if (p >= 1.9) return crestPoint(1, angle);
+  const from = crestPoint(0, angle),
+    to = crestPoint(1, angle),
+    t = (p - 1.35) / 0.55,
+    ease = t * t * (3 - 2 * t);
+  return [
+    from[0] + (to[0] - from[0]) * ease,
+    from[1] + (to[1] - from[1]) * ease + 60 * Math.sin(Math.PI * ease),
+    from[2] + (to[2] - from[2]) * ease,
+  ];
+}
+export function transferPath(): Point3[] {
+  return Array.from({ length: 90 }, (_, index) =>
+    transferPoint(1.35 + (0.55 * index) / 89, 0.85),
+  );
 }
 export function refinementElevation(position: number): number {
   const p = Math.max(0, Math.min(2, position)),
@@ -53,7 +229,7 @@ export const TERRAIN_STEP = 3.1;
 let cachedLevels: readonly TerrainLevel[] | undefined;
 export function terrainLevels(): readonly TerrainLevel[] {
   if (cachedLevels) return cachedLevels;
-  const gridSize = 82,
+  const gridSize = 144,
     xMin = -184,
     zMin = -144,
     dx = 368 / gridSize,
@@ -208,7 +384,14 @@ export function landscapeView(): LandscapeView {
   const forward = normalize(subtract(CAMERA_POSITION, focus)),
     right = normalize(cross([0, 1, 0], forward)),
     up = cross(forward, right);
-  const projected = points.map((p) => {
+  const fittingPoints = points.concat(
+    Array.from({ length: 28 }, (_, index) =>
+      Array.from({ length: 16 }, (_, step) =>
+        transferPoint(1.35 + (0.55 * step) / 15, index * 2.3999632297),
+      ),
+    ).flat(),
+  );
+  const projected = fittingPoints.map((p) => {
     const q = subtract(restRotate(p), focus);
     return [dot(q, right), dot(q, up)];
   });
@@ -227,7 +410,7 @@ export function landscapeView(): LandscapeView {
         cy = Math.cos(yaw),
         sx = Math.sin(pitch),
         cx = Math.cos(pitch);
-      for (const [x, height, z] of points)
+      for (const [x, height, z] of fittingPoints)
         for (const y of [
           height + 0.2,
           height - (height === 0 ? 5.2 : TERRAIN_STEP - 0.22) - 0.2,

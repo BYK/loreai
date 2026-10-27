@@ -7,7 +7,8 @@ import {
   landscapeView,
   bandAtHeight,
   terrainLevels,
-  pointOnTerrain,
+  transferPoint,
+  transferPath,
   refinementElevation,
   refinementDetailCount,
   type MemoryPhase,
@@ -178,6 +179,20 @@ export function mountLandscape(
         world.add(edge);
       }
     }
+    const connection = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(
+        transferPath().map((point) => new THREE.Vector3(...point)),
+      ),
+      new THREE.LineDashedMaterial({
+        transparent: true,
+        opacity: 0.16,
+        dashSize: 3,
+        gapSize: 3,
+        toneMapped: false,
+      }),
+    );
+    connection.computeLineDistances();
+    world.add(connection);
     const shadow = new THREE.Mesh(
       new THREE.PlaneGeometry(850, 850),
       new THREE.ShadowMaterial({ opacity: 0.13 }),
@@ -221,11 +236,7 @@ export function mountLandscape(
     let orbit = 0,
       tilt = 0,
       targetOrbit = 0,
-      targetTilt = 0,
-      pointerX = 0,
-      pointerY = 0,
-      targetX = 0,
-      targetY = 0;
+      targetTilt = 0;
     let press: {
       id: number;
       x: number;
@@ -235,8 +246,9 @@ export function mountLandscape(
       moved: boolean;
       dragging: boolean;
       touch: boolean;
+      selection: number;
     } | null = null;
-    let pendingTap = false;
+    let pendingTap: number | null = null;
     const clamp = (value: number, min: number, max: number) =>
       Math.max(min, Math.min(max, value));
     const probe = document.createElement("canvas").getContext("2d");
@@ -266,11 +278,14 @@ export function mountLandscape(
       colors.high.copy(color("--land-jade", "#37684b"));
       colors.gold.copy(color("--land-brass", "#b28240"));
       fragments.forEach((mesh) => mesh.material.color.copy(colors.gold));
+      connection.material.color.copy(colors.gold);
       paint();
       schedule();
     }
     function paint() {
       const { low, mid, high, gold } = colors;
+      connection.material.opacity =
+        0.12 + Math.max(0, Math.min(1, cursor - 1)) * 0.5;
       materials.forEach(({ material, level }) => {
         const t = level / 80,
           band = bandAtHeight(level),
@@ -322,8 +337,7 @@ export function mountLandscape(
     }
     function settle() {
       release();
-      pendingTap = false;
-      targetX = targetY = 0;
+      pendingTap = null;
       hover(-1);
       finishTransition();
     }
@@ -345,12 +359,10 @@ export function mountLandscape(
       if (disposed || lost || !visible || document.hidden) return;
       try {
         const easing = 0.17;
-        pointerX += (targetX - pointerX) * easing;
-        pointerY += (targetY - pointerY) * easing;
         orbit += (targetOrbit - orbit) * easing;
         tilt += (targetTilt - tilt) * easing;
-        world.rotation.y = REST_YAW + orbit + pointerX * 0.055;
-        world.rotation.x = tilt + pointerY * 0.025;
+        world.rotation.y = REST_YAW + orbit;
+        world.rotation.x = tilt;
         if (transition) {
           if (transition.started === null) transition.started = now;
           const t = Math.min(
@@ -366,10 +378,9 @@ export function mountLandscape(
             mesh.material.opacity =
               Math.min(1, Math.max(0, count - index)) * envelope;
             mesh.visible = mesh.material.opacity > 0.01;
+            if (!mesh.visible) return;
             const angle = index * 2.3999632297 + cursor * 0.1;
-            mesh.position.set(
-              ...pointOnTerrain(refinementElevation(cursor), angle),
-            );
+            mesh.position.set(...transferPoint(cursor, angle));
             mesh.rotation.y = -angle;
             mesh.scale.x = 1.4 - cursor * 0.35;
           });
@@ -384,11 +395,7 @@ export function mountLandscape(
         }
         if (
           transition ||
-          Math.abs(targetX - pointerX) +
-            Math.abs(targetY - pointerY) +
-            Math.abs(targetOrbit - orbit) +
-            Math.abs(targetTilt - tilt) >
-            0.0015
+          Math.abs(targetOrbit - orbit) + Math.abs(targetTilt - tilt) > 0.0015
         )
           schedule();
       } catch {
@@ -415,7 +422,12 @@ export function mountLandscape(
           from: cursor,
           to: phase,
           started: null,
-          duration: Math.abs(cursor - phase) > 1 ? 1200 : 850,
+          duration:
+            phase > 1 || cursor > 1
+              ? Math.abs(cursor - phase) > 1
+                ? 2300
+                : 1700
+              : 850,
         };
         element.dataset.refining = "true";
         events.refining(true);
@@ -448,10 +460,10 @@ export function mountLandscape(
     function down(event: PointerEvent) {
       if (!event.isPrimary || event.button !== 0) {
         release();
-        pendingTap = false;
+        pendingTap = null;
         return;
       }
-      pendingTap = false;
+      pendingTap = null;
       press = {
         id: event.pointerId,
         x: event.clientX,
@@ -461,6 +473,8 @@ export function mountLandscape(
         moved: false,
         dragging: false,
         touch: event.pointerType !== "mouse",
+        // Click events may round coordinates; preserve the precise pointer hit.
+        selection: locate(event.clientX, event.clientY),
       };
     }
     function move(event: PointerEvent) {
@@ -475,7 +489,7 @@ export function mountLandscape(
           Math.abs(dy) > Math.abs(dx)
         ) {
           release();
-          pendingTap = false;
+          pendingTap = null;
           return;
         }
         if (
@@ -492,16 +506,12 @@ export function mountLandscape(
           targetOrbit = clamp(press.orbit + dx * 0.0045, -0.42, 0.42);
           if (!press.touch)
             targetTilt = clamp(press.tilt + dy * 0.0018, -0.1, 0.1);
-          targetX = targetY = 0;
           hover(-1);
           schedule();
           return;
         }
       }
       if (event.pointerType === "mouse") {
-        const r = element.getBoundingClientRect();
-        targetX = ((event.clientX - r.left) / r.width - 0.5) * 2;
-        targetY = ((event.clientY - r.top) / r.height - 0.5) * 2;
         hover(locate(event.clientX, event.clientY));
         schedule();
       }
@@ -510,32 +520,30 @@ export function mountLandscape(
       if (!press || press.id !== event.pointerId) return;
       pendingTap =
         !press.moved &&
-        Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 7;
+        Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 7
+          ? press.selection
+          : null;
       release();
     }
     function cancel() {
       release();
-      pendingTap = false;
+      pendingTap = null;
       hover(-1);
-      targetX = targetY = 0;
       schedule();
     }
     function leave() {
       if (press?.dragging) return;
       if (press) {
         release();
-        pendingTap = false;
+        pendingTap = null;
       }
-      targetX = targetY = 0;
       hover(-1);
       schedule();
     }
-    function click(event: MouseEvent) {
-      const allowed = pendingTap;
-      pendingTap = false;
-      if (!allowed) return;
-      const index = locate(event.clientX, event.clientY);
-      if (index >= 0) events.select(PHASES[index]);
+    function click() {
+      const index = pendingTap;
+      pendingTap = null;
+      if (index !== null && index >= 0) events.select(PHASES[index]);
     }
     function contextLost(event: Event) {
       event.preventDefault();

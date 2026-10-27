@@ -45,7 +45,7 @@ for (const root of document.querySelectorAll<HTMLElement>(
         ? "Returning to the conversation…"
         : current() === "knowledge"
           ? "Refining conversation into knowledge…"
-          : "Selecting context relevant to this task…"
+          : "Carrying relevant knowledge to Orders…"
       : next
         ? {
             conversation: "Lower layers · Conversation",

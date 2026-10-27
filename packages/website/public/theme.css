@@ -172,3 +172,9 @@ th { font-weight: 500; }
 .memory-landscape:has(input[value="recall"]:checked) #memory-stage-recall { visibility: visible; }
 
 .memory-stage-panels .memory-tangent { font-size:.75rem; margin-top:.5rem; }
+
+.landscape-transfer { fill:none; stroke:var(--land-brass); stroke-width:1.1; stroke-dasharray:3 4; opacity:.18; pointer-events:none; }
+.memory-landscape:has(input[value="recall"]:checked) .landscape-transfer { opacity:.7; }
+.landscape-projects { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; text-align:center; margin-block:.25rem .75rem; color:var(--muted); font-size:.75rem; }
+.landscape-projects strong { color:var(--text); font-weight:500; }
+.landscape-projects small { display:block; font-size:.6875rem; }

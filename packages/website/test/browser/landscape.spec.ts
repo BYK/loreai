@@ -6,6 +6,7 @@ import {
   projectPoint,
   SVG_WIDTH,
   SVG_HEIGHT,
+  TERRAIN_STEP,
 } from "../../src/lib/memory-landscape";
 
 test.beforeEach(async ({ page }) => {
@@ -35,12 +36,20 @@ test("the landscape and native stage controls work without JavaScript", async ({
   const graph = page.locator(".memory-landscape");
   await expect(graph.locator("svg.landscape-fallback")).toBeVisible();
   await expect(graph.locator(".landscape-pin, [data-marker]")).toHaveCount(0);
+  await expect(graph.locator(".landscape-projects")).toContainText("Payments");
+  await expect(graph.locator(".landscape-projects")).toContainText("Orders");
+  const connection = graph.locator(".landscape-transfer");
+  const quiet = await connection.evaluate(
+    (path) => getComputedStyle(path).opacity,
+  );
   await graph.getByRole("radio", { name: "2 Distilled", exact: true }).check();
   await expect(graph.locator("#memory-stage-knowledge")).toBeVisible();
   await expect(graph.locator("#memory-stage-knowledge")).toContainText(
     ".lore.md",
   );
   await graph.getByRole("radio", { name: "3 Relevant", exact: true }).check();
+  await expect(connection).not.toHaveCSS("opacity", quiet);
+  await expect(graph.locator("#memory-stage-recall")).toContainText("Orders");
   await expect(graph.locator("#memory-stage-recall")).toBeVisible();
   await expect(graph.getByRole("button", { name: /motion/i })).toHaveCount(0);
   await context.close();
@@ -223,9 +232,13 @@ async function regionPoint(
   // Sample exposed terrace centres first, and verify them through the real raycaster.
   const index = PHASES.indexOf(phase as (typeof PHASES)[number]);
   for (const angle of [0.85, 0.55, 1.15, 0.25, 1.45]) {
-    const [x, y] = projectPoint(
-      pointOnTerrain(refinementElevation(index), angle),
-    );
+    const height = refinementElevation(index),
+      surface = pointOnTerrain(height, angle);
+    const [x, y] = projectPoint([
+      surface[0],
+      Math.floor(height / TERRAIN_STEP) * TERRAIN_STEP + 1.5,
+      surface[2],
+    ]);
     const point = {
       x: bounds.x + (bounds.width * x) / SVG_WIDTH,
       y: bounds.y + (bounds.height * y) / SVG_HEIGHT,
@@ -295,6 +308,13 @@ test("dragging away and back preserves selection without extra view controls", a
   await expect(
     page.getByRole("button", { name: "Reset view", exact: true }),
   ).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const first = await art.locator("canvas").screenshot();
+      await page.waitForTimeout(100);
+      return (await art.locator("canvas").screenshot()).equals(first);
+    })
+    .toBe(true);
   const target = await regionPoint(page, "recall");
   await page.mouse.click(target.x, target.y);
   await expect(
@@ -443,6 +463,8 @@ test("mobile horizontal swipes rotate, while vertical gestures still scroll", as
   const art = page.locator(".landscape-art");
   await art.scrollIntoViewIfNeeded();
   await expect(art).toHaveAttribute("data-renderer", "webgl");
+  const canvas = art.locator("canvas");
+  const initial = await canvas.screenshot();
   const b = await art.boundingBox();
   if (!b) throw new Error("Missing terrain bounds");
   const session = await page.context().newCDPSession(page);
@@ -464,8 +486,6 @@ test("mobile horizontal swipes rotate, while vertical gestures still scroll", as
       touchPoints: [],
     });
   };
-  const canvas = art.locator("canvas");
-  const initial = await canvas.screenshot();
   await swipe(55, 0);
   await expect
     .poll(async () => !(await canvas.screenshot()).equals(initial))
