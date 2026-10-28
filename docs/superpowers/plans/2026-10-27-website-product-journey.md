@@ -120,3 +120,20 @@ Workspace typechecks, lint, formatting, Astro checks, and internal HTTP link
 validation passed. Correctness/security reviews found no remaining scoped blocker.
 No app production source, camp scene/controller, dependencies, or data flow changed;
 prior broader root-suite limitations remain documented.
+
+
+## Follow-up: three-way icon theme selector
+
+The user clarified the awkward select menu was the theme dropdown and requested a
+rounded icon-only Light/System/Dark selector. Replace the disclosure with native
+buttons, sun/monitor/moon icons, accessible names and titles, pressed state, and
+44px targets. Keep focus on the activated button; preserve before-paint theme
+resolution, the existing storage key, live system following, cross-tab updates,
+and storage-denied fallback. Keep the same shared control across public pages and
+docs, reducing mobile docs-header gaps to accommodate its width.
+
+Verification: 254 browser tests passed with 6 conditional skips; 14 unit tests
+passed. Coverage includes persistent choices, live system changes, no-JS fallback,
+keyboard Enter/Space, retained focus, one selected choice, 44px targets, narrow and
+short screens, header containment, and contrast. Astro checked 39 files with zero
+diagnostics. The broader root-suite limitations are unchanged.

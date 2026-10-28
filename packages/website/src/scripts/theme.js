@@ -17,10 +17,6 @@
     root.dataset.themeChoice = choice;
     root.dataset.theme =
       choice === "auto" ? (media.matches ? "dark" : "light") : choice;
-    document.querySelectorAll("[data-theme-current]").forEach((label) => {
-      label.textContent =
-        choice === "auto" ? "System" : choice === "light" ? "Light" : "Dark";
-    });
     document.querySelectorAll("button[data-theme-choice]").forEach((button) => {
       button.setAttribute(
         "aria-pressed",
@@ -51,11 +47,6 @@
           // Preserve the in-memory choice even when persistence is unavailable.
         }
         apply();
-        const menu = button.closest("details");
-        if (menu) {
-          menu.open = false;
-          menu.querySelector("summary")?.focus();
-        }
       });
     });
     apply();

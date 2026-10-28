@@ -153,7 +153,7 @@ test("shared navigation identifies the current section and blog metadata is not 
   expect(await page.locator(".post-tags button, .post-tags a").count()).toBe(0);
 });
 
-test("short portrait and landscape screens keep both compact menus usable", async ({
+test("short screens keep the theme pill and navigation usable", async ({
   page,
 }) => {
   for (const viewport of [
@@ -162,16 +162,27 @@ test("short portrait and landscape screens keep both compact menus usable", asyn
   ]) {
     await page.setViewportSize(viewport);
     await page.goto("/");
-    const summary = page.getByLabel("Theme settings", { exact: true });
-    await summary.click();
-    const options = page.locator(".theme-options");
-    const box = await options.boundingBox();
+    const pill = page.getByRole("group", { name: "Colour theme", exact: true });
+    const box = await pill.boundingBox();
     expect(box?.x).toBeGreaterThanOrEqual(0);
+    expect((box?.x ?? Infinity) + (box?.width ?? 0)).toBeLessThanOrEqual(
+      viewport.width,
+    );
     expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThanOrEqual(
       viewport.height,
     );
-    await page.keyboard.press("Escape");
-    await expect(summary).toBeFocused();
+    const choices = pill.getByRole("button");
+    await expect(choices).toHaveCount(3);
+    for (const button of await choices.all()) {
+      const target = await button.boundingBox();
+      expect(target!.width).toBeGreaterThanOrEqual(44);
+      expect(target!.height).toBeGreaterThanOrEqual(44);
+      await button.focus();
+      await page.keyboard.press("Space");
+      await expect(button).toHaveAttribute("aria-pressed", "true");
+      await expect(button).toBeFocused();
+      await expect(pill.locator('[aria-pressed="true"]')).toHaveCount(1);
+    }
     await page.getByLabel("Toggle navigation menu", { exact: true }).click();
     const panel = page.locator(".nav-mobile-panel");
     const panelBox = await panel.boundingBox();

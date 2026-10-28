@@ -21,13 +21,8 @@ const surfaces = [
 ];
 
 async function themeButton(page: Page, choice: string) {
-  const menu = page
-    .getByLabel("Theme settings", { exact: true })
-    .filter({ visible: true })
-    .first();
   const value = choice === "System" ? "auto" : choice.toLowerCase();
   const control = page.locator(`button[data-theme-choice="${value}"]`).first();
-  if (!(await control.isVisible())) await menu.click();
   return control;
 }
 
@@ -104,8 +99,12 @@ test("theme override survives navigation and reload; System resumes live OS upda
   await page.goto("/");
   await (await themeButton(page, "Dark")).click();
   await expect(
-    page.getByLabel("Theme settings", { exact: true }).first(),
-  ).toContainText("Dark");
+    page.getByRole("group", { name: "Colour theme", exact: true }),
+  ).toBeVisible();
+  await expect(await themeButton(page, "Dark")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   for (const path of ["/docs/install/", "/blog/", "/different/"]) {
     await page.goto(path);
@@ -139,10 +138,7 @@ test("keyboard theme controls and native installation copy button", async ({
   await page.keyboard.press("Enter");
   await expect(dark).toHaveAttribute("aria-pressed", "true");
   expect(
-    await page
-      .getByLabel("Theme settings", { exact: true })
-      .first()
-      .evaluate((summary) => getComputedStyle(summary).outlineStyle),
+    await dark.evaluate((button) => getComputedStyle(button).outlineStyle),
   ).toBe("solid");
   await page.goto("/docs/install/");
   const copy = page.getByRole("button", { name: "Copy installation command" });

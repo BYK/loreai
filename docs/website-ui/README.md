@@ -6,7 +6,9 @@ with neutral titles, bounded panes, subtle borders, and compact selected navigat
 states drawn from the local app. Serif lettering is reserved for the brand mark.
 The first-use flow now leads with concrete product copy,
 installation and a clearly fictional memory example. Shared navigation and compact
-native theme menus give every section a consistent structure.
+three-way icon theme pills give every section a consistent structure. Light,
+System, and Dark have accessible names, native keyboard behavior, and persistent
+selection; the System choice follows the device.
 
 The homepage keeps the adventurer camp, one static app preview, a concise everyday
 workflow, practical questions, and an installation link. The full app tour lives
@@ -60,6 +62,11 @@ The simplified homepage product section links to the full tour instead of placin
 its controls in the main page.
 
 ![Homepage product preview](screenshots/home-product-light.png)
+
+The theme selector replaces the former dropdown with direct icon choices.
+
+![Theme selector, light](screenshots/theme-selector-light.png)
+![Theme selector, dark](screenshots/theme-selector-dark.png)
 
 ## Approved audit coverage
 

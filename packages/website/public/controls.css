@@ -1,12 +1,10 @@
 /* Shared controls and navigation on public and documentation pages. */
-.theme-toggle { position: relative; flex-shrink: 0; font: 500 .8125rem/1.4 "DM Sans Variable", "DM Sans", sans-serif; }
-.theme-toggle > summary { display: flex; align-items: center; justify-content: center; gap: .5rem; min-height: 44px; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--text); cursor: pointer; list-style: none; }
-.theme-toggle > summary::-webkit-details-marker { display: none; }
-.theme-options { position: absolute; right: 0; top: calc(100% + .5rem); width: 210px; z-index: 80; padding: .375rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-lifted); }
-.theme-options button { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: space-between; gap: 1rem; padding: .5rem .75rem; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
-.theme-options button small { color: var(--muted); font-weight: 400; }
-.theme-options button:hover { background: var(--chrome); }
-.theme-options button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-soft-text); }
+.theme-toggle { display:inline-flex;align-items:center;flex-shrink:0;padding:3px;border:1px solid var(--line);border-radius:999px;background:var(--chrome); }
+.theme-toggle button { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:44px;height:44px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer; }
+.theme-toggle button:hover { color:var(--heading); }
+.theme-toggle button[aria-pressed="true"] { background:var(--surface);border-color:var(--line);color:var(--accent);box-shadow:0 1px 3px color-mix(in srgb,var(--heading) 8%,transparent); }
+.theme-toggle button:focus-visible { outline-offset:-3px; }
+.theme-toggle svg { display:block;pointer-events:none; }
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 ::selection { background: var(--accent-soft); color: var(--accent-soft-text); }
 .primary-nav ul { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .25rem; list-style: none; padding: 0; margin: 0; }
@@ -26,4 +24,4 @@
   :root:not([data-theme]) .logo-img-dark { display: block; }
 }
 @media (max-width: 380px) { .logo .logo-text { display: none; } }
-@media (forced-colors: active) { .theme-options button[aria-pressed="true"] { outline: 2px solid Highlight; } }
+@media (forced-colors: active) { .theme-toggle button[aria-pressed="true"] { outline: 2px solid Highlight; } }
