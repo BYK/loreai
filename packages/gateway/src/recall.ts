@@ -1455,7 +1455,7 @@ export function shouldEnableRecallMarkerReplay(tools: GatewayTool[]): boolean {
 /** Parse recall input from the tool_use block. */
 function parseRecallInput(block: GatewayToolUseBlock): {
   query: string;
-  scope: RecallScope;
+  scope?: RecallScope;
   id?: string;
   ids?: string[];
   detailOffset?: number;
@@ -1465,7 +1465,10 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   if (!parsed.valid) throw new Error(parsed.error);
   return {
     query: parsed.value.query ?? "",
-    scope: parsed.value.scope ?? "all",
+    // Opaque detail refs carry their bound scope; default other requests to all.
+    scope:
+      parsed.value.scope ??
+      (isRecallDetailRef(parsed.value.id) ? undefined : "all"),
     ...(parsed.value.id ? { id: parsed.value.id } : {}),
     ...(parsed.value.ids ? { ids: [...parsed.value.ids] } : {}),
     ...(parsed.value.detailOffset !== undefined
@@ -1520,7 +1523,7 @@ export async function executeRecall(
   coverage?: RecallCoverage[];
 }> {
   let query = "";
-  let scope: RecallScope = "all";
+  let scope: RecallScope | undefined;
   let id: string | undefined;
   let ids: string[] | undefined;
   let detailOffset: number | undefined;

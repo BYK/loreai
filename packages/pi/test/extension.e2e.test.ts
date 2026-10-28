@@ -164,13 +164,13 @@ describe("pi extension — e2e against a real gateway", () => {
 
   test("registers recall as a native tool through Pi's extension API", () => {
     expect(mock.tools).toHaveLength(1);
+    expect(mock.tools[0]?.parameters).not.toHaveProperty("anyOf");
     expect(mock.tools[0]).toMatchObject({
       name: RECALL_TOOL_NAME,
       description: RECALL_TOOL_DESCRIPTION,
       parameters: {
         type: RECALL_TOOL_INPUT_SCHEMA.type,
         additionalProperties: false,
-        anyOf: RECALL_TOOL_INPUT_SCHEMA.anyOf,
       },
     });
   });

@@ -227,8 +227,38 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       },
     );
 
+    test("follows same-origin redirects for credentialed non-LLM requests", async () => {
+      cleanup();
+      let redirectedRequests = 0;
+      const upstream = createServer((request, response) => {
+        if (request.url === "/v1/admin") {
+          response.writeHead(302, { location: "/download" });
+          response.end();
+          return;
+        }
+        redirectedRequests++;
+        response.end("downloaded");
+      });
+      const upstreamPort = await listen(upstream);
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${upstreamPort}/v1/admin`,
+          { headers: { "x-api-key": "synthetic-provider-key" } },
+        );
+        expect(response.status).toBe(200);
+        expect(redirectedRequests).toBe(1);
+      } finally {
+        await closeServer(upstream);
+      }
+    });
+
     test.each([
-      ["a non-LLM path", "127.0.0.1", "/v1/admin"],
       ["a local-provider LLM path", "127.0.0.1", "/v1/messages"],
       ["an unrewritable LLM path", "127.0.0.2", "/v2/messages"],
     ])(

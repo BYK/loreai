@@ -71,7 +71,8 @@ const parameters = Type.Object(
   },
   {
     additionalProperties: false,
-    anyOf: RECALL_TOOL_INPUT_SCHEMA.anyOf,
+    // Keep this provider schema root-object-only. Runtime argument validation
+    // still enforces that callers provide query, id, or ids.
   },
 );
 

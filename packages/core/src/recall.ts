@@ -114,6 +114,8 @@ export type RecallInput = {
   knowledgeEnabled?: boolean;
   /** Add opaque, request-session-bound handles for truncated agent-tool results. */
   detailRefs?: boolean;
+  /** Add stable knowledge IDs for UI results that turn them into entry links. */
+  includeKnowledgeLinks?: boolean;
   /** Optional LLM client for query expansion (if `config.search.queryExpansion`). */
   llm?: LLMClient;
   /** Abort in-flight query expansion when the owning client disconnects. */
@@ -453,6 +455,7 @@ type FormatConfig = Omit<typeof DEFAULT_FORMAT_CONFIG, "alreadyInLtmIds"> & {
   alreadyInLtmIds?: ReadonlySet<string>;
   /** Private resolver; rendered handles never contain the underlying source ID. */
   createDetailRef?: (tagged: TaggedResult) => string;
+  includeKnowledgeLinks?: boolean;
 };
 
 /**
@@ -667,6 +670,7 @@ function formatFusedResults(
         anchorsByLogicalId,
         filesByLogicalId,
         detailRef,
+        config.includeKnowledgeLinks ?? false,
       );
       lines.push(line);
     }
@@ -879,6 +883,7 @@ function renderResultLine(
   anchorsByLogicalId?: Map<string, ltm.KnowledgeRefAnchor[]>,
   filesByLogicalId?: Map<string, string[]>,
   detailRef?: string,
+  includeKnowledgeLinks = false,
 ): string {
   const detailRefSuffix = detailRef ? ` [detail ref: \`${detailRef}\`]` : "";
   switch (tagged.source) {
@@ -893,7 +898,8 @@ function renderResultLine(
         charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
-      return `- ${titlePart}${content}${anchors}${files}${detailRefSuffix}`;
+      const knowledgeLink = includeKnowledgeLinks ? ` (k:${k.logical_id})` : "";
+      return `- ${titlePart}${content}${anchors}${files}${knowledgeLink}${detailRefSuffix}`;
     }
     case "cross-knowledge": {
       const k = tagged.item;
@@ -906,7 +912,8 @@ function renderResultLine(
         charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
-      return `- ${titlePart}${content}${anchors}${files}${detailRefSuffix}`;
+      const knowledgeLink = includeKnowledgeLinks ? ` (k:${k.logical_id})` : "";
+      return `- ${titlePart}${content}${anchors}${files}${knowledgeLink}${detailRefSuffix}`;
     }
     case "distillation": {
       const d = tagged.item;
@@ -2761,6 +2768,7 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
     absoluteFloor:
       recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
     alreadyInLtmIds: input.alreadyInLtmIds,
+    includeKnowledgeLinks: input.includeKnowledgeLinks,
     ...(input.detailRefs && input.sessionID?.trim()
       ? {
           createDetailRef: (tagged: TaggedResult) =>

@@ -18,6 +18,22 @@ describe("TenantBoundExpiringStore", () => {
     expect(store.get("a-3", 0)).toBeDefined();
   });
 
+  test("a read refreshes recency before the tenant limit evicts a handle", () => {
+    const store = new TenantBoundExpiringStore<{
+      tenantId: string;
+      expiresAt: number;
+    }>(2, 2);
+    store.set("a-1", { tenantId: "a", expiresAt: 100 }, 0);
+    store.set("a-2", { tenantId: "a", expiresAt: 100 }, 0);
+
+    expect(store.get("a-1", 1)).toEqual({ tenantId: "a", expiresAt: 100 });
+    store.set("a-3", { tenantId: "a", expiresAt: 100 }, 2);
+
+    expect(store.get("a-1", 2)).toBeDefined();
+    expect(store.get("a-2", 2)).toBeUndefined();
+    expect(store.get("a-3", 2)).toBeDefined();
+  });
+
   test("rejects new tenants at global capacity and expires stale entries", () => {
     const store = new TenantBoundExpiringStore<{
       tenantId: string;

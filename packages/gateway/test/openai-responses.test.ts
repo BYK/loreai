@@ -32,7 +32,10 @@ import { gzipSync, inflateSync } from "node:zlib";
 import { decodedRequestChunks } from "../src/http-body";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeConversationFixtures } from "./helpers/fixtures";
-import { buildOpenAIResponse } from "../src/translate/openai";
+import {
+  buildOpenAIResponse,
+  buildOpenAIUpstreamRequest,
+} from "../src/translate/openai";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,
@@ -771,6 +774,38 @@ describe("parseOpenAIResponsesRequest", () => {
 
     expect(body.input).toContainEqual(toolSearchCall);
     expect(body.input).toContainEqual(toolSearchOutput);
+  });
+
+  test("rejects tool-search history when translating Responses to Chat Completions", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "find a tool" },
+          {
+            type: "tool_search_call",
+            id: "tsc_1",
+            call_id: "call_1",
+            execution: "client",
+            status: "completed",
+            arguments: { query: "weather" },
+          },
+          {
+            type: "tool_search_output",
+            id: "tso_1",
+            call_id: "call_1",
+            execution: "client",
+            status: "completed",
+            tools: [],
+          },
+        ],
+      },
+      headers,
+    );
+
+    expect(() =>
+      buildOpenAIUpstreamRequest(req, "https://api.openai.com"),
+    ).toThrow("Unsupported cross-provider request");
   });
 
   test("accepts omitted client execution and pairs server-owned null call IDs", () => {

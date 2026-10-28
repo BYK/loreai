@@ -885,13 +885,17 @@ describe("GET /api/v1/recall", () => {
   });
 
   it("returns results for a valid query", async () => {
-    const { projectPath } = await seedProject();
+    const { projectPath, knowledgeId } = await seedProject();
     const pq = `path=${encodeURIComponent(projectPath)}`;
     const data = await apiJSON<{ query: string; result: string }>(
-      `/api/v1/recall?q=REST+API&${pq}`,
+      `/api/v1/recall?q=REST+API&${pq}&expand=false&link_knowledge=true`,
     );
+    const { ltm } = await import("@loreai/core");
+    const entry = ltm.get(knowledgeId);
+    if (!entry) throw new Error("seed knowledge entry was not created");
     expect(data.query).toBe("REST API");
     expect(typeof data.result).toBe("string");
+    expect(data.result).toContain(`(k:${entry.logical_id})`);
   });
 
   it.each(["false", "0", "no"])(

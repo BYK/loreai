@@ -250,7 +250,14 @@ describe("executeRecall malformed input", () => {
       "Recall search failed. The memory system encountered an error.",
     );
     expect(result.valid).toBe(false);
-    expect(result.input).toEqual({ query: "", scope: "all", id: undefined });
+    expect(result.input).toEqual({
+      query: "",
+      scope: undefined,
+      id: undefined,
+      ids: undefined,
+      detailOffset: undefined,
+      detailLimit: undefined,
+    });
   });
 
   test('OpenAI arguments "null" reaches the same safe failure path', async () => {

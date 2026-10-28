@@ -50,6 +50,10 @@ export class TenantBoundExpiringStore<T extends TenantBoundExpiringEntry> {
       this.entries.delete(key);
       return undefined;
     }
+    // Live reads refresh the per-tenant LRU order; only unread handles are
+    // eligible for eviction when that tenant reaches its cap.
+    this.entries.delete(key);
+    this.entries.set(key, entry);
     return entry;
   }
 

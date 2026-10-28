@@ -15,10 +15,10 @@ describe("Pi recall tool", () => {
 
     expect(recall.name).toBe(RECALL_TOOL_NAME);
     expect(recall.description).toBe(RECALL_TOOL_DESCRIPTION);
+    expect(recall.parameters).not.toHaveProperty("anyOf");
     expect(recall.parameters).toMatchObject({
       type: RECALL_TOOL_INPUT_SCHEMA.type,
       additionalProperties: false,
-      anyOf: RECALL_TOOL_INPUT_SCHEMA.anyOf,
       properties: {
         query: {
           type: "string",
