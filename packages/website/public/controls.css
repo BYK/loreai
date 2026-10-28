@@ -1,0 +1,28 @@
+/* Shared controls and navigation on public and documentation pages. */
+.theme-toggle { display:inline-flex;align-items:center;flex-shrink:0;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--chrome); }
+.theme-toggle button { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer; }
+.theme-toggle button:hover { color:var(--heading); }
+.theme-toggle button[aria-pressed="true"] { background:var(--surface);border-color:var(--accent);color:var(--accent);box-shadow:0 1px 3px color-mix(in srgb,var(--heading) 8%,transparent); }
+.theme-toggle button:focus-visible { outline-offset:-3px; }
+.theme-toggle svg { display:block;width:16px;height:16px;pointer-events:none; }
+@media (pointer:coarse) { .theme-toggle button { width:44px;height:44px; } }
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+::selection { background: var(--accent-soft); color: var(--accent-soft-text); }
+.primary-nav ul { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .25rem; list-style: none; padding: 0; margin: 0; }
+.primary-nav a { display: inline-flex; align-items: center; min-height: 44px; padding:.5rem .75rem; border-radius:var(--radius-control); color: var(--muted); font-size: .875rem; text-decoration: none; }
+.primary-nav a:hover { color: var(--heading); background:var(--chrome); }
+.primary-nav a[aria-current] { color:var(--accent-soft-text); background:var(--accent-soft); }
+.primary-nav-mobile ul { display: block; }
+.primary-nav-mobile a { display: flex; padding-inline: .75rem; }
+.primary-nav-mobile a:hover { background: var(--chrome); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.logo .logo-img-light { display: block; }
+.logo .logo-img-dark { display: none; }
+:root[data-theme="dark"] .logo-img-light { display: none; }
+:root[data-theme="dark"] .logo-img-dark { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .logo-img-light { display: none; }
+  :root:not([data-theme]) .logo-img-dark { display: block; }
+}
+@media (max-width: 380px) { .logo .logo-text { display: none; } }
+@media (forced-colors: active) { .theme-toggle button[aria-pressed="true"] { outline: 2px solid Highlight; } }

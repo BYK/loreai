@@ -1,30 +1,31 @@
 ---
-title: Lore Documentation
-description: Install, operate, and understand Lore's local-first memory layer for AI coding agents.
-template: splash
-hero:
-  title: Lore Documentation
-  tagline: Persistent memory and context management for the coding agents you already use.
-  actions:
-    - text: Install Lore
-      link: install/
-      icon: right-arrow
-      variant: primary
-    - text: Architecture
-      link: architecture/
-      icon: open-book
+title: Start with Lore
+description: Connect your coding agent, verify a recorded session, and learn to use project memory.
 ---
 
-Lore is a local-first memory layer for AI coding agents. It captures conversation history, distills operational context, extracts durable project knowledge, and gives agents a recall tool for details that should not be lost to compaction.
+Lore runs alongside your existing coding agent. It records conversations locally,
+manages working context, and curates project knowledge you can inspect and review in Git.
 
-## Start Here
+## Connect your agent
 
-- Install Lore and run your existing agent through the gateway.
-- Read the architecture overview to understand temporal storage, distillation, and long-term knowledge.
-- Keep project knowledge in version-controlled `.lore.md` files when sharing memory with a team.
+[Choose your setup and install Lore](/docs/install/). You need a supported agent
+already installed and authenticated. Codex Desktop has a different connection path
+from terminal clients.
 
-## Site Sections
+Already have Lore? [Connect and verify your first session](/docs/first-session/).
+Success means a conversation appears in your project's **Sessions** list.
 
-- [Home](../) introduces the product and Folk Lore early access signup.
-- [Why Lore](../different/) compares Lore to memory-only and context-only approaches.
-- [Blog](../blog/) is ready for essays, release notes, and engineering writeups.
+## Use your memory
+
+- [Day-to-day guide](/docs/using-lore/) — find an earlier decision, review knowledge, or switch agents.
+- [What Lore stores and supplies to your agent](/docs/memory/) — conversation history, summaries, knowledge, and current context.
+- [Import earlier work](/docs/import/) — preview supported local conversation sources.
+- [Share knowledge through Git](/docs/team-memory/) — review `.lore.md` like code.
+- [Try a sample workflow](/docs/example/) — follow a webhook decision into a later task.
+
+## Get help or go deeper
+
+[Something missing? Start with troubleshooting](/docs/troubleshooting/).
+[Data and costs](/docs/data-and-costs/) explains storage, providers, telemetry,
+and usage. The [configuration reference](/docs/configuration/) and
+[architecture](/docs/architecture/) cover advanced behavior.

@@ -9,11 +9,15 @@ Lore treats context management and memory as one pipeline. The same gradient eng
 
 ## Where Lore fits in the stack
 
-Lore is a **transparent HTTP proxy** that sits between an AI harness and its upstream LLM provider. Every supported harness — Claude Code, Codex, OpenCode, Pi, or Hermes — already speaks one of the standard LLM HTTP APIs (Anthropic's `/v1/messages`, OpenAI's `/v1/chat/completions` and `/v1/responses`, Codex's `/v1/codex/responses`). Lore redirects those requests to its own gateway, where the conversation is parsed, persisted, and transformed before being forwarded to the real upstream. The agent never knows it's there.
+Lore's gateway sits between a compatible coding client and its configured model
+provider. Requests routed through the gateway can be recorded and transformed
+before they reach the provider. Supported integrations supply the client-specific
+routing and project metadata; OpenCode and Pi also have adapter hooks.
 
-This position is deliberate. It means Lore is **agent-agnostic by construction** — any new harness that uses one of those HTTP APIs gets the full memory pipeline for free, with no per-harness SDK. It also means every conversation is captured exactly once, at the only place where it exists as structured LLM traffic: the request itself.
-
-Existing AI harnesses are also **closed ecosystems**: Claude Code, Codex, and the others don't expose their internals to plugins in a way that lets an external tool actively manage context mid-conversation. Sitting at the HTTP boundary — the one place these harnesses must cross to talk to a model — is the only viable integration point that works with every harness, current and future. It's also the only way to stay portable: switching harnesses doesn't lose your memory, because Lore lives below them, not inside.
+This keeps the memory record outside a single client. Compatibility still depends
+on the client's API, transport, authentication, and integration behavior. Use the
+[client guides](/docs/install/) for supported connection paths rather than assuming
+that changing any base URL enables every memory feature.
 
 ```mermaid
 flowchart LR
@@ -29,7 +33,7 @@ flowchart LR
 
 The supported agents reach the proxy through one of three mechanisms:
 
-- **`lore run` auto-detects all five agents** (`gateway/src/cli/agents.ts`) and sets the right base-URL knob for each: `ANTHROPIC_BASE_URL` for Claude Code and Pi, `OPENAI_BASE_URL` for Hermes, and the `codex -c openai_base_url=...` CLI flag for Codex (the Codex CLI is a Rust binary that doesn't read `OPENAI_BASE_URL`).
+- **`lore run` auto-detects all five agents** (`gateway/src/cli/agents.ts`) and configures routing for that invocation: environment settings for Claude Code and Hermes, an HTTP-only named provider via `-c` overrides for Codex, and adapter configuration where supported. Pi needs its extension for complete routing and memory hooks; see its integration guide.
 - **OpenCode and Pi additionally ship dedicated plugins** (`@loreai/opencode`, `@loreai/pi`) that install a fetch interceptor and pin each provider's `baseURL` to the local gateway — so they work even when launched outside `lore run`.
 - **Anything else** that reads `baseURL` from the environment can be pointed at the gateway manually.
 

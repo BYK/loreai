@@ -1,0 +1,16 @@
+---
+interface Props { mobile?: boolean; }
+const { mobile = false } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const links = [
+  { label: "Docs", href: `${base}docs/` },
+  { label: "Why Lore", href: `${base}different/` },
+  { label: "Blog", href: `${base}blog/` },
+  { label: "Get started", href: `${base}docs/install/`, action: true },
+  { label: "GitHub", href: "https://github.com/BYK/loreai", external: true },
+];
+const current = (href: string) => Astro.url.pathname === href ? "page" : Astro.url.pathname.startsWith(href) ? "true" : undefined;
+---
+<nav aria-label="Primary navigation" class:list={["primary-nav", { "primary-nav-mobile": mobile }]}>
+  <ul>{links.map(link => <li><a href={link.href} aria-current={link.external || link.action ? undefined : current(link.href)} {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{link.label}</a></li>)}</ul>
+</nav>

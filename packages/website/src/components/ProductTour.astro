@@ -1,0 +1,19 @@
+---
+const base=import.meta.env.BASE_URL;
+import { TOUR_SCREENS as screens } from "../lib/product-tour";
+---
+<section class="section product-tour" id="product" aria-labelledby="tour-title">
+ <div class="section-heading"><p class="eyebrow">Inside the local app · Sample data</p><h2 id="tour-title">Your project memory, with a way to inspect it.</h2><p>Lore’s memory browser runs locally with the gateway. These are captures of the actual app using a fictional webhook project.</p></div>
+ <fieldset class="tour-picker"><legend class="visually-hidden">Explore the local app</legend>{screens.map((screen,index)=><label><input type="radio" name="product-tour" value={screen.id} checked={index===0} aria-label={screen.choice} aria-controls={`tour-${screen.id}`} /><span>{screen.choice}</span></label>)}</fieldset>
+ {screens.map(screen=><figure class="tour-panel" data-tour-panel={screen.id} id={`tour-${screen.id}`}>
+  <div class="tour-caption"><h3>{screen.title}</h3><p>{screen.description}</p><a href={`${base}docs/${screen.link}`}>{screen.action} →</a></div>
+  {(["light","dark"] as const).map(theme=><a class:list={["tour-image-link",`tour-shot-${theme}`]} href={`${base}product-tour/${screen.id}-${theme}.png`} target="_blank" rel="noopener noreferrer" aria-label={`Open full-size ${screen.choice.toLowerCase()} screenshot`}><picture>{screen.id === "knowledge" && <source media="(max-width: 600px)" srcset={`${base}product-tour/knowledge-mobile-${theme}.png`} width="390" height="700" />}<img src={`${base}product-tour/${screen.id}-${theme}.png`} width="1120" height="760" loading="lazy" decoding="async" alt={screen.alt} /></picture></a>)}
+  <figcaption class="small muted">Sample data in the actual Lore app. Select the image to inspect it at full size.</figcaption>
+ </figure>)}
+</section>
+
+<script>
+import { bindUrlChoice } from "../scripts/url-choice";
+import { TOUR_SCREENS } from "../lib/product-tour";
+bindUrlChoice(".product-tour", "view", TOUR_SCREENS.map(screen => screen.id));
+</script>

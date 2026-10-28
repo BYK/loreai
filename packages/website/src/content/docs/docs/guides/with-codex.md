@@ -11,7 +11,7 @@ The Codex CLI is a Rust binary that does NOT read `OPENAI_BASE_URL` from the env
 
 ## Install (CLI)
 
-The hosted install script sets up Lore and Codex in one step:
+Have Codex installed and authenticated first. This command installs Lore:
 
 ```bash
 curl -fsSL https://withlore.ai/install | bash
@@ -63,6 +63,9 @@ The `lore_http` provider name is reserved for Lore's HTTP configuration. If you 
 - **Compaction is disabled.** Codex's `model_auto_compact_token_limit=999999999` override prevents the built-in compaction from destroying Lore's gradient context.
 
 ## Next steps
+
+- [Verify a recorded session](/docs/first-session/?agent=codex#verify).
+- [Use Lore day to day](/docs/using-lore/).
 
 - [Setup command](/docs/setup/) — `lore setup codex` for manual/Desktop configuration and remote gateways.
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

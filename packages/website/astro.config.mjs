@@ -65,13 +65,16 @@ export default defineConfig({
       title: "Lore",
       components: {
         Header: "./src/components/SiteHeader.astro",
+        Footer: "./src/components/DocsFooter.astro",
+        ThemeProvider: "./src/components/ThemeProvider.astro",
+        ThemeSelect: "./src/components/ThemeToggle.astro",
         MobileMenuFooter: "./src/components/MobileMenuFooter.astro",
       },
       // No `logo` config — SiteHeader.astro renders our <Logo> component
       // (image + HTML text) directly, so Starlight's default SiteTitle is
       // never used.
       customCss: ["./src/styles/starlight.css"],
-      pagefind: false,
+      pagefind: true,
       lastUpdated: false,
       social: [
         {
@@ -83,37 +86,65 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: "Lore",
+          label: "Get started",
           items: [
-            { label: "Overview", slug: "docs" },
-            { label: "Install", slug: "docs/install" },
-            { label: "Architecture", slug: "docs/architecture" },
-            { label: "Team memory", slug: "docs/team-memory" },
+            { label: "Start here", slug: "docs" },
+            { label: "Install & connect", slug: "docs/install" },
+            { label: "Your first session", slug: "docs/first-session" },
+            { label: "Troubleshooting", slug: "docs/troubleshooting" },
           ],
         },
         {
-          label: "Guides",
+          label: "Use Lore",
           items: [
+            { label: "Day-to-day workflow", slug: "docs/using-lore" },
+            { label: "How memory works", slug: "docs/memory" },
+            { label: "Try a sample project", slug: "docs/example" },
+            { label: "Import conversations", slug: "docs/import" },
+            { label: "Team memory", slug: "docs/team-memory" },
+            { label: "Data & costs", slug: "docs/data-and-costs" },
+          ],
+        },
+        {
+          label: "Integrations",
+          collapsed: true,
+          items: [
+            { label: "Claude Code", slug: "docs/guides/with-claude-code" },
+            { label: "Codex CLI & Desktop", slug: "docs/guides/with-codex" },
             { label: "OpenCode", slug: "docs/guides/with-opencode" },
             { label: "Pi", slug: "docs/guides/with-pi" },
-            { label: "Claude Code", slug: "docs/guides/with-claude-code" },
-            { label: "Codex", slug: "docs/guides/with-codex" },
+            { label: "Hermes", slug: "docs/guides/with-hermes" },
+          ],
+        },
+        {
+          label: "Advanced & reference",
+          collapsed: true,
+          items: [
+            { label: "Configuration", slug: "docs/configuration" },
+            { label: "Environment variables", slug: "docs/environment" },
+            { label: "Setup command", slug: "docs/setup" },
+            {
+              label: "Tune knowledge injection",
+              slug: "docs/guides/tune-knowledge-injection",
+            },
             { label: "Custom upstreams", slug: "docs/guides/custom-upstreams" },
             { label: "Local inference", slug: "docs/guides/local-inference" },
             {
               label: "Semantic linter (CI)",
               slug: "docs/guides/semantic-linter",
             },
+            { label: "Architecture", slug: "docs/architecture" },
+            { label: "Recall benchmark", slug: "docs/benchmark" },
+            {
+              label: "Installer & uninstall",
+              slug: "docs/installation-reference",
+            },
           ],
         },
         {
-          label: "Reference",
-          items: [
-            { label: "Configuration", slug: "docs/configuration" },
-            { label: "Environment variables", slug: "docs/environment" },
-            { label: "Setup command", slug: "docs/setup" },
-            { label: "Import conversations", slug: "docs/import" },
-          ],
+          label: "Contributors",
+          collapsed: true,
+          items: [{ label: "Code review workflow", slug: "docs/review" }],
         },
       ],
       head: [

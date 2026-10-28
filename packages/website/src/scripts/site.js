@@ -1,65 +1,32 @@
-const cursor = document.getElementById("cur");
-
-if (cursor) {
-  document.addEventListener("mousemove", (event) => {
-    cursor.style.left = `${event.clientX}px`;
-    cursor.style.top = `${event.clientY}px`;
-  });
-
-  document.querySelectorAll("a,button").forEach((element) => {
-    element.addEventListener("mouseenter", () =>
-      cursor.classList.add("expand"),
-    );
-    element.addEventListener("mouseleave", () =>
-      cursor.classList.remove("expand"),
-    );
-  });
-}
-
-const revealObserver = new IntersectionObserver(
-  (entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add("in");
-      }
-    });
-  },
-  { threshold: 0.1 },
-);
-
-document.querySelectorAll(".sr").forEach((element) => {
-  // Mark elements already in the viewport immediately to avoid flash of invisible content
-  if (element.getBoundingClientRect().top < window.innerHeight) {
-    element.classList.add("in");
-  }
-  revealObserver.observe(element);
-});
-
-void (async () => {
-  const versionBadge = document.getElementById("version-badge");
-
-  if (versionBadge) {
+// Public-page interactions. Commands and destination URLs remain static markup.
+const releaseLinks = document.querySelectorAll(".release-link");
+if (releaseLinks.length) {
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     try {
       const response = await fetch(
         "https://api.github.com/repos/BYK/loreai/releases/latest",
+        { signal: controller.signal },
       );
-
-      if (response.ok) {
-        const data = await response.json();
-        versionBadge.textContent = `v${data.tag_name || "0.13.4"}`;
-      } else {
-        versionBadge.textContent = "v0.13.4";
-      }
+      if (!response.ok) return;
+      const data = await response.json();
+      if (
+        typeof data?.tag_name !== "string" ||
+        !/^v?\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(data.tag_name)
+      )
+        return;
+      const version = data.tag_name.replace(/^v/, "");
+      releaseLinks.forEach((link) => {
+        link.textContent = `Latest: v${version}`;
+      });
     } catch {
-      versionBadge.textContent = "v0.13.4";
+      // The existing Releases link remains useful without a version lookup.
+    } finally {
+      clearTimeout(timer);
     }
-  }
-})();
-
-const LOOPS_ENDPOINT =
-  "https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq";
-const RATE_LIMIT_KEY = "loops-form-timestamp";
-const RATE_LIMIT_MS = 60_000;
+  })();
+}
 
 const form = document.getElementById("waitlist-form");
 const email = document.getElementById("waitlist-email");
@@ -68,88 +35,95 @@ const formView = document.getElementById("waitlist-form-view");
 const successView = document.getElementById("waitlist-success");
 const errorView = document.getElementById("waitlist-error");
 const errorMessage = document.getElementById("waitlist-error-msg");
-const retryButton = document.getElementById("waitlist-retry");
+const rateKey = "loops-form-timestamp";
+let submitting = false;
+let failed = false;
 
-function showView(view) {
-  formView?.classList.remove("show");
-  successView?.classList.remove("show");
+function clearError() {
   errorView?.classList.remove("show");
-  view?.classList.add("show");
+  email?.removeAttribute("aria-describedby");
 }
-
+function showSuccess() {
+  clearError();
+  formView?.classList.remove("show");
+  successView?.classList.add("show");
+  successView?.focus();
+}
 function showError(message) {
-  if (errorMessage) {
-    errorMessage.textContent =
-      message || "Something went wrong. Please try again.";
-  }
-
-  showView(errorView);
-  retryButton?.focus();
+  failed = true;
+  if (errorMessage) errorMessage.textContent = message;
+  errorView?.classList.add("show");
+  email?.setAttribute("aria-describedby", "waitlist-error-msg");
+  if (button) button.textContent = "Try again";
+  errorView?.focus();
 }
 
-retryButton?.addEventListener("click", () => {
-  showView(formView);
-  email?.focus();
-});
-
-// oxlint-disable-next-line typescript/no-misused-promises -- DOM submit handler; the event target ignores the returned promise
+// oxlint-disable-next-line typescript/no-misused-promises -- DOM event callbacks ignore the returned promise
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
-
   if (
     !(email instanceof HTMLInputElement) ||
-    !(button instanceof HTMLButtonElement)
-  ) {
+    !(button instanceof HTMLButtonElement) ||
+    submitting
+  )
     return;
-  }
-
   const value = email.value.trim();
-
-  if (!value) {
-    return;
-  }
-
+  if (!value || !email.checkValidity()) return;
   let last = 0;
-
   try {
-    last = Number.parseInt(localStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+    last = Number.parseInt(localStorage.getItem(rateKey) || "0", 10);
   } catch {
-    last = 0;
+    /* Storage is optional. */
   }
-
-  if (Date.now() - last < RATE_LIMIT_MS) {
-    showError("Too many attempts. Please try again in a minute.");
+  if (Date.now() - last < 60_000) {
+    showError(
+      "You recently joined this list. Wait a minute before trying again.",
+    );
     return;
   }
-
-  button.textContent = "Sending...";
+  submitting = true;
+  failed = false;
+  clearError();
   button.disabled = true;
-
+  button.textContent = "Joining…";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(LOOPS_ENDPOINT, {
+    const response = await fetch(form.action, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ email: value }),
+      signal: controller.signal,
     });
-
-    const data = await response.json();
-
-    if (response.ok || data.message === "Email already on list.") {
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      /* A successful response need not contain JSON. */
+    }
+    if (response.ok || data?.message === "Email already on list.") {
       try {
-        localStorage.setItem(RATE_LIMIT_KEY, String(Date.now()));
+        localStorage.setItem(rateKey, String(Date.now()));
       } catch {
-        // Ignore localStorage failures; the server still accepted the signup.
+        /* The server accepted the signup. */
       }
-
       email.value = "";
-      showView(successView);
+      showSuccess();
     } else {
-      showError(data.message || null);
+      showError(
+        "We couldn’t add your email. Your address has been kept so you can try again.",
+      );
     }
   } catch {
-    showError("Network error. Please check your connection and try again.");
+    showError(
+      controller.signal.aborted
+        ? "The request timed out. Try again when your connection is ready."
+        : "We couldn’t reach the signup service. Check your connection and try again.",
+    );
   } finally {
-    button.textContent = "Join Waitlist";
+    clearTimeout(timer);
+    submitting = false;
     button.disabled = false;
+    button.textContent = failed ? "Try again" : "Join early access list";
   }
 });

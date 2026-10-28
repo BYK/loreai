@@ -9,7 +9,9 @@ export async function getStaticPaths() {
 }
 
 const { post } = Astro.props;
-const { Content } = await render(post);
+const { Content, headings } = await render(post);
+const outline = headings.filter(heading => heading.depth === 2 || heading.depth === 3);
+const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.length >= 4;
 ---
 
 <BlogLayout
@@ -20,7 +22,7 @@ const { Content } = await render(post);
   <article class="blog-post">
     <a class="blog-back" href={`${import.meta.env.BASE_URL}blog/`}>Back to blog</a>
     <header>
-      <p class="eyebrow">{post.data.author}</p>
+      <p class="eyebrow">{post.data.kind} · {post.data.author}</p>
       <h1>{post.data.title}</h1>
       {post.data.subtitle && <p class="blog-subtitle">{post.data.subtitle}</p>}
       <time datetime={post.data.pubDate.toISOString()}>
@@ -28,8 +30,11 @@ const { Content } = await render(post);
       </time>
       <p>{post.data.description}</p>
     </header>
+    {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><strong>In practice</strong><p>{post.data.takeaway}</p><a href={`${import.meta.env.BASE_URL}docs/team-memory/`}>Current availability: local Lore and Git sharing; Folk Lore early access →</a></aside>}
+    {showOutline && <details class="article-outline"><summary>On this page</summary><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></details>}
     <div class="blog-prose">
       <Content />
     </div>
+    <nav class="article-next" aria-label="Put this into practice"><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`}>{post.data.nextStep?.label ?? "Connect and verify your first Lore session"} →</a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
   </article>
 </BlogLayout>

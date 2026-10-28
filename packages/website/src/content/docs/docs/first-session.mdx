@@ -1,0 +1,44 @@
+---
+title: Your first session
+description: Connect your agent and verify a recorded conversation in the local Lore app.
+---
+import AgentSetup from '../../../components/AgentSetup.astro';
+
+The first milestone is a **recorded session**, visible in Lore's local app. You do
+not need to wait for a knowledge file to check the connection.
+
+## Connect
+
+[Install Lore first](/docs/install/) if `lore --version` is not available. Select
+your installed, authenticated agent below. Run commands from the project you want
+to record; Pi also needs the extension described in its instructions.
+
+<AgentSetup id="first-session-setup" installed />
+
+## Verify
+
+1. Send a normal project-related message in the connected agent. For a disposable
+   example: “This service should reject duplicate webhook deliveries by event ID.”
+2. Open the **Dashboard URL printed by Lore**. This opens the local memory browser,
+   separate from withlore.ai. Use the actual printed address and port.
+3. Select your project in the project picker, then open **Sessions**.
+4. Open the recorded session. Check that your message appears in its conversation.
+
+**Expected result:** a project and recorded conversation. A running process or saved
+routing configuration alone does not confirm that your agent is sending through Lore.
+If the project or message is missing, follow [connection troubleshooting](/docs/troubleshooting/#missing-session).
+
+## Knowledge comes later
+
+Lore distills older conversation and curates durable knowledge in the background.
+One message does not guarantee a `.lore.md` entry. Continue normal work, then open
+**Knowledge** to inspect what was extracted. [How history and knowledge differ](/docs/memory/).
+
+## Review, then reuse
+
+Open a knowledge entry and read **Source & history**. Correct inaccurate content
+with **Edit**. Check the `.lore.md` diff before committing it. A later session can
+use eligible project knowledge and search earlier details; the supplied context
+depends on relevance, confidence, scope, and budget.
+
+[Try the complete sample workflow](/docs/example/) or [learn the everyday workflow](/docs/using-lore/).

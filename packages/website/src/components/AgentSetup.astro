@@ -1,0 +1,46 @@
+---
+import { SETUP_AGENTS } from "../lib/agent-setup";
+import InstallCommand from "./InstallCommand.astro";
+interface Props { id?: string; installed?: boolean; }
+const { id = "agent-setup", installed = false } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+<section class="agent-setup" aria-label="Set up Lore with your agent">
+  <fieldset class="setup-picker"><legend>Which agent do you use?</legend>
+    {SETUP_AGENTS.map((agent,index) => <label><input type="radio" name={`${id}-agent`} value={agent.id} checked={index===0} aria-label={agent.name} aria-controls={`${id}-${agent.id}`} /><span>{agent.name}</span></label>)}
+  </fieldset>
+  {!installed && <div class="setup-install"><h3>Install Lore</h3><p>Have your agent installed and signed in first. This command installs Lore.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
+    <h3>Connect {agent.name}</h3><p>{agent.detail}</p>
+    <pre><code>{agent.command}</code></pre><button type="button" class="button button-secondary" data-copy-setup hidden aria-label={`Copy ${agent.name} connection command`}>Copy connection command</button><p class="setup-copy-status small muted" role="status"></p>
+    <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>Connect and verify</a><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide →</a></div>
+  </div>)}
+  <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
+</section>
+<script>import "../scripts/agent-setup";</script>
+<style is:global>
+.agent-setup { min-width:0; }
+[data-copy-setup][hidden] { display:none; }
+.setup-picker { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem;border:0;padding:0;margin:0 0 1.5rem; }
+.setup-picker legend { font:500 1rem var(--sans,"DM Sans Variable",sans-serif);margin-bottom:.75rem;color:var(--heading); }
+.setup-picker label { display:flex;min-width:0;align-items:center;gap:.5rem;min-height:44px;padding:.65rem .75rem;border:1px solid var(--line);border-radius:var(--radius-control);color:var(--text);font-size:.875rem;cursor:pointer; }
+.setup-picker label:has(:checked) { background:var(--accent-soft);border-color:var(--accent);color:var(--accent-soft-text); }
+.setup-picker input { accent-color:var(--accent);flex-shrink:0; }
+.setup-picker label:has(:focus-visible) { outline:2px solid var(--accent);outline-offset:2px; }
+.agent-setup h3 { font:500 1.1rem/1.4 var(--sans,"DM Sans Variable",sans-serif);margin:0 0 .5rem; }
+.setup-install { padding-block:0 1.5rem;border-bottom:1px solid var(--line); }
+.agent-setup .install-box { margin-block:.75rem; }
+.setup-panel { display:none;padding-block:1.5rem 0; }
+.agent-setup:has(input[value="claude-code"]:checked) [data-setup-panel="claude-code"],
+.agent-setup:has(input[value="codex"]:checked) [data-setup-panel="codex"],
+.agent-setup:has(input[value="codex-desktop"]:checked) [data-setup-panel="codex-desktop"],
+.agent-setup:has(input[value="opencode"]:checked) [data-setup-panel="opencode"],
+.agent-setup:has(input[value="pi"]:checked) [data-setup-panel="pi"],
+.agent-setup:has(input[value="hermes"]:checked) [data-setup-panel="hermes"] { display:block; }
+.setup-panel pre { overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-control);padding:1rem;margin-block:.75rem;white-space:pre-wrap;overflow-wrap:anywhere; }
+.setup-panel pre code { background:transparent;padding:0;color:var(--text);font-size:.875rem; }
+.setup-next { display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-block:1rem; }
+.setup-copy-status:empty { display:none; }
+.setup-disclosure { margin-top:1rem; }
+@media(max-width:600px) { .setup-picker { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+</style>

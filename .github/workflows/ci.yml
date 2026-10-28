@@ -831,7 +831,10 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @loreai/website test
       - run: pnpm run check:links
+      - run: pnpm --filter @loreai/website exec playwright install --with-deps chromium
+      - run: pnpm --filter @loreai/website test:browser
 
   # ---------------------------------------------------------------------------
   # PR-preview link integrity.
