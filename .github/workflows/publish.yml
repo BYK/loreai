@@ -87,11 +87,36 @@ jobs:
       # Pin to a specific Craft version to avoid upstream regressions.
       - name: Install Craft
         env:
-          CRAFT_VERSION: '2.26.9'
+          CRAFT_VERSION: '3.3.0'
         run: |
           CRAFT_URL="https://github.com/getsentry/craft/releases/download/${CRAFT_VERSION}/craft"
           sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
           sudo chmod +x /usr/local/bin/craft
+
+      # Both retry seeding and failure recovery must locate the same file.
+      - name: Locate Craft publish state
+        id: publish-state
+        env:
+          VERSION: ${{ steps.inputs.outputs.version }}
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const { createHash } = require("node:crypto");
+          const { homedir } = require("node:os");
+          const { join } = require("node:path");
+          const sanitise = (value) => value.toLowerCase()
+            .replace(/[^a-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+          const version = process.env.VERSION;
+          const safeVersion = sanitise(version);
+          // Match Craft 3.3.0's lossless version encoding.
+          const versionKey = safeVersion === version ? safeVersion
+            : `version-${Buffer.from(version).toString("base64url")}`;
+          const owner = sanitise(process.env.GITHUB_REPOSITORY_OWNER);
+          const repo = sanitise(process.env.GITHUB_REPOSITORY.split("/")[1]);
+          const cwdHash = createHash("sha1").update(process.cwd()).digest("hex").slice(0, 12);
+          const stateHome = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
+          const filename = `publish-state-${owner}-${repo}-${cwdHash}-${versionKey}.json`;
+          console.log(`path=${join(stateHome, "craft", filename)}`);
+          NODE
 
       # Parse checked targets from the publish issue body and write a Craft
       # publish-state file so Craft skips already-published targets on retry.
@@ -99,7 +124,7 @@ jobs:
       - name: Set already-published targets
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
-          VERSION: ${{ steps.inputs.outputs.version }}
+          CRAFT_STATE_FILE: ${{ steps.publish-state.outputs.path }}
         run: |
           # Extract checked targets (already published / skip)
           CHECKED=$(echo "$ISSUE_BODY" \
@@ -113,17 +138,8 @@ jobs:
             done <<< "$CHECKED"
             payload=$(jq -n --argjson p "$published" '{"published": $p}')
 
-            # Compute state file path the same way Craft does:
-            # SHA1 of cwd, sanitised owner/repo/version
-            cwd_hash=$(printf '%s' "$GITHUB_WORKSPACE" | sha1sum | cut -c1-12)
-            sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
-            owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
-            repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
-            version_sanitised=$(sanitise "$VERSION")
-
-            state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
-            state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
-            mkdir -p "$state_dir"
+            state_file="$CRAFT_STATE_FILE"
+            mkdir -p "$(dirname "$state_file")"
             printf '%s' "$payload" > "$state_file"
             echo "Wrote publish state file: $state_file"
             echo "Contents: $(cat "$state_file")"
@@ -170,16 +186,9 @@ jobs:
         if: cancelled() || failure()
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.inputs.outputs.version }}
+          CRAFT_STATE_FILE: ${{ steps.publish-state.outputs.path }}
         run: |
-          # Locate the state file
-          cwd_hash=$(printf '%s' "$GITHUB_WORKSPACE" | sha1sum | cut -c1-12)
-          sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
-          owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
-          repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
-          version_sanitised=$(sanitise "$VERSION")
-          state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
-          state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
+          state_file="$CRAFT_STATE_FILE"
 
           if [[ ! -f "$state_file" ]]; then
             echo "No publish state file found — skipping target update."
