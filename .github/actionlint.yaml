@@ -6,7 +6,7 @@
 # actionlint's static allowlist predates it — track upstream:
 # https://github.com/rhysd/actionlint/blob/main/rule_permissions.go
 # Until then, ignore the spurious "unknown permission scope" finding on the
-# specific permission so the semantic-linter workflow can request Copilot
+# specific permission so workflows can request Copilot
 # access for GITHUB_TOKEN.
 paths:
   .github/workflows/semantic-linter.yml:
@@ -16,5 +16,8 @@ paths:
     ignore:
       - 'unknown permission scope "copilot-requests"'
   .github/workflows/eval.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
+  .github/workflows/release.yml:
     ignore:
       - 'unknown permission scope "copilot-requests"'

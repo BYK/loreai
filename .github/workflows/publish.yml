@@ -87,7 +87,7 @@ jobs:
       # Pin to a specific Craft version to avoid upstream regressions.
       - name: Install Craft
         env:
-          CRAFT_VERSION: '2.26.9'
+          CRAFT_VERSION: '3.3.0'
         run: |
           CRAFT_URL="https://github.com/getsentry/craft/releases/download/${CRAFT_VERSION}/craft"
           sudo curl -fsSL -o /usr/local/bin/craft "$CRAFT_URL"
@@ -119,7 +119,12 @@ jobs:
             sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
             owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
             repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
-            version_sanitised=$(sanitise "$VERSION")
+            # Craft 3.3 preserves versions changed by filename sanitisation.
+            version_sanitised=$(node -e '
+              const version = process.env.VERSION;
+              const safeVersion = version.toLowerCase().replace(/[^a-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+              process.stdout.write(safeVersion === version ? safeVersion : `version-${Buffer.from(version).toString("base64url")}`);
+            ')
 
             state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
             state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
@@ -177,7 +182,12 @@ jobs:
           sanitise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]\+/_/g; s/^_\+//; s/_\+$//'; }
           owner_sanitised=$(sanitise "${GITHUB_REPOSITORY_OWNER}")
           repo_sanitised=$(sanitise "${GITHUB_REPOSITORY#*/}")
-          version_sanitised=$(sanitise "$VERSION")
+          # Craft 3.3 preserves versions changed by filename sanitisation.
+          version_sanitised=$(node -e '
+            const version = process.env.VERSION;
+            const safeVersion = version.toLowerCase().replace(/[^a-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+            process.stdout.write(safeVersion === version ? safeVersion : `version-${Buffer.from(version).toString("base64url")}`);
+          ')
           state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/craft"
           state_file="$state_dir/publish-state-${owner_sanitised}-${repo_sanitised}-${cwd_hash}-${version_sanitised}.json"
 
