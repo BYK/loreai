@@ -137,3 +137,8 @@ passed. Coverage includes persistent choices, live system changes, no-JS fallbac
 keyboard Enter/Space, retained focus, one selected choice, 44px targets, narrow and
 short screens, header containment, and contrast. Astro checked 39 files with zero
 diagnostics. The broader root-suite limitations are unchanged.
+
+
+The user requested a smaller theme pill: reduce desktop buttons from 44px to 32px,
+icons from 18px to 16px, and outer padding from 3px to 2px (140×52px → 102×38px).
+Coarse pointers retain 44px touch targets. Theme behavior and focus remain unchanged.

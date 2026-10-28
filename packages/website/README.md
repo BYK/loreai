@@ -25,7 +25,7 @@ The website does not load the application's CSS or JavaScript.
 
 Every page uses `ThemeProvider.astro` and an icon-only `ThemeToggle.astro` pill.
 Its native Light/System/Dark buttons expose accessible names, pressed state, and
-44px targets; focus stays on the selected button. The provider runs
+compact desktop controls and 44px touch targets; focus stays on the selected button. The provider runs
 before paint and shares Starlight's existing `starlight-theme` storage key.
 System clears the override and follows live OS changes; explicit choices survive
 navigation. Blocked storage falls back to an in-memory preference. Native

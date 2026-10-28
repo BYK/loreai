@@ -171,12 +171,15 @@ test("short screens keep the theme pill and navigation usable", async ({
     expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThanOrEqual(
       viewport.height,
     );
+    const minimumTarget = await page.evaluate(() =>
+      matchMedia("(pointer: coarse)").matches ? 44 : 24,
+    );
     const choices = pill.getByRole("button");
     await expect(choices).toHaveCount(3);
     for (const button of await choices.all()) {
       const target = await button.boundingBox();
-      expect(target!.width).toBeGreaterThanOrEqual(44);
-      expect(target!.height).toBeGreaterThanOrEqual(44);
+      expect(target!.width).toBeGreaterThanOrEqual(minimumTarget);
+      expect(target!.height).toBeGreaterThanOrEqual(minimumTarget);
       await button.focus();
       await page.keyboard.press("Space");
       await expect(button).toHaveAttribute("aria-pressed", "true");
