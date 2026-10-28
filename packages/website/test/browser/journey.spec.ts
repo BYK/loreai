@@ -96,10 +96,10 @@ test("signup preserves the email on error and provides a bounded success receipt
   await email.fill("reader@example.com");
   await page.getByRole("button", { name: "Join early access list" }).click();
   await expect(page.locator("#waitlist-error")).toBeVisible();
-  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(email).toBeVisible();
   await expect(email).toHaveValue("reader@example.com");
-  await expect(email).toBeFocused();
-  await page.getByRole("button", { name: "Join early access list" }).click();
+  await expect(page.locator("#waitlist-error")).toBeFocused();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.locator("#waitlist-success")).toBeVisible();
   await expect(page.locator("#waitlist-success")).toContainText(
     "does not create an account",
@@ -201,14 +201,18 @@ test("pending signup is submitted once and its timeout offers recovery", async (
 }) => {
   await page.clock.install();
   let requests = 0;
-  await page.route("https://app.loops.so/api/newsletter-form/*", async () => {
-    requests++;
-  });
+  await page.route(
+    "https://app.loops.so/api/newsletter-form/*",
+    async (route) => {
+      requests++;
+      if (requests > 1) await route.fulfill({ status: 200, json: {} });
+    },
+  );
   await page.goto("/different/#waitlist");
   await page
     .getByRole("textbox", { name: "Email address" })
     .fill("reader@example.com");
-  const submit = page.getByRole("button", { name: "Join early access list" });
+  const submit = page.locator("#waitlist-btn");
   await submit.click();
   await expect(page.locator("#waitlist-btn")).toBeDisabled();
   await expect.poll(() => requests).toBe(1);
@@ -218,12 +222,15 @@ test("pending signup is submitted once and its timeout offers recovery", async (
   expect(requests).toBe(1);
   await page.clock.fastForward(16_000);
   await expect(page.locator("#waitlist-error")).toContainText("timed out");
-  await page.getByRole("button", { name: "Try again" }).click();
-  await expect(submit).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Email address" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "Email address" }),
   ).toHaveValue("reader@example.com");
-  expect(requests).toBe(1);
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.locator("#waitlist-success")).toBeVisible();
+  expect(requests).toBe(2);
 });
 
 test("blog masthead stays compact enough to lead with the articles", async ({

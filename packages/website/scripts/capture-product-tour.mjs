@@ -240,6 +240,21 @@ try {
       expect(unexpected).toEqual([]);
       console.log(`Captured ${name}-${scheme}`);
     }
+    await page.setViewportSize({ width: 390, height: 700 });
+    await page.goto(origin + `/ui/projects/${projectId}/knowledge/${entryId}`);
+    const knowledgeHeading = page.getByRole("heading", {
+      name: entry.title,
+      exact: true,
+    });
+    await expect(knowledgeHeading).toBeVisible();
+    await page.getByText("Source & history", { exact: true }).click();
+    await knowledgeHeading.scrollIntoViewIfNeeded();
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({
+      path: join(output, `knowledge-mobile-${scheme}.png`),
+    });
+    expect(unexpected).toEqual([]);
+    console.log(`Captured knowledge-mobile-${scheme}`);
     await context.close();
   }
 } finally {

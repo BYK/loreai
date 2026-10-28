@@ -1,10 +1,11 @@
-import { setupAgent } from "../lib/agent-setup";
-const chosen = setupAgent(new URLSearchParams(location.search).get("agent"));
+import { SETUP_AGENTS } from "../lib/agent-setup";
+import { bindUrlChoice } from "./url-choice";
+bindUrlChoice(
+  ".agent-setup",
+  "agent",
+  SETUP_AGENTS.map((agent) => agent.id),
+);
 for (const setup of document.querySelectorAll<HTMLElement>(".agent-setup")) {
-  const input = setup.querySelector<HTMLInputElement>(
-    `input[value="${chosen.id}"]`,
-  );
-  if (input) input.checked = true;
   setup
     .querySelectorAll<HTMLButtonElement>("[data-copy-setup]")
     .forEach((button) => {

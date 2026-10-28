@@ -2,7 +2,7 @@
 .theme-toggle { display:inline-flex;align-items:center;flex-shrink:0;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--chrome); }
 .theme-toggle button { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer; }
 .theme-toggle button:hover { color:var(--heading); }
-.theme-toggle button[aria-pressed="true"] { background:var(--surface);border-color:var(--line);color:var(--accent);box-shadow:0 1px 3px color-mix(in srgb,var(--heading) 8%,transparent); }
+.theme-toggle button[aria-pressed="true"] { background:var(--surface);border-color:var(--accent);color:var(--accent);box-shadow:0 1px 3px color-mix(in srgb,var(--heading) 8%,transparent); }
 .theme-toggle button:focus-visible { outline-offset:-3px; }
 .theme-toggle svg { display:block;width:16px;height:16px;pointer-events:none; }
 @media (pointer:coarse) { .theme-toggle button { width:44px;height:44px; } }

@@ -92,7 +92,12 @@ test("product tour shows the actual app and an accessible next step", async ({
   const panel = tour.locator("[data-tour-panel=knowledge]");
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("img")).toBeVisible();
-  await expect(panel.getByRole("img")).toHaveJSProperty("naturalWidth", 1120);
+  const mobile = page.viewportSize()!.width <= 600;
+  await expect(panel.getByRole("img")).toHaveJSProperty(
+    "naturalWidth",
+    mobile ? 390 : 1120,
+  );
+  await expect(panel.getByRole("img")).toHaveAttribute("src", /knowledge-/);
   const theme = await page.locator("html").getAttribute("data-theme");
   await expect(
     panel.getByRole("link", { name: /Open full-size/ }),

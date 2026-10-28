@@ -9,11 +9,11 @@ const base = import.meta.env.BASE_URL;
       <form id="waitlist-form" action="https://app.loops.so/api/newsletter-form/cmpemslgp03m10jxaipjw78iq" method="POST" aria-describedby="waitlist-description">
         <label for="waitlist-email">Email address</label>
         <input id="waitlist-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+        <div id="waitlist-error" class="cta-form-view signup-error" role="alert" tabindex="-1"><p id="waitlist-error-msg">We couldn’t add your email. Try again.</p></div>
         <button class="button button-primary" type="submit" id="waitlist-btn">Join early access list</button>
       </form>
       <p class="muted small">Unsubscribe using the link in any update.</p>
     </div>
     <div id="waitlist-success" class="cta-form-view receipt" role="status" tabindex="-1"><h3>You’re on the list.</h3><p>We’ll email you about Folk Lore early access. This does not create an account or enable team sync.</p><a href={`${base}docs/install/`}>Use local Lore while you wait →</a></div>
-    <div id="waitlist-error" class="cta-form-view receipt" role="alert" tabindex="-1"><p id="waitlist-error-msg">We couldn’t add your email. Try again.</p><button class="button button-secondary" type="button" id="waitlist-retry">Try again</button></div>
   </div>
 </section>

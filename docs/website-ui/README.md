@@ -19,7 +19,9 @@ unrelated lunch plan; the relevance story is explicitly illustrative.
 
 The tour uses captures of the actual built Solid app with synthetic API fixtures.
 It does not open a gateway or a production database. Native tour/setup choices work
-without JavaScript; enhancement handles allowlisted setup links and clipboard feedback.
+without JavaScript; enhancement handles allowlisted setup/tour query state, browser
+history, and clipboard feedback. The Knowledge preview opens that same tour view,
+with an actual mobile app capture and a full-size link.
 Docs guide a first recorded session, everyday use, troubleshooting, memory concepts,
 data/costs, and a reproducible example. Pagefind search stays local to static public docs.
 Task navigation precedes integrations and advanced references; generated references
@@ -94,3 +96,27 @@ The theme selector replaces the former dropdown with direct icon choices.
 No new backend behavior, dependencies, accounts, permissions, or guaranteed performance
 claims are introduced. The command contract test caught the incorrect `claude-code`
 launch token before it was corrected to the actual `claude` executable.
+
+
+## Follow-up design and accessibility audit
+
+All eight approved improvements are included:
+
+| Area | Delivered behavior |
+| --- | --- |
+| Navigation | Docs identifies its section; Get started remains an action rather than a second current destination |
+| Setup state | Allowlisted agent selection persists in the URL, reload, Back, and Forward; delayed initialization preserves early native choices |
+| Product preview | Knowledge preview opens the matching tour state; mobile uses actual 390×700 app captures; full-size originals remain linked |
+| Selected state | Compact theme pill retains its size and now uses an accent border exceeding 3:1 against its surrounding fill |
+| Hero explanation | One direct explanation of running Lore locally with an existing coding agent and reviewing project rules in Git |
+| Proportions | Smaller camp artwork and tighter spacing preserve geometry, camera, native fallback, and stable stage-panel height |
+| Articles | Long posts gain a native collapsible outline linked to generated heading IDs |
+| Signup recovery | Email and form stay visible on failure, with associated feedback and a one-action retry |
+
+![Mobile Knowledge tour](screenshots/tour-mobile-light.png)
+![Article section navigation](screenshots/article-outline-light.png)
+![Inline signup recovery with a synthetic address and mocked service response](screenshots/signup-error-light.png)
+
+These checks establish behavior for the reviewed routes and conditions, not full
+WCAG certification or a completed VoiceOver/NVDA audit. No real signup is submitted
+while capturing or testing the error/retry flow.

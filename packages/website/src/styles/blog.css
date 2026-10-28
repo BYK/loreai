@@ -183,3 +183,9 @@
 .article-takeaway a { font-size:.8125rem; }
 .article-next { display:flex;flex-direction:column;align-items:flex-start;gap:.75rem;border-top:1px solid var(--line);padding-top:2rem;margin-top:3rem; }
 .article-next h2 { font:500 1.25rem/1.4 var(--sans);margin:0; }
+
+.article-outline { border-block:1px solid var(--line);padding-block:.5rem;margin-bottom:2rem;font-size:.875rem; }
+.article-outline summary { min-height:44px;display:list-item;align-content:center;cursor:pointer;font-weight:500;color:var(--heading); }
+.article-outline ul { list-style:none;padding:0;margin:.5rem 0; }
+.article-outline a { display:flex;align-items:center;min-height:44px; }
+.article-outline .outline-subsection { margin-inline-start:1rem; }

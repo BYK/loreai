@@ -77,7 +77,9 @@ everyday workflow and installation entry. `/tour/` owns the full three-view app
 tour; benchmark details and team signup remain on their destination pages.
 `AgentSetup.astro` shares fixed definitions from `src/lib/agent-setup.ts` between
 the installation and first-session MDX guides. Native radios work without JavaScript; enhancement allowlists the `agent`
-query and enables click-only clipboard controls. Launch commands are tested against
+query and enables click-only clipboard controls. Agent and tour changes update
+allowlisted URL parameters and restore on reload or Back/Forward. Initial setup
+retains an early native selection when no valid explicit URL choice exists. Launch commands are tested against
 the owning gateway agent registry.
 
 Starlight search uses its built-in Pagefind integration. It indexes public static
@@ -99,3 +101,11 @@ It opens no gateway, account, provider connection, or production database, and b
 all nonlocal browser requests. Captures contain a fictional webhook project and
 sample counts; they are UI examples, not measurements or a live curation run. Both
 appearance variants are saved under `public/product-tour/`, with no DOM/CSS/image edits.
+Knowledge includes a 390×700 mobile capture alongside the 1120×760 desktop view.
+Responsive pictures retain explicit dimensions and link to the original full-size image.
+
+
+Long blog posts expose a native collapsible outline using Astro’s rendered heading
+IDs. Signup errors remain associated with the email input in the visible form;
+the original submit action becomes a direct retry with the existing timeout,
+duplicate-submit guard, and timestamp-only rate tracking.

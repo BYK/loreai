@@ -35,25 +35,28 @@ const formView = document.getElementById("waitlist-form-view");
 const successView = document.getElementById("waitlist-success");
 const errorView = document.getElementById("waitlist-error");
 const errorMessage = document.getElementById("waitlist-error-msg");
-const retryButton = document.getElementById("waitlist-retry");
 const rateKey = "loops-form-timestamp";
 let submitting = false;
+let failed = false;
 
-function showView(view) {
-  [formView, successView, errorView].forEach((element) =>
-    element?.classList.remove("show"),
-  );
-  view?.classList.add("show");
-  if (view !== formView) view?.focus();
+function clearError() {
+  errorView?.classList.remove("show");
+  email?.removeAttribute("aria-describedby");
+}
+function showSuccess() {
+  clearError();
+  formView?.classList.remove("show");
+  successView?.classList.add("show");
+  successView?.focus();
 }
 function showError(message) {
+  failed = true;
   if (errorMessage) errorMessage.textContent = message;
-  showView(errorView);
+  errorView?.classList.add("show");
+  email?.setAttribute("aria-describedby", "waitlist-error-msg");
+  if (button) button.textContent = "Try again";
+  errorView?.focus();
 }
-retryButton?.addEventListener("click", () => {
-  showView(formView);
-  email?.focus();
-});
 
 // oxlint-disable-next-line typescript/no-misused-promises -- DOM event callbacks ignore the returned promise
 form?.addEventListener("submit", async (event) => {
@@ -79,6 +82,8 @@ form?.addEventListener("submit", async (event) => {
     return;
   }
   submitting = true;
+  failed = false;
+  clearError();
   button.disabled = true;
   button.textContent = "Joining…";
   const controller = new AbortController();
@@ -103,7 +108,7 @@ form?.addEventListener("submit", async (event) => {
         /* The server accepted the signup. */
       }
       email.value = "";
-      showView(successView);
+      showSuccess();
     } else {
       showError(
         "We couldn’t add your email. Your address has been kept so you can try again.",
@@ -119,6 +124,6 @@ form?.addEventListener("submit", async (event) => {
     clearTimeout(timer);
     submitting = false;
     button.disabled = false;
-    button.textContent = "Join early access list";
+    button.textContent = failed ? "Try again" : "Join early access list";
   }
 });

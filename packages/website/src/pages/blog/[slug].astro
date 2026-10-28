@@ -9,7 +9,9 @@ export async function getStaticPaths() {
 }
 
 const { post } = Astro.props;
-const { Content } = await render(post);
+const { Content, headings } = await render(post);
+const outline = headings.filter(heading => heading.depth === 2 || heading.depth === 3);
+const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.length >= 4;
 ---
 
 <BlogLayout
@@ -29,6 +31,7 @@ const { Content } = await render(post);
       <p>{post.data.description}</p>
     </header>
     {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><strong>In practice</strong><p>{post.data.takeaway}</p><a href={`${import.meta.env.BASE_URL}docs/team-memory/`}>Current availability: local Lore and Git sharing; Folk Lore early access →</a></aside>}
+    {showOutline && <details class="article-outline"><summary>On this page</summary><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></details>}
     <div class="blog-prose">
       <Content />
     </div>
