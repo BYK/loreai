@@ -181,6 +181,7 @@ describe("remote gateway access headers", () => {
     expect(shouldRegisterNativeRecallTool("https://lore.example/", {})).toBe(
       false,
     );
+    expect(shouldRegisterNativeRecallTool("", {})).toBe(false);
   });
 
   test.each([

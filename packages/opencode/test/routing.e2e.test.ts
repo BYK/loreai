@@ -22,6 +22,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
+import { RECALL_TOOL_DESCRIPTION, RECALL_TOOL_NAME } from "@loreai/core";
 import { LorePlugin } from "../src/index";
 
 // Capture the pristine fetch BEFORE the plugin installs its interceptor so we
@@ -168,6 +169,19 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     // If discovery/interceptor-install regressed, the plugin would have stayed
     // inert (gatewayBase "") and never patched fetch.
     expect(globalThis.fetch).not.toBe(originalFetch);
+  });
+
+  test("registers native recall for the discovered local gateway", () => {
+    const recall = hooks.tool?.[RECALL_TOOL_NAME];
+    expect(recall?.description).toBe(RECALL_TOOL_DESCRIPTION);
+    expect(Object.keys(recall?.args ?? {}).sort()).toEqual([
+      "detailLimit",
+      "detailOffset",
+      "id",
+      "ids",
+      "query",
+      "scope",
+    ]);
   });
 
   test("the plugin's config hook pins provider baseURL to the discovered gateway", async () => {
