@@ -22,6 +22,8 @@ interface MockOpts {
   parents?: Record<string, string>;
   /** Records every session.get(id) call. */
   calls?: string[];
+  /** Records the workspace query passed to each session.get call. */
+  queries?: Array<{ id: string; directory?: string }>;
   /** When true, session.get rejects (transient failure). */
   fail?: () => boolean;
 }
@@ -30,11 +32,14 @@ function createMockClient(opts: MockOpts): PluginInput["client"] {
   return {
     tui: { showToast: () => Promise.resolve() },
     session: {
-      get: (args: { path: { id: string } }) => {
+      get: (args: { path: { id: string }; query?: { directory?: string } }) => {
         const id = args?.path?.id;
         opts.calls?.push(id);
+        opts.queries?.push({ id, directory: args.query?.directory });
         if (opts.fail?.()) return Promise.reject(new Error("server down"));
-        const parentID = opts.parents?.[id];
+        const parentID =
+          opts.parents?.[`${args.query?.directory}:${id}`] ??
+          opts.parents?.[id];
         return Promise.resolve({
           data: parentID ? { id, parentID } : { id },
         });
@@ -168,6 +173,41 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     );
     await headersFor(hooks, "cache-child");
     expect(calls.filter((id) => id === "cache-child")).toHaveLength(1);
+  });
+
+  test("scopes session metadata lookups to each workspace", async () => {
+    const directoryA = makeTmp("workspace-a");
+    const directoryB = makeTmp("workspace-b");
+    const queries: Array<{ id: string; directory?: string }> = [];
+    const client = createMockClient({
+      parents: {
+        [`${directoryA}:shared-session`]: "parent-a",
+        [`${directoryB}:shared-session`]: "parent-b",
+      },
+      queries,
+    });
+    const hooksA = await initPlugin(directoryA, client);
+    const hooksB = await initPlugin(directoryB, client);
+
+    await headersFor(hooksA, "shared-session");
+    await waitForHeader(
+      hooksA,
+      "shared-session",
+      "x-parent-session-id",
+      "parent-a",
+    );
+    await headersFor(hooksB, "shared-session");
+    await waitForHeader(
+      hooksB,
+      "shared-session",
+      "x-parent-session-id",
+      "parent-b",
+    );
+
+    expect(queries).toEqual([
+      { id: "shared-session", directory: directoryA },
+      { id: "shared-session", directory: directoryB },
+    ]);
   });
 
   test("a lookup failure is swallowed and NOT cached (retried next turn)", async () => {

@@ -226,12 +226,44 @@ function upstreamRequestTarget(upstream: URL): string {
 }
 
 /**
+ * Compact requests use a gateway management endpoint rather than a generation
+ * endpoint. Normalize every provider prefix to the registered compact route,
+ * while preserving the exact upstream request target for forwarding.
+ */
+function interceptCompactUrl(upstream: URL, gateway: URL): Rewrite | null {
+  const match = /(?:^|\/)(?:codex\/)?responses\/compact\/?$/.exec(
+    upstream.pathname,
+  );
+  if (!match) return null;
+
+  const versionedMatches = ["/v1/", "/v1beta/"]
+    .map((segment) => upstream.pathname.lastIndexOf(segment))
+    .filter((index) => index >= 0);
+  const versionedIdx = versionedMatches.length
+    ? Math.max(...versionedMatches)
+    : -1;
+  const upstreamBasePath =
+    versionedIdx >= 0
+      ? upstream.pathname.slice(0, versionedIdx)
+      : upstream.pathname.slice(0, match.index);
+
+  return {
+    gatewayUrl: `${gateway.origin}/v1/responses/compact${upstream.search}`,
+    upstreamBase: upstream.origin + upstreamBasePath,
+    upstreamPath: upstreamRequestTarget(upstream),
+  };
+}
+
+/**
  * Rewrite an intercepted URL to the gateway, handling both standard /v1/...
  * paths and non-standard paths (e.g. /codex/responses). Used by the
  * URL-pattern-matched path (Path 1). Returns null when the path can't be
  * mapped to a canonical gateway endpoint from the URL alone.
  */
 function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
+  const compact = interceptCompactUrl(upstream, gateway);
+  if (compact) return compact;
+
   // Preserve standard versioned paths. Gemini commonly uses /v1beta/ while
   // OpenAI and Anthropic use /v1/.
   const versionedMatches = ["/v1/", "/v1beta/"]
@@ -285,6 +317,9 @@ export function interceptUrlForProtocol(
   gateway: URL,
   protocol: BodyProtocol,
 ): Rewrite {
+  const compact = interceptCompactUrl(upstream, gateway);
+  if (compact) return compact;
+
   const gatewayPath = PROTOCOL_GATEWAY_PATHS[protocol];
   // Strip the recognized endpoint suffix from the path so X-Lore-Upstream-URL
   // points at the provider base (everything before the endpoint). If no known
@@ -651,23 +686,41 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
     const parsed = new URL(url);
     // Never intercept requests already going to the gateway
     if (url.startsWith(gatewayBase)) return false;
-    // Never intercept local requests (could be local LLM or gateway itself)
-    const host = parsed.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      // URL.hostname KEEPS brackets on IPv6 addresses (unlike the WHATWG
-      // URL spec we expected). Treat "[::1]" the same as "::1".
-      host === "::1" ||
-      host === "[::1]"
-    )
-      return false;
+    // Local endpoints include the full IPv4 loopback range and .localhost
+    // names; routing them can send local-provider credentials to the gateway.
+    if (isLocalInterceptionHost(parsed.hostname)) return false;
     // Intercept known LLM API paths only
     return matchesLLMApiPath(parsed.pathname);
   } catch {
     return false;
   }
+}
+
+function isLoopbackIPv4(host: string): boolean {
+  const octets = host.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+  );
+}
+
+function isLocalInterceptionHost(hostname: string): boolean {
+  // URL.hostname keeps brackets on IPv6 literals in the supported runtimes.
+  const host = hostname
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .toLowerCase()
+    .replace(/\.$/, "");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "127.0.0.1" ||
+    isLoopbackIPv4(host) ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host === "[::1]"
+  );
 }
 
 /**
@@ -953,15 +1006,9 @@ export function installFetchInterceptor(
       );
     }
 
-    // Never intercept local requests (could be local LLM or gateway itself)
+    // Never intercept local requests (could be local LLM or gateway itself).
     const host = upstream.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      host === "::1" ||
-      host === "[::1]"
-    ) {
+    if (isLocalInterceptionHost(host)) {
       return originalFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, true),

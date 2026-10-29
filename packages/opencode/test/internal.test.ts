@@ -177,6 +177,12 @@ describe("remote gateway access headers", () => {
     ).toBe(false);
   });
 
+  test("does not register native recall for an unmarked remote gateway", () => {
+    expect(shouldRegisterNativeRecallTool("https://lore.example/", {})).toBe(
+      false,
+    );
+  });
+
   test.each([
     "x-api-key",
     "X-Goog-Api-Key",

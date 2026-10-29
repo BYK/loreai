@@ -116,6 +116,35 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       );
     });
 
+    test("routes Codex compact requests to the registered compact endpoint", async () => {
+      const target = "https://api.openai.com/v1/codex/responses/compact?turn=2";
+      const body = JSON.stringify({ model: "gpt-5", input: [] });
+      await fetch(target, { method: "POST", body });
+
+      expect(captured?.url).toBe(`${GATEWAY}/v1/responses/compact?turn=2`);
+      expect(headerVal("x-lore-upstream-url")).toBe("https://api.openai.com");
+      expect(headerVal("x-lore-upstream-path")).toBe(
+        "/v1/codex/responses/compact?turn=2",
+      );
+      expect(captured?.init?.body).toBe(body);
+    });
+
+    test("routes prefixed compact requests without losing upstream path or query", async () => {
+      const target =
+        "https://api.openai.com/tenant/responses/compact?mode=fast";
+      const body = JSON.stringify({ model: "gpt-5", input: [] });
+      await fetch(target, { method: "POST", body });
+
+      expect(captured?.url).toBe(`${GATEWAY}/v1/responses/compact?mode=fast`);
+      expect(headerVal("x-lore-upstream-url")).toBe(
+        "https://api.openai.com/tenant",
+      );
+      expect(headerVal("x-lore-upstream-path")).toBe(
+        "/tenant/responses/compact?mode=fast",
+      );
+      expect(captured?.init?.body).toBe(body);
+    });
+
     test("preserves original headers and injects X-Lore-* context", async () => {
       await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -582,12 +611,18 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(captured?.url).toBe("https://registry.npmjs.org/some-package");
     });
 
-    test("does not intercept local LLM servers", async () => {
-      await fetch("http://localhost:8000/v1/messages", {
+    test.each([
+      "http://localhost:8000/v1/messages",
+      "http://127.0.0.2:8000/v1/messages",
+      "http://api.localhost:8000/v1/messages",
+      "http://localhost.:8000/v1/messages",
+    ])("does not intercept local LLM server %s", async (url) => {
+      await fetch(url, {
         method: "POST",
+        headers: { "x-api-key": "local-provider-key" },
         body: JSON.stringify({ model: "x", messages: [] }),
       });
-      expect(captured?.url).toBe("http://localhost:8000/v1/messages");
+      expect(captured?.url).toBe(url);
     });
   });
 });

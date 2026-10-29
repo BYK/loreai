@@ -237,6 +237,10 @@ function applySessionInfo(
   entry.titleFetchedAt = Date.now();
 }
 
+function sessionInfoKey(directory: string, sessionID: string): string {
+  return JSON.stringify([directory, sessionID]);
+}
+
 /**
  * Resolve a session's parent session ID and harness title via the OpenCode SDK.
  *
@@ -248,7 +252,7 @@ function applySessionInfo(
  * own `title` is forwarded percent-encoded as `x-lore-session-title` so the
  * gateway can persist it as the session's explicit title (#1921).
  *
- * Cached per session (parentID is immutable). A successful lookup — including
+ * Cached per workspace and session (parentID is immutable). A successful lookup — including
  * the common `null` for a primary session — is cached so we never re-query.
  * Failures (gateway server unreachable, session not yet persisted) are NOT
  * cached and never throw, so a transient error is retried on the next turn
@@ -257,12 +261,14 @@ function applySessionInfo(
 function resolveSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
+  directory: string,
 ): {
   parentID: string | null;
   title: string | null;
   parentLookupPending: boolean;
 } {
-  const cached = sessionParent.get(sessionID);
+  const key = sessionInfoKey(directory, sessionID);
+  const cached = sessionParent.get(key);
   if (cached) {
     cached.lastSeenAt = Date.now();
     // Title refresh policy (#1921): a harness that reports no title at all
@@ -283,41 +289,50 @@ function resolveSessionInfo(
         parentLookupPending: false,
       };
     }
-    fetchSessionInfo(client, sessionID);
+    fetchSessionInfo(client, sessionID, directory);
     return {
       parentID: cached.parentID,
       title: cached.title,
       parentLookupPending: false,
     };
   }
-  fetchSessionInfo(client, sessionID);
+  fetchSessionInfo(client, sessionID, directory);
   return { parentID: null, title: null, parentLookupPending: true };
 }
 
 function fetchSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
+  directory: string,
 ): void {
-  if (sessionInfoLookups.has(sessionID)) return;
+  // Session IDs are scoped by OpenCode's workspace directory; never reuse a
+  // lookup or cached metadata from a different workspace with the same ID.
+  const key = sessionInfoKey(directory, sessionID);
+  if (sessionInfoLookups.has(key)) return;
 
   // Session metadata is optional: never await it on a provider request. A
   // failed or timed-out lookup stays uncached so a later turn can retry it.
   let lookup: Promise<void> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const request = Promise.resolve()
-    .then(() => client.session.get({ path: { id: sessionID } }))
+    .then(() =>
+      client.session.get({
+        path: { id: sessionID },
+        query: { directory },
+      }),
+    )
     .then((res) => {
       // A timeout or newer lookup owns the slot now; late responses cannot
       // overwrite metadata resolved by a later turn.
-      if (!lookup || sessionInfoLookups.get(sessionID) !== lookup) return;
-      const entry = sessionParent.get(sessionID) ?? {
+      if (!lookup || sessionInfoLookups.get(key) !== lookup) return;
+      const entry = sessionParent.get(key) ?? {
         parentID: null,
         title: null,
         titleFetchedAt: 0,
         lastSeenAt: Date.now(),
       };
       applySessionInfo(entry, res.data);
-      sessionParent.set(sessionID, entry);
+      sessionParent.set(key, entry);
       reapStaleSessionParent();
     })
     .catch(() => {
@@ -328,11 +343,11 @@ function fetchSessionInfo(
   });
   lookup = Promise.race([request, deadline]).finally(() => {
     if (timeout) clearTimeout(timeout);
-    if (sessionInfoLookups.get(sessionID) === lookup) {
-      sessionInfoLookups.delete(sessionID);
+    if (sessionInfoLookups.get(key) === lookup) {
+      sessionInfoLookups.delete(key);
     }
   });
-  sessionInfoLookups.set(sessionID, lookup);
+  sessionInfoLookups.set(key, lookup);
 }
 
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
@@ -491,9 +506,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       },
 
       tool:
-        loreDisabled ||
-        Boolean(process.env.LORE_REMOTE_URL) ||
-        !shouldRegisterNativeRecallTool(gatewayBase)
+        loreDisabled || !shouldRegisterNativeRecallTool(gatewayBase)
           ? {}
           : { [RECALL_TOOL_NAME]: createRecallTool() },
 
@@ -516,7 +529,11 @@ export const LorePlugin: Plugin = async (ctx) => {
         // parentID; forward it as the `x-parent-session-id` signal the gateway
         // already understands (Claude Code sends this natively). Resolution is
         // cached and never blocks or throws on failure.
-        const sessionInfo = resolveSessionInfo(ctx.client, input.sessionID);
+        const sessionInfo = resolveSessionInfo(
+          ctx.client,
+          input.sessionID,
+          ctx.worktree || ctx.directory,
+        );
         if (sessionInfo.parentID) {
           output.headers["x-parent-session-id"] = sessionInfo.parentID;
         } else {

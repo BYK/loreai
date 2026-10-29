@@ -95,7 +95,9 @@ export function shouldRegisterNativeRecallTool(
   gatewayBase: string,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return !isRemoteGatewayTarget(gatewayBase, env);
+  // Native recall reads the host's local database. Keep it available only
+  // when model traffic goes to a local gateway, never a remote target.
+  return isLoopbackUrl(gatewayBase) && !isRemoteGatewayTarget(gatewayBase, env);
 }
 
 /** Provider and Lore credentials are applied by the gateway, never this hop. */
