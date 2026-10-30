@@ -1018,6 +1018,9 @@ const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
 const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
 const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
 const MAX_PENDING_SESSION_CLAIMS = 64;
+// One assistant response can invoke several native recall tools in parallel.
+// Serialize their reads while retaining a bounded per-session request backlog.
+const MAX_PENDING_NATIVE_RECALL_CLAIMS_PER_SESSION = 16;
 const MAX_DETACHED_PIPELINE_REQUESTS = 64;
 let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
 let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
@@ -1031,7 +1034,8 @@ interface PendingSessionClaim {
   onAbort: () => void;
 }
 
-const pendingSessionClaims = new Map<string, PendingSessionClaim>();
+// Insertion order preserves FIFO while each waiter has independent cancellation.
+const pendingSessionClaims = new Set<PendingSessionClaim>();
 
 class PipelineCapacityError extends Error {}
 
@@ -1059,6 +1063,14 @@ function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
   return count;
 }
 
+function pendingSessionClaimsForSession(sessionID: string): number {
+  let count = 0;
+  for (const claim of pendingSessionClaims) {
+    if (claim.sessionID === sessionID) count++;
+  }
+  return count;
+}
+
 function pipelineSessionHasCapacity(sessionID: string): boolean {
   return (
     activePipelineRequestsForSession(sessionID) +
@@ -1068,7 +1080,8 @@ function pipelineSessionHasCapacity(sessionID: string): boolean {
 }
 
 function pumpPendingSessionClaims(): void {
-  for (const [sessionID, claim] of pendingSessionClaims) {
+  for (const claim of pendingSessionClaims) {
+    const { sessionID } = claim;
     if (
       activePipelineRequests.size + streamingPostResponsePending >=
       maxActivePipelineRequests
@@ -1085,7 +1098,7 @@ function pumpPendingSessionClaims(): void {
       continue;
     }
     if (!pipelineSessionHasCapacity(sessionID)) continue;
-    pendingSessionClaims.delete(sessionID);
+    pendingSessionClaims.delete(claim);
     claim.signal.removeEventListener("abort", claim.onAbort);
     if (claim.signal.aborted) {
       claim.reject(claim.signal.reason);
@@ -1100,7 +1113,7 @@ function pumpPendingSessionClaims(): void {
 function isPipelineSessionActive(sessionID: string): boolean {
   return (
     activePipelineRequestsForSession(sessionID) > 0 ||
-    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaimsForSession(sessionID) > 0 ||
     streamingPostResponseFinalizers.has(sessionID)
   );
 }
@@ -19400,6 +19413,7 @@ export async function handleNativeRecallEndpoint(
         undefined,
         undefined,
         directRequestCredentialFingerprint(req, config),
+        MAX_PENDING_NATIVE_RECALL_CLAIMS_PER_SESSION,
       );
     } catch {
       return reply(503, "Recall is temporarily unavailable");
@@ -20244,15 +20258,19 @@ async function claimPipelineSession(
   active: ActivePipelineRequest,
   sessionID: string,
   signal: AbortSignal,
+  maxPendingPerSession: number,
 ): Promise<void> {
   if (active.sessionIDs.has(sessionID)) return;
   signal.throwIfAborted();
-  if (pipelineSessionHasCapacity(sessionID)) {
+  if (
+    pendingSessionClaimsForSession(sessionID) === 0 &&
+    pipelineSessionHasCapacity(sessionID)
+  ) {
     active.sessionIDs.add(sessionID);
     return;
   }
   if (
-    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaimsForSession(sessionID) >= maxPendingPerSession ||
     pendingSessionClaims.size >= MAX_PENDING_SESSION_CLAIMS ||
     pendingSessionClaimsForAdmissionKey(active.admissionKey) >=
       MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
@@ -20264,14 +20282,13 @@ async function claimPipelineSession(
   return new Promise<void>((resolve, reject) => {
     let claim: PendingSessionClaim;
     const onAbort = () => {
-      if (pendingSessionClaims.get(sessionID) !== claim) return;
-      pendingSessionClaims.delete(sessionID);
+      if (!pendingSessionClaims.delete(claim)) return;
       signal.removeEventListener("abort", onAbort);
       reject(signal.reason);
       pumpPendingSessionClaims();
     };
     claim = { active, sessionID, signal, resolve, reject, onAbort };
-    pendingSessionClaims.set(sessionID, claim);
+    pendingSessionClaims.add(claim);
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
     else pumpPendingSessionClaims();
@@ -20289,6 +20306,7 @@ async function runActivePipelineRequest(
   onResponseBodyCancelled?: () => void,
   onResponseBodyCompleted?: () => void,
   admissionKey = "",
+  maxPendingPerSession = 1,
 ): Promise<Response> {
   if (
     detachedPipelineRequests.size +
@@ -20298,6 +20316,7 @@ async function runActivePipelineRequest(
     activePipelineRequests.size + streamingPostResponsePending >=
       maxActivePipelineRequests ||
     activePipelineRequestsForAdmissionKey(admissionKey) +
+      pendingSessionClaimsForAdmissionKey(admissionKey) +
       (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) >=
       MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
   ) {
@@ -20367,7 +20386,7 @@ async function runActivePipelineRequest(
 
   try {
     const response = await operation(signal, trackOperation, (sessionID) =>
-      claimPipelineSession(active, sessionID, signal),
+      claimPipelineSession(active, sessionID, signal, maxPendingPerSession),
     );
     responseReturned = true;
     if (signal.aborted) {

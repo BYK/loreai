@@ -13,6 +13,72 @@ type TurnGroup = {
 };
 const groups = new Map<string, TurnGroup>();
 
+type PiRequestMetadata = {
+  projectPath: string;
+  sessionID: string;
+  gitRemote: string;
+  sessionTitle: string;
+};
+type RequestOwners = {
+  owners: Map<string, PiRequestMetadata>;
+  overflow: number;
+};
+const requestOwners = new Map<string, RequestOwners>();
+
+/** Keep live factory metadata separate from the bounded, evictable turn cache. */
+export function trackPiRequestOwner(
+  gateway: string,
+  ownerID: string,
+  metadata: PiRequestMetadata,
+): { update: (next: PiRequestMetadata) => void; retire: () => void } {
+  let registry = requestOwners.get(gateway);
+  if (!registry) {
+    registry = { owners: new Map(), overflow: 0 };
+    requestOwners.set(gateway, registry);
+  }
+  const state = registry;
+  const tracked = state.owners.size < 256;
+  let retired = false;
+  if (tracked) state.owners.set(ownerID, { ...metadata });
+  else state.overflow++;
+  return {
+    update(next) {
+      if (!retired && tracked) state.owners.set(ownerID, { ...next });
+    },
+    retire() {
+      if (retired) return;
+      retired = true;
+      if (tracked) state.owners.delete(ownerID);
+      else state.overflow--;
+      if (state.owners.size === 0 && state.overflow === 0)
+        requestOwners.delete(gateway);
+    },
+  };
+}
+
+/** Untagged auxiliary requests cannot borrow an active factory's turn. */
+export function singlePiRequestOwner(
+  gateway: string,
+  headers?: Headers,
+): { ownerID: string; metadata: PiRequestMetadata } | undefined {
+  const registry = requestOwners.get(gateway);
+  // Never silently evict a live owner and mistake another one for unique.
+  if (!registry || registry.overflow > 0) return undefined;
+  const project = headers?.get("x-lore-project");
+  const session = headers?.get("x-lore-session-id");
+  let candidate: { ownerID: string; metadata: PiRequestMetadata } | undefined;
+  for (const [ownerID, metadata] of registry.owners) {
+    if (
+      (project && metadata.projectPath !== project) ||
+      (session && metadata.sessionID !== session)
+    )
+      continue;
+    if (candidate) return undefined;
+    candidate = { ownerID, metadata };
+  }
+  return candidate;
+}
+
 /** Shared ownership survives extension reloads, while scopes remain distinct. */
 export function piTurnGroup(
   gateway: string,
@@ -137,6 +203,7 @@ export function retirePiOwner(gateway: string, ownerID: string): void {
 export function singlePendingPiTurn(
   gateway: string,
   headers?: Headers,
+  ownerID?: string,
 ): RecallToolContext | undefined {
   const project = headers?.get("x-lore-project");
   const session = headers?.get("x-lore-session-id");
@@ -149,7 +216,11 @@ export function singlePendingPiTurn(
     )
       continue;
     if (group.ambiguous || group.pending.size > 1) return undefined;
-    for (const turn of group.pending.values()) candidates.push(turn);
+    for (const turn of group.pending.values()) {
+      if (ownerID && !group.owners.get(ownerID)?.pending.has(turn.turnID!))
+        return undefined;
+      candidates.push(turn);
+    }
   }
   return candidates.length === 1 ? candidates[0] : undefined;
 }

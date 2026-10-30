@@ -884,6 +884,45 @@ describe("GET /api/v1/recall", () => {
     expect(body.error.message).toContain("Invalid scope");
   });
 
+  it.each([null, "", "   "])(
+    "returns 400 for session scope without a nonblank session ID (%s)",
+    async (session) => {
+      const { projectPath } = await seedProject();
+      const params = new URLSearchParams({
+        q: "test",
+        path: projectPath,
+        scope: "session",
+        expand: "false",
+      });
+      if (session !== null) params.set("session", session);
+      const res = await api(`/api/v1/recall?${params}`);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        error: { type: string; message: string };
+      };
+      expect(body.error).toMatchObject({
+        type: "invalid_request",
+        message: "Recall session scope requires a session ID.",
+      });
+    },
+  );
+
+  it("accepts session scope with a session ID", async () => {
+    const { projectPath } = await seedProject();
+    const params = new URLSearchParams({
+      q: "test",
+      path: projectPath,
+      scope: "session",
+      session: "test-session",
+      expand: "false",
+    });
+    const res = await api(`/api/v1/recall?${params}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { scope: string; result: string };
+    expect(body.scope).toBe("session");
+    expect(typeof body.result).toBe("string");
+  });
+
   it("returns results for a valid query", async () => {
     const { projectPath, knowledgeId } = await seedProject();
     const pq = `path=${encodeURIComponent(projectPath)}`;

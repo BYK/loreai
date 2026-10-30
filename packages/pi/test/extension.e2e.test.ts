@@ -185,6 +185,7 @@ describe("pi extension — e2e against a real gateway", () => {
         remoteMock.pi as unknown as Parameters<typeof lorePiExtension>[0],
       );
       expect(remoteMock.tools).toHaveLength(0);
+      await remoteMock.handlers.get("session_shutdown")?.({});
     } finally {
       process.env = previousEnv;
     }
@@ -266,6 +267,7 @@ describe("pi extension — e2e against a real gateway", () => {
   });
 
   test("native recall binds tool origins across rotation, model switches, overlap, and reload", async () => {
+    await mock.handlers.get("session_shutdown")?.({});
     const branch: unknown[] = [];
     let liveProvider = "anthropic";
     let sequence = 0;
@@ -401,51 +403,6 @@ describe("pi extension — e2e against a real gateway", () => {
     expect(
       await call(first, "call-a", { ...context, cwd: "/other-project" }),
     ).toContain("unavailable");
-    // A dynamically discovered provider has no static registration headers.
-    // The first factory's shared interceptor must select this pending nonce,
-    // never its original session/turn captured before extension reload.
-    await reloaded.handlers.get("turn_start")?.(
-      { type: "turn_start", turnIndex: 99, timestamp: 99 },
-      context,
-    );
-    const custom = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": "custom-provider-token",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1024,
-        system: "You are a coding assistant. ".repeat(30),
-        messages: [
-          { role: "user", content: "pi-turn-memory-custom-after-reload" },
-        ],
-      }),
-    });
-    expect(custom.status).toBe(200);
-    await custom.text();
-    const customMessage = {
-      role: "assistant",
-      provider: "custom-provider",
-      model: "claude-sonnet-4-20250514",
-      timestamp: 99,
-      content: [
-        { type: "toolCall", id: "custom-call", name: RECALL_TOOL_NAME },
-      ],
-    };
-    await reloaded.handlers.get("message_start")?.(
-      { type: "message_start", message: customMessage },
-      context,
-    );
-    branch.push({
-      type: "message",
-      id: "custom-entry",
-      message: customMessage,
-    });
-    expect(await call(reloaded, "custom-call")).toContain(
-      "pi-turn-memory-custom-after-reload",
-    );
     expect(
       await call(first, "call-a", {
         ...context,
@@ -530,6 +487,53 @@ describe("pi extension — e2e against a real gateway", () => {
     expect(await call(reloaded, "after-overlap-call")).toContain(
       "pi-turn-memory-after-overlap",
     );
+    await first.handlers.get("session_shutdown")?.({});
+    // A dynamically discovered provider has no static registration headers.
+    // The first factory's shared interceptor must select this pending nonce,
+    // never its original session/turn captured before extension reload.
+    await reloaded.handlers.get("turn_start")?.(
+      { type: "turn_start", turnIndex: 99, timestamp: 99 },
+      context,
+    );
+    const custom = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "custom-provider-token",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        system: "You are a coding assistant. ".repeat(30),
+        messages: [
+          { role: "user", content: "pi-turn-memory-custom-after-reload" },
+        ],
+      }),
+    });
+    expect(custom.status).toBe(200);
+    await custom.text();
+    const customMessage = {
+      role: "assistant",
+      provider: "custom-provider",
+      model: "claude-sonnet-4-20250514",
+      timestamp: 99,
+      content: [
+        { type: "toolCall", id: "custom-call", name: RECALL_TOOL_NAME },
+      ],
+    };
+    await reloaded.handlers.get("message_start")?.(
+      { type: "message_start", message: customMessage },
+      context,
+    );
+    branch.push({
+      type: "message",
+      id: "custom-entry",
+      message: customMessage,
+    });
+    expect(await call(reloaded, "custom-call")).toContain(
+      "pi-turn-memory-custom-after-reload",
+    );
+    await reloaded.handlers.get("session_shutdown")?.({});
   });
 
   test("the gateway serves /v1/messages at the registered Anthropic baseUrl", async () => {

@@ -559,6 +559,13 @@ async function handleRecall(
   }
   const scope = rawScope as RecallScope;
   const sessionID = url.searchParams.get("session") ?? undefined;
+  if (scope === "session" && !sessionID?.trim()) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Recall session scope requires a session ID.",
+    );
+  }
   const limit = getLimit(url, 10, 50);
   const includeKnowledgeLinks = parseBooleanParam(url, "link_knowledge", false);
 

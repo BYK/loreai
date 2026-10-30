@@ -58,6 +58,8 @@ import { recallOriginKey } from "./recall-origin";
 import {
   piTurnGroup,
   singlePendingPiTurn,
+  singlePiRequestOwner,
+  trackPiRequestOwner,
   startPiOwner,
   startPiTurn,
   bindPiOrigin,
@@ -202,6 +204,17 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   }
 
   let cachedGitRemote = getGitRemote(projectPath) ?? "";
+  const requestMetadata = () => ({
+    projectPath,
+    sessionID: currentSessionID,
+    gitRemote: cachedGitRemote,
+    sessionTitle: currentSessionTitle,
+  });
+  const requestOwner = trackPiRequestOwner(
+    gatewayBase,
+    turnOwnerID,
+    requestMetadata(),
+  );
 
   // Install fetch-level interceptor — transparently reroutes LLM API calls
   // through the gateway while preserving original auth headers and URLs.
@@ -215,21 +228,26 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     installFetchInterceptor({
       gatewayBase,
       getHeaders: (requestHeaders) => {
-        const owner = singlePendingPiTurn(gatewayBase, requestHeaders);
+        const owner = singlePiRequestOwner(gatewayBase, requestHeaders);
         if (!owner) return { ...gatewayAccessHeaders };
+        const metadata = owner.metadata;
+        const scope = new Headers({
+          "x-lore-project": metadata.projectPath,
+          "x-lore-session-id": metadata.sessionID,
+        });
+        const turn = singlePendingPiTurn(gatewayBase, scope, owner.ownerID);
         const headers: Record<string, string> = {
           ...gatewayAccessHeaders,
-          "x-lore-session-id": owner.sessionID!,
-          "x-lore-project": owner.projectPath,
-          ...(owner.turnID
-            ? { [NATIVE_RECALL_TURN_HEADER]: owner.turnID }
-            : {}),
+          "x-lore-session-id": metadata.sessionID,
+          "x-lore-project": metadata.projectPath,
+          ...(turn?.turnID ? { [NATIVE_RECALL_TURN_HEADER]: turn.turnID } : {}),
         };
-        if (owner.projectPath === projectPath && cachedGitRemote)
-          headers["x-lore-git-remote"] = cachedGitRemote;
-        if (owner.sessionID === currentSessionID && currentSessionTitle)
-          headers["x-lore-session-title"] =
-            encodeURIComponent(currentSessionTitle);
+        if (metadata.gitRemote)
+          headers["x-lore-git-remote"] = metadata.gitRemote;
+        if (metadata.sessionTitle)
+          headers["x-lore-session-title"] = encodeURIComponent(
+            metadata.sessionTitle,
+          );
         return headers;
       },
       onRequestHeaders: (headers) => {
@@ -296,6 +314,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       // requests carry the correct x-lore-session-id header.
       registerProviders();
     }
+    requestOwner.update(requestMetadata());
   });
 
   pi.on("agent_start", (_event, context) => {
@@ -319,7 +338,12 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   pi.on("turn_start", (_event, context) => {
     if (retired || context.signal?.aborted) return;
     currentSessionID = sessionIDFor(context.sessionManager.getSessionFile());
-    projectPath = discoverWorkspaceRoot(context.cwd);
+    const nextProjectPath = discoverWorkspaceRoot(context.cwd);
+    if (projectPath !== nextProjectPath) {
+      projectPath = nextProjectPath;
+      cachedGitRemote = getGitRemote(projectPath) ?? "";
+    }
+    requestOwner.update(requestMetadata());
     currentTurn = {
       projectPath,
       sessionID: currentSessionID,
@@ -383,6 +407,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   });
   pi.on("session_shutdown", () => {
     retired = true;
+    requestOwner.retire();
     retireCurrentOwnership();
     compactAuthHeaders = {};
   });
@@ -392,6 +417,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   pi.on("before_agent_start", async (_event, ctx) => {
     if (retired) return;
     currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
+    requestOwner.update(requestMetadata());
   });
 
   // ---------------------------------------------------------------------------
