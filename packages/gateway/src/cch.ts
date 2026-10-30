@@ -228,12 +228,13 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.310": SEED_2_1_138,
   "2.1.311": SEED_2_1_138,
   "2.1.312": SEED_2_1_138,
+  "2.1.314": SEED_2_1_138,
   // Future versions: extract and add entries here.
   // Use `pnpm exec tsx scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
 
 /** Version we pin worker billing headers to (must have a known seed). */
-const WORKER_VERSION = "2.1.312";
+const WORKER_VERSION = "2.1.314";
 const WORKER_SEED = VERSION_SEEDS[WORKER_VERSION];
 if (WORKER_SEED === undefined) {
   throw new Error(`Missing CCH seed for worker version ${WORKER_VERSION}`);
