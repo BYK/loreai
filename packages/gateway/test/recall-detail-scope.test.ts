@@ -44,4 +44,19 @@ test("id-only recall keeps the scope bound into an opaque detail ref", async () 
 
   expect(detail.result).toContain(marker);
   expect(detail.input.scope).toBeUndefined();
+
+  const batch = await executeRecall(
+    recallBlock({ ids: [detailRef] }),
+    projectPath,
+    sessionID,
+  );
+  expect(batch.result).toContain(marker);
+  expect(batch.input.scope).toBeUndefined();
+
+  const wrongScope = await executeRecall(
+    recallBlock({ ids: [detailRef], scope: "all" }),
+    projectPath,
+    sessionID,
+  );
+  expect(wrongScope.result).not.toContain(marker);
 });

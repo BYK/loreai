@@ -86,6 +86,8 @@ import {
 import {
   load,
   config as loreConfig,
+  createRecallToolExecutor,
+  parseRecallToolArguments,
   ensureProject,
   db,
   recordCacheBustObservation,
@@ -6704,6 +6706,7 @@ function getOrCreateSession(
     }
 
     // Restore sub-agent parent–child relationship (v26)
+    state.parentSessionPrimary = persisted?.parentSessionPrimary === true;
     if (persisted?.isSubagent) {
       state.isSubagent = true;
       // Preserve the provisional classification across restarts so a later
@@ -19292,6 +19295,118 @@ async function handleCompactEndpointInner(
   }
 }
 
+/** Execute a native recall tool under the gateway's established session owner. */
+export async function handleNativeRecallEndpoint(
+  req: Request,
+  config: GatewayConfig,
+  loopbackPeer = false,
+): Promise<Response> {
+  const rawHeaders = requestHeaders(req.headers);
+  const reply = (status: number, message: string) =>
+    new Response(JSON.stringify({ error: "recall_unavailable", message }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return reply(400, "Conflicting provider credentials");
+  }
+  if (
+    !extractAuth(rawHeaders) &&
+    (!loopbackPeer || usesRemoteSessionBinding(config))
+  )
+    return reply(401, "A provider credential is required");
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress)
+      return reply(503, "Gateway pipeline is resetting");
+    const requestGeneration = streamingPostResponseGeneration;
+    const projectPath = rawHeaders["x-lore-project"];
+    if (!projectPath) return reply(400, "A project path is required");
+    const minimalReq: GatewayRequest = {
+      protocol: "anthropic",
+      system: "",
+      messages: [],
+      tools: [],
+      model: "",
+      maxTokens: 0,
+      stream: false,
+      metadata: {},
+      rawHeaders,
+      signal: req.signal,
+    };
+    const state = resolveAuthenticatedDirectSession(
+      minimalReq,
+      projectPath,
+      config,
+    );
+    if (!state) return reply(404, "No authenticated session found");
+    if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
+      return reply(403, "Project does not match the authenticated session");
+    }
+    try {
+      return await runActivePipelineRequest(
+        req.signal,
+        async (signal, _trackOperation, claimSession) => {
+          await claimSession(state.sessionID);
+          await awaitStreamingPostResponse(state.sessionID, signal);
+          assertCurrentPipelineGeneration(signal, requestGeneration);
+          if (
+            !confirmedIndexedIdentityResolvesTo(
+              minimalReq,
+              state.sessionID,
+              config,
+            )
+          ) {
+            return reply(404, "No authenticated session found");
+          }
+          if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
+            return reply(
+              403,
+              "Project does not match the authenticated session",
+            );
+          }
+          let input: unknown;
+          try {
+            input = JSON.parse(
+              await decodeRequestBody(req, signal, {
+                compressedBytes: 16_384,
+                decompressedBytes: 16_384,
+              }),
+            );
+          } catch {
+            signal.throwIfAborted();
+            return reply(400, "Invalid recall arguments");
+          }
+          const parsed = parseRecallToolArguments(input);
+          if (!parsed.valid) return reply(400, parsed.error);
+          await initIfNeeded(
+            state.projectPath,
+            config,
+            undefined,
+            signal,
+            requestGeneration,
+          );
+          const execute = createRecallToolExecutor();
+          const result = await execute(parsed.value, {
+            projectPath: state.projectPath,
+            sessionID: state.sessionID,
+            signal,
+          });
+          signal.throwIfAborted();
+          return new Response(JSON.stringify({ result }), {
+            headers: { "content-type": "application/json" },
+          });
+        },
+        undefined,
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
+      );
+    } catch {
+      return reply(503, "Recall is temporarily unavailable");
+    }
+  });
+}
+
 export async function handleCompactEndpoint(
   req: Request,
   config: GatewayConfig,
@@ -21833,22 +21948,31 @@ async function handleConversationTurnPrepared(
     // adversarial sub-agent request that carries neither header.
     const parentLookupValue = parentClientId ?? sharedSessionId;
     if (
-      sessionState.parentSessionPending &&
+      (sessionState.parentSessionPending ||
+        sessionState.parentSessionPrimary) &&
       (parentClientId || isClaudeSubagent)
     ) {
+      sessionState.isSubagent = true;
       sessionState.parentSessionPending = false;
-      saveSessionTracking(sessionID, { parentSessionPending: false });
+      sessionState.parentSessionPrimary = false;
+      saveSessionTracking(sessionID, {
+        isSubagent: true,
+        parentSessionPending: false,
+        parentSessionPrimary: false,
+      });
     }
     // The OpenCode adapter cannot await session.get() on the provider request.
-    // Mark its cold lookup as sub-agent-scoped before LTM selection, then clear
-    // only that unresolved classification after the adapter reports a primary
-    // session. Native parent/Claude signals always take precedence.
+    // Mark an unclassified cold lookup as sub-agent-scoped before LTM selection.
+    // Explicit primary confirmation survives a later adapter cache miss; age
+    // and existing conversation activity never establish that confirmation.
+    // Native parent/Claude signals always take precedence.
     const parentNotResolvedHere =
       !isClaudeSubagent && !parentClientId && !sessionState.parentSessionId;
     if (
       parentNotResolvedHere &&
       parentStateHint === "pending" &&
       !sessionState.isSubagent &&
+      !sessionState.parentSessionPrimary &&
       sessionState.parentSessionPending !== true
     ) {
       sessionState.isSubagent = true;
@@ -21860,13 +21984,17 @@ async function handleConversationTurnPrepared(
     } else if (
       parentNotResolvedHere &&
       parentStateHint === "primary" &&
-      sessionState.parentSessionPending === true
+      (!sessionState.isSubagent ||
+        sessionState.parentSessionPending === true) &&
+      !sessionState.parentSessionPrimary
     ) {
       sessionState.isSubagent = false;
       sessionState.parentSessionPending = false;
+      sessionState.parentSessionPrimary = true;
       saveSessionTracking(sessionID, {
         isSubagent: false,
         parentSessionPending: false,
+        parentSessionPrimary: true,
       });
     }
     const shouldResolveParent =

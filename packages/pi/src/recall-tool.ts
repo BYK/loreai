@@ -12,6 +12,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { recallOrigin, type RecallOrigin } from "./recall-origin";
 
 const properties = RECALL_TOOL_INPUT_SCHEMA.properties;
 
@@ -85,6 +86,10 @@ type RecallToolHostContext = Pick<
 export function createPiRecallTool(
   getHostContext: () => RecallToolHostContext,
   execute: RecallToolExecutor = executeRecallTool,
+  resolveTurn?: (
+    origin: RecallOrigin,
+    context: ExtensionContext,
+  ) => RecallToolContext | undefined,
 ): ToolDefinition {
   return {
     name: RECALL_TOOL_NAME,
@@ -93,17 +98,47 @@ export function createPiRecallTool(
     promptSnippet: "Search Lore memory for project knowledge and earlier work.",
     parameters,
     async execute(
-      _toolCallID,
+      toolCallID,
       input,
       signal,
       _onUpdate,
       context: ExtensionContext,
     ) {
-      const hostContext = getHostContext();
+      const callSignal = signal ?? context.signal;
+      if (callSignal?.aborted)
+        return {
+          content: [{ type: "text", text: "Recall was cancelled." }],
+          details: undefined,
+        };
+      const origin = recallOrigin(context, toolCallID);
+      if (!origin)
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Recall is unavailable for this authenticated session.",
+            },
+          ],
+          details: undefined,
+        };
+      const hostContext = resolveTurn
+        ? resolveTurn(origin, context)
+        : getHostContext();
+      if (!hostContext)
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Recall is unavailable for this authenticated session.",
+            },
+          ],
+          details: undefined,
+        };
       // Use the same project/session pair as provider attribution for this turn.
       const result = await execute(input, {
         ...hostContext,
-        signal: signal ?? context.signal,
+        providerID: origin.providerID,
+        signal: callSignal,
       });
       return { content: [{ type: "text", text: result }], details: undefined };
     },

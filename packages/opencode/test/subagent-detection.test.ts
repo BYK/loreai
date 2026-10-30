@@ -236,6 +236,42 @@ describe("OpenCode plugin — sub-agent detection (#1300)", () => {
     );
   });
 
+  test("a non-throwing SDK error stays pending and retries rather than caching a primary session", async () => {
+    const dir = makeTmp("sdk-error");
+    const client = createMockClient({});
+    let available = false;
+    let calls = 0;
+    client.session.get = (() => {
+      calls++;
+      return Promise.resolve(
+        available
+          ? { data: { id: "sdk-error-child", parentID: "sdk-error-parent" } }
+          : { error: { message: "server unavailable" } },
+      );
+    }) as unknown as typeof client.session.get;
+    const hooks = await initPlugin(dir, client);
+
+    expect(
+      (await headersFor(hooks, "sdk-error-child"))[
+        "x-lore-session-parent-state"
+      ],
+    ).toBe("pending");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const afterError = await headersFor(hooks, "sdk-error-child");
+    expect(afterError["x-lore-session-parent-state"]).toBe("pending");
+    expect(afterError["x-parent-session-id"]).toBeUndefined();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).toBeGreaterThanOrEqual(2);
+
+    available = true;
+    await waitForHeader(
+      hooks,
+      "sdk-error-child",
+      "x-parent-session-id",
+      "sdk-error-parent",
+    );
+  });
+
   test("a stalled session lookup never blocks provider headers", async () => {
     const dir = makeTmp("stalled");
     const client = createMockClient({});

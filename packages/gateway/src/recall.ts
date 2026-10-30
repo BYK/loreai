@@ -605,6 +605,7 @@ export function serializeRecallStore(store: RecallStore): string {
       continue;
     }
     const companionToolUseCounts = companionCountsFor(value);
+    const companionToolUseFingerprints = companionFingerprintsFor(value);
     entries.push([
       key,
       {
@@ -618,6 +619,9 @@ export function serializeRecallStore(store: RecallStore): string {
         result: value.result,
         anchorContextId: value.anchorContextId,
         ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
+        ...(companionToolUseFingerprints
+          ? { companionToolUseFingerprints }
+          : {}),
       },
     ]);
   }
@@ -691,6 +695,9 @@ export function deserializeRecallStore(json: string): RecallStore {
       ) {
         try {
           const companionToolUseCounts = companionCountsFor(entry[1]);
+          const companionToolUseFingerprints = companionFingerprintsFor(
+            entry[1],
+          );
           addRecallStoreEntry(store, entry[0], {
             toolUseId: persistedRecallToolUseId(
               entry[0].slice("anchor:".length),
@@ -704,6 +711,9 @@ export function deserializeRecallStore(json: string): RecallStore {
             position: entry[1].position,
             result: entry[1].result,
             ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
+            ...(companionToolUseFingerprints
+              ? { companionToolUseFingerprints }
+              : {}),
           });
         } catch {
           break;
@@ -723,18 +733,61 @@ function persistedRecallToolUseId(anchorId: string): string {
   return `lore-recall-${anchorId}`;
 }
 
+/** Canonical JSON keeps object key order from changing companion identity. */
+function companionFingerprint(
+  anchorId: string | undefined,
+  item: { id: string; name: string; input: unknown; side: "before" | "after" },
+): string {
+  const input = JSON.stringify(item.input, (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : value,
+  );
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "lore-recall-companion-v1",
+        anchorId ?? "",
+        item.side,
+        item.id,
+        item.name,
+        input,
+      ]),
+    )
+    .digest("hex");
+}
+
+function companionFingerprintsFor(
+  item: StoredRecall,
+): StoredRecall["companionToolUseFingerprints"] {
+  return item.companionToolUses
+    ? item.companionToolUses.map((companion) => ({
+        hash: companionFingerprint(item.anchorId, companion),
+        side: companion.side,
+      }))
+    : item.companionToolUseFingerprints?.map(({ hash, side }) => ({
+        hash,
+        side,
+      }));
+}
+
 function companionCountsFor(
   item: StoredRecall,
 ): { before: number; after: number } | undefined {
   if (item.companionToolUseCounts !== undefined) {
-    return item.companionToolUseCounts;
+    const { before, after } = item.companionToolUseCounts;
+    return { before, after };
   }
-  if (!item.companionToolUses || item.companionToolUses.length === 0) {
-    return undefined;
-  }
+  const companions =
+    item.companionToolUses ?? item.companionToolUseFingerprints;
+  if (!companions || companions.length === 0) return undefined;
   let before = 0;
   let after = 0;
-  for (const companion of item.companionToolUses) {
+  for (const companion of companions) {
     if (companion.side === "before") before++;
     else after++;
   }
@@ -875,6 +928,23 @@ function isStoredRecall(value: unknown): value is StoredRecall {
       }
     }
   }
+  if (item.companionToolUseFingerprints !== undefined) {
+    if (
+      !Array.isArray(item.companionToolUseFingerprints) ||
+      item.companionToolUseFingerprints.length >
+        MAX_RECALL_COMPANION_TOOL_USES ||
+      !item.companionToolUseFingerprints.every((value: unknown) => {
+        if (!value || typeof value !== "object") return false;
+        const record = value as Record<string, unknown>;
+        return (
+          typeof record.hash === "string" &&
+          /^[0-9a-f]{64}$/.test(record.hash) &&
+          (record.side === "before" || record.side === "after")
+        );
+      })
+    )
+      return false;
+  }
   if (
     item.companionToolUseCounts !== undefined &&
     !isValidCompanionToolUseCounts(item.companionToolUseCounts)
@@ -934,7 +1004,10 @@ export function expandRecallMarkers(
     return suppressed;
   }
   let expanded = false;
-  const anchorValidity = new Map<string, boolean[]>();
+  const anchorValidity = new Map<
+    string,
+    Array<{ valid: boolean; before: string[] }>
+  >();
   const incomingMessages = structuredClone(req.messages);
   for (let i = 0; i < incomingMessages.length; i++) {
     const message = incomingMessages[i];
@@ -959,7 +1032,30 @@ export function expandRecallMarkers(
               recallMessagePrefix(message, j),
             );
       const occurrences = anchorValidity.get(candidate.key) ?? [];
-      occurrences.push(valid);
+      const previous = incomingMessages[i - 1];
+      occurrences.push({
+        valid,
+        before:
+          valid &&
+          candidate.key.startsWith("anchor:") &&
+          candidate.stored.companionToolUses === undefined &&
+          candidate.stored.companionToolUseFingerprints === undefined &&
+          !message.content
+            .slice(0, j)
+            .some((block) => block.type === "tool_use") &&
+          previous?.role === "assistant"
+            ? previous.content.flatMap((block) =>
+                block.type === "tool_use"
+                  ? [
+                      companionFingerprint(candidate.stored.anchorId, {
+                        ...block,
+                        side: "before",
+                      }),
+                    ]
+                  : [],
+              )
+            : [],
+      });
       anchorValidity.set(candidate.key, occurrences);
     }
   }
@@ -1004,8 +1100,9 @@ export function expandRecallMarkers(
       expanded = true;
       continue;
     }
-    const { stored } = match;
-    if (!(anchorValidity.get(match.key)?.shift() ?? false)) {
+    const { stored, key: matchedKey } = match;
+    const validatedAnchor = anchorValidity.get(match.key)?.shift();
+    if (!validatedAnchor?.valid) {
       const block = msg.content[markerIdx];
       if (block.type !== "text") throw new Error("recall marker is not text");
       const continuation = match.key.startsWith("anchor:")
@@ -1027,7 +1124,7 @@ export function expandRecallMarkers(
     // which parse into adjacent assistant messages. Rejoin only tool calls that
     // were companions of the original recall. Continuation tool calls are not
     // companions and must stay after the synthetic recall result turn.
-    const companions = stored.companionToolUses;
+    const companions = companionFingerprintsFor(stored);
     const counts = companionCountsFor(stored);
     const beforeCompanions = companions
       ? companions.filter((item) => item.side === "before")
@@ -1038,22 +1135,41 @@ export function expandRecallMarkers(
     const matchesCompanions = (
       content: GatewayContentBlock[],
       expected: typeof beforeCompanions,
+      side: "before" | "after",
     ): boolean => {
       const toolUses = content.filter(
         (block): block is GatewayToolUseBlock => block.type === "tool_use",
       );
-      // Counts survive persistence, but the corresponding provider-controlled
-      // IDs and inputs do not. Never reattach a merely same-sized neighboring
-      // tool group after restart; exact matching is available only in memory.
-      if (typeof expected === "number") return false;
+      // Legacy counts do not prove identity. The validated canonical anchor
+      // context above hashes the complete preceding transcript, including this
+      // adjacent group's exact IDs, names and inputs. That independent proof
+      // permits restoring a preceding legacy group only. Following groups are
+      // outside the context hash and always require companion fingerprints.
+      if (typeof expected === "number") {
+        return (
+          side === "before" &&
+          matchedKey.startsWith("anchor:") &&
+          stored.anchorContextId !== undefined &&
+          toolUses.length === expected &&
+          validatedAnchor.before.length === expected &&
+          toolUses.every(
+            (block, index) =>
+              companionFingerprint(stored.anchorId, {
+                ...block,
+                side: "before",
+              }) === validatedAnchor.before[index],
+          )
+        );
+      }
       return (
         toolUses.length === expected.length &&
         toolUses.every((block, index) => {
           const item = expected[index];
           return (
-            block.id === item.id &&
-            block.name === item.name &&
-            JSON.stringify(block.input) === JSON.stringify(item.input)
+            companionFingerprint(stored.anchorId, {
+              ...block,
+              side: item.side,
+            }) === item.hash
           );
         })
       );
@@ -1104,7 +1220,7 @@ export function expandRecallMarkers(
       const previous = req.messages[i - 1];
       if (
         previous.role === "assistant" &&
-        matchesCompanions(previous.content, beforeCompanions)
+        matchesCompanions(previous.content, beforeCompanions, "before")
       ) {
         const moved = takeCompanions(previous);
         insertCompanionBundle(msg, 0, moved);
@@ -1127,7 +1243,7 @@ export function expandRecallMarkers(
       if (
         next &&
         next.role === "assistant" &&
-        matchesCompanions(next.content, afterCompanions)
+        matchesCompanions(next.content, afterCompanions, "after")
       ) {
         insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
         if (
@@ -1178,6 +1294,51 @@ export function expandRecallMarkers(
       ],
     };
 
+    if (hasContinuationAfter || req.messages[i + 1]?.role !== "user") {
+      // A legacy following group stays independent. Its shared result turn may
+      // also contain outputs for calls now preceding Lore's synthetic result.
+      // Move those real outputs with their exact native envelopes; resolving
+      // only their semantic parts later would strand or discard provenance.
+      let resultSourceIndex = i + 1;
+      while (req.messages[resultSourceIndex]?.role === "assistant")
+        resultSourceIndex++;
+      const resultSource = req.messages[resultSourceIndex];
+      if (resultSource?.role === "user") {
+        let resultIndex = 0;
+        for (const call of msg.content) {
+          if (call.type !== "tool_use") continue;
+          if (call.id === stored.toolUseId) {
+            resultIndex++;
+            continue;
+          }
+          const sourceIndex = resultSource.content.findIndex(
+            (block) =>
+              block.type === "tool_result" && block.toolUseId === call.id,
+          );
+          if (sourceIndex < 0) continue;
+          const provenanceIndex =
+            resultSource.provenancePositions?.[sourceIndex];
+          const provenance =
+            provenanceIndex === undefined
+              ? undefined
+              : resultSource.provenanceContent?.[provenanceIndex];
+          const block = removeVisibleContentBlock(resultSource, sourceIndex);
+          insertCompanionBundle(toolResultMsg, resultIndex++, {
+            content: [block],
+            ...(provenance
+              ? { provenanceContent: [provenance], provenancePositions: [0] }
+              : {}),
+          });
+        }
+        if (
+          resultSource.content.length === 0 &&
+          (resultSource.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(resultSourceIndex, 1);
+        }
+      }
+    }
+
     if (hasContinuationAfter) {
       // Split: insert tool_result user message + continuation assistant
       // message after the current assistant message.
@@ -1197,12 +1358,7 @@ export function expandRecallMarkers(
         const resultIndex = msg.content
           .slice(0, markerIdx)
           .filter((block) => block.type === "tool_use").length;
-        nextMsg.content.splice(resultIndex, 0, {
-          type: "tool_result",
-          toolUseId: stored.toolUseId,
-          toolName: RECALL_TOOL_NAME,
-          content: [{ type: "text", text: stored.result }],
-        });
+        insertVisibleContentBlocks(nextMsg, resultIndex, toolResultMsg.content);
       } else {
         // No following user message — insert a synthetic one
         req.messages.splice(i + 1, 0, toolResultMsg);
@@ -1465,10 +1621,14 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   if (!parsed.valid) throw new Error(parsed.error);
   return {
     query: parsed.value.query ?? "",
-    // Opaque detail refs carry their bound scope; default other requests to all.
+    // Opaque detail refs carry their bound scope, including in mixed batches;
+    // raw IDs and searches still default to all in the core recall runner.
     scope:
       parsed.value.scope ??
-      (isRecallDetailRef(parsed.value.id) ? undefined : "all"),
+      (isRecallDetailRef(parsed.value.id) ||
+      parsed.value.ids?.some(isRecallDetailRef)
+        ? undefined
+        : "all"),
     ...(parsed.value.id ? { id: parsed.value.id } : {}),
     ...(parsed.value.ids ? { ids: [...parsed.value.ids] } : {}),
     ...(parsed.value.detailOffset !== undefined

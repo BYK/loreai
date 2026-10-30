@@ -33,7 +33,9 @@ import {
   getGitRemote,
   discoverWorkspaceRoot,
   installFetchInterceptor,
-  isRemoteGatewayTarget,
+  createGatewayRecallClient,
+  NATIVE_RECALL_TURN_HEADER,
+  type RecallToolContext,
   log,
 } from "@loreai/core";
 import type {
@@ -48,12 +50,30 @@ import {
   runCompaction,
   type SessionBeforeCompactResult,
   sessionIDFor,
+  shouldRegisterNativeRecallTool,
   startInProcess,
 } from "./internal";
 import { createPiRecallTool } from "./recall-tool";
+import { recallOriginKey } from "./recall-origin";
+import {
+  piTurnGroup,
+  singlePendingPiTurn,
+  startPiOwner,
+  startPiTurn,
+  bindPiOrigin,
+  endPiOwner,
+  retirePiOwner,
+} from "./recall-turns";
+import { randomUUID } from "node:crypto";
 
 /** Guard against double-installing the fetch interceptor if Pi re-initializes. */
 let fetchInterceptorInstalled = false;
+// The single fetch observer outlives an extension factory invocation. Reuse its
+// client when Pi reloads the extension, without sharing auth across gateways.
+const nativeRecallClients = new Map<
+  string,
+  ReturnType<typeof createGatewayRecallClient>
+>();
 
 /**
  * Pi extension entry point.
@@ -128,13 +148,56 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let currentSessionTitle = "";
   let compactAuthHeaders: Record<string, string> = {};
   const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
+  let currentTurn: RecallToolContext | undefined;
+  // null means overlapping requests cannot yet be assigned to an assistant.
+  // A later message must never be attributed to whichever turn started last.
+  let pendingAssistantTurn: RecallToolContext | null | undefined;
+  const turnOwnerID = randomUUID();
+  let retired = false;
+  let removeAbortListener: (() => void) | undefined;
+  const retireCurrentOwnership = () => {
+    removeAbortListener?.();
+    removeAbortListener = undefined;
+    retirePiOwner(gatewayBase, turnOwnerID);
+    currentTurn = undefined;
+    pendingAssistantTurn = undefined;
+  };
+  const nativeRecallClient =
+    nativeRecallClients.get(gatewayBase) ??
+    createGatewayRecallClient(gatewayBase, () =>
+      gatewayAccessHeadersForRemote(gatewayBase),
+    );
+  nativeRecallClients.set(gatewayBase, nativeRecallClient);
+  if (nativeRecallClients.size > 4) {
+    const oldest = nativeRecallClients.keys().next().value;
+    if (oldest !== undefined) nativeRecallClients.delete(oldest);
+  }
 
-  if (!isRemoteGatewayTarget(gatewayBase)) {
+  if (shouldRegisterNativeRecallTool(gatewayBase)) {
     pi.registerTool(
-      createPiRecallTool(() => ({
-        projectPath,
-        sessionID: currentSessionID,
-      })),
+      createPiRecallTool(
+        () => ({
+          projectPath,
+          sessionID: currentSessionID,
+        }),
+        nativeRecallClient.execute,
+        (origin, context) => {
+          if (retired) return undefined;
+          const turn = piTurnGroup(
+            gatewayBase,
+            discoverWorkspaceRoot(context.cwd),
+            sessionIDFor(context.sessionManager.getSessionFile()),
+          )?.origins.get(recallOriginKey(origin));
+          if (
+            !turn ||
+            turn.sessionID !==
+              sessionIDFor(context.sessionManager.getSessionFile()) ||
+            turn.projectPath !== discoverWorkspaceRoot(context.cwd)
+          )
+            return undefined;
+          return turn;
+        },
+      ),
     );
   }
 
@@ -151,19 +214,27 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   if (!fetchInterceptorInstalled) {
     installFetchInterceptor({
       gatewayBase,
-      getHeaders: () => {
+      getHeaders: (requestHeaders) => {
+        const owner = singlePendingPiTurn(gatewayBase, requestHeaders);
+        if (!owner) return { ...gatewayAccessHeaders };
         const headers: Record<string, string> = {
           ...gatewayAccessHeaders,
-          "x-lore-session-id": currentSessionID,
-          "x-lore-project": projectPath,
+          "x-lore-session-id": owner.sessionID!,
+          "x-lore-project": owner.projectPath,
+          ...(owner.turnID
+            ? { [NATIVE_RECALL_TURN_HEADER]: owner.turnID }
+            : {}),
         };
-        if (cachedGitRemote) headers["x-lore-git-remote"] = cachedGitRemote;
-        if (currentSessionTitle)
+        if (owner.projectPath === projectPath && cachedGitRemote)
+          headers["x-lore-git-remote"] = cachedGitRemote;
+        if (owner.sessionID === currentSessionID && currentSessionTitle)
           headers["x-lore-session-title"] =
             encodeURIComponent(currentSessionTitle);
         return headers;
       },
       onRequestHeaders: (headers) => {
+        nativeRecallClient.observeRequestHeaders(headers);
+        if (retired) return;
         if (
           headers.get("x-lore-session-id") !== currentSessionID ||
           headers.get("x-lore-project") !== projectPath
@@ -200,6 +271,8 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       gitRemote: getGitRemote(projectPath) ?? undefined,
     });
     for (const { provider, baseUrl, headers } of registrations) {
+      if (currentTurn?.turnID)
+        headers[NATIVE_RECALL_TURN_HEADER] = currentTurn.turnID;
       pi.registerProvider(provider, { baseUrl, headers });
     }
   }
@@ -208,23 +281,116 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   registerProviders();
 
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
+    if (retired) return;
     currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
     const nextProjectPath = discoverWorkspaceRoot(ctx.cwd);
     const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
     if (newID !== currentSessionID || nextProjectPath !== projectPath) {
+      retireCurrentOwnership();
       currentSessionID = newID;
       projectPath = nextProjectPath;
       cachedGitRemote = getGitRemote(projectPath) ?? "";
       compactAuthHeaders = {};
+      currentTurn = undefined;
       // Re-register with the real session ID so all subsequent provider
       // requests carry the correct x-lore-session-id header.
       registerProviders();
     }
   });
 
+  pi.on("agent_start", (_event, context) => {
+    if (retired) return;
+    const group = piTurnGroup(
+      gatewayBase,
+      discoverWorkspaceRoot(context.cwd),
+      sessionIDFor(context.sessionManager.getSessionFile()),
+      true,
+    );
+    if (group) startPiOwner(group, turnOwnerID);
+    removeAbortListener?.();
+    const signal = context.signal;
+    if (signal?.aborted) retireCurrentOwnership();
+    else if (signal) {
+      const onAbort = () => retireCurrentOwnership();
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }
+  });
+  pi.on("turn_start", (_event, context) => {
+    if (retired || context.signal?.aborted) return;
+    currentSessionID = sessionIDFor(context.sessionManager.getSessionFile());
+    projectPath = discoverWorkspaceRoot(context.cwd);
+    currentTurn = {
+      projectPath,
+      sessionID: currentSessionID,
+      turnID: randomUUID(),
+    };
+    const group = piTurnGroup(gatewayBase, projectPath, currentSessionID, true);
+    const tracked = group && startPiTurn(group, turnOwnerID, currentTurn);
+    pendingAssistantTurn =
+      !group || !tracked || group.ambiguous ? null : currentTurn;
+    registerProviders();
+  });
+
+  pi.on("message_start", (event, context) => {
+    if (
+      event.message.role !== "assistant" ||
+      retired ||
+      !pendingAssistantTurn ||
+      pendingAssistantTurn.sessionID !==
+        sessionIDFor(context.sessionManager.getSessionFile()) ||
+      pendingAssistantTurn.projectPath !== discoverWorkspaceRoot(context.cwd)
+    )
+      return;
+    const message = event.message;
+    const group = piTurnGroup(
+      gatewayBase,
+      pendingAssistantTurn.projectPath,
+      pendingAssistantTurn.sessionID!,
+    );
+    if (
+      !group ||
+      group.ambiguous ||
+      group.pending.size !== 1 ||
+      !group.pending.has(pendingAssistantTurn.turnID!)
+    )
+      return;
+    const key = recallOriginKey({
+      timestamp: message.timestamp,
+      providerID: message.provider,
+      modelID: message.model,
+    });
+    const previous = group.origins.get(key);
+    if (
+      previous === undefined ||
+      previous?.turnID === pendingAssistantTurn.turnID
+    )
+      bindPiOrigin(group, turnOwnerID, key, pendingAssistantTurn);
+    else group.origins.set(key, null);
+    pendingAssistantTurn = undefined;
+  });
+  pi.on("agent_end", (_event, context) => {
+    if (retired) return;
+    removeAbortListener?.();
+    removeAbortListener = undefined;
+    const group = piTurnGroup(
+      gatewayBase,
+      discoverWorkspaceRoot(context.cwd),
+      sessionIDFor(context.sessionManager.getSessionFile()),
+    );
+    if (group) endPiOwner(group, turnOwnerID);
+    pendingAssistantTurn = undefined;
+  });
+  pi.on("session_shutdown", () => {
+    retired = true;
+    retireCurrentOwnership();
+    compactAuthHeaders = {};
+  });
+
   // Refresh the session title per turn so a /name issued mid-session is
   // picked up without waiting for the next session_start.
   pi.on("before_agent_start", async (_event, ctx) => {
+    if (retired) return;
     currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
   });
 
@@ -243,8 +409,10 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     async (
       event: SessionBeforeCompactEvent,
       _ctx,
-    ): Promise<SessionBeforeCompactResult | undefined> =>
-      runCompaction({
+    ): Promise<SessionBeforeCompactResult | undefined> => {
+      if (retired) return undefined;
+      retireCurrentOwnership();
+      return runCompaction({
         gatewayBase,
         sessionID: currentSessionID,
         projectPath,
@@ -252,7 +420,8 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
         authHeaders: { ...gatewayAccessHeaders, ...compactAuthHeaders },
-      }),
+      });
+    },
   );
 }
 

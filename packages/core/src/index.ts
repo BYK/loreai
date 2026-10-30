@@ -21,6 +21,10 @@ export * as keystore from "./crypto/keystore";
 export * as references from "./references";
 export { isRemoteGatewayTarget } from "./remote-gateway";
 export {
+  createGatewayRecallClient,
+  NATIVE_RECALL_TURN_HEADER,
+} from "./recall-gateway-client";
+export {
   DirectFsResolver,
   NoopResolver,
   SyntheticProbeResolver,

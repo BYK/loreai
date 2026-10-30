@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { tool } from "@opencode-ai/plugin/tool";
 import type { ToolContext } from "@opencode-ai/plugin/tool";
+import type { PluginInput } from "@opencode-ai/plugin";
 import {
   RECALL_TOOL_DESCRIPTION,
   RECALL_TOOL_INPUT_SCHEMA,
@@ -26,6 +27,56 @@ function makeToolContext(): ToolContext {
 }
 
 describe("OpenCode recall tool", () => {
+  test("accepts provider identity only from the invoking assistant message in the same session", async () => {
+    const context = makeToolContext();
+    const execute = vi.fn<RecallToolExecutor>(async () => "memory");
+    const message = vi.fn(async (_options: unknown) => ({
+      data: {
+        info: {
+          id: context.messageID,
+          sessionID: context.sessionID,
+          role: "assistant",
+          providerID: "minimax",
+          parentID: "parent-1",
+        },
+      },
+    }));
+    const client = { session: { message } } as unknown as PluginInput["client"];
+    const recall = createRecallTool(execute, client);
+    await recall.execute({ query: "memory" }, context);
+    expect(execute.mock.calls.at(-1)?.[1].providerID).toBe("minimax");
+    for (const invalid of [
+      { id: "other-message" },
+      { sessionID: "other-session" },
+      { role: "user" },
+    ]) {
+      execute.mockClear();
+      message.mockResolvedValueOnce({
+        data: {
+          info: {
+            id: context.messageID,
+            sessionID: context.sessionID,
+            role: "assistant",
+            providerID: "minimax",
+            parentID: "parent-1",
+            ...invalid,
+          },
+        },
+      });
+      await recall.execute({ query: "memory" }, context);
+      expect(execute).not.toHaveBeenCalled();
+    }
+    expect(message.mock.calls[0]?.[0]).toMatchObject({
+      path: { id: context.sessionID, messageID: context.messageID },
+      query: { directory: context.directory },
+    });
+    execute.mockClear();
+    message.mockRejectedValueOnce(new Error("private lookup failure"));
+    expect(await recall.execute({ query: "memory" }, context)).toContain(
+      "unavailable",
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
   test("registers the shared schema and forwards host context", async () => {
     const execute = vi.fn<RecallToolExecutor>(async () => "memory results");
     const recall = createRecallTool(execute);

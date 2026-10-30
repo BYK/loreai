@@ -15,7 +15,7 @@ import * as temporal from "./temporal";
 import * as embedding from "./embedding";
 import { ReadPathTimer } from "./read-telemetry";
 import * as entities from "./entities";
-import { currentTenantId } from "./tenant";
+import { currentTenantId, LOCAL_TENANT_ID } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { createHash, randomUUID } from "node:crypto";
@@ -195,6 +195,9 @@ const RECALL_DETAIL_REF_TTL_MS = 30 * 60 * 1000;
 const recallDetailRefs = new TenantBoundExpiringStore<RecallDetailRef>(
   MAX_RECALL_DETAIL_REFS,
   MAX_RECALL_DETAIL_REFS_PER_TENANT,
+  // All local sessions share the historical empty tenant. Let them use the
+  // existing global budget while hosted tenants retain their smaller quota.
+  new Map([[LOCAL_TENANT_ID, MAX_RECALL_DETAIL_REFS]]),
 );
 
 /** Keep one tool call bounded while allowing known source details to be batched. */

@@ -204,6 +204,72 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       }
     });
 
+    test("does not leak credentials when a stale boundary replay redirects", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const prefix = [{ role: "user", content: "original" }];
+      const appended = [...prefix, { role: "user", content: "next" }];
+      const token = encodeContextBoundary({
+        v: 1,
+        protocol: "anthropic",
+        inputItems: prefix.length,
+        inputDigest: digestChain(prefix),
+        retainedItems: 0,
+        sourceMessages: prefix.length,
+        sourceDigest: digestChain([]),
+      });
+      let count = 0;
+      const gateway = createServer((request, response) => {
+        request.resume();
+        count++;
+        if (count === 1) {
+          response.writeHead(200, { "x-lore-context-boundary": token });
+        } else if (count === 2) {
+          response.writeHead(409, {
+            "x-lore-context-boundary-mismatch": "true",
+          });
+        } else {
+          response.writeHead(307, {
+            location: `http://127.0.0.1:${hostilePort}/capture`,
+          });
+        }
+        response.end("ok");
+      });
+      const gatewayPort = await listen(gateway);
+      const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({}),
+      });
+      const send = (messages: unknown[]) =>
+        fetch(`${gatewayBase}/v1/messages`, {
+          method: "POST",
+          headers: {
+            "x-lore-session-id": "redirect-replay",
+            "x-api-key": "synthetic-provider-key",
+            "x-lore-gateway-token": "synthetic-gateway-token",
+          },
+          body: JSON.stringify({ model: "claude", messages }),
+          redirect: "follow",
+        });
+      try {
+        await (await send(prefix)).text();
+        const response = await send(appended);
+        expect(response.status).toBe(307);
+        expect(count).toBe(3);
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(gateway);
+        await closeServer(hostile);
+      }
+    });
+
     test.each([
       [
         "gateway and provider credentials",

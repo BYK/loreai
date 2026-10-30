@@ -3,8 +3,6 @@ export const MAX_RECALL_ID_CHARS = 256;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const TEMPORAL_HASH_ID_RE = /^[0-9a-f]{32}$/;
-const TEMPORAL_STORAGE_ID_RE = /^lore_tm_v1_[A-Za-z0-9_-]{43}$/;
 
 export function isRecallDetailRef(id: unknown): id is string {
   return (
@@ -41,13 +39,11 @@ export function isValidRecallId(id: unknown): id is string {
     case "e":
       return UUID_RE.test(sourceId);
     case "t":
-      // Gateway temporal source IDs are truncated SHA-256 hex; retain UUID and
-      // storage-key forms used by existing rows and the core temporal store.
-      return (
-        TEMPORAL_HASH_ID_RE.test(sourceId) ||
-        UUID_RE.test(sourceId) ||
-        TEMPORAL_STORAGE_ID_RE.test(sourceId)
-      );
+      // v82 intentionally preserves arbitrary pre-existing temporal primary
+      // keys (including provider IDs such as msg_...). These are opaque exact
+      // lookup keys, bounded and control-checked above; visibility is checked
+      // separately against the owning tenant/project/session.
+      return sourceId.length > 0;
     case "lat":
       // LAT references are repository-relative file + heading identities.
       return (

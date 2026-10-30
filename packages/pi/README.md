@@ -71,6 +71,8 @@ The extension injects the token as `x-lore-gateway-token` only when provider cal
 
 The shared native recall tool is named `lore_recall`. When `LORE_REMOTE_URL` points to a remote gateway, the extension leaves recall registration to that gateway instead of exposing a competing local tool. Recall query text is omitted from durable replay state.
 
+Native recall executes through the active gateway using the same authenticated session and project as provider traffic. Its configuration and detail refs stay with the gateway. Credentials are bound to the invoking assistant turn and provider, so sequential token rotations remain separate. Missing or ambiguous tool origins, or conflicting credentials within one turn, make recall unavailable; it never guesses an owner or falls back to another database.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:

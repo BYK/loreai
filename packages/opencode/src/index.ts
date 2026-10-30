@@ -5,6 +5,8 @@ import {
   discoverWorkspaceRoot,
   installFetchInterceptor,
   RECALL_TOOL_NAME,
+  createGatewayRecallClient,
+  NATIVE_RECALL_TURN_HEADER,
 } from "@loreai/core";
 // Helpers live in a separate module so they are NOT re-exported from this
 // plugin entry. OpenCode's legacy plugin loader invokes every function
@@ -23,6 +25,10 @@ import {
   surfaceGatewayUnavailable,
 } from "./internal";
 import { createRecallTool } from "./recall-tool";
+
+let nativeRecallClient:
+  | ReturnType<typeof createGatewayRecallClient>
+  | undefined;
 
 /**
  * Lore plugin for OpenCode — transparent LLM proxy routing.
@@ -325,6 +331,9 @@ function fetchSessionInfo(
       // A timeout or newer lookup owns the slot now; late responses cannot
       // overwrite metadata resolved by a later turn.
       if (!lookup || sessionInfoLookups.get(key) !== lookup) return;
+      // The SDK can return HTTP errors without rejecting. Such a response
+      // cannot establish that the session has no parent and must be retried.
+      if (res.error || !res.data) return;
       const entry = sessionParent.get(key) ?? {
         parentID: null,
         title: null,
@@ -508,7 +517,17 @@ export const LorePlugin: Plugin = async (ctx) => {
       tool:
         loreDisabled || !shouldRegisterNativeRecallTool(gatewayBase)
           ? {}
-          : { [RECALL_TOOL_NAME]: createRecallTool() },
+          : {
+              [RECALL_TOOL_NAME]: createRecallTool(
+                (input, context) =>
+                  nativeRecallClient
+                    ? nativeRecallClient.execute(input, context)
+                    : Promise.resolve(
+                        "Recall is unavailable for this authenticated session.",
+                      ),
+                ctx.client,
+              ),
+            },
 
       // Inject per-request identifiers so the gateway can distinguish meta
       // requests (title generation, summary agents, etc.) from real
@@ -523,6 +542,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
+        output.headers[NATIVE_RECALL_TURN_HEADER] = input.message.id;
         output.headers["x-lore-agent"] = input.agent;
         // Flag OpenCode Task sub-agents so the gateway sizes their LTM
         // injection (see #1300). A sub-agent runs in a child session carrying a
@@ -622,11 +642,16 @@ export const LorePlugin: Plugin = async (ctx) => {
       log.info(`active: ${projectPath}`);
 
       if (loreActive) {
+        nativeRecallClient = createGatewayRecallClient(gatewayBase, () =>
+          gatewayAccessHeadersForRemote(gatewayBase),
+        );
         // Install the fetch interceptor once per process. It transparently
         // reroutes outgoing LLM API calls through the gateway while
         // preserving original auth headers and URLs.
         installFetchInterceptor({
           gatewayBase,
+          onRequestHeaders: (headers) =>
+            nativeRecallClient?.observeRequestHeaders(headers),
           getHeaders: () => {
             const headers: Record<string, string> = {
               ...gatewayAccessHeadersForRemote(gatewayBase),

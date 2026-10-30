@@ -6,10 +6,12 @@ type TenantBoundExpiringEntry = {
 /** A bounded expiring store that never evicts one tenant for another. */
 export class TenantBoundExpiringStore<T extends TenantBoundExpiringEntry> {
   private readonly entries = new Map<string, T>();
+  private readonly tenantLimits: ReadonlyMap<string, number>;
 
   constructor(
     private readonly maxEntries: number,
     private readonly maxEntriesPerTenant: number,
+    tenantLimits: ReadonlyMap<string, number> = new Map(),
   ) {
     if (
       !Number.isSafeInteger(maxEntries) ||
@@ -21,6 +23,14 @@ export class TenantBoundExpiringStore<T extends TenantBoundExpiringEntry> {
         "Recall detail-ref store limits must be positive integers",
       );
     }
+    for (const limit of tenantLimits.values()) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > maxEntries) {
+        throw new RangeError(
+          "Recall detail-ref tenant limits must be positive integers within global capacity",
+        );
+      }
+    }
+    this.tenantLimits = new Map(tenantLimits);
   }
 
   set(key: string, value: T, now = Date.now()): boolean {
@@ -31,7 +41,9 @@ export class TenantBoundExpiringStore<T extends TenantBoundExpiringEntry> {
     for (const [entryKey, entry] of this.entries) {
       if (entry.tenantId === value.tenantId) tenantKeys.push(entryKey);
     }
-    if (tenantKeys.length >= this.maxEntriesPerTenant) {
+    const tenantLimit =
+      this.tenantLimits.get(value.tenantId) ?? this.maxEntriesPerTenant;
+    if (tenantKeys.length >= tenantLimit) {
       const oldestTenantKey = tenantKeys[0];
       if (oldestTenantKey !== undefined) this.entries.delete(oldestTenantKey);
     }

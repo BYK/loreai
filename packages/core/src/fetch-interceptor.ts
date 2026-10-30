@@ -12,6 +12,7 @@
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
 import { isCredentialHeaderName } from "./credential-headers";
+import { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
 import {
   CONTEXT_BOUNDARY_CAPABILITY_HEADER,
   CONTEXT_BOUNDARY_CAPABILITY_VALUE,
@@ -36,7 +37,7 @@ export type FetchInterceptorConfig = {
    * Dynamic headers to inject on every intercepted request.
    * Called per-request so values can change (e.g., session ID).
    */
-  getHeaders: () => Record<string, string>;
+  getHeaders: (requestHeaders?: Headers) => Record<string, string>;
   /** Observe LLM request headers in memory before gateway routing. */
   onRequestHeaders?: (headers: Headers) => void;
 };
@@ -819,7 +820,7 @@ function buildGatewayHeaders(
   // Inject dynamic context headers (session ID, project, git remote, etc.).
   // Only set if not already present — per-request hooks may have set them.
   try {
-    for (const [k, v] of Object.entries(config.getHeaders())) {
+    for (const [k, v] of Object.entries(config.getHeaders(headers))) {
       if (!headers.has(k)) headers.set(k, v);
     }
   } catch (e) {
@@ -892,10 +893,10 @@ async function fetchWithContextBoundary(
     void response.body?.cancel().catch(() => {});
     const fullHeaders = new Headers(headers);
     fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
-    response = await originalFetch(requestInput, {
-      ...replayInit,
-      headers: fullHeaders,
-    });
+    response = await originalFetch(
+      requestInput,
+      prepareGatewayFetchInit(requestInput, replayInit, fullHeaders, true),
+    );
   }
   return updateContextBoundary(
     response,
@@ -923,6 +924,24 @@ export function installFetchInterceptor(
   // every fetch call in the process (tool executions, file downloads, etc.).
   const gateway = new URL(config.gatewayBase);
   const gatewayBase = config.gatewayBase;
+
+  // Observe correlation in process, then remove it on every outbound path,
+  // including passthroughs and context-boundary retries. Never mutate SDK init.
+  const networkFetch: typeof fetch = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(
+        init?.headers ??
+          (typeof input !== "string" && !(input instanceof URL)
+            ? input.headers
+            : undefined),
+      );
+      if (!headers.has(NATIVE_RECALL_TURN_HEADER))
+        return originalFetch(input, init);
+      headers.delete(NATIVE_RECALL_TURN_HEADER);
+      return originalFetch(input, { ...init, headers });
+    },
+    originalFetch,
+  );
 
   const interceptor = async (
     input: RequestInfo | URL,
@@ -958,7 +977,7 @@ export function installFetchInterceptor(
       !hasCredentialHeaders(requestHeaders) &&
       !strippedBoundaryClaims
     ) {
-      return originalFetch(input, init);
+      return networkFetch(input, init);
     }
 
     // Parse the URL once and reuse across both intercept paths.
@@ -966,7 +985,7 @@ export function installFetchInterceptor(
     try {
       upstream = new URL(url);
     } catch {
-      return originalFetch(
+      return networkFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, false),
       );
@@ -978,7 +997,7 @@ export function installFetchInterceptor(
     if (isDirectGatewayRequest(upstream, gatewayBase)) {
       if (boundaryEndpoint(upstream.pathname)) {
         return fetchWithContextBoundary(
-          originalFetch,
+          networkFetch,
           typeof input === "string" || input instanceof URL ? url : input,
           init,
           requestHeaders,
@@ -991,16 +1010,16 @@ export function installFetchInterceptor(
       // only when credentials need redirect protection or boundary claims were
       // removed above.
       if (!hasCredentialHeaders(requestHeaders) && !strippedBoundaryClaims) {
-        return originalFetch(input, init);
+        return networkFetch(input, init);
       }
-      return originalFetch(
+      return networkFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, true),
       );
     }
 
     if (!couldBeLlmRequest) {
-      return originalFetch(
+      return networkFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, false),
       );
@@ -1009,7 +1028,7 @@ export function installFetchInterceptor(
     // Never intercept local requests (could be local LLM or gateway itself).
     const host = upstream.hostname;
     if (isLocalInterceptionHost(host)) {
-      return originalFetch(
+      return networkFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, true),
       );
@@ -1022,7 +1041,7 @@ export function installFetchInterceptor(
         // Should not happen — matchesLLMApiPath() being true means the path
         // matched a pattern, and interceptUrl handles all patterns. Pass
         // through as a safety fallback.
-        return originalFetch(
+        return networkFetch(
           input,
           prepareGatewayFetchInit(input, init, requestHeaders, true),
         );
@@ -1038,7 +1057,7 @@ export function installFetchInterceptor(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
       return fetchWithContextBoundary(
-        originalFetch,
+        networkFetch,
         rewrittenFetchInput(input, rewrite.gatewayUrl),
         init,
         headers,
@@ -1068,7 +1087,7 @@ export function installFetchInterceptor(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
         return fetchWithContextBoundary(
-          originalFetch,
+          networkFetch,
           rewrittenFetchInput(input, rewrite.gatewayUrl),
           init,
           headers,
@@ -1088,7 +1107,7 @@ export function installFetchInterceptor(
       }
     }
 
-    return originalFetch(
+    return networkFetch(
       input,
       prepareGatewayFetchInit(input, init, requestHeaders, true),
     );

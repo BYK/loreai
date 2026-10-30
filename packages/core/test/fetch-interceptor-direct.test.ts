@@ -113,6 +113,46 @@ test("preserves direct routing, credentials and fetch options on suffix and repl
 });
 
 test.each([
+  [undefined, "manual"],
+  ["follow", "manual"],
+  ["error", "error"],
+] as const)(
+  "protects credentials on a stale-boundary replay with redirect %s",
+  async (redirect, expected) => {
+    const calls: RequestInit[] = [];
+    const token = boundary(prefix);
+    globalThis.fetch = vi.fn<typeof fetch>(async (_input, init) => {
+      calls.push(init!);
+      return calls.length === 2
+        ? new Response("mismatch", {
+            status: 409,
+            headers: { "x-lore-context-boundary-mismatch": "true" },
+          })
+        : new Response("ok", { headers: { "x-lore-context-boundary": token } });
+    });
+    install();
+    const credentials = {
+      ...headers,
+      "x-api-key": "synthetic-provider-key",
+      "x-lore-gateway-token": "synthetic-gateway-token",
+    };
+    await (await send(prefix, { headers: credentials, redirect })).text();
+    await (await send(appended, { headers: credentials, redirect })).text();
+
+    expect(calls).toHaveLength(3);
+    expect(calls.map((init) => init.redirect)).toEqual([
+      expected,
+      expected,
+      expected,
+    ]);
+    expect(
+      new Headers(calls[2].headers).get("x-lore-context-boundary"),
+    ).toBeNull();
+    expect(JSON.parse(calls[2].body as string).messages).toEqual(appended);
+  },
+);
+
+test.each([
   "/v1/responses/compact",
   "/v1/messages/count_tokens",
   "/v1/compact",

@@ -83,6 +83,10 @@ export type RecallToolArguments = {
 export type RecallToolContext = {
   projectPath: string;
   sessionID?: string;
+  /** Harness-derived provider for the assistant message invoking this tool. */
+  providerID?: string;
+  /** Host-verified origin of the assistant tool call; never sent to providers. */
+  turnID?: string;
   signal?: AbortSignal;
 };
 

@@ -198,11 +198,12 @@ describe("db", () => {
         "INSERT INTO session_state (session_id, updated_at, recall_store) VALUES (?, ?, ?)",
       )
       .run("recall-invalid-json", Date.now(), "{invalid");
-    connection
-      .query("UPDATE schema_version SET version = ?")
-      .run(MIGRATIONS.length - 2);
+    connection.query("UPDATE schema_version SET version = ?").run(105);
     connection.exec(
       "ALTER TABLE session_state DROP COLUMN parent_session_pending",
+    );
+    connection.exec(
+      "ALTER TABLE session_state DROP COLUMN parent_session_primary",
     );
     close();
 
@@ -248,7 +249,8 @@ describe("db", () => {
     const connection = db();
     connection.exec(`
       ALTER TABLE session_state DROP COLUMN parent_session_pending;
-      UPDATE schema_version SET version = ${MIGRATIONS.length - 1};
+      ALTER TABLE session_state DROP COLUMN parent_session_primary;
+      UPDATE schema_version SET version = 106;
     `);
     close();
 
@@ -260,6 +262,37 @@ describe("db", () => {
       "parent_session_pending",
     );
     expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+  });
+
+  test("version 108 leaves existing sessions unconfirmed until an explicit primary observation", () => {
+    const connection = db();
+    saveSessionTracking("unconfirmed-root", { messageCount: 10 });
+    saveSessionTracking("pending-child", {
+      isSubagent: true,
+      parentSessionPending: true,
+    });
+    connection.exec(`
+      ALTER TABLE session_state DROP COLUMN parent_session_primary;
+      UPDATE schema_version SET version = 107;
+    `);
+    close();
+
+    expect(loadSessionTracking("unconfirmed-root")?.parentSessionPrimary).toBe(
+      false,
+    );
+    expect(loadSessionTracking("pending-child")).toMatchObject({
+      isSubagent: true,
+      parentSessionPending: true,
+      parentSessionPrimary: false,
+    });
+    saveSessionTracking("unconfirmed-root", { parentSessionPrimary: true });
+    close();
+    expect(loadSessionTracking("unconfirmed-root")?.parentSessionPrimary).toBe(
+      true,
+    );
+    expect(db().query("SELECT version FROM schema_version").get()).toEqual({
       version: MIGRATIONS.length,
     });
   });

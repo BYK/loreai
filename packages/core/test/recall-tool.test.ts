@@ -101,7 +101,7 @@ describe("shared recall tool contract", () => {
 
     for (const id of [
       "k:short",
-      "t:source-1",
+      "t:",
       "other:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
       "lat:private query",
     ]) {

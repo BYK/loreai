@@ -321,6 +321,24 @@ export function gatewayAccessHeadersForRemote(
     : {};
 }
 
+/** Native recall reads the host DB, so only a discovered local gateway owns it. */
+export function shouldRegisterNativeRecallTool(
+  gatewayBase: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const selectedUrl = gatewayUrlForLog(gatewayBase.replace(/\/$/, ""));
+  if (selectedUrl === "invalid" || !isLoopbackUrl(selectedUrl)) return false;
+
+  // Pi discovery removes userinfo, query, and fragment before selecting a URL.
+  // Compare ownership using that same representation, including for a remote
+  // reached through a loopback tunnel. Keep this separate from access-token
+  // matching: ignoring credentials here must not authorize forwarding a token.
+  const remoteUrl = env.LORE_REMOTE_URL;
+  return (
+    !remoteUrl || gatewayUrlForLog(remoteUrl.replace(/\/$/, "")) !== selectedUrl
+  );
+}
+
 /**
  * Build the provider registrations for every gateway-routable provider.
  *

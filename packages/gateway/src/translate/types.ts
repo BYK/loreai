@@ -476,8 +476,8 @@ export type StoredRecall = {
   /** Fingerprint of the transcript prefix that produced the anchor. */
   anchorContextId?: string;
   /** Non-recall tool calls emitted beside this hidden recall in the original
-   *  response. Legacy in-memory detail is not durable; serialization projects
-   *  it to side counts so tool IDs, names, and inputs cannot persist. */
+   *  response. Serialization retains only fingerprints and side counts so raw
+   *  tool IDs, names, and inputs cannot persist. */
   companionToolUseIds?: string[];
   companionToolUses?: Array<{
     id: string;
@@ -485,9 +485,13 @@ export type StoredRecall = {
     input: unknown;
     side: "before" | "after";
   }>;
-  /** Privacy-safe counts only. After restart these do not authorize coalescing
-   *  neighboring calls; that requires exact in-memory companion metadata. */
+  /** Legacy topology only; matching also requires independent identity proof. */
   companionToolUseCounts?: { before: number; after: number };
+  /** Ordered, anchor-bound SHA-256 fingerprints of exact companion calls. */
+  companionToolUseFingerprints?: Array<{
+    hash: string;
+    side: "before" | "after";
+  }>;
 };
 
 /** Map from unique anchor or legacy marker keys to stored recall data. */
@@ -730,6 +734,8 @@ export type SessionState = {
   parentSessionId?: string;
   /** True only while OpenCode's asynchronous parent lookup is unresolved. */
   parentSessionPending?: boolean;
+  /** Explicit primary confirmation survives adapter metadata-cache loss. */
+  parentSessionPrimary?: boolean;
 
   // --- Tier 1/2 session header identification ---
 

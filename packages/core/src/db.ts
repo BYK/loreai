@@ -2606,6 +2606,11 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- completed primary-session lookup can clear only its own temporary flag.
   ALTER TABLE session_state ADD COLUMN parent_session_pending INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 108: retain only explicitly confirmed primary-session ownership.
+  -- Existing root rows are unclassified, not evidence of an adapter lookup.
+  ALTER TABLE session_state ADD COLUMN parent_session_primary INTEGER NOT NULL DEFAULT 0;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -7633,6 +7638,8 @@ export type SessionTrackingState = {
   isSubagent?: boolean;
   /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
   parentSessionPending?: boolean;
+  /** OpenCode explicitly confirmed that this session has no parent. */
+  parentSessionPrimary?: boolean;
   // v36: project binding (survives restart so the project_id never splits)
   projectPath?: string | null;
   projectPathProvisional?: boolean;
@@ -7793,6 +7800,10 @@ export function saveSessionTracking(
     sets.push("parent_session_pending = ?");
     vals.push(state.parentSessionPending ? 1 : 0);
   }
+  if (state.parentSessionPrimary !== undefined) {
+    sets.push("parent_session_primary = ?");
+    vals.push(state.parentSessionPrimary ? 1 : 0);
+  }
   // v36: project binding
   if (state.projectPath !== undefined) {
     sets.push("project_path = ?");
@@ -7865,6 +7876,8 @@ export type LoadedSessionTracking = {
   isSubagent: boolean;
   /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
   parentSessionPending: boolean;
+  /** OpenCode explicitly confirmed that this session has no parent. */
+  parentSessionPrimary: boolean;
   // v36: project binding
   projectPath: string | null;
   projectPathProvisional: boolean;
@@ -8215,7 +8228,7 @@ export function loadSessionTracking(
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
               last_turn_at, last_bust_at, last_accepted_provenance_layer,
-               parent_session_id, is_subagent, parent_session_pending,
+               parent_session_id, is_subagent, parent_session_pending, parent_session_primary,
               project_path, project_path_provisional,
                compaction_anomaly_pending, amnesia
        FROM session_state WHERE session_id = ?`,
@@ -8254,6 +8267,7 @@ export function loadSessionTracking(
     parent_session_id: string | null;
     is_subagent: number;
     parent_session_pending: number;
+    parent_session_primary: number;
     project_path: string | null;
     project_path_provisional: number;
     compaction_anomaly_pending: number;
@@ -8294,6 +8308,7 @@ export function loadSessionTracking(
     parentSessionId: row.parent_session_id,
     isSubagent: row.is_subagent === 1,
     parentSessionPending: row.parent_session_pending === 1,
+    parentSessionPrimary: row.parent_session_primary === 1,
     projectPath: row.project_path,
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,

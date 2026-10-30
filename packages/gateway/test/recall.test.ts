@@ -15,6 +15,7 @@ import {
   accumulateOpenAINonStreamJSON,
   accumulateResponsesNonStreamJSON,
   loreMessagesToGateway,
+  removeOrphanedToolResults,
   responsesProvenanceContent,
   responsesProvenanceByMessageId,
   responsesAnchorContext,
@@ -61,6 +62,10 @@ import {
   MAX_RECALL_STORE_BYTES,
   executeRecall,
 } from "../src/recall";
+import {
+  PreparationTiming,
+  prepareSemanticMessages,
+} from "../src/semantic-preparation";
 import { MAX_RECALL_ID_CHARS, MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 import {
   buildOpenAIResponsesUpstreamRequest,
@@ -1046,47 +1051,435 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     });
   });
 
-  test("does not coalesce neighboring tools from count-only persisted companions", () => {
-    const anchorId = "123e4567-e89b-42d3-a456-426614174004";
-    const liveStore: RecallStore = new Map([
-      [
-        `anchor:${anchorId}`,
-        makeStoredRecall({
-          anchorId,
-          companionToolUses: [
-            {
-              id: "private-original-call",
-              name: "private-original-name",
-              input: { query: "private-original-input" },
-              side: "before",
-            },
-          ],
-        }),
-      ],
-    ]);
-    const restored = deserializeRecallStore(serializeRecallStore(liveStore));
-    const neighboringCall = {
-      type: "tool_use" as const,
-      id: "different-call",
-      name: "different-tool",
-      input: { query: "different input" },
-    };
-    const req = makeRequest([
-      { role: "user", content: [{ type: "text", text: "continue" }] },
-      { role: "assistant", content: [{ ...neighboringCall }] },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
-      },
-    ]);
-    bindCanonicalAnchors(req, restored);
+  test.each([false, true])(
+    "does not coalesce unrelated neighboring tools after restart (legacy counts: %s)",
+    (legacyCounts) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174004";
+      const liveStore: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            ...(legacyCounts
+              ? { companionToolUseCounts: { before: 0, after: 1 } }
+              : {
+                  companionToolUses: [
+                    {
+                      id: "private-original-call",
+                      name: "private-original-name",
+                      input: { query: "private-original-input" },
+                      side: "after" as const,
+                    },
+                  ],
+                }),
+          }),
+        ],
+      ]);
+      const restored = deserializeRecallStore(serializeRecallStore(liveStore));
+      const neighboringCall = {
+        type: "tool_use" as const,
+        id: "different-call",
+        name: "different-tool",
+        input: { query: "different input" },
+      };
+      const req = makeRequest([
+        { role: "user", content: [{ type: "text", text: "continue" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
+        },
+        { role: "assistant", content: [{ ...neighboringCall }] },
+      ]);
+      bindCanonicalAnchors(req, restored);
 
-    expect(expandRecallMarkers(req, restored)).toBe(true);
-    expect(req.messages[1]?.content).toEqual([neighboringCall]);
-    expect(req.messages[2]?.content).toMatchObject([
-      { type: "tool_use", id: `lore-recall-${anchorId}` },
+      expect(expandRecallMarkers(req, restored)).toBe(true);
+      expect(req.messages[3]?.content).toEqual([neighboringCall]);
+      expect(req.messages[1]?.content).toMatchObject([
+        { type: "tool_use", id: `lore-recall-${anchorId}` },
+      ]);
+    },
+  );
+
+  test.each([
+    "id",
+    "name",
+    "input",
+    "side",
+    "order",
+    "array order",
+    "nested special key",
+  ] as const)(
+    "does not coalesce a persisted companion group with changed %s",
+    (changed) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174006";
+      const calls: GatewayToolUseBlock[] = [
+        {
+          type: "tool_use",
+          id: "call_read",
+          name: "read",
+          input: JSON.parse(
+            '{"file":"original","values":[1,2],"nested":{"__proto__":"original"}}',
+          ),
+        },
+        {
+          type: "tool_use",
+          id: "call_list",
+          name: "list",
+          input: { path: "original" },
+        },
+      ];
+      const liveStore: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            companionToolUses: calls.map((call) => ({
+              ...call,
+              side: "before" as const,
+            })),
+          }),
+        ],
+      ]);
+      const restored = deserializeRecallStore(serializeRecallStore(liveStore));
+      const incoming = structuredClone(calls);
+      if (changed === "id") incoming[0].id = "other-id";
+      if (changed === "name") incoming[0].name = "write";
+      if (changed === "input") incoming[0].input = { file: "changed" };
+      if (changed === "order") incoming.reverse();
+      if (changed === "array order")
+        incoming[0].input = JSON.parse(
+          '{"file":"original","values":[2,1],"nested":{"__proto__":"original"}}',
+        );
+      if (changed === "nested special key")
+        incoming[0].input = JSON.parse(
+          '{"file":"original","values":[1,2],"nested":{"__proto__":"changed"}}',
+        );
+      const marker = {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: buildRecallAnchor(anchorId) }],
+      };
+      const neighbor = { role: "assistant" as const, content: incoming };
+      const req = makeRequest(
+        changed === "side" ? [marker, neighbor] : [neighbor, marker],
+      );
+      bindCanonicalAnchors(req, restored);
+      expect(expandRecallMarkers(req, restored)).toBe(true);
+      expect(
+        req.messages.find((message) =>
+          message.content.some(
+            (block) => block.type === "tool_use" && block.id === "call_list",
+          ),
+        )?.content,
+      ).toEqual(incoming);
+    },
+  );
+
+  test("validates and allowlists durable companion fingerprints", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174007";
+    const key = `anchor:${anchorId}`;
+    const entry = makeStoredRecall({ anchorId });
+    for (const fingerprints of [
+      null,
+      {},
+      [{ hash: "bad", side: "before" }],
+      [{ hash: "a".repeat(64), side: "elsewhere" }],
+      Array.from({ length: 129 }, () => ({
+        hash: "a".repeat(64),
+        side: "before",
+      })),
+    ]) {
+      expect(
+        deserializeRecallStore(
+          JSON.stringify([
+            [key, { ...entry, companionToolUseFingerprints: fingerprints }],
+          ]),
+        ).size,
+      ).toBe(0);
+    }
+    const restored = deserializeRecallStore(
+      JSON.stringify([
+        [
+          key,
+          {
+            ...entry,
+            companionToolUseFingerprints: [
+              {
+                hash: "a".repeat(64),
+                side: "before",
+                privateMetadata: "private fingerprint data",
+              },
+            ],
+            companionToolUseCounts: {
+              before: 1,
+              after: 0,
+              privateMetadata: "private count data",
+            },
+          },
+        ],
+      ]),
+    );
+    expect(restored.size).toBe(1);
+    expect(serializeRecallStore(restored)).not.toContain("private");
+    expect(restored.get(key)?.companionToolUseFingerprints).toEqual([
+      { hash: "a".repeat(64), side: "before" },
     ]);
   });
+
+  test.each([
+    ["before", false],
+    ["after", false],
+    ["before", true],
+    ["after", true],
+  ] as const)(
+    "preserves a %s recall companion and its host result through restart and semantic preparation (legacy counts: %s)",
+    async (side, legacyCounts) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174005";
+      const call = {
+        type: "function_call",
+        call_id: "call_read",
+        name: "read",
+        arguments:
+          '{"file":"private-file","options":{"b":2,"a":1},"__proto__":{"value":"original"}}',
+      };
+      const marker = {
+        role: "assistant",
+        content: [{ type: "output_text", text: buildRecallAnchor(anchorId) }],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-5.6",
+          input: [
+            { role: "user", content: "inspect this file" },
+            ...(side === "before" ? [call, marker] : [marker, call]),
+            {
+              type: "function_call_output",
+              call_id: "call_read",
+              output: "actual host file contents",
+            },
+            { role: "user", content: "continue" },
+          ],
+        },
+        {},
+      );
+      const liveStore: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            companionToolUses: [
+              {
+                id: call.call_id,
+                name: call.name,
+                input: JSON.parse(
+                  '{"__proto__":{"value":"original"},"options":{"a":1,"b":2},"file":"private-file"}',
+                ),
+                side,
+              },
+            ],
+          }),
+        ],
+      ]);
+      // Bind against the original client transcript, before the durable boundary.
+      bindCanonicalAnchors(req, liveStore);
+      let durable = serializeRecallStore(liveStore);
+      if (legacyCounts) {
+        // Records written before companion fingerprints contain side counts only.
+        const entries = JSON.parse(durable);
+        delete entries[0][1].companionToolUseFingerprints;
+        durable = JSON.stringify(entries);
+      }
+      const restored = deserializeRecallStore(durable);
+      expect(expandRecallMarkers(req, restored)).toBe(true);
+      const prepared = await prepareSemanticMessages({
+        messages: req.messages,
+        sessionID: `restart-companion-${side}`,
+        projectPath: "/test/restart-companions",
+        noStore: true,
+        timing: new PreparationTiming(req),
+      });
+      const messages = loreMessagesToGateway(
+        prepared.loreMessages,
+        prepared.provenanceByMessageId,
+      );
+      removeOrphanedToolResults(messages);
+      const body = buildOpenAIResponsesUpstreamRequest(
+        { ...req, messages },
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(
+        body.input
+          .filter((item) => item.type === "function_call")
+          .map((item) => item.call_id),
+      ).toEqual(
+        side === "before"
+          ? ["call_read", `lore-recall-${anchorId}`]
+          : [`lore-recall-${anchorId}`, "call_read"],
+      );
+      expect(
+        body.input.filter((item) => item.type === "function_call_output"),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            call_id: "call_read",
+            output: "actual host file contents",
+          }),
+          expect.objectContaining({ call_id: `lore-recall-${anchorId}` }),
+        ]),
+      );
+    },
+  );
+
+  test.each([false, true])(
+    "preserves multiple companions on both sides after restart (legacy counts: %s)",
+    async (legacyCounts) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174008";
+      const companions = ["before", "before", "after", "after"].map(
+        (side, index) => ({
+          id: `host-call-${index}`,
+          name: "read",
+          input: { file: `file-${index}` },
+          side: side as "before" | "after",
+        }),
+      );
+      const calls = companions.map(({ id, name, input }) => ({
+        type: "function_call",
+        call_id: id,
+        name,
+        arguments: JSON.stringify(input),
+      }));
+      const outputs = companions.map(({ id }) => ({
+        type: "function_call_output",
+        id: `fco-${id}`,
+        call_id: id,
+        status: "completed",
+        output: [
+          {
+            type: "output_text",
+            text: `actual output for ${id}`,
+            annotations: [
+              { type: "url_citation", url: "https://example.test/file" },
+            ],
+          },
+          {
+            type: "input_image",
+            image_url:
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9FeAAAAABJRU5ErkJggg==",
+          },
+        ],
+      }));
+      const expectedOutputs = structuredClone(outputs);
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-5.6",
+          input: [
+            { role: "user", content: "read all files" },
+            ...calls.slice(0, 2),
+            {
+              role: "assistant",
+              content: [
+                { type: "output_text", text: buildRecallAnchor(anchorId) },
+              ],
+            },
+            ...calls.slice(2),
+            ...outputs,
+          ],
+        },
+        {},
+      );
+      const liveStore: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({ anchorId, companionToolUses: companions }),
+        ],
+      ]);
+      bindCanonicalAnchors(req, liveStore);
+      const entries = JSON.parse(serializeRecallStore(liveStore));
+      if (legacyCounts) delete entries[0][1].companionToolUseFingerprints;
+      const restored = deserializeRecallStore(JSON.stringify(entries));
+      expect(expandRecallMarkers(req, restored)).toBe(true);
+      const prepared = await prepareSemanticMessages({
+        messages: req.messages,
+        sessionID: `both-sides-${legacyCounts}`,
+        projectPath: "/test/restart-companions",
+        noStore: true,
+        timing: new PreparationTiming(req),
+      });
+      const messages = loreMessagesToGateway(
+        prepared.loreMessages,
+        prepared.provenanceByMessageId,
+        true,
+        true,
+        false,
+        true,
+        true,
+      );
+      removeOrphanedToolResults(messages);
+      const body = buildOpenAIResponsesUpstreamRequest(
+        { ...req, messages },
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(
+        body.input
+          .filter((item) => item.type === "function_call")
+          .map((item) => item.call_id),
+      ).toEqual([
+        companions[0].id,
+        companions[1].id,
+        `lore-recall-${anchorId}`,
+        companions[2].id,
+        companions[3].id,
+      ]);
+      expect(
+        body.input.filter((item) => item.type === "function_call_output"),
+      ).toHaveLength(5);
+      for (const output of expectedOutputs)
+        expect(body.input).toContainEqual(output);
+    },
+  );
+
+  test.each(["id", "name", "input"] as const)(
+    "rejects legacy preceding companions with changed %s using the original prefix proof",
+    (changed) => {
+      const anchorId = "123e4567-e89b-42d3-a456-426614174009";
+      const call: GatewayToolUseBlock = {
+        type: "tool_use",
+        id: "original-id",
+        name: "read",
+        input: { file: "original" },
+      };
+      const req = makeRequest([
+        { role: "assistant", content: [call] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
+        },
+      ]);
+      const liveStore: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            companionToolUses: [{ ...call, side: "before" }],
+          }),
+        ],
+      ]);
+      bindCanonicalAnchors(req, liveStore);
+      const entries = JSON.parse(serializeRecallStore(liveStore));
+      delete entries[0][1].companionToolUseFingerprints;
+      const restored = deserializeRecallStore(JSON.stringify(entries));
+      if (changed === "id") call.id = "changed-id";
+      if (changed === "name") call.name = "write";
+      if (changed === "input") call.input = { file: "changed" };
+      expect(expandRecallMarkers(req, restored)).toBe(true);
+      expect(req.messages[0].content).toEqual([call]);
+      expect(JSON.stringify(req.messages)).not.toContain("Recall Results");
+      expect(
+        req.messages
+          .flatMap((message) => message.content)
+          .filter((block) => block.type === "tool_use"),
+      ).toEqual([call]);
+    },
+  );
 
   test("deserialize tolerates corrupt / empty blobs", () => {
     expect(deserializeRecallStore("not json").size).toBe(0);

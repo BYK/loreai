@@ -15,6 +15,7 @@ import {
 import { anthropicRoutes } from "./anthropic";
 import { openaiRoutes } from "./openai";
 import { compactRoutes } from "./compact";
+import { recallRoutes } from "./recall";
 import { modelsRoutes } from "./models";
 import { controlRoutes } from "./control";
 import { dashboardRoutes } from "./dashboard";
@@ -32,6 +33,7 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   anthropicRoutes,
   openaiRoutes,
   compactRoutes,
+  recallRoutes,
   modelsRoutes,
   controlRoutes,
   dashboardRoutes,
