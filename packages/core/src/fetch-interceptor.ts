@@ -11,7 +11,10 @@
  */
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
-import { isCredentialHeaderName } from "./credential-headers";
+import {
+  GATEWAY_AUTH_HEADER,
+  isCredentialHeaderName,
+} from "./credential-headers";
 import { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
 import {
   CONTEXT_BOUNDARY_CAPABILITY_HEADER,
@@ -231,12 +234,25 @@ function upstreamRequestTarget(upstream: URL): string {
   return upstream.pathname + upstream.search;
 }
 
+// Dynamic selection may distinguish tenants by base path on the same origin.
+// Static interception retains its existing origin-root rewrite behavior.
+function gatewayRoutingBase(gateway: URL, preserveBasePath: boolean): string {
+  return (
+    gateway.origin +
+    (preserveBasePath ? gateway.pathname.replace(/\/+$/, "") : "")
+  );
+}
+
 /**
  * Compact requests use a gateway management endpoint rather than a generation
  * endpoint. Normalize every provider prefix to the registered compact route,
  * while preserving the exact upstream request target for forwarding.
  */
-function interceptCompactUrl(upstream: URL, gateway: URL): Rewrite | null {
+function interceptCompactUrl(
+  upstream: URL,
+  gateway: URL,
+  preserveBasePath = false,
+): Rewrite | null {
   const match = /(?:^|\/)(?:codex\/)?responses\/compact\/?$/.exec(
     upstream.pathname,
   );
@@ -254,7 +270,7 @@ function interceptCompactUrl(upstream: URL, gateway: URL): Rewrite | null {
       : upstream.pathname.slice(0, match.index);
 
   return {
-    gatewayUrl: `${gateway.origin}/v1/responses/compact${upstream.search}`,
+    gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}/v1/responses/compact${upstream.search}`,
     upstreamBase: upstream.origin + upstreamBasePath,
     upstreamPath: upstreamRequestTarget(upstream),
   };
@@ -266,8 +282,12 @@ function interceptCompactUrl(upstream: URL, gateway: URL): Rewrite | null {
  * URL-pattern-matched path (Path 1). Returns null when the path can't be
  * mapped to a canonical gateway endpoint from the URL alone.
  */
-function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
-  const compact = interceptCompactUrl(upstream, gateway);
+function interceptUrl(
+  upstream: URL,
+  gateway: URL,
+  preserveBasePath = false,
+): Rewrite | null {
+  const compact = interceptCompactUrl(upstream, gateway, preserveBasePath);
   if (compact) return compact;
 
   // Preserve standard versioned paths. Gemini commonly uses /v1beta/ while
@@ -280,14 +300,14 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
     : -1;
   if (versionedIdx >= 0) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
+      gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
       upstreamBase: upstream.origin + upstream.pathname.slice(0, versionedIdx),
       upstreamPath: upstreamRequestTarget(upstream),
     };
   }
   if (GEMINI_GENERATE_CONTENT_PATH_RE.test(upstream.pathname)) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname}${upstream.search}`,
+      gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${upstream.pathname}${upstream.search}`,
       upstreamBase: upstream.origin,
       upstreamPath: upstreamRequestTarget(upstream),
     };
@@ -298,7 +318,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
   )) {
     if (upstream.pathname.endsWith(suffix)) {
       return {
-        gatewayUrl: `${gateway.origin}${canonical}${upstream.search}`,
+        gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${canonical}${upstream.search}`,
         upstreamBase:
           upstream.origin + upstream.pathname.slice(0, -suffix.length),
         upstreamPath: upstreamRequestTarget(upstream),
@@ -322,8 +342,9 @@ export function interceptUrlForProtocol(
   upstream: URL,
   gateway: URL,
   protocol: BodyProtocol,
+  preserveBasePath = false,
 ): Rewrite {
-  const compact = interceptCompactUrl(upstream, gateway);
+  const compact = interceptCompactUrl(upstream, gateway, preserveBasePath);
   if (compact) return compact;
 
   const gatewayPath = PROTOCOL_GATEWAY_PATHS[protocol];
@@ -339,7 +360,7 @@ export function interceptUrlForProtocol(
     }
   }
   return {
-    gatewayUrl: `${gateway.origin}${gatewayPath}${upstream.search}`,
+    gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${gatewayPath}${upstream.search}`,
     upstreamBase,
     upstreamPath: upstreamRequestTarget(upstream),
   };
@@ -1003,12 +1024,13 @@ export function installFetchInterceptor(
     if (!selectedGateway) {
       // Ownership is ambiguous. Keep provider credentials at their original
       // destination, but never send gateway secrets or internal attribution.
+      const gatewayCredentialed = requestHeaders.has(GATEWAY_AUTH_HEADER);
       for (const name of Array.from(requestHeaders.keys())) {
         if (name.startsWith("x-lore-")) requestHeaders.delete(name);
       }
       // Request-owned and streaming bodies cannot be inspected synchronously.
       // Protect fallback LLM paths even when their protocol is unverified.
-      const llmHop = pathLooksLLMLike(upstream.pathname);
+      const llmHop = gatewayCredentialed || pathLooksLLMLike(upstream.pathname);
       return networkFetch(
         input,
         prepareGatewayFetchInit(input, init, requestHeaders, llmHop),
@@ -1064,7 +1086,7 @@ export function installFetchInterceptor(
 
     // ---- Path 1: URL matched a known LLM API pattern ----
     if (matchesLLMApiPath(upstream.pathname)) {
-      const rewrite = interceptUrl(upstream, gateway);
+      const rewrite = interceptUrl(upstream, gateway, !!config.resolveGateway);
       if (!rewrite) {
         // Should not happen — matchesLLMApiPath() being true means the path
         // matched a pattern, and interceptUrl handles all patterns. Pass
@@ -1103,7 +1125,12 @@ export function installFetchInterceptor(
         // Body shape identified the protocol — route to the canonical
         // gateway endpoint for that protocol so the request goes through
         // Lore even though the URL path was non-standard.
-        const rewrite = interceptUrlForProtocol(upstream, gateway, detected);
+        const rewrite = interceptUrlForProtocol(
+          upstream,
+          gateway,
+          detected,
+          !!config.resolveGateway,
+        );
         const headers = buildGatewayHeaders(
           input,
           init,

@@ -48,7 +48,9 @@ test("live native clients keep observations after the idle cache evicts their ga
         response.end(
           JSON.stringify(
             request.url === "/v1/recall"
-              ? { result: `memory-${index}-${request.headers["x-api-key"]}` }
+              ? {
+                  result: `memory-${index}-${String(request.headers["x-api-key"] ?? "")}`,
+                }
               : {},
           ),
         );
@@ -97,11 +99,11 @@ test("live native clients keep observations after the idle cache evicts their ga
       factories.push(instance);
       return instance;
     };
-    const active = [];
+    const active: Array<Awaited<ReturnType<typeof makeFactory>>> = [];
     for (let index = 0; index < 5; index++)
       active.push(await makeFactory(index));
     const call = async (instance: (typeof active)[number], id: string) => {
-      const result = await instance.tools[0]!.execute(
+      const result = await instance.tools[0].execute(
         id,
         { query: "memory", scope: "session" },
         instance.context.signal,
@@ -149,17 +151,17 @@ test("live native clients keep observations after the idle cache evicts their ga
       await instance.handlers.get("agent_end")?.({}, instance.context);
     };
     for (let index = 0; index < 5; index++) {
-      await send(active[index]!, `call-${index}`, `key-${index}`, index + 1);
-      expect(await call(active[index]!, `call-${index}`)).toBe(
+      await send(active[index], `call-${index}`, `key-${index}`, index + 1);
+      expect(await call(active[index], `call-${index}`)).toBe(
         `memory-${index}-key-${index}`,
       );
     }
     // Reload must recover the live gateway client, including its prior exact-turn observations.
-    const reloaded = await makeFactory(0, active[0]!.branch);
+    const reloaded = await makeFactory(0, active[0].branch);
     expect(await call(reloaded, "call-0")).toBe("memory-0-key-0");
     await send(reloaded, "call-rotated", "rotated-key", 100);
     expect(await call(reloaded, "call-rotated")).toBe("memory-0-rotated-key");
-    expect(await call(active[0]!, "call-0")).toBe("memory-0-key-0");
+    expect(await call(active[0], "call-0")).toBe("memory-0-key-0");
     expect(
       received
         .filter((request) => request.path === "/v1/recall")

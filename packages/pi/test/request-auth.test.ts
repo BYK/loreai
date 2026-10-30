@@ -226,3 +226,76 @@ test("distinct gateway destinations are preserved and ambiguous upstream request
   expect((await send()).url).toBe(`${gatewayA}/v1/messages`);
   await first.handlers.get("session_shutdown")?.({});
 });
+
+test.each([
+  {
+    name: "standard",
+    upstream: "https://api.anthropic.com/v1/messages",
+    endpoint: "/v1/messages",
+  },
+  {
+    name: "body-detected",
+    upstream: "https://custom-provider.example/llm/messages",
+    endpoint: "/v1/messages",
+  },
+  {
+    name: "compact",
+    upstream: "https://api.openai.com/v1/responses/compact",
+    endpoint: "/v1/responses/compact",
+  },
+])(
+  "same-origin path tenant keeps $name requests and credentials below its configured base",
+  async ({ name, upstream, endpoint }) => {
+    const shared = "https://shared-gateway.example";
+    const root = await factory(shared, "root-token", `root-${name}`);
+    const tenant = await factory(
+      `${shared}/tenant-b`,
+      "tenant-token",
+      `tenant-${name}`,
+    );
+    const headers = {
+      "x-lore-project": tenant.context.cwd,
+      "x-lore-session-id": sessionIDFor(
+        tenant.context.sessionManager.getSessionFile(),
+      ),
+      "x-api-key": "tenant-provider-key",
+      "content-type": "application/json",
+    };
+    await fetch(upstream, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "model",
+        ...(name === "body-detected"
+          ? { system: "You are a coding assistant." }
+          : {}),
+        messages: [{ role: "user", content: "memory" }],
+      }),
+    });
+    const routed = requests.at(-1)!;
+    expect({
+      url: routed.url,
+      gatewayToken: routed.headers.get(GATEWAY_AUTH_HEADER),
+      providerKey: routed.headers.get("x-api-key"),
+    }).toEqual({
+      url: `${shared}/tenant-b${endpoint}`,
+      gatewayToken: "tenant-token",
+      providerKey: "tenant-provider-key",
+    });
+    const registration = tenant.registrations.get("anthropic")!;
+    const direct = await send(
+      `${registration.baseUrl}/v1/messages`,
+      registration.headers,
+    );
+    expect(direct.url).toBe(`${shared}/tenant-b/v1/messages`);
+    expect(direct.headers.get(GATEWAY_AUTH_HEADER)).toBe("tenant-token");
+    const rootRequest = await send(undefined, {
+      "x-lore-project": root.context.cwd,
+      "x-lore-session-id": sessionIDFor(
+        root.context.sessionManager.getSessionFile(),
+      ),
+    });
+    expect(rootRequest.url).toBe(`${shared}/v1/messages`);
+    expect(rootRequest.headers.get(GATEWAY_AUTH_HEADER)).toBe("root-token");
+  },
+);

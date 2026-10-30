@@ -182,3 +182,33 @@ test.each([
     }
   },
 );
+
+test.each(["/health", "/v1/compact"])(
+  "unresolved credentialed gateway %s protects remaining provider credentials",
+  async (path) => {
+    const calls: Request[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Request(input, init));
+        return Response.json({});
+      }),
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: "https://gateway.example",
+      resolveGateway: () => null,
+      getHeaders: () => ({}),
+    });
+    const input = new Request(`https://unremembered-gateway.example${path}`, {
+      headers: {
+        "x-lore-gateway-token": "gateway-secret",
+        "x-api-key": "provider-secret",
+      },
+    });
+    await fetch(input);
+    expect(calls[0].redirect).toBe("manual");
+    expect(calls[0].headers.get("x-lore-gateway-token")).toBeNull();
+    expect(calls[0].headers.get("x-api-key")).toBe("provider-secret");
+    expect(input.headers.get("x-lore-gateway-token")).toBe("gateway-secret");
+  },
+);
