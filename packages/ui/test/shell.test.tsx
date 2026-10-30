@@ -1,5 +1,6 @@
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -2668,28 +2669,42 @@ it.each([
 );
 
 it("labels every mini rail destination through keyboard tooltips", async () => {
-  mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
-  await screen.findByTestId("knowledge-document");
-  const rail = screen.getByTestId("icon-rail");
-  const destinations = [
-    ...rail.querySelectorAll<HTMLAnchorElement>("a[data-testid]"),
-  ];
-  expect(destinations.length).toBeGreaterThan(10);
-  for (const link of destinations) {
-    const label = link.getAttribute("aria-label");
-    if (!label) throw new Error("Missing navigation label");
-    expect(link.textContent).toBe("");
-    expect(link).toHaveAttribute("href");
-    link.focus();
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
-    expect(link).toHaveAttribute(
-      "aria-describedby",
-      screen.getByRole("tooltip").id,
-    );
-    fireEvent.keyDown(link, { key: "Escape" });
-    link.blur();
-    await waitFor(() =>
-      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
-    );
+  vi.useFakeTimers();
+  try {
+    mount("/projects/p-lore/knowledge/k-sqlite", fakeClient());
+    await screen.findByTestId("knowledge-document");
+    const rail = screen.getByTestId("icon-rail");
+    const destinations = [
+      ...rail.querySelectorAll<HTMLAnchorElement>("a[data-testid]"),
+    ];
+    expect(destinations.length).toBeGreaterThan(10);
+    for (const link of destinations) {
+      const label = link.getAttribute("aria-label");
+      if (!label) throw new Error("Missing navigation label");
+      expect(link.textContent).toBe("");
+      expect(link).toHaveAttribute("href");
+      link.focus();
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+      expect(link).toHaveAttribute(
+        "aria-describedby",
+        screen.getByRole("tooltip").id,
+      );
+      fireEvent.keyDown(link, { key: "Escape" });
+      link.blur();
+      await waitFor(() =>
+        expect(screen.queryByRole("tooltip")).not.toBeInTheDocument(),
+      );
+    }
+  } finally {
+    try {
+      cleanup();
+      // Kobalte's module-global skip-delay timers outlive disposed tooltips.
+      // Execute their callbacks while jsdom still supplies window; clearing
+      // timers or ignoring uncaught errors would hide real callback failures.
+      await vi.runOnlyPendingTimersAsync();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   }
 });
