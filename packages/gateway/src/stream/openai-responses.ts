@@ -38,6 +38,10 @@ import {
 } from "../usage-validation";
 import { responsesToolName } from "../translate/responses-native";
 import { appendCodexRateLimitEvent } from "../codex-rate-limits";
+import {
+  hasConsistentResponsesToolSearchOwnership,
+  isValidResponsesToolSearchItem,
+} from "../translate/responses-tool-search";
 
 // ---------------------------------------------------------------------------
 // Stream accumulator — shared per-event core
@@ -292,6 +296,18 @@ export function assertSuccessfulResponsesCompletion(
     if (rawItem.status !== undefined && rawItem.status !== "completed") {
       throw new Error("upstream Responses request did not complete");
     }
+    if (
+      (rawItem.type === "tool_search_call" ||
+        rawItem.type === "tool_search_output") &&
+      !isValidResponsesToolSearchItem(rawItem, "output")
+    ) {
+      throw new Error("upstream Responses request did not complete");
+    }
+  }
+  if (
+    !hasConsistentResponsesToolSearchOwnership(response.output as unknown[])
+  ) {
+    throw new Error("upstream Responses request did not complete");
   }
 }
 
@@ -1069,6 +1085,14 @@ function validatePublicResponsesEvent(
     ) {
       malformed();
     }
+    if (
+      event === "response.completed" &&
+      !hasConsistentResponsesToolSearchOwnership(
+        Array.from(state.rawItems.values()),
+      )
+    ) {
+      malformed();
+    }
   }
   if (
     validOutputIndex &&
@@ -1115,6 +1139,9 @@ function validatePublicResponsesEvent(
           addedItem.status,
           "added",
         ) ||
+        ((addedItem.type === "tool_search_call" ||
+          addedItem.type === "tool_search_output") &&
+          !isValidResponsesToolSearchItem(addedItem, "output-added")) ||
         (addedItem.type === "message" && typeof addedItem.id !== "string") ||
         (addedItem.type === "message" &&
           addedItem.status !== undefined &&
@@ -1165,6 +1192,9 @@ function validatePublicResponsesEvent(
           doneItem.status,
           "done",
         ) ||
+        ((doneItem.type === "tool_search_call" ||
+          doneItem.type === "tool_search_output") &&
+          !isValidResponsesToolSearchItem(doneItem, "output")) ||
         (doneItem.type === "message" && typeof doneItem.id !== "string") ||
         (doneItem.type === "message" &&
           doneItem.status !== undefined &&
@@ -1452,6 +1482,15 @@ function validateCodexOutputItem(
       item.type,
       item.status,
       event === "response.output_item.added" ? "added" : "done",
+    )
+  ) {
+    malformedResponsesEvent();
+  }
+  if (
+    (item.type === "tool_search_call" || item.type === "tool_search_output") &&
+    !isValidResponsesToolSearchItem(
+      item,
+      event === "response.output_item.added" ? "output-added" : "output",
     )
   ) {
     malformedResponsesEvent();

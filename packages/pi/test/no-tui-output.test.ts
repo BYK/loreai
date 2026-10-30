@@ -42,6 +42,7 @@ function createMockPi() {
     ): void {
       providers.push({ name, config });
     },
+    registerTool(): void {},
     on(event: string, handler: AnyHandler): void {
       handlers.set(event, handler);
     },

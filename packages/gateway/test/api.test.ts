@@ -884,14 +884,57 @@ describe("GET /api/v1/recall", () => {
     expect(body.error.message).toContain("Invalid scope");
   });
 
-  it("returns results for a valid query", async () => {
+  it.each([null, "", "   "])(
+    "returns 400 for session scope without a nonblank session ID (%s)",
+    async (session) => {
+      const { projectPath } = await seedProject();
+      const params = new URLSearchParams({
+        q: "test",
+        path: projectPath,
+        scope: "session",
+        expand: "false",
+      });
+      if (session !== null) params.set("session", session);
+      const res = await api(`/api/v1/recall?${params}`);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        error: { type: string; message: string };
+      };
+      expect(body.error).toMatchObject({
+        type: "invalid_request",
+        message: "Recall session scope requires a session ID.",
+      });
+    },
+  );
+
+  it("accepts session scope with a session ID", async () => {
     const { projectPath } = await seedProject();
+    const params = new URLSearchParams({
+      q: "test",
+      path: projectPath,
+      scope: "session",
+      session: "test-session",
+      expand: "false",
+    });
+    const res = await api(`/api/v1/recall?${params}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { scope: string; result: string };
+    expect(body.scope).toBe("session");
+    expect(typeof body.result).toBe("string");
+  });
+
+  it("returns results for a valid query", async () => {
+    const { projectPath, knowledgeId } = await seedProject();
     const pq = `path=${encodeURIComponent(projectPath)}`;
     const data = await apiJSON<{ query: string; result: string }>(
-      `/api/v1/recall?q=REST+API&${pq}`,
+      `/api/v1/recall?q=REST+API&${pq}&expand=false&link_knowledge=true`,
     );
+    const { ltm } = await import("@loreai/core");
+    const entry = ltm.get(knowledgeId);
+    if (!entry) throw new Error("seed knowledge entry was not created");
     expect(data.query).toBe("REST API");
     expect(typeof data.result).toBe("string");
+    expect(data.result).toContain(`(k:${entry.logical_id})`);
   });
 
   it.each(["false", "0", "no"])(

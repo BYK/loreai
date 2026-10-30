@@ -191,7 +191,7 @@ describe("api client: happy path", () => {
       session: "s 1",
     });
     expect(calls[0]).toBe(
-      "/api/v1/recall?q=sqlite&scope=knowledge&expand=false&limit=50&path=%2Fp&session=s+1",
+      "/api/v1/recall?q=sqlite&scope=knowledge&expand=false&link_knowledge=true&limit=50&path=%2Fp&session=s+1",
     );
   });
 

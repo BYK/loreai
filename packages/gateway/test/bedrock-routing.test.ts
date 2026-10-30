@@ -123,7 +123,9 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
     expect(capturedBody).toBeDefined();
     expect(capturedBody?.model).toBe("anthropic.claude-3-5-sonnet-20241022");
     expect(capturedBody?.tools).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "recall" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ name: "lore_recall" }),
+      ]),
     );
     expect(capturedBody?.tool_choice).toBeUndefined();
     // It is plain Anthropic — NOT the runtime InvokeModel sentinel.

@@ -70,6 +70,7 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
 } from "@loreai/core";
@@ -85,6 +86,8 @@ import {
 import {
   load,
   config as loreConfig,
+  createRecallToolExecutor,
+  parseRecallToolArguments,
   ensureProject,
   db,
   recordCacheBustObservation,
@@ -508,6 +511,8 @@ import {
   projectRecallRecoveryResponse,
   hasOtherToolUse,
   clientHasRecallTool,
+  markNativeRecallTool,
+  appendNativeRecallToolReminder,
   hasGatewayRecallTool,
   shouldEnableRecallMarkerReplay,
   runRecallFollowUpStreaming,
@@ -1013,6 +1018,9 @@ const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
 const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
 const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
 const MAX_PENDING_SESSION_CLAIMS = 64;
+// One assistant response can invoke several native recall tools in parallel.
+// Serialize their reads while retaining a bounded per-session request backlog.
+const MAX_PENDING_NATIVE_RECALL_CLAIMS_PER_SESSION = 16;
 const MAX_DETACHED_PIPELINE_REQUESTS = 64;
 let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
 let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
@@ -1026,7 +1034,8 @@ interface PendingSessionClaim {
   onAbort: () => void;
 }
 
-const pendingSessionClaims = new Map<string, PendingSessionClaim>();
+// Insertion order preserves FIFO while each waiter has independent cancellation.
+const pendingSessionClaims = new Set<PendingSessionClaim>();
 
 class PipelineCapacityError extends Error {}
 
@@ -1054,6 +1063,14 @@ function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
   return count;
 }
 
+function pendingSessionClaimsForSession(sessionID: string): number {
+  let count = 0;
+  for (const claim of pendingSessionClaims) {
+    if (claim.sessionID === sessionID) count++;
+  }
+  return count;
+}
+
 function pipelineSessionHasCapacity(sessionID: string): boolean {
   return (
     activePipelineRequestsForSession(sessionID) +
@@ -1063,7 +1080,8 @@ function pipelineSessionHasCapacity(sessionID: string): boolean {
 }
 
 function pumpPendingSessionClaims(): void {
-  for (const [sessionID, claim] of pendingSessionClaims) {
+  for (const claim of pendingSessionClaims) {
+    const { sessionID } = claim;
     if (
       activePipelineRequests.size + streamingPostResponsePending >=
       maxActivePipelineRequests
@@ -1080,7 +1098,7 @@ function pumpPendingSessionClaims(): void {
       continue;
     }
     if (!pipelineSessionHasCapacity(sessionID)) continue;
-    pendingSessionClaims.delete(sessionID);
+    pendingSessionClaims.delete(claim);
     claim.signal.removeEventListener("abort", claim.onAbort);
     if (claim.signal.aborted) {
       claim.reject(claim.signal.reason);
@@ -1095,7 +1113,7 @@ function pumpPendingSessionClaims(): void {
 function isPipelineSessionActive(sessionID: string): boolean {
   return (
     activePipelineRequestsForSession(sessionID) > 0 ||
-    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaimsForSession(sessionID) > 0 ||
     streamingPostResponseFinalizers.has(sessionID)
   );
 }
@@ -6701,8 +6719,13 @@ function getOrCreateSession(
     }
 
     // Restore sub-agent parent–child relationship (v26)
+    state.parentSessionPrimary = persisted?.parentSessionPrimary === true;
     if (persisted?.isSubagent) {
       state.isSubagent = true;
+      // Preserve the provisional classification across restarts so a later
+      // primary-session observation can clear it instead of leaving a false
+      // sub-agent attribution permanently pinned.
+      state.parentSessionPending = persisted.parentSessionPending === true;
       if (persisted.parentSessionId) {
         state.parentSessionId = persisted.parentSessionId;
       }
@@ -6735,11 +6758,14 @@ function getOrCreateSession(
         tokenCount: persisted.stableLtmTokens,
       });
     }
-    // Restore the recall store (v46) so historical recall markers still expand
-    // to their original tool_use + tool_result pair after a restart, instead of
-    // leaking upstream as raw marker text and rewriting that message.
+    // Restore only anchor replay state. Query text is never durable; normalize
+    // legacy/corrupt rows here as a second boundary in addition to migration 106.
     if (persisted?.recallStore != null) {
       state.recallStore = deserializeRecallStore(persisted.recallStore);
+      const sanitizedRecallStore = serializeRecallStore(state.recallStore);
+      if (sanitizedRecallStore !== persisted.recallStore) {
+        saveSessionTracking(sessionID, { recallStore: sanitizedRecallStore });
+      }
     }
     if (persisted?.lastUpstream != null) {
       try {
@@ -10810,7 +10836,11 @@ export function streamResponsesRecallAware(
         `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
       );
     }
-    if (idValue !== undefined && !isValidRecallId(idValue)) {
+    if (
+      idValue !== undefined &&
+      !isValidRecallId(idValue) &&
+      !isRecallDetailRef(idValue)
+    ) {
       throw new InvalidRecallArguments("id_type", "id must be a string");
     }
     if (
@@ -10818,7 +10848,7 @@ export function streamResponsesRecallAware(
       (!Array.isArray(idsValue) ||
         idsValue.length === 0 ||
         idsValue.length > MAX_RECALL_BATCH_IDS ||
-        idsValue.some((id) => !isValidRecallId(id)))
+        idsValue.some((id) => !isValidRecallId(id) && !isRecallDetailRef(id)))
     ) {
       throw new InvalidRecallArguments(
         "ids_type",
@@ -14120,8 +14150,8 @@ export function streamResponsesRecallAware(
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
                 item?.type === "function_call" &&
-                item?.name === "recall" &&
-                item.namespace === undefined;
+                item?.name === RECALL_TOOL_NAME &&
+                item?.namespace === undefined;
               if (isRecallCall) {
                 recallDetected = true;
                 recallIndices.add(outputIndex);
@@ -15507,7 +15537,10 @@ export function streamResponsesRecallAware(
               const visibleResp = {
                 ...finalResp,
                 content: finalResp.content.map((block) => {
-                  if (block.type !== "tool_use" || block.name !== "recall") {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.name !== RECALL_TOOL_NAME
+                  ) {
                     return block;
                   }
                   return {
@@ -19275,6 +19308,119 @@ async function handleCompactEndpointInner(
   }
 }
 
+/** Execute a native recall tool under the gateway's established session owner. */
+export async function handleNativeRecallEndpoint(
+  req: Request,
+  config: GatewayConfig,
+  loopbackPeer = false,
+): Promise<Response> {
+  const rawHeaders = requestHeaders(req.headers);
+  const reply = (status: number, message: string) =>
+    new Response(JSON.stringify({ error: "recall_unavailable", message }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return reply(400, "Conflicting provider credentials");
+  }
+  if (
+    !extractAuth(rawHeaders) &&
+    (!loopbackPeer || usesRemoteSessionBinding(config))
+  )
+    return reply(401, "A provider credential is required");
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress)
+      return reply(503, "Gateway pipeline is resetting");
+    const requestGeneration = streamingPostResponseGeneration;
+    const projectPath = rawHeaders["x-lore-project"];
+    if (!projectPath) return reply(400, "A project path is required");
+    const minimalReq: GatewayRequest = {
+      protocol: "anthropic",
+      system: "",
+      messages: [],
+      tools: [],
+      model: "",
+      maxTokens: 0,
+      stream: false,
+      metadata: {},
+      rawHeaders,
+      signal: req.signal,
+    };
+    const state = resolveAuthenticatedDirectSession(
+      minimalReq,
+      projectPath,
+      config,
+    );
+    if (!state) return reply(404, "No authenticated session found");
+    if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
+      return reply(403, "Project does not match the authenticated session");
+    }
+    try {
+      return await runActivePipelineRequest(
+        req.signal,
+        async (signal, _trackOperation, claimSession) => {
+          await claimSession(state.sessionID);
+          await awaitStreamingPostResponse(state.sessionID, signal);
+          assertCurrentPipelineGeneration(signal, requestGeneration);
+          if (
+            !confirmedIndexedIdentityResolvesTo(
+              minimalReq,
+              state.sessionID,
+              config,
+            )
+          ) {
+            return reply(404, "No authenticated session found");
+          }
+          if (!isConfidentlyBoundToLogicalProject(state, projectPath)) {
+            return reply(
+              403,
+              "Project does not match the authenticated session",
+            );
+          }
+          let input: unknown;
+          try {
+            input = JSON.parse(
+              await decodeRequestBody(req, signal, {
+                compressedBytes: 16_384,
+                decompressedBytes: 16_384,
+              }),
+            );
+          } catch {
+            signal.throwIfAborted();
+            return reply(400, "Invalid recall arguments");
+          }
+          const parsed = parseRecallToolArguments(input);
+          if (!parsed.valid) return reply(400, parsed.error);
+          await initIfNeeded(
+            state.projectPath,
+            config,
+            undefined,
+            signal,
+            requestGeneration,
+          );
+          const execute = createRecallToolExecutor();
+          const result = await execute(parsed.value, {
+            projectPath: state.projectPath,
+            sessionID: state.sessionID,
+            signal,
+          });
+          signal.throwIfAborted();
+          return new Response(JSON.stringify({ result }), {
+            headers: { "content-type": "application/json" },
+          });
+        },
+        undefined,
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
+        MAX_PENDING_NATIVE_RECALL_CLAIMS_PER_SESSION,
+      );
+    } catch {
+      return reply(503, "Recall is temporarily unavailable");
+    }
+  });
+}
+
 export async function handleCompactEndpoint(
   req: Request,
   config: GatewayConfig,
@@ -20112,15 +20258,19 @@ async function claimPipelineSession(
   active: ActivePipelineRequest,
   sessionID: string,
   signal: AbortSignal,
+  maxPendingPerSession: number,
 ): Promise<void> {
   if (active.sessionIDs.has(sessionID)) return;
   signal.throwIfAborted();
-  if (pipelineSessionHasCapacity(sessionID)) {
+  if (
+    pendingSessionClaimsForSession(sessionID) === 0 &&
+    pipelineSessionHasCapacity(sessionID)
+  ) {
     active.sessionIDs.add(sessionID);
     return;
   }
   if (
-    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaimsForSession(sessionID) >= maxPendingPerSession ||
     pendingSessionClaims.size >= MAX_PENDING_SESSION_CLAIMS ||
     pendingSessionClaimsForAdmissionKey(active.admissionKey) >=
       MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
@@ -20132,14 +20282,13 @@ async function claimPipelineSession(
   return new Promise<void>((resolve, reject) => {
     let claim: PendingSessionClaim;
     const onAbort = () => {
-      if (pendingSessionClaims.get(sessionID) !== claim) return;
-      pendingSessionClaims.delete(sessionID);
+      if (!pendingSessionClaims.delete(claim)) return;
       signal.removeEventListener("abort", onAbort);
       reject(signal.reason);
       pumpPendingSessionClaims();
     };
     claim = { active, sessionID, signal, resolve, reject, onAbort };
-    pendingSessionClaims.set(sessionID, claim);
+    pendingSessionClaims.add(claim);
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
     else pumpPendingSessionClaims();
@@ -20157,6 +20306,7 @@ async function runActivePipelineRequest(
   onResponseBodyCancelled?: () => void,
   onResponseBodyCompleted?: () => void,
   admissionKey = "",
+  maxPendingPerSession = 1,
 ): Promise<Response> {
   if (
     detachedPipelineRequests.size +
@@ -20166,6 +20316,7 @@ async function runActivePipelineRequest(
     activePipelineRequests.size + streamingPostResponsePending >=
       maxActivePipelineRequests ||
     activePipelineRequestsForAdmissionKey(admissionKey) +
+      pendingSessionClaimsForAdmissionKey(admissionKey) +
       (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) >=
       MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
   ) {
@@ -20235,7 +20386,7 @@ async function runActivePipelineRequest(
 
   try {
     const response = await operation(signal, trackOperation, (sessionID) =>
-      claimPipelineSession(active, sessionID, signal),
+      claimPipelineSession(active, sessionID, signal, maxPendingPerSession),
     );
     responseReturned = true;
     if (signal.aborted) {
@@ -21803,6 +21954,7 @@ async function handleConversationTurnPrepared(
   {
     const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
     const parentClientId = req.rawHeaders["x-parent-session-id"];
+    const parentStateHint = req.rawHeaders["x-lore-session-parent-state"];
     const sharedSessionId = req.rawHeaders["x-claude-code-session-id"];
     const credentialFingerprint = requestCredentialFingerprint(
       req.rawHeaders,
@@ -21814,6 +21966,56 @@ async function handleConversationTurnPrepared(
     // parent *agent*, not its session). May be undefined for a malformed or
     // adversarial sub-agent request that carries neither header.
     const parentLookupValue = parentClientId ?? sharedSessionId;
+    if (
+      (sessionState.parentSessionPending ||
+        sessionState.parentSessionPrimary) &&
+      (parentClientId || isClaudeSubagent)
+    ) {
+      sessionState.isSubagent = true;
+      sessionState.parentSessionPending = false;
+      sessionState.parentSessionPrimary = false;
+      saveSessionTracking(sessionID, {
+        isSubagent: true,
+        parentSessionPending: false,
+        parentSessionPrimary: false,
+      });
+    }
+    // The OpenCode adapter cannot await session.get() on the provider request.
+    // Mark an unclassified cold lookup as sub-agent-scoped before LTM selection.
+    // Explicit primary confirmation survives a later adapter cache miss; age
+    // and existing conversation activity never establish that confirmation.
+    // Native parent/Claude signals always take precedence.
+    const parentNotResolvedHere =
+      !isClaudeSubagent && !parentClientId && !sessionState.parentSessionId;
+    if (
+      parentNotResolvedHere &&
+      parentStateHint === "pending" &&
+      !sessionState.isSubagent &&
+      !sessionState.parentSessionPrimary &&
+      sessionState.parentSessionPending !== true
+    ) {
+      sessionState.isSubagent = true;
+      sessionState.parentSessionPending = true;
+      saveSessionTracking(sessionID, {
+        isSubagent: true,
+        parentSessionPending: true,
+      });
+    } else if (
+      parentNotResolvedHere &&
+      parentStateHint === "primary" &&
+      (!sessionState.isSubagent ||
+        sessionState.parentSessionPending === true) &&
+      !sessionState.parentSessionPrimary
+    ) {
+      sessionState.isSubagent = false;
+      sessionState.parentSessionPending = false;
+      sessionState.parentSessionPrimary = true;
+      saveSessionTracking(sessionID, {
+        isSubagent: false,
+        parentSessionPending: false,
+        parentSessionPrimary: true,
+      });
+    }
     const shouldResolveParent =
       credentialFingerprint !== null &&
       (!sessionState.isSubagent || !sessionState.parentSessionId) &&
@@ -21837,9 +22039,11 @@ async function handleConversationTurnPrepared(
       }
       if (resolvedParent) {
         sessionState.parentSessionId = resolvedParent;
+        sessionState.parentSessionPending = false;
         saveSessionTracking(sessionID, {
           isSubagent: true,
           parentSessionId: resolvedParent,
+          parentSessionPending: false,
         });
       } else if (!sessionState.parentSessionId) {
         // Parent may use Tier 3 (fingerprint) identification, or hasn't made
@@ -22030,7 +22234,8 @@ async function handleConversationTurnPrepared(
   // persisted anchors. The gateway injects its own recall tool only when the
   // client has tools but no recall tool, so this decision is made before any
   // marker expansion mutates the request.
-  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(req.tools);
+  const replayTools = markNativeRecallTool(req.tools);
+  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(replayTools);
 
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
@@ -22045,9 +22250,7 @@ async function handleConversationTurnPrepared(
     gatewayRecallEnabled: gatewayRecallForRequest,
   });
   if (expanded) {
-    reportRecallDiagnostic(
-      `expanded recall markers for session ${sessionID.slice(0, 16)}`,
-    );
+    reportRecallDiagnostic("expanded recall markers");
   }
   if (recallStoreChanged) {
     saveSessionTracking(sessionID, {
@@ -23488,9 +23691,20 @@ async function handleConversationTurnPrepared(
     messages: transformedMessages,
   };
 
+  // Native host adapters register Lore recall through their own tool registry.
+  // Preserve host ownership; only the gateway's private brand can authorize
+  // gateway execution or marker replay.
+  modifiedReq.tools = markNativeRecallTool(modifiedReq.tools);
+  if (cfg.knowledge.enabled && cfg.loreFile.enabled) {
+    modifiedReq.tools = appendNativeRecallToolReminder(
+      modifiedReq.tools,
+      LORE_COMMIT_REMINDER,
+    );
+  }
+
   // --- 8b. Inject recall tool (with git reminder appended to description) ---
-  // Only inject if the client doesn't already have a recall tool (e.g. from
-  // a host plugin like OpenCode) and the request has a callable function tool.
+  // Only inject if the client doesn't already have a native recall tool and
+  // the request has a callable function tool.
   // A provider-owned built-in cannot execute recall, and a client's explicit
   // parallel-tool setting must not be replaced by our serial recall policy.
   if (

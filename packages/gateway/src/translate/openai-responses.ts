@@ -26,6 +26,7 @@ import type {
   GatewayUsage,
 } from "./types";
 import { sanitizeCodexRateLimitEvents } from "../codex-rate-limits";
+import { hasGatewayRecallTool } from "../recall";
 import {
   blocksToText,
   forwardClientHeaders,
@@ -35,6 +36,10 @@ import {
 } from "./types";
 import { extractAuth } from "../auth";
 import { isImageBlock, toResponsesImage } from "./images";
+import {
+  hasConsistentResponsesToolSearchOwnership,
+  isValidResponsesToolSearchItem,
+} from "./responses-tool-search";
 import {
   assertResponsesToolOutputEnvelope,
   portableResponsesFunctionCall,
@@ -469,6 +474,7 @@ function createInputItemsBuilder(): {
   const messages: GatewayMessage[] = [];
   const instructions: string[] = [];
   const elevatedItems: ParsedInputItems["elevatedItems"] = [];
+  const toolSearchItems: Record<string, unknown>[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
   let pendingStart = 0;
   let sourceIndex = 0;
@@ -561,6 +567,13 @@ function createInputItemsBuilder(): {
     }
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
+
+    if (itemType === "tool_search_call" || itemType === "tool_search_output") {
+      if (!isValidResponsesToolSearchItem(raw, "input")) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      toolSearchItems.push(raw);
+    }
 
     // Track only the state that can affect normalization across an item seam.
     if (itemType === "message" || (!itemType && role)) {
@@ -902,6 +915,9 @@ function createInputItemsBuilder(): {
   };
 
   const finish = (): ParsedInputItems => {
+    if (!hasConsistentResponsesToolSearchOwnership(toolSearchItems)) {
+      throw new InvalidCrossProviderRequestError();
+    }
     const boundarySafe =
       sawItem &&
       // Elevated items live in req.system rather than the normalized message
@@ -1249,11 +1265,9 @@ export function buildOpenAIResponsesUpstreamRequest(
       if (t.responsesBuiltin === "web_search_preview") {
         return [{ type: "web_search_preview" }];
       }
-      if (
-        t.name !== "recall" ||
-        t.gatewayOwned !== true ||
-        t.inputSchema.additionalProperties !== false
-      ) {
+      // Only the exact privately branded contract receives strict projection;
+      // caller-owned tools with matching names or flags remain ordinary tools.
+      if (!hasGatewayRecallTool([t])) {
         return [
           {
             type: "function",

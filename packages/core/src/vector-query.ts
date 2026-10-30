@@ -44,7 +44,12 @@ export type VectorQuerySpec =
       excludeCategories?: string[];
     }
   | { kind: "entities"; tenantId?: string; limit: number }
-  | { kind: "distillations"; tenantId?: string; limit: number }
+  | {
+      kind: "distillations";
+      tenantId?: string;
+      projectId?: string;
+      limit: number;
+    }
   | { kind: "allDistillations"; projectId: string; limit: number }
   | {
       kind: "temporal";
@@ -239,6 +244,7 @@ export function runVectorQuery(
         queryEmbedding,
         spec.tenantId,
         spec.limit,
+        spec.projectId,
       );
     case "allDistillations":
       return runAllDistillations(
@@ -403,23 +409,34 @@ function runDistillations(
   queryEmbedding: Float32Array,
   tenantId = "",
   limit: number,
+  projectId?: string,
 ): VectorHit[] {
   if (readMode === "degraded") return [];
   if (readMode === "vec0") {
     // `archived` flips on meta-distillation (mutable) → post-filter via join,
     // over-fetching so attrition leaves >= limit non-archived survivors, and
     // widening to a full scan if that still under-fills (blob-mode parity).
+    const projectFilter = projectId ? " AND project_id = ?" : "";
+    const rowProjectFilter = projectId ? " AND d.project_id = ?" : "";
+    const projectParams = projectId ? [projectId] : [];
     const run = (k: number): VectorHit[] =>
       conn
         .query(
-          "WITH knn AS (SELECT id, distance FROM distillation_vec WHERE embedding MATCH ? AND k = ?) " +
+          `WITH knn AS (SELECT id, distance FROM distillation_vec WHERE embedding MATCH ? AND k = ?${projectFilter}) ` +
             "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
             "FROM knn JOIN distillations d ON d.id = knn.id " +
             "JOIN projects p ON p.id = d.project_id " +
-            "WHERE p.tenant_id = ? AND d.archived = 0 " +
+            `WHERE p.tenant_id = ? AND d.archived = 0${rowProjectFilter} ` +
             "ORDER BY knn.distance LIMIT ?",
         )
-        .all(toBlob(queryEmbedding), k, tenantId, limit) as VectorHit[];
+        .all(
+          toBlob(queryEmbedding),
+          k,
+          ...projectParams,
+          tenantId,
+          ...projectParams,
+          limit,
+        ) as VectorHit[];
     const k0 = overfetchK(limit);
     const hits = run(k0);
     return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
@@ -427,20 +444,30 @@ function runDistillations(
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
     try {
+      const projectFilter = projectId ? " AND d.project_id = ?" : "";
       return conn
         .query(
-          "SELECT d.id, 1 - vec_distance_cosine(d.embedding, ?) AS similarity FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0 ORDER BY similarity DESC LIMIT ?",
+          `SELECT d.id, 1 - vec_distance_cosine(d.embedding, ?) AS similarity FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0${projectFilter} ORDER BY similarity DESC LIMIT ?`,
         )
-        .all(toBlob(queryEmbedding), tenantId, limit) as VectorHit[];
+        .all(
+          toBlob(queryEmbedding),
+          tenantId,
+          ...(projectId ? [projectId] : []),
+          limit,
+        ) as VectorHit[];
     } catch {
       // fall through to JS brute-force
     }
   }
+  const projectFilter = projectId ? " AND d.project_id = ?" : "";
   const rows = conn
     .query(
-      "SELECT d.id, d.embedding FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0",
+      `SELECT d.id, d.embedding FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0${projectFilter}`,
     )
-    .all(tenantId) as Array<{ id: string; embedding: Buffer }>;
+    .all(tenantId, ...(projectId ? [projectId] : [])) as Array<{
+    id: string;
+    embedding: Buffer;
+  }>;
 
   const topK: VectorHit[] = [];
   for (const row of rows) {

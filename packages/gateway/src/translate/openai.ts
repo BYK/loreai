@@ -964,6 +964,24 @@ export function buildOpenAIUpstreamRequest(
   upstreamBase: string,
   cache?: AnthropicCacheOptions,
 ): { url: string; headers: Record<string, string>; body: unknown } {
+  // Responses tool-search calls and outputs are top-level native items, not
+  // Chat Completions messages. Refuse cross-protocol conversion rather than
+  // silently dropping their provenance from the rebuilt history.
+  if (
+    req.protocol === "openai-responses" &&
+    req.messages.some((message) =>
+      message.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem === true &&
+          (block.raw.type === "tool_search_call" ||
+            block.raw.type === "tool_search_output"),
+      ),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+
   // Forward non-managed client headers first, then overlay gateway-managed.
   const headers: Record<string, string> = {
     ...forwardClientHeaders(req.rawHeaders),

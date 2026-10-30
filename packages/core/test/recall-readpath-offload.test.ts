@@ -7,7 +7,7 @@ import * as latReader from "../src/lat-reader";
 import * as ltm from "../src/ltm";
 import * as readOffload from "../src/read-offload";
 import * as temporal from "../src/temporal";
-import { runRecall, searchRecall } from "../src/recall";
+import { runRecall, runRecallWithMetadata, searchRecall } from "../src/recall";
 
 // PR3 (#966): recall's entity FTS scans and per-vector-hit single-row
 // hydration are routed off the main event loop. Hydration loops are now a
@@ -382,6 +382,48 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
     expect(tIds.length).toBe(1);
   });
 
+  test("drops temporal vector hits moved to another project before hydration", async () => {
+    const movedId = seedTemporal("qqzz private moved temporal payload");
+    const movedProjectId = ensureProject("/test/offload/recall-vec-moved");
+    const originalOffload = readOffload.offloadAll;
+    let movedDuringHydration = false;
+    tSpy.mockResolvedValue([{ id: movedId, similarity: 0.99 }]);
+    const offloadSpy = vi
+      .spyOn(readOffload, "offloadAll")
+      .mockImplementation((sql, params) => {
+        if (sql.includes("FROM temporal_messages WHERE id IN")) {
+          // Model a project transfer after candidate selection but before the
+          // separate hydration read. The stale vector hit must not authorize
+          // reading this row into another project's results or coverage.
+          db()
+            .query("UPDATE temporal_messages SET project_id = ? WHERE id = ?")
+            .run(movedProjectId, movedId);
+          movedDuringHydration = true;
+        }
+        return originalOffload(sql, params);
+      });
+
+    try {
+      const recalled = await runRecallWithMetadata({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "project",
+        knowledgeEnabled: false,
+      });
+
+      expect(movedDuringHydration).toBe(true);
+      expect(
+        db()
+          .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+          .get(movedId),
+      ).toEqual({ project_id: movedProjectId });
+      expect(recalled.result).not.toContain("private moved temporal payload");
+      expect(recalled.coverage).toEqual([]);
+    } finally {
+      offloadSpy.mockRestore();
+    }
+  });
+
   test("hydrates knowledge vector hits via getManyOffloaded", async () => {
     const kId = ltm.create({
       projectPath: PROJ,
@@ -610,22 +652,36 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
 
   test("checks cancellation again after synchronous ID detail retrieval", async () => {
     const controller = new AbortController();
-    const logicalIdSpy = vi.spyOn(ltm, "logicalIdOf").mockImplementation(() => {
-      controller.abort(new DOMException("client disconnected", "AbortError"));
-      return "missing";
+    const id = ltm.create({
+      projectPath: PROJ,
+      scope: "project",
+      category: "gotcha",
+      title: "Recall detail cancellation",
+      content: "The detail read completes before cancellation is checked.",
     });
+    const anchorSpy = vi
+      .spyOn(ltm, "knowledgeRefAnchors")
+      .mockImplementation(() => {
+        controller.abort(new DOMException("client disconnected", "AbortError"));
+        return new Map();
+      });
     try {
       await expect(
         runRecall({
           query: "",
-          id: "k:missing",
+          id: `k:${id}`,
           projectPath: PROJ,
           signal: controller.signal,
         }),
       ).rejects.toMatchObject({ name: "AbortError" });
-      expect(logicalIdSpy).toHaveBeenCalledWith("missing");
+      expect(anchorSpy).toHaveBeenCalledWith([id], {
+        visibility: {
+          prefix: "k",
+          projectId: ensureProject(PROJ),
+        },
+      });
     } finally {
-      logicalIdSpy.mockRestore();
+      anchorSpy.mockRestore();
     }
   });
 

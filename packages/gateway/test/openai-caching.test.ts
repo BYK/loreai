@@ -17,6 +17,7 @@ import {
   parseOpenAIRequest,
 } from "../src/translate/openai";
 import type { GatewayMessage, GatewayRequest } from "../src/translate/types";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 const BASE = "https://openrouter.ai/api";
 
@@ -236,7 +237,7 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
           role: "assistant",
           content: [
             { type: "text", text: "calling" },
-            { type: "tool_use", id: "t1", name: "recall", input: {} },
+            { type: "tool_use", id: "t1", name: RECALL_TOOL_NAME, input: {} },
           ],
         },
         {
@@ -273,7 +274,9 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
         { role: "user", content: [{ type: "text", text: "do it" }] },
         {
           role: "assistant",
-          content: [{ type: "tool_use", id: "t1", name: "recall", input: {} }],
+          content: [
+            { type: "tool_use", id: "t1", name: RECALL_TOOL_NAME, input: {} },
+          ],
         },
         {
           role: "user",
@@ -312,7 +315,9 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
       messages: [
         {
           role: "assistant",
-          content: [{ type: "tool_use", id: "t1", name: "recall", input: {} }],
+          content: [
+            { type: "tool_use", id: "t1", name: RECALL_TOOL_NAME, input: {} },
+          ],
         },
         {
           role: "user",
@@ -351,7 +356,7 @@ describe("buildOpenAIUpstreamRequest — tool caching", () => {
   const withTools = makeRequest({
     tools: [
       { name: "a", description: "first", inputSchema: {} },
-      { name: "recall", description: "last", inputSchema: {} },
+      { name: RECALL_TOOL_NAME, description: "last", inputSchema: {} },
     ],
   });
 
@@ -382,7 +387,9 @@ describe("buildOpenAIUpstreamRequest — tool caching", () => {
 describe("buildOpenAIUpstreamRequest — full session cache config", () => {
   test("system + conversation + tool breakpoints all present", () => {
     const req = makeRequest({
-      tools: [{ name: "recall", description: "search", inputSchema: {} }],
+      tools: [
+        { name: RECALL_TOOL_NAME, description: "search", inputSchema: {} },
+      ],
     });
     const body = getBody(req, {
       systemTTL: "5m",
@@ -512,7 +519,9 @@ describe("buildOpenAIUpstreamRequest — intermediate anchor breakpoint (#961)",
     // system + tools + anchor + tail must never exceed that.
     const req = makeRequest({
       messages: convo(30),
-      tools: [{ name: "recall", description: "search", inputSchema: {} }],
+      tools: [
+        { name: RECALL_TOOL_NAME, description: "search", inputSchema: {} },
+      ],
     });
     const body = getBody(req, { ...cacheOpts, cacheTools: true });
     const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;

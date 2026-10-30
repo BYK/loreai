@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 /** One Responses-API SSE event (`event:` + `data:` framing). */
 function sseEvent(event: string, data: unknown): string {
@@ -53,7 +54,7 @@ function codexRecallStream(): Response {
         type: "function_call",
         id: "fc_recall",
         call_id: "call_recall1",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
       },
     }) +
     sseEvent("response.function_call_arguments.done", {
@@ -67,7 +68,7 @@ function codexRecallStream(): Response {
         type: "function_call",
         id: "fc_recall",
         call_id: "call_recall1",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         arguments: JSON.stringify({ query: "decide" }),
         status: "completed",
       },
@@ -293,8 +294,12 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // instead of falling back to the bare recall marker.
     expect(bodyText).toContain("Here is the answer.");
     // The recall tool_use must NOT leak to the client.
-    expect(bodyText).not.toContain('"name":"recall"');
-    expect(bodyText).not.toContain('"name": "recall"');
+    expect(bodyText).not.toContain(
+      `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
+    expect(bodyText).not.toContain(
+      `"name": ${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
 
     const requestWithoutTools = async (
       path: "/v1/codex/responses" | "/v1/responses",
@@ -512,7 +517,11 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
 
     // The continuation still reaches the client.
     expect(bodyText).toContain("Here is the answer.");
-    expect(bodyText).not.toContain('"name":"recall"');
-    expect(bodyText).not.toContain('"name": "recall"');
+    expect(bodyText).not.toContain(
+      `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
+    expect(bodyText).not.toContain(
+      `"name": ${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
   });
 });

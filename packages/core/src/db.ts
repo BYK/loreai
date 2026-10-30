@@ -2507,6 +2507,110 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- explicit opt-outs before deleting the retired KV row.
   SELECT 1;
   `,
+  `
+   -- Version 106: recall queries, provider call IDs, and companion call payloads
+   -- are transient and must not remain in durable session state. Keep only
+   -- anchor-keyed replay records, replacing the query with a fixed marker,
+   -- dropping selectors/detail paging, deriving a replay call ID from the local
+    -- anchor, and reducing companion calls to privacy-safe before/after counts.
+    -- Counts cannot authorize joining neighboring calls after restart. Legacy
+    -- query-keyed records cannot replay without the query and are discarded.
+  UPDATE session_state
+     SET recall_store = '[]'
+   WHERE recall_store IS NOT NULL AND NOT json_valid(recall_store);
+  UPDATE session_state
+     SET recall_store = COALESCE((
+       SELECT json_group_array(json(entry_json))
+         FROM (
+            SELECT json_array(
+                     json_extract(entry.array_value, '$[0]'),
+                     json_patch(
+                       json_object(
+                         'toolUseId', 'lore-recall-' || json_extract(entry.array_value, '$[1].anchorId'),
+                         'anchorId', json_extract(entry.array_value, '$[1].anchorId'),
+                         'anchorContextId', json_extract(entry.array_value, '$[1].anchorContextId'),
+                         'input', json_object(
+                           'query', '[recall query omitted from persistent state]',
+                           'scope', json_extract(entry.array_value, '$[1].input.scope')
+                         ),
+                         'position', json_extract(entry.array_value, '$[1].position'),
+                         'result', json_extract(entry.array_value, '$[1].result')
+                       ),
+                        CASE
+                          WHEN json_type(entry.array_value, '$[1].companionToolUses') = 'array'
+                           AND json_array_length(entry.array_value, '$[1].companionToolUses') <= 128
+                          THEN json_object(
+                            'companionToolUseCounts',
+                            json_object(
+                              'before', (
+                                SELECT count(*)
+                                  FROM json_each(entry.array_value, '$[1].companionToolUses') AS companion
+                                 WHERE CASE WHEN companion.type = 'object'
+                                            THEN json_extract(companion.value, '$.side')
+                                       END = 'before'
+                              ),
+                              'after', (
+                                SELECT count(*)
+                                  FROM json_each(entry.array_value, '$[1].companionToolUses') AS companion
+                                 WHERE CASE WHEN companion.type = 'object'
+                                            THEN json_extract(companion.value, '$.side')
+                                       END = 'after'
+                              )
+                            )
+                          )
+                          ELSE '{}'
+                        END
+                     )
+                   ) AS entry_json
+             FROM (
+                SELECT entry.key,
+                       entry.type,
+                       CASE WHEN entry.type = 'array'
+                            THEN entry.value ELSE '[]' END AS array_value
+                  FROM json_each(session_state.recall_store) AS entry
+             ) AS entry
+             WHERE entry.type = 'array'
+               -- Persist only complete replay records; malformed anchor keys or
+               -- context fingerprints could themselves carry private input.
+               AND json_type(entry.array_value, '$[0]') = 'text'
+               AND substr(json_extract(entry.array_value, '$[0]'), 1, 7) = 'anchor:'
+               AND json_type(entry.array_value, '$[1]') = 'object'
+               AND json_type(entry.array_value, '$[1].input') = 'object'
+               AND json_type(entry.array_value, '$[1].input.query') = 'text'
+               AND json_type(entry.array_value, '$[1].input.scope') = 'text'
+               AND json_extract(entry.array_value, '$[1].input.scope') IN ('all', 'session', 'project', 'knowledge')
+               AND json_type(entry.array_value, '$[1].position') = 'integer'
+               AND json_extract(entry.array_value, '$[1].position') BETWEEN 0 AND 9007199254740991
+               AND json_type(entry.array_value, '$[1].result') = 'text'
+               AND json_type(entry.array_value, '$[1].anchorId') = 'text'
+               AND json_extract(entry.array_value, '$[1].anchorId') = substr(json_extract(entry.array_value, '$[0]'), 8)
+               AND length(json_extract(entry.array_value, '$[1].anchorId')) = 36
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 9, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 14, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 19, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 24, 1) = '-'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 15, 1) = '4'
+               AND substr(json_extract(entry.array_value, '$[1].anchorId'), 20, 1) IN ('8', '9', 'a', 'b')
+               AND length(replace(json_extract(entry.array_value, '$[1].anchorId'), '-', '')) = 32
+               AND replace(json_extract(entry.array_value, '$[1].anchorId'), '-', '') NOT GLOB '*[^0-9a-f]*'
+               AND json_type(entry.array_value, '$[1].anchorContextId') = 'text'
+               AND length(json_extract(entry.array_value, '$[1].anchorContextId')) = 64
+               AND json_extract(entry.array_value, '$[1].anchorContextId') NOT GLOB '*[^0-9a-f]*'
+             ORDER BY CAST(entry.key AS INTEGER)
+         )
+     ), '[]')
+   WHERE recall_store IS NOT NULL AND json_valid(recall_store);
+  `,
+  `
+  -- Version 107: record the provisional OpenCode parent-lookup state so a
+  -- completed primary-session lookup can clear only its own temporary flag.
+  ALTER TABLE session_state ADD COLUMN parent_session_pending INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Version 108: retain only explicitly confirmed primary-session ownership.
+  -- Existing root rows are unclassified, not evidence of an adapter lookup.
+  ALTER TABLE session_state ADD COLUMN parent_session_primary INTEGER NOT NULL DEFAULT 0;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -7532,6 +7636,10 @@ export type SessionTrackingState = {
   // v26: sub-agent parent–child relationships
   parentSessionId?: string | null;
   isSubagent?: boolean;
+  /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
+  parentSessionPending?: boolean;
+  /** OpenCode explicitly confirmed that this session has no parent. */
+  parentSessionPrimary?: boolean;
   // v36: project binding (survives restart so the project_id never splits)
   projectPath?: string | null;
   projectPathProvisional?: boolean;
@@ -7688,6 +7796,14 @@ export function saveSessionTracking(
     sets.push("is_subagent = ?");
     vals.push(state.isSubagent ? 1 : 0);
   }
+  if (state.parentSessionPending !== undefined) {
+    sets.push("parent_session_pending = ?");
+    vals.push(state.parentSessionPending ? 1 : 0);
+  }
+  if (state.parentSessionPrimary !== undefined) {
+    sets.push("parent_session_primary = ?");
+    vals.push(state.parentSessionPrimary ? 1 : 0);
+  }
   // v36: project binding
   if (state.projectPath !== undefined) {
     sets.push("project_path = ?");
@@ -7758,6 +7874,10 @@ export type LoadedSessionTracking = {
   // v26: sub-agent parent–child relationships
   parentSessionId: string | null;
   isSubagent: boolean;
+  /** OpenCode parent lookup is unresolved; permits only its pending/primary transition. */
+  parentSessionPending: boolean;
+  /** OpenCode explicitly confirmed that this session has no parent. */
+  parentSessionPrimary: boolean;
   // v36: project binding
   projectPath: string | null;
   projectPathProvisional: boolean;
@@ -8108,7 +8228,7 @@ export function loadSessionTracking(
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
               last_turn_at, last_bust_at, last_accepted_provenance_layer,
-              parent_session_id, is_subagent,
+               parent_session_id, is_subagent, parent_session_pending, parent_session_primary,
               project_path, project_path_provisional,
                compaction_anomaly_pending, amnesia
        FROM session_state WHERE session_id = ?`,
@@ -8146,6 +8266,8 @@ export function loadSessionTracking(
     last_accepted_provenance_layer: number;
     parent_session_id: string | null;
     is_subagent: number;
+    parent_session_pending: number;
+    parent_session_primary: number;
     project_path: string | null;
     project_path_provisional: number;
     compaction_anomaly_pending: number;
@@ -8185,6 +8307,8 @@ export function loadSessionTracking(
     lastAcceptedProvenanceLayer: row.last_accepted_provenance_layer,
     parentSessionId: row.parent_session_id,
     isSubagent: row.is_subagent === 1,
+    parentSessionPending: row.parent_session_pending === 1,
+    parentSessionPrimary: row.parent_session_primary === 1,
     projectPath: row.project_path,
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,

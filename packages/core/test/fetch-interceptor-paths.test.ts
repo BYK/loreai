@@ -198,6 +198,14 @@ describe("shouldIntercept — LLM API path patterns", () => {
       ).toBe(false);
     });
 
+    test.each([
+      ["another IPv4 loopback address", "http://127.0.0.2:8000/v1/messages"],
+      ["a localhost subdomain", "http://api.localhost:8000/v1/messages"],
+      ["localhost with a trailing dot", "http://localhost.:8000/v1/messages"],
+    ])("does NOT intercept %s", (_description, url) => {
+      expect(shouldIntercept(url, GATEWAY)).toBe(false);
+    });
+
     test("does NOT intercept 0.0.0.0", () => {
       expect(shouldIntercept("http://0.0.0.0:8000/v1/messages", GATEWAY)).toBe(
         false,

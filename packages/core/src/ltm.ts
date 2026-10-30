@@ -2734,6 +2734,28 @@ export function setFileRefs(logicalId: string, paths: string[]): string[] {
   return clean;
 }
 
+type KnowledgeRefVisibility = {
+  projectId: string;
+  prefix: "k" | "xk";
+};
+
+function knowledgeRefVisibilityClause(visibility?: KnowledgeRefVisibility): {
+  sql: string;
+  parameters: string[];
+} {
+  if (!visibility) return { sql: "1 = 1", parameters: [] };
+  if (visibility.prefix === "xk") {
+    return {
+      sql: "k.project_id IS NOT NULL AND k.project_id <> ? AND k.cross_project = 0",
+      parameters: [visibility.projectId],
+    };
+  }
+  return {
+    sql: "(k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)",
+    parameters: [visibility.projectId],
+  };
+}
+
 /**
  * Batch-load the file-path associations for a set of entries by logical_id,
  * so recall can render `↳ files: src/foo.ts, src/bar.ts` alongside the anchor
@@ -2748,7 +2770,7 @@ export function setFileRefs(logicalId: string, paths: string[]): string[] {
  */
 export function knowledgeFileRefsBatch(
   logicalIds: string[],
-  opts?: { limit?: number },
+  opts?: { limit?: number; visibility?: KnowledgeRefVisibility },
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
   const requestedLimit = opts?.limit ?? MAX_RECALL_FILES_PER_ENTRY;
@@ -2757,14 +2779,16 @@ export function knowledgeFileRefsBatch(
     : MAX_RECALL_FILES_PER_ENTRY;
   if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
+  const visibility = knowledgeRefVisibilityClause(opts?.visibility);
   const rows = db()
     .query(
       `SELECT f.logical_id, f.paths_json
          FROM knowledge_file_refs f
          JOIN knowledge_current k ON k.logical_id = f.logical_id
-        WHERE k.tenant_id = ? AND f.logical_id IN (${placeholders})`,
+        WHERE k.tenant_id = ? AND f.logical_id IN (${placeholders})
+          AND ${visibility.sql}`,
     )
-    .all(currentTenantId(), ...logicalIds) as Array<{
+    .all(currentTenantId(), ...logicalIds, ...visibility.parameters) as Array<{
     logical_id: string;
     paths_json: string;
   }>;
@@ -2797,7 +2821,7 @@ export function knowledgeFileRefsBatch(
  */
 export function knowledgeRefAnchors(
   logicalIds: string[],
-  opts?: { limit?: number },
+  opts?: { limit?: number; visibility?: KnowledgeRefVisibility },
 ): Map<string, KnowledgeRefAnchor[]> {
   const out = new Map<string, KnowledgeRefAnchor[]>();
   const requestedLimit = opts?.limit ?? MAX_RECALL_ANCHORS_PER_ENTRY;
@@ -2806,6 +2830,7 @@ export function knowledgeRefAnchors(
     : MAX_RECALL_ANCHORS_PER_ENTRY;
   if (logicalIds.length === 0 || limit === 0) return out;
   const placeholders = logicalIds.map(() => "?").join(",");
+  const visibility = knowledgeRefVisibilityClause(opts?.visibility);
   // 'file' < 'symbol' lexically, so ORDER BY kind puts file anchors first; a
   // stable secondary sort by anchor keeps output deterministic (cache-friendly).
   const rows = db()
@@ -2814,9 +2839,10 @@ export function knowledgeRefAnchors(
          FROM knowledge_ref_anchor a
          JOIN knowledge_current k ON k.logical_id = a.logical_id
         WHERE k.tenant_id = ? AND a.logical_id IN (${placeholders})
+          AND ${visibility.sql}
         ORDER BY a.logical_id, a.kind, a.anchor`,
     )
-    .all(currentTenantId(), ...logicalIds) as Array<{
+    .all(currentTenantId(), ...logicalIds, ...visibility.parameters) as Array<{
     logical_id: string;
     kind: string;
     anchor: string;
@@ -4099,17 +4125,15 @@ async function loadContextSourceCandidates(
 
       // Vector pass (only when a context vector is available).
       if (contextVec) {
-        // vectorSearchDistillations takes no pid: the vec0 backend partitions
-        // distillation_vec by project (so results are already project-scoped),
-        // but the legacy blob backend is not — so over-fetch and re-filter by
-        // project_id in hydration below to keep another project's distillation
-        // from leaking in regardless of backend. Temporal is already
-        // project-scoped via vectorSearchTemporal(pid).
+        // Restrict candidates at the vector query on every backend, then keep
+        // the hydration project check below as defense in depth. Temporal is
+        // likewise project-scoped via vectorSearchTemporal(pid).
         const hits = await embedding.vectorSearchDistillations(
           contextVec,
           limit * 4,
           "context",
           { signal },
+          pid,
         );
         for (const h of hits) {
           // Match the knowledge path's floor semantics: a context source must

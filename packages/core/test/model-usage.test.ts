@@ -317,11 +317,9 @@ describe("buildDailyModelUsage", () => {
     "throws ModelUsageLimitError past MAX_DAILY_CELLS with real data",
     { timeout: 60_000 },
     async () => {
-      // Seed MAX_DAILY_CELLS + 1 distinct (day, model) cells in one
-      // atomic statement: ~549 days x 365 models, all valid.
+      // Seed MAX_DAILY_CELLS + 1 distinct (day, model) cells with one recursive
+      // statement, preserving real triggers while avoiding 200k JS inserts.
       const base = Date.UTC(2024, 0, 1);
-      // One atomic statement retains the real schema/triggers and oversized
-      // boundary without spending the assertion's deadline on 200k JS calls.
       db()
         .query(
           `WITH RECURSIVE cells(i) AS (

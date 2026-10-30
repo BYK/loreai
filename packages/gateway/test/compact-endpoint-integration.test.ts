@@ -16,6 +16,7 @@
  * via `runCompaction`.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { installFetchInterceptor } from "@loreai/core";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeFixtureEntry } from "./helpers/fixtures";
 import { _setModelDataForTest, type ModelsDevEntry } from "../src/worker-model";
@@ -105,7 +106,7 @@ async function chatWithSession(
   sessionID: string,
   providerID = "anthropic",
 ): Promise<Response> {
-  return harness.chat(body, "test-key", {
+  const response = await harness.chat(body, "test-key", {
     "x-lore-session-id": sessionID,
     // Real Pi / OpenCode / Claude Code clients send `x-lore-provider` so the
     // gateway can resolve the provider-qualified model entry (which carries
@@ -115,6 +116,24 @@ async function chatWithSession(
     // assertions. We send it here to mirror production traffic.
     "x-lore-provider": providerID,
   });
+  await response.clone().arrayBuffer();
+  return response;
+}
+
+function expectTemporalSessionMessages(
+  harness: Harness,
+  sessionID: string,
+  projectPath: string,
+): void {
+  const [row] = harness.queryDB<{ count: number }>(
+    `SELECT COUNT(*) AS count
+     FROM temporal_messages AS messages
+     JOIN session_state AS state ON state.session_id = messages.session_id
+     JOIN projects ON projects.id = messages.project_id
+     WHERE state.header_session_id = ? AND projects.path = ?`,
+    [sessionID, projectPath],
+  );
+  expect(row?.count ?? 0).toBeGreaterThan(0);
 }
 
 /**
@@ -158,7 +177,9 @@ function realConversationBody(model: string): Record<string, unknown> {
 }
 
 describe("POST /v1/compact — integration (real session populated via chat turn)", () => {
-  let harness: Harness;
+  let harness: Harness | undefined;
+  let interceptorCleanup: (() => void) | undefined;
+  let originalFetch: typeof globalThis.fetch | undefined;
   // Project path bound to the chat() call. The compact POST must use the
   // SAME project_path in its body so both calls resolve to the same session.
   // The harness defaults projectPath to process.cwd() but does not expose it
@@ -166,7 +187,42 @@ describe("POST /v1/compact — integration (real session populated via chat turn
   const PROJECT_PATH = process.cwd();
 
   afterEach(async () => {
+    interceptorCleanup?.();
+    interceptorCleanup = undefined;
+    if (originalFetch) globalThis.fetch = originalFetch;
+    originalFetch = undefined;
     await harness?.teardown();
+    harness = undefined;
+  });
+
+  it.each([
+    "https://api.openai.com/v1/codex/responses/compact?turn=2",
+    "https://api.openai.com/tenant/responses/compact?mode=fast",
+  ])("routes %s through the registered compact handler", async (target) => {
+    harness = await createHarness({ fixtures: [], projectPath: PROJECT_PATH });
+    originalFetch = globalThis.fetch;
+    interceptorCleanup = installFetchInterceptor({
+      gatewayBase: harness.baseURL,
+      getHeaders: () => ({
+        "x-lore-session-id": "missing-compact-session",
+        "x-lore-project": PROJECT_PATH,
+      }),
+    });
+
+    const response = await fetch(target, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({ model: "gpt-5", input: [] }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: "session_not_found",
+      message: "No authenticated session found for the given headers",
+    });
   });
 
   it("returns { cancel: true } when tokensBefore fits the session's lastUpstream budget", async () => {
@@ -438,6 +494,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
           )
         ).status,
       ).toBe(200);
+      expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
       await harness.restartPipeline();
 
       const response = await postCompact(
@@ -523,6 +580,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(chatResp.status).toBe(200);
+    expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
 
     // 873_000 tokens exceeds the 872K budget by 1. The gateway should fall
     // through to the summary path. The summary itself may be null (worker
@@ -595,6 +653,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       "openai",
     );
     expect(chatResp.status).toBe(200);
+    expectTemporalSessionMessages(harness, sessionID, PROJECT_PATH);
 
     // 100K fits in 111_616 budget → cancel.
     const cancelResp = await postCompact(

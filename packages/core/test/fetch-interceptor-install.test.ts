@@ -7,6 +7,8 @@
  * what URL/headers/body the gateway would receive.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   installFetchInterceptor,
   interceptUrlForProtocol,
@@ -15,6 +17,26 @@ import { digestChain } from "../src/chain-digest";
 import { encodeContextBoundary } from "../src/context-boundary";
 
 const GATEWAY = "http://127.0.0.1:3207";
+const nativeFetch = globalThis.fetch;
+
+async function listen(
+  server: ReturnType<typeof createServer>,
+  host = "127.0.0.1",
+): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, host, resolve);
+  });
+  return (server.address() as AddressInfo).port;
+}
+
+async function closeServer(
+  server: ReturnType<typeof createServer>,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
 
 type Captured = { url: string; init: RequestInit | undefined };
 
@@ -24,11 +46,13 @@ describe("installFetchInterceptor — end-to-end routing", () => {
   let realFetch: typeof globalThis.fetch;
   let observedAuthorization: string | null;
   let observedApiKey: string | null;
+  let additionalHeaders: Record<string, string>;
 
   beforeEach(() => {
     captured = null;
     observedAuthorization = null;
     observedApiKey = null;
+    additionalHeaders = {};
     // Stub the underlying fetch so the interceptor calls into our capture.
     realFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       captured = {
@@ -47,6 +71,7 @@ describe("installFetchInterceptor — end-to-end routing", () => {
     cleanup = installFetchInterceptor({
       gatewayBase: GATEWAY,
       getHeaders: () => ({
+        ...additionalHeaders,
         "x-lore-session-id": "sess-123",
         "x-lore-project": "/home/me/proj",
       }),
@@ -91,6 +116,35 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       );
     });
 
+    test("routes Codex compact requests to the registered compact endpoint", async () => {
+      const target = "https://api.openai.com/v1/codex/responses/compact?turn=2";
+      const body = JSON.stringify({ model: "gpt-5", input: [] });
+      await fetch(target, { method: "POST", body });
+
+      expect(captured?.url).toBe(`${GATEWAY}/v1/responses/compact?turn=2`);
+      expect(headerVal("x-lore-upstream-url")).toBe("https://api.openai.com");
+      expect(headerVal("x-lore-upstream-path")).toBe(
+        "/v1/codex/responses/compact?turn=2",
+      );
+      expect(captured?.init?.body).toBe(body);
+    });
+
+    test("routes prefixed compact requests without losing upstream path or query", async () => {
+      const target =
+        "https://api.openai.com/tenant/responses/compact?mode=fast";
+      const body = JSON.stringify({ model: "gpt-5", input: [] });
+      await fetch(target, { method: "POST", body });
+
+      expect(captured?.url).toBe(`${GATEWAY}/v1/responses/compact?mode=fast`);
+      expect(headerVal("x-lore-upstream-url")).toBe(
+        "https://api.openai.com/tenant",
+      );
+      expect(headerVal("x-lore-upstream-path")).toBe(
+        "/tenant/responses/compact?mode=fast",
+      );
+      expect(captured?.init?.body).toBe(body);
+    });
+
     test("preserves original headers and injects X-Lore-* context", async () => {
       await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -101,6 +155,312 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(headerVal("x-lore-session-id")).toBe("sess-123");
       expect(headerVal("x-lore-project")).toBe("/home/me/proj");
       expect(observedAuthorization).toBe("Bearer sk-test");
+    });
+
+    test("does not follow redirects when sending remote gateway credentials", async () => {
+      additionalHeaders["x-lore-gateway-token"] = "remote-gateway-secret";
+      await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-4", messages: [] }),
+        redirect: "follow",
+      });
+
+      expect(headerVal("x-lore-gateway-token")).toBe("remote-gateway-secret");
+      expect(captured?.init?.redirect).toBe("manual");
+    });
+
+    test("does not follow a direct-gateway redirect off-origin", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const gateway = createServer((_request, response) => {
+        response.writeHead(302, {
+          location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+        });
+        response.end();
+      });
+      const gatewayPort = await listen(gateway);
+      const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const response = await fetch(`${gatewayBase}/v1/messages`, {
+          headers: { "x-lore-gateway-token": "remote-gateway-secret" },
+          redirect: "follow",
+        });
+        expect(response.status).toBe(302);
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(gateway);
+        await closeServer(hostile);
+      }
+    });
+
+    test("does not leak credentials when a stale boundary replay redirects", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const prefix = [{ role: "user", content: "original" }];
+      const appended = [...prefix, { role: "user", content: "next" }];
+      const token = encodeContextBoundary({
+        v: 1,
+        protocol: "anthropic",
+        inputItems: prefix.length,
+        inputDigest: digestChain(prefix),
+        retainedItems: 0,
+        sourceMessages: prefix.length,
+        sourceDigest: digestChain([]),
+      });
+      let count = 0;
+      const gateway = createServer((request, response) => {
+        request.resume();
+        count++;
+        if (count === 1) {
+          response.writeHead(200, { "x-lore-context-boundary": token });
+        } else if (count === 2) {
+          response.writeHead(409, {
+            "x-lore-context-boundary-mismatch": "true",
+          });
+        } else {
+          response.writeHead(307, {
+            location: `http://127.0.0.1:${hostilePort}/capture`,
+          });
+        }
+        response.end("ok");
+      });
+      const gatewayPort = await listen(gateway);
+      const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({}),
+      });
+      const send = (messages: unknown[]) =>
+        fetch(`${gatewayBase}/v1/messages`, {
+          method: "POST",
+          headers: {
+            "x-lore-session-id": "redirect-replay",
+            "x-api-key": "synthetic-provider-key",
+            "x-lore-gateway-token": "synthetic-gateway-token",
+          },
+          body: JSON.stringify({ model: "claude", messages }),
+          redirect: "follow",
+        });
+      try {
+        await (await send(prefix)).text();
+        const response = await send(appended);
+        expect(response.status).toBe(307);
+        expect(count).toBe(3);
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(gateway);
+        await closeServer(hostile);
+      }
+    });
+
+    test.each([
+      [
+        "gateway and provider credentials",
+        {
+          "x-lore-gateway-token": "synthetic-gateway-token",
+          "x-api-key": "synthetic-provider-key",
+        },
+      ],
+      [
+        "provider credentials without a gateway token",
+        {
+          "x-api-key": "synthetic-provider-key",
+        },
+      ],
+    ])(
+      "does not follow redirects from direct non-LLM gateway routes with %s",
+      async (_label, headers) => {
+        cleanup();
+        let hostileRequests = 0;
+        const hostile = createServer((_request, response) => {
+          hostileRequests++;
+          response.end("received");
+        });
+        const hostilePort = await listen(hostile);
+        const gateway = createServer((_request, response) => {
+          response.writeHead(302, {
+            location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+          });
+          response.end();
+        });
+        const gatewayPort = await listen(gateway);
+        const gatewayBase = `http://127.0.0.1:${gatewayPort}`;
+        globalThis.fetch = nativeFetch;
+        cleanup = installFetchInterceptor({
+          gatewayBase,
+          getHeaders: () => ({}),
+        });
+
+        try {
+          const response = await fetch(`${gatewayBase}/v1/compact`, {
+            headers,
+            redirect: "follow",
+          });
+          expect(response.status).toBe(302);
+          expect(hostileRequests).toBe(0);
+        } finally {
+          await closeServer(gateway);
+          await closeServer(hostile);
+        }
+      },
+    );
+
+    test("follows same-origin redirects for credentialed non-LLM requests", async () => {
+      cleanup();
+      let redirectedRequests = 0;
+      const upstream = createServer((request, response) => {
+        if (request.url === "/v1/admin") {
+          response.writeHead(302, { location: "/download" });
+          response.end();
+          return;
+        }
+        redirectedRequests++;
+        response.end("downloaded");
+      });
+      const upstreamPort = await listen(upstream);
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${upstreamPort}/v1/admin`,
+          { headers: { "x-api-key": "synthetic-provider-key" } },
+        );
+        expect(response.status).toBe(200);
+        expect(redirectedRequests).toBe(1);
+      } finally {
+        await closeServer(upstream);
+      }
+    });
+
+    test.each([
+      ["a local-provider LLM path", "127.0.0.1", "/v1/messages"],
+      ["an unrewritable LLM path", "127.0.0.2", "/v2/messages"],
+    ])(
+      "does not follow a credentialed redirect from %s",
+      async (_label, requestHost, path) => {
+        cleanup();
+        let hostileRequests = 0;
+        const hostile = createServer((_request, response) => {
+          hostileRequests++;
+          response.end("received");
+        });
+        const hostilePort = await listen(hostile);
+        const upstream = createServer((_request, response) => {
+          response.writeHead(302, {
+            location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+          });
+          response.end();
+        });
+        const upstreamPort = await listen(
+          upstream,
+          requestHost === "127.0.0.2" ? "0.0.0.0" : "127.0.0.1",
+        );
+        globalThis.fetch = nativeFetch;
+        cleanup = installFetchInterceptor({
+          gatewayBase: GATEWAY,
+          getHeaders: () => ({}),
+        });
+
+        try {
+          const response = await fetch(
+            `http://${requestHost}:${upstreamPort}${path}`,
+            {
+              headers: { "x-api-key": "synthetic-provider-key" },
+              redirect: "follow",
+            },
+          );
+          expect(response.status).toBe(302);
+          expect(hostileRequests).toBe(0);
+        } finally {
+          await closeServer(upstream);
+          await closeServer(hostile);
+        }
+      },
+    );
+
+    test("preserves an explicit redirect:error on credentialed pass-through", async () => {
+      await fetch("https://provider.invalid/v2/messages", {
+        headers: { "x-api-key": "synthetic-provider-key" },
+        redirect: "error",
+      });
+
+      expect(captured?.init?.redirect).toBe("error");
+    });
+
+    test("preserves Request.redirect:error on credentialed pass-through", async () => {
+      cleanup();
+      let hostileRequests = 0;
+      const hostile = createServer((_request, response) => {
+        hostileRequests++;
+        response.end("received");
+      });
+      const hostilePort = await listen(hostile);
+      const upstream = createServer((_request, response) => {
+        response.writeHead(302, {
+          location: `http://127.0.0.1:${hostilePort}/redirect-target`,
+        });
+        response.end();
+      });
+      const upstreamPort = await listen(upstream);
+      globalThis.fetch = nativeFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        getHeaders: () => ({}),
+      });
+
+      try {
+        const request = new Request(
+          `http://127.0.0.1:${upstreamPort}/v1/admin`,
+          {
+            headers: { "x-api-key": "synthetic-provider-key" },
+            redirect: "error",
+          },
+        );
+        await expect(fetch(request)).rejects.toThrow();
+        expect(hostileRequests).toBe(0);
+      } finally {
+        await closeServer(upstream);
+        await closeServer(hostile);
+      }
+    });
+
+    test("does not classify a host sharing the gateway URL prefix as direct", async () => {
+      const gatewayBase = "https://gateway.example";
+      additionalHeaders["x-lore-gateway-token"] = "remote-gateway-secret";
+      cleanup();
+      cleanup = installFetchInterceptor({
+        gatewayBase,
+        getHeaders: () => ({ ...additionalHeaders }),
+      });
+
+      await fetch("https://gateway.example.attacker/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude", messages: [] }),
+      });
+
+      expect(captured?.url).toBe(`${gatewayBase}/v1/messages`);
+      expect(headerVal("x-lore-gateway-token")).toBe("remote-gateway-secret");
     });
 
     test("observes auth on requests already targeting the gateway", async () => {
@@ -317,12 +677,18 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(captured?.url).toBe("https://registry.npmjs.org/some-package");
     });
 
-    test("does not intercept local LLM servers", async () => {
-      await fetch("http://localhost:8000/v1/messages", {
+    test.each([
+      "http://localhost:8000/v1/messages",
+      "http://127.0.0.2:8000/v1/messages",
+      "http://api.localhost:8000/v1/messages",
+      "http://localhost.:8000/v1/messages",
+    ])("does not intercept local LLM server %s", async (url) => {
+      await fetch(url, {
         method: "POST",
+        headers: { "x-api-key": "local-provider-key" },
         body: JSON.stringify({ model: "x", messages: [] }),
       });
-      expect(captured?.url).toBe("http://localhost:8000/v1/messages");
+      expect(captured?.url).toBe(url);
     });
   });
 });

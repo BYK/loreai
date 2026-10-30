@@ -124,9 +124,15 @@ export async function vectorSearchDistillations(
   limit = 10,
   selectionPhase?: ReadPreparationUnavailableError["phase"],
   options?: ReadPoolRequestOptions,
+  projectId?: string,
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
-    { kind: "distillations", tenantId: currentTenantId(), limit },
+    {
+      kind: "distillations",
+      tenantId: currentTenantId(),
+      projectId,
+      limit,
+    },
     queryEmbedding,
     selectionPhase,
     options,

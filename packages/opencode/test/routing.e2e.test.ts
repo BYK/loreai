@@ -22,6 +22,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
+import { RECALL_TOOL_DESCRIPTION, RECALL_TOOL_NAME } from "@loreai/core";
 import { LorePlugin } from "../src/index";
 
 // Capture the pristine fetch BEFORE the plugin installs its interceptor so we
@@ -30,6 +31,8 @@ import { LorePlugin } from "../src/index";
 // worker. (The plugin only installs once per process and never under
 // NODE_ENV=test unless LORE_OPENCODE_FORCE_ACTIVE=1.)
 const originalFetch = globalThis.fetch;
+const assistantProviders = new Map<string, string>();
+const assistantParents = new Map<string, string>();
 
 function createMockClient() {
   return {
@@ -39,7 +42,20 @@ function createMockClient() {
       list: () => Promise.resolve({ data: [] }),
       create: () => Promise.resolve({ data: { id: "worker_1" } }),
       messages: () => Promise.resolve({ data: [] }),
-      message: () => Promise.resolve({ data: null }),
+      message: ({ path }: { path: { id: string; messageID: string } }) =>
+        Promise.resolve({
+          data: assistantProviders.has(path.messageID)
+            ? {
+                info: {
+                  id: path.messageID,
+                  sessionID: path.id,
+                  role: "assistant",
+                  providerID: assistantProviders.get(path.messageID),
+                  parentID: assistantParents.get(path.messageID),
+                },
+              }
+            : null,
+        }),
       prompt: () => Promise.resolve({ data: {} }),
     },
   } as unknown as PluginInput["client"];
@@ -170,6 +186,19 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     expect(globalThis.fetch).not.toBe(originalFetch);
   });
 
+  test("registers native recall for the discovered local gateway", () => {
+    const recall = hooks.tool?.[RECALL_TOOL_NAME];
+    expect(recall?.description).toBe(RECALL_TOOL_DESCRIPTION);
+    expect(Object.keys(recall?.args ?? {}).sort()).toEqual([
+      "detailLimit",
+      "detailOffset",
+      "id",
+      "ids",
+      "query",
+      "scope",
+    ]);
+  });
+
   test("the plugin's config hook pins provider baseURL to the discovered gateway", async () => {
     const cfg: Record<string, unknown> = {
       provider: { anthropic: { options: { apiKey: "x" } } },
@@ -209,8 +238,151 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     expect(output.headers["x-lore-provider"]).toBe("anthropic");
   });
 
+  test("registered native recall binds sequential and overlapping token rotations to the verified user turn", async () => {
+    const sessionID = "oc-rotating-turns";
+    const send = async (userID: string, key: string, marker: string) => {
+      const output = {
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": key,
+        } as Record<string, string>,
+      };
+      await hooks["chat.headers"]?.(
+        {
+          sessionID,
+          agent: "build",
+          provider: { id: "anthropic" },
+          model: {},
+          message: { id: userID },
+        } as unknown as Parameters<NonNullable<Hooks["chat.headers"]>>[0],
+        output,
+      );
+      expect(output.headers["x-lore-native-turn-id"]).toBe(userID);
+      const response = await fetch(`${baseURL}/v1/messages`, {
+        method: "POST",
+        headers: output.headers,
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1024,
+          system: "You are a coding assistant. ".repeat(30),
+          messages: [{ role: "user", content: marker }],
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      assistantProviders.set(`assistant-${userID}`, "anthropic");
+      assistantParents.set(`assistant-${userID}`, userID);
+    };
+    const call = (userID: string) =>
+      hooks.tool![RECALL_TOOL_NAME].execute(
+        { query: "opencode-rotating-turn-memory", scope: "session" },
+        {
+          sessionID,
+          messageID: `assistant-${userID}`,
+          agent: "build",
+          directory: process.cwd(),
+          worktree: process.cwd(),
+          abort: new AbortController().signal,
+          metadata() {},
+          async ask() {},
+        },
+      );
+    await send(
+      "user-1",
+      "oauth-token-1",
+      "opencode-rotating-turn-memory-first",
+    );
+    await send(
+      "user-2",
+      "oauth-token-2",
+      "opencode-rotating-turn-memory-second",
+    );
+    expect(await call("user-1")).toContain(
+      "opencode-rotating-turn-memory-first",
+    );
+    expect(await call("user-2")).toContain(
+      "opencode-rotating-turn-memory-second",
+    );
+    await Promise.all([
+      send("user-3", "oauth-token-3", "opencode-rotating-turn-memory-third"),
+      send("user-4", "oauth-token-4", "opencode-rotating-turn-memory-fourth"),
+    ]);
+    expect(await call("user-3")).toContain(
+      "opencode-rotating-turn-memory-third",
+    );
+    expect(await call("user-4")).toContain(
+      "opencode-rotating-turn-memory-fourth",
+    );
+    expect(await call("user-1")).toContain(
+      "opencode-rotating-turn-memory-first",
+    );
+  });
+
+  test("registered native recall follows the assistant provider across switches and refuses same-provider credential ambiguity", async () => {
+    const sessionID = "oc-provider-switch-session";
+    const send = async (providerID: string, key: string) => {
+      const response = await fetch(`${baseURL}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": key,
+          "x-lore-session-id": sessionID,
+          "x-lore-agent": "build",
+          "x-lore-provider": providerID,
+          "x-lore-native-turn-id": `turn-${providerID}`,
+          "x-lore-project": process.cwd(),
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1024,
+          system: "You are a coding assistant. ".repeat(30),
+          messages: [
+            {
+              role: "user",
+              content: `opencode-provider-switch-memory-${providerID}`,
+            },
+          ],
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+    };
+    const recall = (providerID: string) => {
+      assistantProviders.set(`message-${providerID}`, providerID);
+      assistantParents.set(`message-${providerID}`, `turn-${providerID}`);
+      return hooks.tool![RECALL_TOOL_NAME].execute(
+        { query: "opencode-provider-switch-memory", scope: "session" },
+        {
+          sessionID,
+          messageID: `message-${providerID}`,
+          agent: "build",
+          directory: process.cwd(),
+          worktree: process.cwd(),
+          abort: new AbortController().signal,
+          metadata() {},
+          async ask() {},
+        },
+      );
+    };
+    await send("anthropic", "switch-key-a");
+    await send("minimax", "switch-key-b");
+    expect(await recall("anthropic")).toContain(
+      "opencode-provider-switch-memory-anthropic",
+    );
+    expect(await recall("minimax")).toContain(
+      "opencode-provider-switch-memory-minimax",
+    );
+    await send("minimax", "another-switch-key-b");
+    expect(await recall("minimax")).toContain("unavailable");
+    expect(await recall("anthropic")).toContain(
+      "opencode-provider-switch-memory-anthropic",
+    );
+  });
+
   test("the installed interceptor reroutes a provider call through the gateway to the upstream", async () => {
     const before = upstreamCalls;
+    assistantProviders.set("native-message", "anthropic");
+    assistantParents.set("native-message", "native-user");
     // A bare provider call (as the @ai-sdk would make) to a REMOTE host. The
     // interceptor the plugin installed rewrites api.anthropic.com → gateway,
     // which forwards to the mocked upstream. The x-lore-* headers mimic what
@@ -223,14 +395,16 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
         "x-api-key": "test-key",
         "anthropic-version": "2023-06-01",
         "x-lore-session-id": "oc-sess-1",
+        "x-lore-native-turn-id": "native-user",
         "x-lore-agent": "build",
         "x-lore-provider": "anthropic",
         "x-lore-project": process.cwd(),
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 64,
-        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1024,
+        system: "You are a coding assistant. ".repeat(30),
+        messages: [{ role: "user", content: "opencode-native-session-memory" }],
       }),
     });
     expect(res.ok).toBe(true);
@@ -241,5 +415,19 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     // The call to the remote provider host was rerouted to the in-process
     // gateway (not the real network), which hit the mocked upstream.
     expect(upstreamCalls).toBeGreaterThan(before);
+    const recalled = await hooks.tool![RECALL_TOOL_NAME].execute(
+      { query: "opencode-native-session-memory", scope: "session" },
+      {
+        sessionID: "oc-sess-1",
+        messageID: "native-message",
+        agent: "build",
+        directory: process.cwd(),
+        worktree: process.cwd(),
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask() {},
+      },
+    );
+    expect(recalled).toContain("opencode-native-session-memory");
   });
 });

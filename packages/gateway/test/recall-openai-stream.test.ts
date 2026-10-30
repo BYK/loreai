@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 // SSE chunk for OpenAI chat-completions streaming.
 function sseChunk(obj: unknown): string {
@@ -46,7 +47,7 @@ function openAIRecallStream(): Response {
                 id: "call_recall1",
                 type: "function",
                 function: {
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({ query: "test" }),
                 },
               },
@@ -189,8 +190,12 @@ describe("recall interception — OpenAI streaming path", () => {
     const bodyText = await resp.text();
 
     // The recall tool_use must NOT appear in the client-facing response.
-    expect(bodyText).not.toContain('"name":"recall"');
-    expect(bodyText).not.toContain('"name": "recall"');
+    expect(bodyText).not.toContain(
+      `"name":${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
+    expect(bodyText).not.toContain(
+      `"name": ${JSON.stringify(RECALL_TOOL_NAME)}`,
+    );
 
     // The recall follow-up should have been issued (2 upstream calls).
     expect(call).toBe(2);

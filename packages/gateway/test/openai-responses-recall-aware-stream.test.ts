@@ -112,7 +112,7 @@ const recallCall = (
       type: "function_call",
       id: itemId,
       call_id: callId,
-      name: "recall",
+      name: "lore_recall",
     },
   }) +
   sseEvent("response.function_call_arguments.done", {
@@ -126,7 +126,7 @@ const recallCall = (
       type: "function_call",
       id: itemId,
       call_id: callId,
-      name: "recall",
+      name: "lore_recall",
       arguments: JSON.stringify(args),
       status: "completed",
     },
@@ -954,7 +954,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_0",
                 call_id: "call_0",
-                name: "recall",
+                name: "lore_recall",
                 arguments: '{"query":"architecture"}',
                 status: "completed",
               },
@@ -984,7 +984,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("resp_follow_in_progress");
     expect(out).not.toContain("resp_follow_completed");
     expect(out).not.toContain(privateProviderField);
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
   });
 
   test("drops unreviewed terminal metadata from a stable-ID recall continuation", async () => {
@@ -1024,7 +1024,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_0",
                 call_id: "call_0",
-                name: "recall",
+                name: "lore_recall",
                 arguments: '{"query":"architecture"}',
                 status: "completed",
               },
@@ -1044,7 +1044,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain("Done");
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(out).not.toContain(privateValue);
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
   });
 
   test("charges only emitted continuation bytes after lifecycle-ID pinning", async () => {
@@ -1061,7 +1061,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_0",
               call_id: "call_0",
-              name: "recall",
+              name: "lore_recall",
               arguments: '{"query":"architecture"}',
               status: "completed",
             },
@@ -1121,7 +1121,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(out).toContain(privateValue);
     expect(out).not.toContain(createdId);
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
   });
 
   test("rejects a pinned continuation lifecycle snapshot without an ID", async () => {
@@ -1139,7 +1139,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_0",
               call_id: "call_0",
-              name: "recall",
+              name: "lore_recall",
               arguments: '{"query":"architecture"}',
               status: "completed",
             },
@@ -1194,7 +1194,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain(privateValue);
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
   });
 
   test("forwards standard hosted-tool lifecycle deltas", async () => {
@@ -1314,7 +1314,7 @@ describe("streamResponsesRecallAware", () => {
 
       const out = await drain(client);
       expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
-      expect(out).not.toContain('"name":"recall"');
+      expect(out).not.toContain('"name":"lore_recall"');
       expect(out).not.toContain("call_0");
       expect(JSON.stringify(completedResponse)).not.toContain("recall");
       expect(JSON.stringify(completedResponse)).not.toContain("call_0");
@@ -1372,7 +1372,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
 
     // The recall function_call must NOT leak to the client.
-    expect(out).not.toMatch(/name":\s*"recall/);
+    expect(out).not.toMatch(/name":\s*"lore_recall/);
     // The non-recall tool (read) must still be present.
     expect(out).toMatch(/name":\s*"read/);
     expect(out).toContain(buildAnchor("what is lore"));
@@ -1460,7 +1460,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_recall",
             call_id: "call_reused",
-            name: "recall",
+            name: "lore_recall",
           },
         }),
         sseEvent("response.function_call_arguments.done", {
@@ -1485,7 +1485,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(seen).toEqual([]);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
-    expect(out).not.toContain('name":"recall"');
+    expect(out).not.toContain('name":"lore_recall"');
   });
 
   test("rejects parallel recalls even when a non-recall tool is present", async () => {
@@ -1567,7 +1567,7 @@ describe("streamResponsesRecallAware", () => {
         type: "function_call",
         id: "fc_args",
         call_id: "call_args",
-        name: "recall",
+        name: "lore_recall",
       },
     });
     const client = streamResponsesRecallAware(
@@ -2179,7 +2179,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "private_snapshot_item",
             call_id: "private_snapshot_call",
-            name: "recall",
+            name: "lore_recall",
             arguments: '{"query":"private_snapshot_query"}',
           },
         ],
@@ -2790,7 +2790,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_terminal_name",
                 call_id: "call_terminal_name",
-                name: "recall",
+                name: "lore_recall",
                 arguments: "{}",
                 status: "completed",
               },
@@ -2819,7 +2819,7 @@ describe("streamResponsesRecallAware", () => {
     ) as { response?: { output?: Array<Record<string, unknown>> } };
     expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
     expect(terminal.response?.output).toEqual([]);
-    expect(output).not.toContain('"name":"recall"');
+    expect(output).not.toContain('"name":"lore_recall"');
     expect(completedResponse?.rawOutputItems).toContainEqual(
       expect.objectContaining({
         id: "fc_terminal_name",
@@ -3479,7 +3479,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_1",
                 call_id: "call_1",
-                name: "recall",
+                name: "lore_recall",
                 arguments: args,
                 status: "completed",
               },
@@ -3552,7 +3552,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_1",
               call_id: "call_1",
-              name: "recall",
+              name: "lore_recall",
               arguments: nestedArgs,
               status: "completed",
             },
@@ -5052,7 +5052,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_done_only_recall",
             call_id: "call_done_only_recall",
-            name: "recall",
+            name: "lore_recall",
             arguments: JSON.stringify({ query: "done-only recall" }),
             status: "completed",
           },
@@ -5118,7 +5118,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_done_only_failed_recall",
             call_id: "call_done_only_failed_recall",
-            name: "recall",
+            name: "lore_recall",
             arguments: privateArguments,
             status: "failed",
           },
@@ -5186,7 +5186,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_sparse_promotion_limit",
             call_id: "call_sparse_promotion_limit",
-            name: "recall",
+            name: "lore_recall",
             arguments: privateArguments,
             status: "completed",
           },
@@ -5446,7 +5446,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_terminal_recall",
                 call_id: "call_terminal_recall",
-                name: "recall",
+                name: "lore_recall",
                 arguments: args,
                 status: "completed",
               },
@@ -5473,7 +5473,7 @@ describe("streamResponsesRecallAware", () => {
     expect(recallCalls).toBe(1);
     expect(output).toContain("terminal recall answer");
     expect(output).not.toContain(PUBLIC_RECALL_ERROR);
-    expect(output).not.toContain('"name":"recall"');
+    expect(output).not.toContain('"name":"lore_recall"');
     expect(output).not.toContain("fc_terminal_recall");
     expect(output).not.toContain("call_terminal_recall");
   });
@@ -5513,7 +5513,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_terminal_failed_sparse_recall",
                 call_id: "call_terminal_failed_sparse_recall",
-                name: "recall",
+                name: "lore_recall",
                 arguments: privateArguments,
                 status: "failed",
               },
@@ -5584,7 +5584,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_terminal_changed_recall",
                 call_id: "call_terminal_changed_recall",
-                name: "recall",
+                name: "lore_recall",
                 arguments: privateArguments,
                 status: "completed",
               },
@@ -5819,7 +5819,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_terminal_recall_mismatch",
             call_id: "",
-            name: "recall",
+            name: "lore_recall",
             arguments: "",
           },
         }),
@@ -5837,7 +5837,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_terminal_recall_mismatch",
                 call_id: "call_terminal_recall_mismatch",
-                name: "recall",
+                name: "lore_recall",
                 arguments: JSON.stringify({ query: "changed" }),
                 status: "completed",
               },
@@ -5916,7 +5916,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_ciphertext_chain_recall",
               call_id: "call_ciphertext_chain_recall",
-              name: "recall",
+              name: "lore_recall",
               arguments: JSON.stringify({ query: "second recall" }),
               status: "completed",
             },
@@ -5949,7 +5949,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_ciphertext_chain_principal",
             call_id: "call_ciphertext_chain_principal",
-            name: "recall",
+            name: "lore_recall",
             arguments: JSON.stringify({ query: "first recall" }),
             status: "completed",
           },
@@ -7581,7 +7581,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_failed_recall",
             call_id: "call_failed_recall",
-            name: "recall",
+            name: "lore_recall",
           },
         }),
         sseEvent("response.function_call_arguments.done", {
@@ -7595,7 +7595,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_failed_recall",
             call_id: "call_failed_recall",
-            name: "recall",
+            name: "lore_recall",
             arguments: args,
             status: "failed",
           },
@@ -7625,7 +7625,7 @@ describe("streamResponsesRecallAware", () => {
       type: "function_call",
       id: "fc_terminal_failed_recall",
       call_id: "call_terminal_failed_recall",
-      name: "recall",
+      name: "lore_recall",
       arguments: args,
     };
     const client = streamResponsesRecallAware(
@@ -7707,7 +7707,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_snapshot_recall",
               call_id: "call_snapshot_recall",
-              name: "recall",
+              name: "lore_recall",
               arguments: '{"query":"leaked"}',
             },
           ],
@@ -8403,7 +8403,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_0",
           call_id: "call_0",
-          name: "recall",
+          name: "lore_recall",
         },
       }) +
       sseEvent("response.function_call_arguments.done", {
@@ -8444,7 +8444,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_toctou",
             call_id: "call_toctou",
-            name: "recall",
+            name: "lore_recall",
           },
         }),
         sseEvent("response.function_call_arguments.done", {
@@ -8458,7 +8458,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_toctou",
             call_id: "call_toctou",
-            name: "recall",
+            name: "lore_recall",
             arguments: JSON.stringify({ query: "changed" }),
           },
         }),
@@ -8539,7 +8539,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_incomplete",
           call_id: "call_incomplete",
-          name: "recall",
+          name: "lore_recall",
         },
       }) +
       sseEvent("response.function_call_arguments.done", {
@@ -8615,7 +8615,7 @@ describe("streamResponsesRecallAware", () => {
               reader: streamFrom([
                 created(`resp_${follows}`, "gpt-5.6-terra"),
                 follows === budget
-                  ? item.replaceAll('"name":"recall"', '"name":"Read"')
+                  ? item.replaceAll('"name":"lore_recall"', '"name":"Read"')
                   : item,
                 completed(`resp_${follows}`, {
                   input_tokens: 3,
@@ -8954,7 +8954,7 @@ describe("streamResponsesRecallAware", () => {
     // Rebuilt terminal event.
     expect(out).toContain("response.completed");
     // No raw recall function_call leaked.
-    expect(out).not.toMatch(/name":\s*"recall/);
+    expect(out).not.toMatch(/name":\s*"lore_recall/);
     // The follow-up's OWN lifecycle/terminal events are suppressed — the
     // client sees exactly ONE response.created and ONE response.completed
     // (as `event:` boundaries; the rebuilt completed also carries
@@ -10072,7 +10072,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(seen).toEqual(["architecture", "detail"]);
     expect(out).toContain("final answer");
-    expect(out).not.toMatch(/name":\s*"recall/);
+    expect(out).not.toMatch(/name":\s*"lore_recall/);
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
   });
 
@@ -10110,7 +10110,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("intermediate");
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
     expect(out).not.toContain("detail");
     expect(out).not.toContain("call_second");
     expect(JSON.stringify(completedResponse)).not.toContain("intermediate");
@@ -10327,7 +10327,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_malformed_unfinished",
           call_id: "call_malformed_unfinished",
-          name: "recall",
+          name: "lore_recall",
         },
       }),
       "event: response.output_item.done\ndata: {not json\n\n",
@@ -10691,7 +10691,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_malformed",
           call_id: "call_malformed",
-          name: "recall",
+          name: "lore_recall",
         },
       }),
       incomplete("resp_malformed"),
@@ -10710,7 +10710,7 @@ describe("streamResponsesRecallAware", () => {
                 type: "function_call",
                 id: "fc_0",
                 call_id: "call_0",
-                name: "recall",
+                name: "lore_recall",
                 arguments: JSON.stringify({ query: "architecture" }),
                 status: "completed",
               },
@@ -10750,7 +10750,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_malformed",
             call_id: "call_malformed",
-            name: "recall",
+            name: "lore_recall",
           },
         }),
         sseEvent("response.function_call_arguments.done", {
@@ -10778,7 +10778,7 @@ describe("streamResponsesRecallAware", () => {
     expect(executed).toBe(false);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).toContain("response.failed");
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
     expect(out).not.toContain("call_malformed");
     expect(JSON.stringify(completedResponse)).not.toContain("recall");
     expect(JSON.stringify(completedResponse)).not.toContain("call_malformed");
@@ -10844,7 +10844,7 @@ describe("streamResponsesRecallAware", () => {
     expect(followUpResults).toHaveLength(2);
     expect(followUpResults[0]).toContain("Invalid recall arguments");
     expect(output).toContain("recovered answer");
-    expect(output).not.toContain('"name":"recall"');
+    expect(output).not.toContain('"name":"lore_recall"');
     expect(output).not.toContain("response.failed");
     expect(output).not.toContain('"call_id":"call_0"');
     const terminal = /event: response\.completed\ndata: (.+)/.exec(output);
@@ -10898,7 +10898,10 @@ describe("streamResponsesRecallAware", () => {
     ).response.output;
     expect(output).toHaveLength(1);
     expect(output).not.toContainEqual(
-      expect.objectContaining({ type: "function_call", name: "recall" }),
+      expect.objectContaining({
+        type: "function_call",
+        name: "lore_recall",
+      }),
     );
     const nextRequest = parseOpenAIResponsesRequest(
       {
@@ -11199,7 +11202,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_late",
           call_id: "call_late",
-          name: "recall",
+          name: "lore_recall",
           arguments: '{"query":"secret"}',
           status: "completed",
         },
@@ -11212,7 +11215,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_no_index",
           call_id: "call_no_index",
-          name: "recall",
+          name: "lore_recall",
         },
       }),
     ],
@@ -11228,7 +11231,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_changed",
             call_id: "call_changed",
-            name: "recall",
+            name: "lore_recall",
             arguments: '{"query":"secret"}',
           },
         }),
@@ -11249,7 +11252,7 @@ describe("streamResponsesRecallAware", () => {
             type: "function_call",
             id: "fc_hidden",
             call_id: "call_hidden",
-            name: "recall",
+            name: "lore_recall",
           },
         }),
     ],
@@ -11273,7 +11276,7 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(out).toContain("response.failed");
-    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain('"name":"lore_recall"');
     expect(out).not.toContain("secret");
   });
 
@@ -11393,7 +11396,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_strict",
               call_id: "call_strict",
-              name: "recall",
+              name: "lore_recall",
             },
           }),
           sseEvent("response.function_call_arguments.done", {
@@ -11407,7 +11410,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_strict",
               call_id: "call_strict",
-              name: "recall",
+              name: "lore_recall",
               arguments: argumentsJSON,
               status: "completed",
             },
@@ -11438,7 +11441,7 @@ describe("streamResponsesRecallAware", () => {
       expect(followUpResult).toContain(`Invalid recall arguments (${issue})`);
       expect(out).toContain("corrected answer");
       expect(out).not.toContain(PUBLIC_RECALL_ERROR);
-      expect(out).not.toContain('"name":"recall"');
+      expect(out).not.toContain('"name":"lore_recall"');
     },
   );
 
@@ -11467,7 +11470,7 @@ describe("streamResponsesRecallAware", () => {
       args: {
         query: null,
         scope: null,
-        id: "k:one",
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
         ids: null,
         detailOffset: 10,
         detailLimit: 20,
@@ -11475,7 +11478,7 @@ describe("streamResponsesRecallAware", () => {
       expected: {
         query: "",
         scope: undefined,
-        id: "k:one",
+        id: "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
         ids: undefined,
         detailOffset: 10,
         detailLimit: 20,
@@ -11487,7 +11490,10 @@ describe("streamResponsesRecallAware", () => {
         query: null,
         scope: null,
         id: null,
-        ids: ["k:one", "k:two"],
+        ids: [
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+        ],
         detailOffset: null,
         detailLimit: null,
       },
@@ -11495,7 +11501,10 @@ describe("streamResponsesRecallAware", () => {
         query: "",
         scope: undefined,
         id: undefined,
-        ids: ["k:one", "k:two"],
+        ids: [
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+          "k:019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+        ],
         detailOffset: undefined,
         detailLimit: undefined,
       },
@@ -11562,7 +11571,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_malformed",
           call_id: "call_malformed",
-          name: "recall",
+          name: "lore_recall",
         },
       }),
       sseEvent("response.custom", { secret: "must-not-leak" }),
@@ -11725,7 +11734,7 @@ describe("streamResponsesRecallAware", () => {
           type: "function_call",
           id: "fc_done_only_failed_followup",
           call_id: "call_done_only_failed_followup",
-          name: "recall",
+          name: "lore_recall",
           arguments: privateArguments,
           status: "failed",
         },
@@ -11995,7 +12004,7 @@ describe("streamResponsesRecallAware", () => {
               type: "function_call",
               id: "fc_nested",
               call_id: "call_nested",
-              name: "recall",
+              name: "lore_recall",
               arguments: args,
               status: "completed",
             },

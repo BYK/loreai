@@ -165,9 +165,15 @@ describe("durable remote tenant storage isolation", () => {
       expect(ltm.get(projectKnowledgeId)).toBeNull();
       expect(ltm.get(globalKnowledgeId)).toBeNull();
       expect(entities.get(entityId)).toBeNull();
-      expect(recallById(`k:${projectKnowledgeId}`)).toContain("No entry found");
-      expect(recallById(`e:${entityId}`)).toContain("No entry found");
-      expect(recallById(`t:${temporalId}`)).toContain("No entry found");
+      expect(
+        recallById(`k:${projectKnowledgeId}`, { projectPath: path }),
+      ).toContain("No matching recall detail");
+      expect(recallById(`e:${entityId}`, { projectPath: path })).toContain(
+        "No matching recall detail",
+      );
+      expect(recallById(`t:${temporalId}`, { projectPath: path })).toContain(
+        "No matching recall detail",
+      );
 
       const recall = await runRecall({
         query: secret,
@@ -210,7 +216,9 @@ describe("durable remote tenant storage isolation", () => {
         scope: "all",
       });
       expect(recall).toContain(secret);
-      expect(recallById(`t:${temporalId}`)).toContain(secret);
+      expect(recallById(`t:${temporalId}`, { projectPath: path })).toContain(
+        secret,
+      );
       expect(
         ltm.contradictionExists(projectKnowledgeId, globalKnowledgeId),
       ).toBe(true);
@@ -295,6 +303,45 @@ describe("durable remote tenant storage isolation", () => {
     expect(entityHits.map((hit) => hit.id)).toEqual([tenantB.entity]);
     expect(distillationHits.map((hit) => hit.id)).toEqual([
       tenantB.distillation,
+    ]);
+
+    const [localProject, otherProject] = withTenant(TENANT_A, () => [
+      ensureProject(`${path}/local`),
+      ensureProject(`${path}/other`),
+    ]);
+    const seedProjectDistillation = (
+      projectId: string,
+      sessionId: string,
+      embedding: Float32Array,
+    ) => {
+      const id = crypto.randomUUID();
+      db()
+        .query(
+          `INSERT INTO distillations
+             (id, project_id, session_id, narrative, facts, source_ids,
+              observations, generation, token_count, created_at, archived)
+           VALUES (?, ?, ?, '', '', '[]', 'private project vector', 0, 10, ?, 0)`,
+        )
+        .run(id, projectId, sessionId, Date.now());
+      storeEmbedding(db(), "distillations", id, embedding);
+      return id;
+    };
+    const localDistillation = withTenant(TENANT_A, () =>
+      seedProjectDistillation(localProject, "local-vector-session", vector(1)),
+    );
+    withTenant(TENANT_A, () =>
+      seedProjectDistillation(otherProject, "other-vector-session", vector(0)),
+    );
+    const projectDistillationHits = withTenant(TENANT_A, () =>
+      runVectorQuery(db(), mode, query, {
+        kind: "distillations",
+        tenantId: TENANT_A,
+        projectId: localProject,
+        limit: 1,
+      }),
+    );
+    expect(projectDistillationHits.map((hit) => hit.id)).toEqual([
+      localDistillation,
     ]);
   });
 });

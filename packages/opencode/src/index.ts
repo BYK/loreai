@@ -4,6 +4,9 @@ import {
   getGitRemote,
   discoverWorkspaceRoot,
   installFetchInterceptor,
+  RECALL_TOOL_NAME,
+  createGatewayRecallClient,
+  NATIVE_RECALL_TURN_HEADER,
 } from "@loreai/core";
 // Helpers live in a separate module so they are NOT re-exported from this
 // plugin entry. OpenCode's legacy plugin loader invokes every function
@@ -17,9 +20,15 @@ import {
   isLoopbackUrl,
   prepareLocalUiAssets,
   probeGateway,
+  shouldRegisterNativeRecallTool,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "./internal";
+import { createRecallTool } from "./recall-tool";
+
+let nativeRecallClient:
+  | ReturnType<typeof createGatewayRecallClient>
+  | undefined;
 
 /**
  * Lore plugin for OpenCode — transparent LLM proxy routing.
@@ -38,6 +47,16 @@ import {
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
+function gatewayOriginForLog(value: string): string {
+  try {
+    // The configured URL may contain credentials or a private path/query.
+    // Keep operational logs useful without retaining any of those components.
+    return new URL(value).origin;
+  } catch {
+    return "<gateway>";
+  }
+}
+
 /**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
@@ -50,7 +69,7 @@ async function resolveGatewayUrl(): Promise<string | null> {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
     log.info(
-      `remote gateway at ${url} not reachable, falling through to local discovery`,
+      "remote gateway is not reachable, falling through to local discovery",
     );
   }
 
@@ -193,12 +212,15 @@ const sessionParent = new Map<
     lastSeenAt: number;
   }
 >();
+const sessionInfoLookups = new Map<string, Promise<void>>();
 
 /** OpenCode's default title before it generates a real one. */
 const PLACEHOLDER_TITLE_RE = /^new session\b/i;
 /** Re-check a real (non-placeholder) title at most this often — a session
  *  can be renamed mid-flight, but titles are not worth polling per turn. */
 const TITLE_REFETCH_MS = 5 * 60 * 1000;
+/** Bound optional metadata lookups so a hung SDK call cannot suppress retries. */
+const SESSION_INFO_LOOKUP_TIMEOUT_MS = 5_000;
 
 function reapStaleSessionParent(): void {
   const cutoff = Date.now() - SESSION_STATE_TTL_MS;
@@ -221,6 +243,10 @@ function applySessionInfo(
   entry.titleFetchedAt = Date.now();
 }
 
+function sessionInfoKey(directory: string, sessionID: string): string {
+  return JSON.stringify([directory, sessionID]);
+}
+
 /**
  * Resolve a session's parent session ID and harness title via the OpenCode SDK.
  *
@@ -232,17 +258,23 @@ function applySessionInfo(
  * own `title` is forwarded percent-encoded as `x-lore-session-title` so the
  * gateway can persist it as the session's explicit title (#1921).
  *
- * Cached per session (parentID is immutable). A successful lookup — including
+ * Cached per workspace and session (parentID is immutable). A successful lookup — including
  * the common `null` for a primary session — is cached so we never re-query.
  * Failures (gateway server unreachable, session not yet persisted) are NOT
  * cached and never throw, so a transient error is retried on the next turn
  * rather than permanently latching a real sub-agent as "not a sub-agent".
  */
-async function resolveSessionInfo(
+function resolveSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
-): Promise<{ parentID: string | null; title: string | null }> {
-  const cached = sessionParent.get(sessionID);
+  directory: string,
+): {
+  parentID: string | null;
+  title: string | null;
+  parentLookupPending: boolean;
+} {
+  const key = sessionInfoKey(directory, sessionID);
+  const cached = sessionParent.get(key);
   if (cached) {
     cached.lastSeenAt = Date.now();
     // Title refresh policy (#1921): a harness that reports no title at all
@@ -257,33 +289,74 @@ async function resolveSessionInfo(
           ? true
           : Date.now() - cached.titleFetchedAt > TITLE_REFETCH_MS;
     if (!needsRefetch) {
-      return { parentID: cached.parentID, title: cached.title };
+      return {
+        parentID: cached.parentID,
+        title: cached.title,
+        parentLookupPending: false,
+      };
     }
-    try {
-      const res = await client.session.get({ path: { id: sessionID } });
-      applySessionInfo(cached, res.data);
-    } catch {
-      // Keep the cached values — a transient failure is not a reason to
-      // drop a title we already know.
-    }
-    return { parentID: cached.parentID, title: cached.title };
-  }
-  try {
-    const res = await client.session.get({ path: { id: sessionID } });
-    const entry = {
-      parentID: null,
-      title: null,
-      titleFetchedAt: 0,
-      lastSeenAt: Date.now(),
+    fetchSessionInfo(client, sessionID, directory);
+    return {
+      parentID: cached.parentID,
+      title: cached.title,
+      parentLookupPending: false,
     };
-    applySessionInfo(entry, res.data);
-    sessionParent.set(sessionID, entry);
-    reapStaleSessionParent();
-    return { parentID: entry.parentID, title: entry.title };
-  } catch {
-    // Best-effort: never break or slow the request path on a lookup failure.
-    return { parentID: null, title: null };
   }
+  fetchSessionInfo(client, sessionID, directory);
+  return { parentID: null, title: null, parentLookupPending: true };
+}
+
+function fetchSessionInfo(
+  client: PluginInput["client"],
+  sessionID: string,
+  directory: string,
+): void {
+  // Session IDs are scoped by OpenCode's workspace directory; never reuse a
+  // lookup or cached metadata from a different workspace with the same ID.
+  const key = sessionInfoKey(directory, sessionID);
+  if (sessionInfoLookups.has(key)) return;
+
+  // Session metadata is optional: never await it on a provider request. A
+  // failed or timed-out lookup stays uncached so a later turn can retry it.
+  let lookup: Promise<void> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const request = Promise.resolve()
+    .then(() =>
+      client.session.get({
+        path: { id: sessionID },
+        query: { directory },
+      }),
+    )
+    .then((res) => {
+      // A timeout or newer lookup owns the slot now; late responses cannot
+      // overwrite metadata resolved by a later turn.
+      if (!lookup || sessionInfoLookups.get(key) !== lookup) return;
+      // The SDK can return HTTP errors without rejecting. Such a response
+      // cannot establish that the session has no parent and must be retried.
+      if (res.error || !res.data) return;
+      const entry = sessionParent.get(key) ?? {
+        parentID: null,
+        title: null,
+        titleFetchedAt: 0,
+        lastSeenAt: Date.now(),
+      };
+      applySessionInfo(entry, res.data);
+      sessionParent.set(key, entry);
+      reapStaleSessionParent();
+    })
+    .catch(() => {
+      // Metadata failures must not escape into request handling.
+    });
+  const deadline = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, SESSION_INFO_LOOKUP_TIMEOUT_MS);
+  });
+  lookup = Promise.race([request, deadline]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+    if (sessionInfoLookups.get(key) === lookup) {
+      sessionInfoLookups.delete(key);
+    }
+  });
+  sessionInfoLookups.set(key, lookup);
 }
 
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
@@ -334,14 +407,16 @@ export const LorePlugin: Plugin = async (ctx) => {
           // Try to find a running gateway first (probes port file + known ports).
           const existingUrl = await resolveGatewayUrl();
           if (existingUrl) {
-            log.info(`gateway detected at ${existingUrl}`);
+            log.info(`gateway detected at ${gatewayOriginForLog(existingUrl)}`);
             return existingUrl;
           }
           // No running gateway — start one in-process (handles fallback chain).
           log.info("starting gateway in-process…");
           const startedUrl = await startInProcess();
           if (startedUrl) {
-            log.info(`gateway started in-process at ${startedUrl}`);
+            log.info(
+              `gateway started in-process at ${gatewayOriginForLog(startedUrl)}`,
+            );
             return startedUrl;
           }
           return null;
@@ -439,7 +514,20 @@ export const LorePlugin: Plugin = async (ctx) => {
         applyLoreProviderConfig(cfg, gatewayBase);
       },
 
-      tool: {},
+      tool:
+        loreDisabled || !shouldRegisterNativeRecallTool(gatewayBase)
+          ? {}
+          : {
+              [RECALL_TOOL_NAME]: createRecallTool(
+                (input, context) =>
+                  nativeRecallClient
+                    ? nativeRecallClient.execute(input, context)
+                    : Promise.resolve(
+                        "Recall is unavailable for this authenticated session.",
+                      ),
+                ctx.client,
+              ),
+            },
 
       // Inject per-request identifiers so the gateway can distinguish meta
       // requests (title generation, summary agents, etc.) from real
@@ -454,18 +542,26 @@ export const LorePlugin: Plugin = async (ctx) => {
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
+        output.headers[NATIVE_RECALL_TURN_HEADER] = input.message.id;
         output.headers["x-lore-agent"] = input.agent;
         // Flag OpenCode Task sub-agents so the gateway sizes their LTM
         // injection (see #1300). A sub-agent runs in a child session carrying a
         // parentID; forward it as the `x-parent-session-id` signal the gateway
         // already understands (Claude Code sends this natively). Resolution is
         // cached and never blocks or throws on failure.
-        const sessionInfo = await resolveSessionInfo(
+        const sessionInfo = resolveSessionInfo(
           ctx.client,
           input.sessionID,
+          ctx.worktree || ctx.directory,
         );
         if (sessionInfo.parentID) {
           output.headers["x-parent-session-id"] = sessionInfo.parentID;
+        } else {
+          // The initial lookup is intentionally fire-and-forget. Tell the
+          // gateway to apply the conservative sub-agent budget until it can
+          // classify a root session and clear that temporary state.
+          output.headers["x-lore-session-parent-state"] =
+            sessionInfo.parentLookupPending ? "pending" : "primary";
         }
         // Forward the harness's own session title so the gateway can persist
         // it as the session's explicit title (#1921). Percent-encoded — header
@@ -546,11 +642,14 @@ export const LorePlugin: Plugin = async (ctx) => {
       log.info(`active: ${projectPath}`);
 
       if (loreActive) {
+        nativeRecallClient = createGatewayRecallClient(gatewayBase);
         // Install the fetch interceptor once per process. It transparently
         // reroutes outgoing LLM API calls through the gateway while
         // preserving original auth headers and URLs.
         installFetchInterceptor({
           gatewayBase,
+          onRequestHeaders: (headers) =>
+            nativeRecallClient?.observeRequestHeaders(headers),
           getHeaders: () => {
             const headers: Record<string, string> = {
               ...gatewayAccessHeadersForRemote(gatewayBase),
@@ -565,8 +664,9 @@ export const LorePlugin: Plugin = async (ctx) => {
             return headers;
           },
         });
-        log.info(`routing through ${gatewayBase}`);
-        log.info(`dashboard: ${gatewayBase}/ui`);
+        const gatewayLogOrigin = gatewayOriginForLog(gatewayBase);
+        log.info(`routing through ${gatewayLogOrigin}`);
+        log.info(`dashboard available at ${gatewayLogOrigin}/ui`);
       }
 
       processInitDone = true;
