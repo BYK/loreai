@@ -1,4 +1,8 @@
-import type { RecallToolContext } from "@loreai/core";
+import {
+  GATEWAY_AUTH_HEADER,
+  type RecallToolContext,
+  type createGatewayRecallClient,
+} from "@loreai/core";
 
 type TurnGroup = {
   gateway: string;
@@ -18,12 +22,18 @@ type PiRequestMetadata = {
   sessionID: string;
   gitRemote: string;
   sessionTitle: string;
+  accessHeaders?: Readonly<Record<string, string>>;
+  observeHeaders?: (headers: Headers) => void;
+  recallClient?: ReturnType<typeof createGatewayRecallClient>;
 };
 type RequestOwners = {
   owners: Map<string, PiRequestMetadata>;
   overflow: number;
 };
 const requestOwners = new Map<string, RequestOwners>();
+// Retired gateway URLs remain direct destinations for delayed SDK requests.
+const knownGateways = new Set<string>();
+let gatewayOverflow = false;
 
 /** Keep live factory metadata separate from the bounded, evictable turn cache. */
 export function trackPiRequestOwner(
@@ -31,6 +41,8 @@ export function trackPiRequestOwner(
   ownerID: string,
   metadata: PiRequestMetadata,
 ): { update: (next: PiRequestMetadata) => void; retire: () => void } {
+  if (knownGateways.size < 256) knownGateways.add(gateway);
+  else if (!knownGateways.has(gateway)) gatewayOverflow = true;
   let registry = requestOwners.get(gateway);
   if (!registry) {
     registry = { owners: new Map(), overflow: 0 };
@@ -66,17 +78,91 @@ export function singlePiRequestOwner(
   if (!registry || registry.overflow > 0) return undefined;
   const project = headers?.get("x-lore-project");
   const session = headers?.get("x-lore-session-id");
+  const accessToken = headers?.get(GATEWAY_AUTH_HEADER);
   let candidate: { ownerID: string; metadata: PiRequestMetadata } | undefined;
   for (const [ownerID, metadata] of registry.owners) {
     if (
       (project && metadata.projectPath !== project) ||
-      (session && metadata.sessionID !== session)
+      (session && metadata.sessionID !== session) ||
+      (accessToken !== null &&
+        accessToken !== undefined &&
+        accessToken !== (metadata.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null))
     )
       continue;
     if (candidate) return undefined;
     candidate = { ownerID, metadata };
   }
   return candidate;
+}
+
+/** Live factories retain their client even when the small idle cache evicts it. */
+export function piGatewayRecallClient(
+  gateway: string,
+): ReturnType<typeof createGatewayRecallClient> | undefined {
+  let client: ReturnType<typeof createGatewayRecallClient> | undefined;
+  for (const owner of requestOwners.get(gateway)?.owners.values() ?? []) {
+    if (!owner.recallClient) continue;
+    if (client && client !== owner.recallClient) return undefined;
+    client = owner.recallClient;
+  }
+  return client;
+}
+
+/** Resolve direct destinations before inferring an upstream request's owner. */
+export function piRequestGateway(url: URL, headers: Headers): string | null {
+  const direct = [...knownGateways]
+    .filter((base) => {
+      const gateway = new URL(base);
+      const path = gateway.pathname.replace(/\/+$/, "");
+      return (
+        url.origin === gateway.origin &&
+        (path === "" ||
+          url.pathname === path ||
+          url.pathname.startsWith(`${path}/`))
+      );
+    })
+    .sort((a, b) => b.length - a.length);
+  if (direct[0]) return direct[0];
+  if (gatewayOverflow) return null;
+  let candidate: string | null = null;
+  for (const [gateway, registry] of requestOwners) {
+    if (registry.overflow > 0) return null;
+    // A gateway with ambiguous matching owners cannot be ignored in favor of
+    // another gateway's sole owner.
+    const project = headers.get("x-lore-project");
+    const session = headers.get("x-lore-session-id");
+    const token = headers.get(GATEWAY_AUTH_HEADER);
+    const matching = [...registry.owners.values()].filter(
+      (owner) =>
+        (!project || owner.projectPath === project) &&
+        (!session || owner.sessionID === session) &&
+        (token === null ||
+          token === (owner.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null)),
+    );
+    if (matching.length === 0) continue;
+    if (matching.length !== 1 || candidate) return null;
+    candidate = gateway;
+  }
+  return candidate;
+}
+
+export function observePiRequestHeaders(
+  gateway: string,
+  headers: Headers,
+): void {
+  // Health/management auth must never replace a model request's provider key.
+  if (!headers.get("x-lore-project") || !headers.get("x-lore-session-id"))
+    return;
+  const owner = singlePiRequestOwner(gateway, headers);
+  if (!owner) return;
+  // Observation must match the access credential actually used on the wire,
+  // including its absence, before assigning provider auth to compaction.
+  if (
+    headers.get(GATEWAY_AUTH_HEADER) !==
+    (owner.metadata.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null)
+  )
+    return;
+  owner.metadata.observeHeaders?.(headers);
 }
 
 /** Shared ownership survives extension reloads, while scopes remain distinct. */

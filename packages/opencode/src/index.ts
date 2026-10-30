@@ -642,9 +642,7 @@ export const LorePlugin: Plugin = async (ctx) => {
       log.info(`active: ${projectPath}`);
 
       if (loreActive) {
-        nativeRecallClient = createGatewayRecallClient(gatewayBase, () =>
-          gatewayAccessHeadersForRemote(gatewayBase),
-        );
+        nativeRecallClient = createGatewayRecallClient(gatewayBase);
         // Install the fetch interceptor once per process. It transparently
         // reroutes outgoing LLM API calls through the gateway while
         // preserving original auth headers and URLs.

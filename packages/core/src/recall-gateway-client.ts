@@ -3,6 +3,7 @@ import {
   type RecallToolExecutor,
 } from "./recall-tool";
 import { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
+import { GATEWAY_AUTH_HEADER } from "./credential-headers";
 export { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
 
 const AUTH_HEADERS = ["x-api-key", "x-goog-api-key", "authorization"] as const;
@@ -14,10 +15,7 @@ const UNAVAILABLE = "Recall is unavailable for this authenticated session.";
  * Native tools execute in the gateway that owns session identity, configuration,
  * and opaque detail handles. Never fall back to a different local database.
  */
-export function createGatewayRecallClient(
-  gatewayBase: string,
-  getAccessHeaders: () => Record<string, string> = () => ({}),
-): {
+export function createGatewayRecallClient(gatewayBase: string): {
   execute: RecallToolExecutor;
   observeRequestHeaders: (headers: Headers) => void;
 } {
@@ -50,7 +48,7 @@ export function createGatewayRecallClient(
         if (entry.expiresAt <= now) credentials.delete(key);
       }
       const auth = Object.fromEntries(
-        AUTH_HEADERS.flatMap((name) => {
+        [...AUTH_HEADERS, GATEWAY_AUTH_HEADER].flatMap((name) => {
           const value = headers.get(name);
           return value ? [[name, value]] : [];
         }),
@@ -63,7 +61,7 @@ export function createGatewayRecallClient(
       // credentials, guessing the most recent one could
       // read another authenticated session's memory. Fail closed instead.
       const unambiguous =
-        Object.keys(auth).length <= 1 &&
+        AUTH_HEADERS.filter((name) => headers.has(name)).length <= 1 &&
         (!previous || JSON.stringify(previous.auth) === JSON.stringify(auth));
       credentials.delete(key);
       credentials.set(key, {
@@ -122,7 +120,6 @@ export function createGatewayRecallClient(
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
-            ...getAccessHeaders(),
             ...entry.auth,
             "content-type": "application/json",
             "x-lore-project": context.projectPath,

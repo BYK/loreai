@@ -60,6 +60,9 @@ import {
   singlePendingPiTurn,
   singlePiRequestOwner,
   trackPiRequestOwner,
+  piRequestGateway,
+  piGatewayRecallClient,
+  observePiRequestHeaders,
   startPiOwner,
   startPiTurn,
   bindPiOrigin,
@@ -85,6 +88,7 @@ const nativeRecallClients = new Map<
  * redirects provider URLs and registers compaction override.
  */
 export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
+  const factoryEnv = { ...process.env };
   let gatewayBase = "";
   let loreActive = false;
   const loreDisabled =
@@ -149,7 +153,10 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   // x-lore-session-title so the gateway can persist it (#1921).
   let currentSessionTitle = "";
   let compactAuthHeaders: Record<string, string> = {};
-  const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
+  const gatewayAccessHeaders = gatewayAccessHeadersForRemote(
+    gatewayBase,
+    factoryEnv,
+  );
   let currentTurn: RecallToolContext | undefined;
   // null means overlapping requests cannot yet be assigned to an assistant.
   // A later message must never be attributed to whichever turn started last.
@@ -166,9 +173,8 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   };
   const nativeRecallClient =
     nativeRecallClients.get(gatewayBase) ??
-    createGatewayRecallClient(gatewayBase, () =>
-      gatewayAccessHeadersForRemote(gatewayBase),
-    );
+    piGatewayRecallClient(gatewayBase) ??
+    createGatewayRecallClient(gatewayBase);
   nativeRecallClients.set(gatewayBase, nativeRecallClient);
   if (nativeRecallClients.size > 4) {
     const oldest = nativeRecallClients.keys().next().value;
@@ -209,6 +215,20 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     sessionID: currentSessionID,
     gitRemote: cachedGitRemote,
     sessionTitle: currentSessionTitle,
+    accessHeaders: gatewayAccessHeaders,
+    recallClient: nativeRecallClient,
+    observeHeaders: (headers: Headers) => {
+      const apiKey = headers.get("x-api-key");
+      const googleApiKey = headers.get("x-goog-api-key");
+      const authorization = headers.get("authorization");
+      compactAuthHeaders = apiKey
+        ? { "x-api-key": apiKey }
+        : googleApiKey
+          ? { "x-goog-api-key": googleApiKey }
+          : authorization
+            ? { authorization }
+            : {};
+    },
   });
   const requestOwner = trackPiRequestOwner(
     gatewayBase,
@@ -227,17 +247,18 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   if (!fetchInterceptorInstalled) {
     installFetchInterceptor({
       gatewayBase,
-      getHeaders: (requestHeaders) => {
-        const owner = singlePiRequestOwner(gatewayBase, requestHeaders);
-        if (!owner) return { ...gatewayAccessHeaders };
+      resolveGateway: piRequestGateway,
+      getHeaders: (requestHeaders, selectedGateway = gatewayBase) => {
+        const owner = singlePiRequestOwner(selectedGateway, requestHeaders);
+        if (!owner) return {};
         const metadata = owner.metadata;
         const scope = new Headers({
           "x-lore-project": metadata.projectPath,
           "x-lore-session-id": metadata.sessionID,
         });
-        const turn = singlePendingPiTurn(gatewayBase, scope, owner.ownerID);
+        const turn = singlePendingPiTurn(selectedGateway, scope, owner.ownerID);
         const headers: Record<string, string> = {
-          ...gatewayAccessHeaders,
+          ...metadata.accessHeaders,
           "x-lore-session-id": metadata.sessionID,
           "x-lore-project": metadata.projectPath,
           ...(turn?.turnID ? { [NATIVE_RECALL_TURN_HEADER]: turn.turnID } : {}),
@@ -250,25 +271,12 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           );
         return headers;
       },
-      onRequestHeaders: (headers) => {
-        nativeRecallClient.observeRequestHeaders(headers);
-        if (retired) return;
-        if (
-          headers.get("x-lore-session-id") !== currentSessionID ||
-          headers.get("x-lore-project") !== projectPath
-        ) {
-          return;
-        }
-        const apiKey = headers.get("x-api-key");
-        const googleApiKey = headers.get("x-goog-api-key");
-        const authorization = headers.get("authorization");
-        compactAuthHeaders = apiKey
-          ? { "x-api-key": apiKey }
-          : googleApiKey
-            ? { "x-goog-api-key": googleApiKey }
-            : authorization
-              ? { authorization }
-              : {};
+      onRequestHeaders: (headers, selectedGateway = gatewayBase) => {
+        (
+          piGatewayRecallClient(selectedGateway) ??
+          nativeRecallClients.get(selectedGateway)
+        )?.observeRequestHeaders(headers);
+        observePiRequestHeaders(selectedGateway, headers);
       },
     });
     fetchInterceptorInstalled = true;
@@ -287,6 +295,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       // Resolve the git remote for the CURRENT project path so worktrees that
       // switch on session_start get the right remote.
       gitRemote: getGitRemote(projectPath) ?? undefined,
+      env: factoryEnv,
     });
     for (const { provider, baseUrl, headers } of registrations) {
       if (currentTurn?.turnID)

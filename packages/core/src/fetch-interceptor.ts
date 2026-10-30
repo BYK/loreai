@@ -37,9 +37,14 @@ export type FetchInterceptorConfig = {
    * Dynamic headers to inject on every intercepted request.
    * Called per-request so values can change (e.g., session ID).
    */
-  getHeaders: (requestHeaders?: Headers) => Record<string, string>;
+  getHeaders: (
+    requestHeaders?: Headers,
+    gatewayBase?: string,
+  ) => Record<string, string>;
   /** Observe LLM request headers in memory before gateway routing. */
-  onRequestHeaders?: (headers: Headers) => void;
+  onRequestHeaders?: (headers: Headers, gatewayBase?: string) => void;
+  /** Select a proven gateway for this request, or bypass Lore without internal headers. */
+  resolveGateway?: (url: URL, headers: Headers) => string | null;
 };
 
 /**
@@ -820,7 +825,9 @@ function buildGatewayHeaders(
   // Inject dynamic context headers (session ID, project, git remote, etc.).
   // Only set if not already present — per-request hooks may have set them.
   try {
-    for (const [k, v] of Object.entries(config.getHeaders(headers))) {
+    for (const [k, v] of Object.entries(
+      config.getHeaders(headers, config.gatewayBase),
+    )) {
       if (!headers.has(k)) headers.set(k, v);
     }
   } catch (e) {
@@ -836,7 +843,7 @@ function observeRequestHeaders(
 ): void {
   if (!config.onRequestHeaders) return;
   try {
-    config.onRequestHeaders(headers);
+    config.onRequestHeaders(headers, config.gatewayBase);
   } catch (e) {
     log.error("fetch-interceptor: onRequestHeaders() failed:", e);
   }
@@ -922,8 +929,7 @@ export function installFetchInterceptor(
 
   // Pre-parse the gateway URL once — avoids constructing a new URL object on
   // every fetch call in the process (tool executions, file downloads, etc.).
-  const gateway = new URL(config.gatewayBase);
-  const gatewayBase = config.gatewayBase;
+  const touchedGateways = new Set([config.gatewayBase]);
 
   // Observe correlation in process, then remove it on every outbound path,
   // including passthroughs and context-boundary retries. Never mutate SDK init.
@@ -991,6 +997,28 @@ export function installFetchInterceptor(
       );
     }
 
+    const selectedGateway = config.resolveGateway
+      ? config.resolveGateway(upstream, requestHeaders)
+      : config.gatewayBase;
+    if (!selectedGateway) {
+      // Ownership is ambiguous. Keep provider credentials at their original
+      // destination, but never send gateway secrets or internal attribution.
+      for (const name of Array.from(requestHeaders.keys())) {
+        if (name.startsWith("x-lore-")) requestHeaders.delete(name);
+      }
+      // Request-owned and streaming bodies cannot be inspected synchronously.
+      // Protect fallback LLM paths even when their protocol is unverified.
+      const llmHop = pathLooksLLMLike(upstream.pathname);
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, llmHop),
+      );
+    }
+    touchedGateways.add(selectedGateway);
+    const requestConfig = { ...config, gatewayBase: selectedGateway };
+    const gatewayBase = selectedGateway;
+    const gateway = new URL(selectedGateway);
+
     // Never rewrite requests already targeting the gateway. Keep direct gateway
     // routes on their original URL while negotiating context boundaries for
     // supported generation endpoints.
@@ -1002,10 +1030,10 @@ export function installFetchInterceptor(
           init,
           requestHeaders,
           upstream.pathname,
-          config,
+          requestConfig,
         );
       }
-      observeRequestHeaders(requestHeaders, config);
+      observeRequestHeaders(requestHeaders, requestConfig);
       // Preserve the caller's exact init for safe direct requests. Rebuild it
       // only when credentials need redirect protection or boundary claims were
       // removed above.
@@ -1051,7 +1079,7 @@ export function installFetchInterceptor(
         init,
         rewrite.upstreamBase,
         rewrite.upstreamPath,
-        config,
+        requestConfig,
       );
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
@@ -1062,7 +1090,7 @@ export function installFetchInterceptor(
         init,
         headers,
         new URL(rewrite.gatewayUrl).pathname,
-        config,
+        requestConfig,
       );
     }
 
@@ -1081,7 +1109,7 @@ export function installFetchInterceptor(
           init,
           rewrite.upstreamBase,
           rewrite.upstreamPath,
-          config,
+          requestConfig,
         );
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
@@ -1092,7 +1120,7 @@ export function installFetchInterceptor(
           init,
           headers,
           new URL(rewrite.gatewayUrl).pathname,
-          config,
+          requestConfig,
         );
       }
 
@@ -1123,7 +1151,8 @@ export function installFetchInterceptor(
     globalThis.fetch = originalFetch;
     writeOriginalFetchSlot(null);
     for (const key of contextBoundaries.keys()) {
-      if (key.startsWith(`${gatewayBase}\x1f`)) contextBoundaries.delete(key);
+      if ([...touchedGateways].some((base) => key.startsWith(`${base}\x1f`)))
+        contextBoundaries.delete(key);
     }
   };
 }

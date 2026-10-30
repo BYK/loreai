@@ -2,6 +2,53 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createGatewayRecallClient } from "../src/recall-gateway-client";
 
 describe("native recall gateway client", () => {
+  test("binds gateway access credentials and their absence to the exact observed turn", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const headers = new Headers(init.headers);
+        return Response.json({
+          result: headers.get("x-lore-gateway-token") ?? "keyless",
+        });
+      }),
+    );
+    const client = createGatewayRecallClient("https://gateway.example");
+    const context = {
+      projectPath: "/project",
+      sessionID: "session",
+      providerID: "anthropic",
+    };
+    const observe = (turnID: string, token?: string) =>
+      client.observeRequestHeaders(
+        new Headers({
+          "x-lore-project": context.projectPath,
+          "x-lore-session-id": context.sessionID,
+          "x-lore-provider": context.providerID,
+          "x-lore-native-turn-id": turnID,
+          "x-api-key": "same-provider-key",
+          ...(token ? { "x-lore-gateway-token": token } : {}),
+        }),
+      );
+    observe("a", "access-a");
+    observe("b", "access-b");
+    observe("none");
+    for (const [turnID, expected] of [
+      ["a", "access-a"],
+      ["b", "access-b"],
+      ["none", "keyless"],
+    ])
+      expect(
+        await client.execute({ query: "memory" }, { ...context, turnID }),
+      ).toBe(expected);
+    observe("a", "access-b");
+    expect(
+      await client.execute({ query: "memory" }, { ...context, turnID: "a" }),
+    ).toContain("unavailable");
+    observe("b");
+    expect(
+      await client.execute({ query: "memory" }, { ...context, turnID: "b" }),
+    ).toContain("unavailable");
+  });
   test("accepts a sole nameless observation only for an exact verified turn", async () => {
     vi.stubGlobal(
       "fetch",
@@ -173,14 +220,13 @@ describe("native recall gateway client", () => {
       return Response.json({ result: "gateway memory" });
     });
     vi.stubGlobal("fetch", fetch);
-    const client = createGatewayRecallClient("http://127.0.0.1:3207", () => ({
-      "x-lore-gateway-token": "access",
-    }));
+    const client = createGatewayRecallClient("http://127.0.0.1:3207");
     const observe = (project: string, session: string, key: string) =>
       client.observeRequestHeaders(
         new Headers({
           "x-lore-project": project,
           "x-lore-session-id": session,
+          "x-lore-gateway-token": "access",
           "x-api-key": key,
         }),
       );
