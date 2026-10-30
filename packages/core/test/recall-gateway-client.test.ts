@@ -196,7 +196,7 @@ describe("native recall gateway client", () => {
       requests.map((request) => new Headers(request.headers).get("x-api-key")),
     ).toEqual(["key-a", "key-b", "key-c"]);
     expect(requests[0]).toMatchObject({ redirect: "error" });
-    expect(new Headers(requests[0]!.headers).get("x-lore-gateway-token")).toBe(
+    expect(new Headers(requests[0].headers).get("x-lore-gateway-token")).toBe(
       "access",
     );
     observe("/project-a", "session-a", "key-b");
@@ -252,6 +252,6 @@ describe("native recall gateway client", () => {
         { projectPath: "/project", sessionID: "session" },
       ),
     ).toBe("Recall is unavailable for this authenticated session.");
-    expect(fetch.mock.calls[1]![1].redirect).toBe("error");
+    expect(fetch.mock.calls[1][1].redirect).toBe("error");
   });
 });

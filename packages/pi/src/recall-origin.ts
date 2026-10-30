@@ -42,7 +42,7 @@ export function recallOrigin(
         }
       }
     }
-    return matches.length === 1 ? matches[0]! : null;
+    return matches.length === 1 ? matches[0] : null;
   } catch {
     return null;
   }

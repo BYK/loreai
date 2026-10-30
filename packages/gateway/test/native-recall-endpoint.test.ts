@@ -206,7 +206,7 @@ describe("authenticated native recall", () => {
       metadata() {},
       async ask() {},
     };
-    const opencode = createRecallTool(clients[0]!.execute);
+    const opencode = createRecallTool(clients[0].execute);
     const preview = await opencode.execute(
       { query: "detail sentence", scope: "session" },
       context,
@@ -220,7 +220,7 @@ describe("authenticated native recall", () => {
     expect(detail).not.toContain(markers[1]);
     const pi = createPiRecallTool(
       () => ({ projectPath: process.cwd(), sessionID }),
-      clients[1]!.execute,
+      clients[1].execute,
     );
     const piResult = await pi.execute(
       "call-1",
@@ -249,7 +249,7 @@ describe("authenticated native recall", () => {
     );
     expect(JSON.stringify(piResult)).toContain(markers[1]);
     expect(JSON.stringify(piResult)).not.toContain(markers[0]);
-    const wrongOwnerDetail = await clients[1]!.execute(
+    const wrongOwnerDetail = await clients[1].execute(
       { id: ref },
       { projectPath: process.cwd(), sessionID },
     );

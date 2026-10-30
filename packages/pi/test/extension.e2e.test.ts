@@ -347,7 +347,7 @@ describe("pi extension — e2e against a real gateway", () => {
       id: string,
       ctx = context,
     ) => {
-      const tool = instance.tools[0]!;
+      const tool = instance.tools[0];
       return tool
         .execute(
           id,

@@ -346,7 +346,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     const group = piTurnGroup(
       gatewayBase,
       pendingAssistantTurn.projectPath,
-      pendingAssistantTurn.sessionID!,
+      pendingAssistantTurn.sessionID,
     );
     if (
       !group ||

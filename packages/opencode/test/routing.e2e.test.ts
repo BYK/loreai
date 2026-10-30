@@ -274,7 +274,7 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
       assistantParents.set(`assistant-${userID}`, userID);
     };
     const call = (userID: string) =>
-      hooks.tool![RECALL_TOOL_NAME]!.execute(
+      hooks.tool![RECALL_TOOL_NAME].execute(
         { query: "opencode-rotating-turn-memory", scope: "session" },
         {
           sessionID,
@@ -350,7 +350,7 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     const recall = (providerID: string) => {
       assistantProviders.set(`message-${providerID}`, providerID);
       assistantParents.set(`message-${providerID}`, `turn-${providerID}`);
-      return hooks.tool![RECALL_TOOL_NAME]!.execute(
+      return hooks.tool![RECALL_TOOL_NAME].execute(
         { query: "opencode-provider-switch-memory", scope: "session" },
         {
           sessionID,
@@ -415,7 +415,7 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     // The call to the remote provider host was rerouted to the in-process
     // gateway (not the real network), which hit the mocked upstream.
     expect(upstreamCalls).toBeGreaterThan(before);
-    const recalled = await hooks.tool![RECALL_TOOL_NAME]!.execute(
+    const recalled = await hooks.tool![RECALL_TOOL_NAME].execute(
       { query: "opencode-native-session-memory", scope: "session" },
       {
         sessionID: "oc-sess-1",
