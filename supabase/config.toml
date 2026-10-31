@@ -11,16 +11,23 @@
 project_id = "jlwxsrmvomocgngbxmcf"
 
 [auth]
-# CLI sign-in uses a loopback `…/callback` redirect for the GitHub OAuth flow.
+# CLI sign-in uses a loopback `…/callback` redirect for GitHub and email flows.
 # Path-aware wildcards are required (a bare host won't match the `/callback`
 # path). NOTE: this only governs the local `supabase start` stack — the hosted
 # project's redirect allow-list is set in the dashboard (see README step 3).
-additional_redirect_urls = ["http://127.0.0.1:*/**", "http://127.0.0.1/**"]
+additional_redirect_urls = ["http://127.0.0.1:*/**", "http://127.0.0.1/**", "http://localhost:*/**", "http://localhost/**", "http://\\[::1\\]:*/**", "http://\\[::1\\]/**"]
 
 [auth.email]
-# Email magic-link / OTP sign-in for non-GitHub users. The OTP code path
-# requires `{{ .Token }}` in the Magic Link email template (dashboard).
+# Email OTP sign-in for non-GitHub users.
 enable_signup = true
+
+[auth.email.template.confirmation]
+subject = "Your Folk Lore sign-in code"
+content_path = "./supabase/templates/sign-in.html"
+
+[auth.email.template.magic_link]
+subject = "Your Folk Lore sign-in code"
+content_path = "./supabase/templates/sign-in.html"
 
 [functions.github-provision]
 # E-5-a (#827): mirrors GitHub org/team memberships into Lore teams. verify_jwt=true so only a

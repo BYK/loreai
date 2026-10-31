@@ -45,7 +45,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   buildProviderRegistrations,
-  gatewayAccessHeadersForRemote,
   resolveGatewayUrl,
   runCompaction,
   type SessionBeforeCompactResult,
@@ -153,10 +152,6 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   // x-lore-session-title so the gateway can persist it (#1921).
   let currentSessionTitle = "";
   let compactAuthHeaders: Record<string, string> = {};
-  const gatewayAccessHeaders = gatewayAccessHeadersForRemote(
-    gatewayBase,
-    factoryEnv,
-  );
   let currentTurn: RecallToolContext | undefined;
   // null means overlapping requests cannot yet be assigned to an assistant.
   // A later message must never be attributed to whichever turn started last.
@@ -215,7 +210,6 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     sessionID: currentSessionID,
     gitRemote: cachedGitRemote,
     sessionTitle: currentSessionTitle,
-    accessHeaders: gatewayAccessHeaders,
     recallClient: nativeRecallClient,
     observeHeaders: (headers: Headers) => {
       const apiKey = headers.get("x-api-key");
@@ -258,7 +252,6 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         });
         const turn = singlePendingPiTurn(selectedGateway, scope, owner.ownerID);
         const headers: Record<string, string> = {
-          ...metadata.accessHeaders,
           "x-lore-session-id": metadata.sessionID,
           "x-lore-project": metadata.projectPath,
           ...(turn?.turnID ? { [NATIVE_RECALL_TURN_HEADER]: turn.turnID } : {}),
@@ -454,7 +447,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         previousSummary: event.preparation.previousSummary,
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
-        authHeaders: { ...gatewayAccessHeaders, ...compactAuthHeaders },
+        authHeaders: { ...compactAuthHeaders },
       });
     },
   );

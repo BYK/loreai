@@ -10,7 +10,6 @@
  * relying on the `NODE_ENV=test` inert path.
  */
 import { createHash } from "node:crypto";
-import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { log } from "@loreai/core";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -309,18 +308,6 @@ export function sessionIDFor(sessionFile: string | undefined): string {
   return `pi-${createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)}`;
 }
 
-/** Access headers are injected only for the URL selected by LORE_REMOTE_URL. */
-export function gatewayAccessHeadersForRemote(
-  gatewayBase: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  const remoteUrl = env.LORE_REMOTE_URL?.replace(/\/+$/, "");
-  const token = env.LORE_GATEWAY_AUTH_TOKEN;
-  return remoteUrl === gatewayBase.replace(/\/+$/, "") && token
-    ? { [GATEWAY_AUTH_HEADER]: token }
-    : {};
-}
-
 /** Native recall reads the host DB, so only a discovered local gateway owns it. */
 export function shouldRegisterNativeRecallTool(
   gatewayBase: string,
@@ -374,7 +361,6 @@ export function buildProviderRegistrations(opts: {
   const registrations: ProviderRegistration[] = [];
   for (const provider of GATEWAY_PROVIDERS) {
     const headers: Record<string, string> = {
-      ...gatewayAccessHeadersForRemote(gatewayBase, env),
       "x-lore-session-id": sessionID,
       "x-lore-project": projectPath,
       // Inject provider ID so the gateway uses provider-based routing

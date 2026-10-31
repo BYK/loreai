@@ -7,7 +7,6 @@
  * Shared by the Hono middleware in `app.ts` and the raw `upgrade` listener in
  * `server.ts` so both paths enforce exactly the same policy.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { PROVIDER_AUTH_HEADER_NAMES } from "./auth";
@@ -176,69 +175,6 @@ export function hiddenManagementResponse(): Response {
     status: 404,
     headers: { connection: "close" },
   });
-}
-
-function rawHeaderCount(
-  rawHeaders: readonly string[] | undefined,
-  target: string,
-): number {
-  if (!rawHeaders) return 1;
-  let count = 0;
-  for (let index = 0; index < rawHeaders.length; index += 2) {
-    if (rawHeaders[index]?.toLowerCase() === target) count++;
-  }
-  return count;
-}
-
-export function singleRawHeaderValue(
-  rawHeaders: readonly string[],
-  target: string,
-): string | null {
-  let value: string | null = null;
-  for (let index = 0; index < rawHeaders.length; index += 2) {
-    if (rawHeaders[index]?.toLowerCase() !== target) continue;
-    if (value !== null) return null;
-    value = rawHeaders[index + 1] ?? "";
-  }
-  return value;
-}
-
-export function constantTimeTokenMatches(
-  actual: string,
-  expected: string,
-): boolean {
-  const digest = (value: string): Buffer =>
-    createHash("sha256")
-      .update("lore.gateway-access.v1\0")
-      .update(value)
-      .digest();
-  return timingSafeEqual(digest(actual), digest(expected));
-}
-
-export function gatewayAccessMatches(
-  headers: Headers,
-  expected: string,
-  rawHeaders?: readonly string[],
-): boolean {
-  if (rawHeaderCount(rawHeaders, GATEWAY_AUTH_HEADER) !== 1) return false;
-  const actual = rawHeaders
-    ? singleRawHeaderValue(rawHeaders, GATEWAY_AUTH_HEADER)
-    : headers.get(GATEWAY_AUTH_HEADER);
-  return actual !== null && constantTimeTokenMatches(actual, expected);
-}
-
-/** Validate the single configured token at the remote management boundary. */
-export function managementBearerMatches(
-  headers: Headers,
-  expected: string,
-  rawHeaders?: readonly string[],
-): boolean {
-  if (rawHeaderCount(rawHeaders, "authorization") !== 1) return false;
-  const authorization = rawHeaders
-    ? singleRawHeaderValue(rawHeaders, "authorization")
-    : headers.get("authorization");
-  const match = /^Bearer ([\x21-\x2b\x2d-\x7e]+)$/i.exec(authorization ?? "");
-  return match !== null && constantTimeTokenMatches(match[1] ?? "", expected);
 }
 
 export function hasRawConflictingProviderAuth(

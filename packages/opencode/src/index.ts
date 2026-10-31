@@ -15,7 +15,6 @@ import {
 // (`undefined is not an object (evaluating 'A.event')`). See ./internal.ts.
 import {
   applyLoreProviderConfig,
-  gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
   isLoopbackUrl,
   prepareLocalUiAssets,
@@ -535,10 +534,6 @@ export const LorePlugin: Plugin = async (ctx) => {
       // Project path, git remote, and upstream URL are injected by the
       // fetch interceptor (installed once per process).
       "chat.headers": async (input, output) => {
-        Object.assign(
-          output.headers,
-          gatewayAccessHeadersForRemote(gatewayBase),
-        );
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
@@ -651,9 +646,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           onRequestHeaders: (headers) =>
             nativeRecallClient?.observeRequestHeaders(headers),
           getHeaders: () => {
-            const headers: Record<string, string> = {
-              ...gatewayAccessHeadersForRemote(gatewayBase),
-            };
+            const headers: Record<string, string> = {};
             const cur = currentProject;
             if (cur?.path) {
               headers["x-lore-project"] = cur.path;

@@ -406,7 +406,9 @@ test("compact rail tooltips label every destination on hover and keyboard focus"
   await page
     .getByRole("button", { name: "Sign in to Lore", exact: true })
     .click();
-  await expect(page.getByRole("dialog")).toContainText("lore login");
+  await expect(
+    page.getByRole("dialog").getByLabel("Email address"),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(avatar).toBeFocused();
 });

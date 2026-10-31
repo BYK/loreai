@@ -2,14 +2,42 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  getOwner,
   on,
   onCleanup,
   onMount,
+  runWithOwner,
 } from "solid-js";
+import type { Accessor } from "solid-js";
+import type { SetStoreFunction } from "solid-js/store";
 
 import { isApiError, type ApiClient } from "~/lib/api";
 import type { AccountStatus, SyncRunReceipt, SyncStatus } from "~/contracts";
 import { createLoader } from "~/lib/loader";
+
+interface LoginState {
+  email: string;
+  code: string;
+  attempt: string;
+  githubAttempt: string;
+  cancelAttempts: string[];
+  pending: boolean;
+  closing: boolean;
+  error: string;
+  generation: number;
+}
+
+interface LoginController {
+  login: LoginState;
+  setLogin: SetStoreFunction<LoginState>;
+  dialog: Accessor<boolean>;
+  showSignIn(): void;
+  startEmailLogin(): Promise<void>;
+  startGitHubLogin(): Promise<void>;
+  dismissLogin(): Promise<void>;
+  verifyLogin(): Promise<void>;
+  changeEmail(): Promise<void>;
+}
 
 /**
  * Folk Lore (team sync) status for the shell: account and sync load once per
@@ -18,6 +46,8 @@ import { createLoader } from "~/lib/loader";
  * surface itself and must not redefine the gateway connection state.
  */
 export function createFolkState({ client }: { client: ApiClient }) {
+  const owner = getOwner();
+  let loginController: LoginController | undefined;
   const always = () => true as const;
   const account = createLoader(always, async (_key, signal) =>
     client.getAccount(signal),
@@ -174,6 +204,16 @@ export function createFolkState({ client }: { client: ApiClient }) {
     }
   };
   return {
+    retainLogin(create: () => LoginController): LoginController {
+      if (!owner) throw new Error("Login requires a workspace owner");
+      // Desktop rails and mobile drawers are disposable views. Their shared
+      // login controller and cleanup always belong to the surviving workspace.
+      if (loginController) return loginController;
+      const controller = runWithOwner(owner, create);
+      if (!controller) throw new Error("Could not create workspace login");
+      loginController = controller;
+      return controller;
+    },
     account,
     confirmedAccount,
     confirmedSync,

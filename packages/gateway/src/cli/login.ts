@@ -18,6 +18,8 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import { runOptionalLoginWorker } from "./login-optional-worker";
+import { UsageError } from "./lib/errors";
 import { withTransaction } from "@loreai/core";
 import {
   clearSession,
@@ -43,7 +45,7 @@ import {
  *  The /collaborators and /contributors endpoints both require `repo` for non-public repos —
  *  e.g. anything under getsentry/*.
  */
-const OAUTH_SCOPES = "read:org repo";
+export const OAUTH_SCOPES = "read:org repo";
 
 /** Historical GitHub OAuth App default TTL for read-only tokens (8 hours). */
 const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
@@ -63,7 +65,7 @@ const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
  * for OAuth flows that never opened the GitHub scope — rare and shouldn't be
  * cached).
  */
-function cacheProviderTokenFromSession(
+export function cacheProviderTokenFromSession(
   session: Session,
   revision: string,
 ): boolean {
@@ -114,9 +116,14 @@ export async function commandLogin(
     } else {
       await loginWithGitHub();
     }
-  } catch (err) {
+  } catch (error) {
+    // Auth errors may echo submitted credentials or contain terminal escapes.
+    // Never render provider diagnostics, even when wrapped in an ordinary Error.
+    // Only locally authored UsageError validation messages are public.
     console.error(
-      `Login failed: ${err instanceof Error ? err.message : String(err)}`,
+      error instanceof UsageError
+        ? `Login failed: ${error.message}`
+        : "Login failed. Please try again or request a new sign-in code.",
     );
     process.exit(1);
   }
@@ -127,37 +134,29 @@ export async function commandLogin(
 async function loginWithEmail(email: string): Promise<void> {
   const expectedRevision = captureLoginRevision(true);
   const client = createSupabaseClient();
-  const { error } = await client.auth.signInWithOtp({ email });
+  const { error } = await client.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: "http://127.0.0.1/callback" },
+  });
   if (error) throw new Error(error.message);
 
-  console.log(`Sent a sign-in code to ${email}. Check your inbox.`);
+  console.log(`Check ${email} for a sign-in email.`);
+  console.log(
+    "Enter the code, or paste the sign-in link from the email. " +
+      "If you opened the link, paste the address from your browser instead " +
+      "even if the page does not load.",
+  );
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let code: string;
   try {
-    code = (await rl.question("Enter the code: ")).trim();
+    code = (await rl.question("Code or link: ")).trim();
   } finally {
     rl.close();
   }
-  if (!code) throw new Error("No code entered.");
+  if (!code) throw new UsageError({ message: "No code entered." });
 
-  // Guard against pasting the magic-link URL / its `?code=` value instead of
-  // the numeric OTP — the most common confusion on headless/remote devices.
-  if (code.includes("://") || code.includes("code=")) {
-    code = extractCodeFromInput(code);
-  }
-  if (!/^\d{4,12}$/.test(code)) {
-    throw new Error(
-      "That doesn't look like a sign-in code. You likely received a magic " +
-        'link instead — add `{{ .Token }}` to the "Confirm signup" and ' +
-        '"Magic Link" email templates in the Supabase dashboard, then run ' +
-        "`lore login --email` again and enter the code from the email.",
-    );
-  }
-
-  // A brand-new email triggers the "signup" confirmation token; a returning
-  // email uses the "email" magic-link OTP. Try the common case, then fall back.
-  const session = await verifyEmailOtp(client, email, code);
-  await finalizeLogin(client, sessionToPersisted(session), expectedRevision);
+  const session = await verifyEmailInput(client, email, code);
+  await finalizeLogin(sessionToPersisted(session), expectedRevision);
 }
 
 /**
@@ -188,19 +187,53 @@ function isInvalidTokenError(message: string | undefined): boolean {
   return /expired|invalid|otp|not found|incorrect/i.test(message ?? "");
 }
 
-/** Pull an OTP token out of a pasted magic-link URL, if present. */
-function extractCodeFromInput(input: string): string {
-  try {
-    const url = new URL(input);
-    // Supabase OTP links may carry the token as `token` or `token_hash`.
-    return (
-      url.searchParams.get("token") ??
-      url.searchParams.get("token_hash") ??
-      input
-    );
-  } catch {
-    return input;
+/** Accept email OTPs, Supabase verification links, and PKCE callback codes. */
+export async function verifyEmailInput(
+  client: SupabaseClient,
+  email: string,
+  input: string,
+): Promise<Session> {
+  const checkEmail = (session: Session): Session => {
+    // Supabase normalizes email addresses case-insensitively; a link can otherwise
+    // authenticate an unrelated account without using the requested address.
+    if (
+      !session.user.email ||
+      session.user.email.trim().toLowerCase() !== email.trim().toLowerCase()
+    ) {
+      throw new Error(
+        "This sign-in link belongs to a different email address.",
+      );
+    }
+    return session;
+  };
+  if (/^\d{4,12}$/.test(input))
+    return checkEmail(await verifyEmailOtp(client, email, input));
+  const url = URL.canParse(input) ? new URL(input) : undefined;
+  if (url) {
+    const tokenHash =
+      url.searchParams.get("token_hash") ?? url.searchParams.get("token");
+    const type = url.searchParams.get("type");
+    if (
+      tokenHash &&
+      (type === "signup" || type === "magiclink" || type === "email")
+    ) {
+      // Verify the token with the configured Supabase client; never visit a pasted URL.
+      const { data, error } = await client.auth.verifyOtp({
+        token_hash: tokenHash,
+        type,
+      });
+      if (error) throw new Error(error.message);
+      if (!data.session) throw new Error("No session returned after sign-in.");
+      return checkEmail(data.session);
+    }
+    const code = url.searchParams.get("code");
+    if (code) return checkEmail(await exchangeOAuthCode(client, code));
   }
+  if (/^[a-zA-Z0-9_-]{16,128}$/.test(input))
+    return checkEmail(await exchangeOAuthCode(client, input));
+  throw new Error(
+    "Enter the code or sign-in link from your email, or the address from your browser.",
+  );
 }
 
 // --- GitHub OAuth (loopback + PKCE) ----------------------------------------
@@ -234,7 +267,6 @@ async function loginWithGitHub(): Promise<void> {
   const session = await exchangeOAuthCode(client, oauthCode);
 
   const revision = await finalizeLogin(
-    client,
     sessionToPersisted(session),
     expectedRevision,
   );
@@ -243,8 +275,9 @@ async function loginWithGitHub(): Promise<void> {
   // the 8h window skips the OAuth dance. Without this, every GitHub-touching
   // command after `lore login` would re-prompt until an OAuth dance ran once.
   cacheProviderTokenFromSession(session, revision);
-  await provisionGitHubTeams(
-    accountDataClient(revision, sessionToPersisted(session)),
+  await provisionCliTeams(
+    revision,
+    sessionToPersisted(session),
     session.provider_token,
   );
 }
@@ -338,7 +371,8 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
   try {
     oauthCode = await Promise.race([cbCode, pastePromise]);
   } catch (e) {
-    if (e === emptyInput) throw new Error("No code provided.");
+    if (e === emptyInput)
+      throw new UsageError({ message: "No code provided." });
     throw e;
   } finally {
     rl.close();
@@ -346,7 +380,7 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
   }
 
   const session = await exchangeOAuthCode(client, oauthCode);
-  return completeProviderAuthorization(client, session, expectedRevision);
+  return completeProviderAuthorization(session, expectedRevision);
 }
 
 /**
@@ -387,15 +421,14 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
     rl.close();
   }
   const oauthCode = extractAuthCode(pasted);
-  if (!oauthCode) throw new Error("No code provided.");
+  if (!oauthCode) throw new UsageError({ message: "No code provided." });
 
   const session = await exchangeOAuthCode(client, oauthCode);
-  return completeProviderAuthorization(client, session, expectedRevision);
+  return completeProviderAuthorization(session, expectedRevision);
 }
 
 /** Both provider OAuth flows bind cached tokens and data requests to this login. */
 async function completeProviderAuthorization(
-  client: SupabaseClient,
   session: Session,
   expectedRevision: string | null,
 ): Promise<{
@@ -403,7 +436,6 @@ async function completeProviderAuthorization(
   providerToken: string;
 }> {
   const revision = await finalizeLogin(
-    client,
     sessionToPersisted(session),
     expectedRevision,
   );
@@ -462,7 +494,7 @@ async function loginWithGitHubManual(): Promise<void> {
     rl.close();
   }
   const oauthCode = extractAuthCode(pasted);
-  if (!oauthCode) throw new Error("No code provided.");
+  if (!oauthCode) throw new UsageError({ message: "No code provided." });
 
   const { data: sess, error: exchErr } =
     await client.auth.exchangeCodeForSession(oauthCode);
@@ -470,7 +502,6 @@ async function loginWithGitHubManual(): Promise<void> {
   if (!sess.session) throw new Error("No session returned after OAuth.");
 
   const revision = await finalizeLogin(
-    client,
     sessionToPersisted(sess.session),
     expectedRevision,
   );
@@ -478,8 +509,9 @@ async function loginWithGitHubManual(): Promise<void> {
   // Persist the GitHub provider_token so the next `lore team discover` within
   // the 8h window skips the OAuth dance (same as the loopback path).
   cacheProviderTokenFromSession(sess.session, revision);
-  await provisionGitHubTeams(
-    accountDataClient(revision, sessionToPersisted(sess.session)),
+  await provisionCliTeams(
+    revision,
+    sessionToPersisted(sess.session),
     sess.session.provider_token,
   );
 }
@@ -490,18 +522,32 @@ async function loginWithGitHubManual(): Promise<void> {
  * fresh session (not persisted, not re-issued on refresh), so provisioning runs at login time only.
  * A failure NEVER fails login — it simply retries on the next login.
  */
-async function provisionGitHubTeams(
+export async function provisionGitHubTeams(
   client: SupabaseClient,
   providerToken?: string | null,
+  waitForCleanup = false,
+  signal?: AbortSignal,
+  isCurrent?: () => boolean,
 ): Promise<void> {
   if (!providerToken) return; // no read:org grant (older session / non-github login)
   try {
-    const { data, error } = await client.functions.invoke("github-provision", {
-      body: { provider_token: providerToken },
-    });
+    const { data, error, response } = await client.functions.invoke(
+      "github-provision",
+      {
+        body: { provider_token: providerToken },
+      },
+    );
+    if (response?.body && !response.bodyUsed) {
+      // Functions leaves error and event-stream responses unconsumed. Keep the
+      // optional operation owned until abandoned upstream work settles.
+      const cleanup = response.body.cancel().catch(() => {});
+      // Web login owns a bounded operation slot; CLI login must not wait for
+      // a server that never finishes cancelling an optional response.
+      if (waitForCleanup) await cleanup;
+    }
     if (error) return; // best-effort — Edge Function not deployed, GitHub error, etc.
     const teams = (data as { teams?: number } | null)?.teams ?? 0;
-    if (teams > 0) {
+    if (teams > 0 && !signal?.aborted && (isCurrent?.() ?? true)) {
       console.log(
         `Synced ${teams} GitHub team${teams === 1 ? "" : "s"} to Lore.`,
       );
@@ -677,9 +723,33 @@ export async function commandWhoami(
 // Helpers
 // ---------------------------------------------------------------------------
 
+async function provisionCliTeams(
+  revision: string,
+  session: PersistedSession,
+  providerToken?: string | null,
+): Promise<void> {
+  try {
+    if (!providerToken || captureLoginRevision() !== revision) return;
+    const result = await runOptionalLoginWorker(
+      session,
+      {
+        kind: "provision",
+        providerToken,
+      },
+      revision,
+    );
+    if (result?.kind === "provision" && captureLoginRevision() === revision) {
+      console.log(
+        `Synced ${result.teams} GitHub team${result.teams === 1 ? "" : "s"} to Lore.`,
+      );
+    }
+  } catch {
+    // Provisioning is optional even if checking the login revision fails.
+  }
+}
+
 /** Persist the session, fetch the profile row (confirms RLS), print identity. */
 async function finalizeLogin(
-  client: SupabaseClient,
   session: PersistedSession,
   expectedRevision: string | null,
 ): Promise<string | null> {
@@ -688,13 +758,13 @@ async function finalizeLogin(
   // Fetch the auto-provisioned profile (RLS scopes it to us). Best-effort —
   // a failure here doesn't undo a successful login.
   try {
-    const { data } = await client
-      .from("profiles")
-      .select("github_login, display_name, email")
-      .eq("id", session.user_id)
-      .maybeSingle();
-    if (data) {
-      updateSessionProfile(revision, data);
+    const result = await runOptionalLoginWorker(
+      session,
+      { kind: "profile" },
+      revision,
+    );
+    if (result?.kind === "profile") {
+      updateSessionProfile(revision, result.profile);
     }
   } catch {
     // Ignore — profile fetch is informational.

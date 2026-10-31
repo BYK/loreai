@@ -83,7 +83,7 @@ export function summarizeFolkStatus(input: FolkStatusInput): ShellFolkSummary {
       label: "Not signed in",
       tone: "muted",
       detail:
-        "No account is signed in on this gateway, so nothing syncs. Run `lore login` to sign in.",
+        "No account is signed in on this gateway, so nothing syncs. Sign in to continue.",
     };
   }
   if (account.state === "hosted") {
@@ -118,7 +118,7 @@ export function summarizeFolkStatus(input: FolkStatusInput): ShellFolkSummary {
       state: "expired",
       label: "Session expired",
       tone: "gold",
-      detail: "Sync is paused until you sign in again with `lore login`.",
+      detail: "Sync is paused until you sign in again.",
     };
   }
   if (input.syncError !== undefined) {

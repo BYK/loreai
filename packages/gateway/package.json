@@ -47,6 +47,7 @@
     "dist/index.bun.js",
     "dist/index.cjs",
     "dist/index.d.cts",
+    "dist/login-optional-task.cjs",
     "dist/ort-wasm-simd-threaded.mjs",
     "dist/ort-wasm-simd-threaded.wasm",
     "dist/ui",

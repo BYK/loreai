@@ -943,6 +943,15 @@ export async function handleAPIRequest(
   const method = req.method;
   let params: RouteParams | null;
 
+  if (pathname.startsWith("/api/v1/account/login/")) {
+    const { handleWebLoginRequest } = await import("./web-login");
+    const response = await handleWebLoginRequest(req, url, config);
+    if (response) {
+      response.headers.set("cache-control", "no-store");
+      return response;
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Data read endpoints
   // -----------------------------------------------------------------------

@@ -1834,15 +1834,15 @@ describe("shell: empty, error, not-found and locked states", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client);
-    const gate = await screen.findByTestId("gateway-auth-gate");
-    expect(gate).toHaveTextContent("Connect to your gateway");
-    expect(gate).toHaveTextContent("LORE_GATEWAY_AUTH_TOKEN");
-    expect(screen.getByLabelText("Gateway token")).toHaveAttribute(
-      "type",
-      "password",
+    const title = await screen.findByText("Knowledge hidden by the gateway");
+    const locked = title.closest('[data-state="locked"]');
+    expect(locked).toHaveAttribute("role", "status");
+    expect(locked).toHaveTextContent(
+      "Only the machine running the gateway can access this view.",
     );
     expect(knowledgeRequests).toBe(1);
-    expect(screen.queryByTestId("connection-status")).toBeNull();
+    expect(screen.queryByTestId("gateway-auth-gate")).toBeNull();
+    expect(screen.queryByLabelText("Gateway token")).toBeNull();
     expect(screen.queryByText("Keep SQLite")).toBeNull();
   });
 

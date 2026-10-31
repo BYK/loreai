@@ -23,7 +23,7 @@ import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Readable } from "node:stream";
-import { db, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { db, log } from "@loreai/core";
 import {
   assertGatewayAccessConfigured,
   DEFAULT_PORT,
@@ -49,11 +49,7 @@ import {
   withNodeResponseFinishLifecycle,
 } from "./response-completion";
 import { responseAgainstAbort } from "./abort-race";
-import {
-  constantTimeTokenMatches,
-  hasRawConflictingProviderAuth,
-  singleRawHeaderValue,
-} from "./management-access";
+import { hasRawConflictingProviderAuth } from "./management-access";
 import { isDataPlanePath } from "./routes/registry";
 
 export { handleForegroundBodyRoute, handleModelsPassthrough } from "./app";
@@ -210,26 +206,6 @@ export async function startServer(
           return;
         }
         if (isDataPlanePath(pathname)) {
-          const accessHeader = singleRawHeaderValue(
-            req.rawHeaders,
-            GATEWAY_AUTH_HEADER,
-          );
-          const accessAllowed =
-            !(config.remoteGateway || config.hostedMode) ||
-            !config.gatewayAuthToken ||
-            (typeof config.gatewayAuthToken === "string" &&
-              accessHeader !== null &&
-              constantTimeTokenMatches(accessHeader, config.gatewayAuthToken));
-          if (!accessAllowed) {
-            socket.end(
-              "HTTP/1.1 401 Unauthorized\r\n" +
-                "Content-Length: 0\r\n" +
-                "Cache-Control: no-store\r\n" +
-                "Connection: close\r\n" +
-                "\r\n",
-            );
-            return;
-          }
           if (hasRawConflictingProviderAuth(req.rawHeaders)) {
             const body = JSON.stringify({
               type: "error",

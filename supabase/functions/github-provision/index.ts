@@ -81,7 +81,8 @@ Deno.serve(
       payload = buildProvisionPayload(memberships);
     } catch (e) {
       await capture(e, "github-provision.fetch-memberships");
-      return json({ error: `github: ${(e as Error).message}` }, 502);
+      // Transport exceptions can contain credentials or arbitrary diagnostics.
+      return json({ error: "GitHub membership lookup failed" }, 502);
     }
 
     // Provision as service_role — the only role permitted to call the RPC.
@@ -95,8 +96,8 @@ Deno.serve(
     });
     if (rpcErr) {
       await capture(rpcErr, "github-provision.provision-membership");
-      console.error("provision_github_membership failed:", rpcErr.message);
-      return json({ error: "provisioning failed" }, 500); // generic — details logged server-side
+      // capture() exports only a fixed failure category, never provider text.
+      return json({ error: "provisioning failed" }, 500);
     }
 
     return json({

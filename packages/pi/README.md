@@ -60,14 +60,11 @@ Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name
 
 ## Remote gateway access
 
-Gateway access authentication is optional. If the remote/hosted gateway configures a token, clients must supply it separately from the model provider's API key or bearer token:
+Set the remote gateway URL and secure its listener with network access controls:
 
 ```bash
 export LORE_REMOTE_URL=https://lore.example.com
-export LORE_GATEWAY_AUTH_TOKEN='<token configured on the gateway>'
 ```
-
-The extension injects the token as `x-lore-gateway-token` only when provider calls or `/v1/compact` target the URL configured by `LORE_REMOTE_URL`. It is never used as provider authentication or put in the URL.
 
 The shared native recall tool is named `lore_recall`. When `LORE_REMOTE_URL` points to a remote gateway, the extension leaves recall registration to that gateway instead of exposing a competing local tool. Recall query text is omitted from durable replay state.
 

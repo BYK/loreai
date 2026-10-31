@@ -596,9 +596,8 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
   linked stylesheet only.
 - the SPA and its assets sit behind the **same management authorization as
   `/api`** (`server.ts`): non-loopback peers get the bodyless 404 unless
-  `LORE_ALLOW_REMOTE_MANAGEMENT` is set, `Origin` is checked the same way and
-  `LORE_GATEWAY_AUTH_TOKEN`, when configured, applies to remote API requests.
-  Without a token, explicitly enabled remote management opens directly (for
+  `LORE_ALLOW_REMOTE_MANAGEMENT` is set and `Origin` is checked the same way.
+  Explicitly enabled remote management opens directly (for
   example, on a trusted Tailscale network). `/` keeps redirecting to `/ui`.
 
 ### Tests
@@ -1399,7 +1398,7 @@ The owner signs this gate off; the implementation agent does not. Each row names
 | Headless gateway non-regression | `pnpm test` (gateway suite incl. `start-gateway-quiet.test.ts`, `cli-bundle-smoke.test.ts`, `bundle-exports.test.ts`); `node packages/ui/scripts/measure-p1.mjs --baseline a4e6af5b` startup/RSS/proxy deltas in "UI-07 P1 measurements". |
 | No harness spawn while browsing | `measure-p1.mjs` reports 0 child processes of the gateway after serving every UI asset; `grep -rn "child_process" packages/ui/src` → none. The UI source has no process-spawn imports. |
 | No new mandatory cloud dependency | `packages/ui/package.json` dependencies are bundled browser libraries only; the SPA talks to same-origin `/api/v1` (`src/lib/api.ts`), `ui-static.test.ts` serves from staged assets. |
-| Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, `LORE_GATEWAY_AUTH_TOKEN`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
+| Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
 | CSP | `packages/gateway/test/ui-static.test.ts` asserts the `Content-Security-Policy` header on `/ui` responses (see "How the gateway serves the SPA"). |
 | Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
 | IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v4 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |

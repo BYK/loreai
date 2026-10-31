@@ -31,8 +31,6 @@ export const DEFAULT_PORTS = [3207, 5673] as const;
 export const DEFAULT_PORT = DEFAULT_PORTS[0];
 
 /** Match the existing owner-control token bounds used by gateway pid records. */
-export const GATEWAY_AUTH_TOKEN_MIN_LENGTH = 32;
-export const GATEWAY_AUTH_TOKEN_MAX_LENGTH = 256;
 /** Default upstream origin for native Gemini (Generative Language API). */
 export const GEMINI_DEFAULT_UPSTREAM =
   "https://generativelanguage.googleapis.com";
@@ -100,12 +98,7 @@ export interface GatewayConfig {
   exposeProviderDiagnostics: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
-  /**
-   * Optional gateway access credential. When configured, remote/hosted
-   * data-plane requests and remote management API requests require it.
-   * This is separate from provider credentials. Env:
-   * LORE_GATEWAY_AUTH_TOKEN.
-   */
+  /** @deprecated Ignored; the gateway no longer authenticates clients. */
   gatewayAuthToken?: string;
   /**
    * Hosted/remote mode — disables all filesystem operations that use
@@ -289,7 +282,6 @@ export function loadConfig(): GatewayConfig {
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
-    gatewayAuthToken: parseGatewayAuthToken(env.LORE_GATEWAY_AUTH_TOKEN),
     hostedMode: hostedModeEnv,
     workerApiKey: env.LORE_WORKER_API_KEY || undefined,
     workerUpstream,
@@ -319,25 +311,6 @@ export function loadConfig(): GatewayConfig {
   };
 }
 
-/** Parse a header-safe, brute-force-resistant gateway access token. */
-export function parseGatewayAuthToken(
-  value: string | undefined,
-): string | undefined {
-  if (value === undefined || value === "") return undefined;
-  if (
-    value.length < GATEWAY_AUTH_TOKEN_MIN_LENGTH ||
-    value.length > GATEWAY_AUTH_TOKEN_MAX_LENGTH ||
-    // Visible ASCII excluding comma keeps one configured token distinguishable
-    // from Fetch/Node's comma-joined duplicate-header representation.
-    !/^[\x21-\x2b\x2d-\x7e]+$/.test(value)
-  ) {
-    throw new Error(
-      `LORE_GATEWAY_AUTH_TOKEN must be ${GATEWAY_AUTH_TOKEN_MIN_LENGTH}-${GATEWAY_AUTH_TOKEN_MAX_LENGTH} visible ASCII characters without commas`,
-    );
-  }
-  return value;
-}
-
 /** Validate optional gateway credentials and upstream headers after CLI overrides. */
 export function assertGatewayAccessConfigured(
   config: Pick<
@@ -348,7 +321,6 @@ export function assertGatewayAccessConfigured(
       Pick<GatewayConfig, "allowRemoteManagement" | "upstreamExtraHeaders">
     >,
 ): void {
-  parseGatewayAuthToken(config.gatewayAuthToken);
   if (hasConflictingAuthHeaders(config.upstreamExtraHeaders)) {
     throw new Error(
       "Configured upstream headers contain conflicting authentication mechanisms",

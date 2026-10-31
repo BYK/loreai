@@ -196,36 +196,6 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   /** Path prefix, defaults to `/api/v1` (same-origin; the Vite dev server proxies it). */
   base?: string;
-  /** Injected for tests; production keeps this browser-local in sessionStorage. */
-  getGatewayAuthToken?: () => string | null;
-  /** Injected for tests; production removes a rejected token from sessionStorage. */
-  clearGatewayAuthToken?: () => void;
-}
-
-const GATEWAY_AUTH_STORAGE_KEY = "lore.gateway-auth-token";
-
-function storedGatewayAuthToken(): string | null {
-  try {
-    return globalThis.sessionStorage?.getItem(GATEWAY_AUTH_STORAGE_KEY) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function setGatewayAuthToken(token: string): void {
-  try {
-    globalThis.sessionStorage?.setItem(GATEWAY_AUTH_STORAGE_KEY, token);
-  } catch {
-    // Keep the token in the browser's available storage only; never send it elsewhere.
-  }
-}
-
-export function clearGatewayAuthToken(): void {
-  try {
-    globalThis.sessionStorage?.removeItem(GATEWAY_AUTH_STORAGE_KEY);
-  } catch {
-    // Storage may be unavailable in privacy-restricted browser contexts.
-  }
 }
 
 async function readErrorDetails(res: Response): Promise<{
@@ -276,10 +246,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
   const base = options.base ?? API_BASE;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const getGatewayAuthToken =
-    options.getGatewayAuthToken ?? storedGatewayAuthToken;
-  const clearRejectedGatewayAuthToken =
-    options.clearGatewayAuthToken ?? clearGatewayAuthToken;
 
   /**
    * Shared transport + error classifier for GET (getJson) and the write
@@ -293,10 +259,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
   ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
-    const gatewayAuthToken = getGatewayAuthToken();
-    if (gatewayAuthToken) {
-      headers.set("authorization", `Bearer ${gatewayAuthToken}`);
-    }
     let res: Response;
     try {
       res = await doFetch(`${base}${path}`, {
@@ -312,7 +274,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     if (res.status === 401) {
       const details = await readErrorDetails(res);
-      clearRejectedGatewayAuthToken();
       throw new ApiError(
         "unauthorized",
         path,
@@ -338,7 +299,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
         );
       }
       if (details.message === null) {
-        clearRejectedGatewayAuthToken();
         throw new ApiError(
           "unauthorized",
           path,
@@ -374,7 +334,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
         if (details.message === null) {
-          clearRejectedGatewayAuthToken();
           throw new ApiError(
             "unauthorized",
             path,
@@ -453,6 +412,38 @@ export function createApiClient(options: ApiClientOptions = {}) {
   }
 
   return {
+    startEmailLogin(email: string) {
+      return mutateJson(
+        "POST",
+        apiPath(["account", "login", "email"]),
+        { email },
+        schema({ attempt: "string" }),
+      );
+    },
+    verifyEmailLogin(attempt: string, code: string) {
+      return mutateJson(
+        "POST",
+        apiPath(["account", "login", "verify"]),
+        { attempt, code },
+        schema({ ok: "boolean" }),
+      );
+    },
+    cancelLogin(attempt: string) {
+      return mutateJson(
+        "POST",
+        apiPath(["account", "login", "cancel"]),
+        { attempt },
+        schema({ ok: "boolean" }),
+      );
+    },
+    startGitHubLogin() {
+      return mutateJson(
+        "POST",
+        apiPath(["account", "login", "github"]),
+        {},
+        schema({ url: "string", attempt: "string" }),
+      );
+    },
     listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
       return getJson("/projects", projectList, signal);
     },
