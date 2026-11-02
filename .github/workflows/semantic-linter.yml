@@ -58,6 +58,38 @@ jobs:
         with:
           node-version: "24"
       - run: pnpm install --frozen-lockfile
+      # Source installs lack the release-only native platform package. Stage it
+      # from the locked dependency so the bundled worker uses native ONNX instead
+      # of single-threaded WASM. Every executed helper still comes from the base.
+      - name: Prepare native embedding runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          native_root="$(mktemp -d "${RUNNER_TEMP}/lore-semantic-native.XXXXXX")"
+          export NODE_PATH="${native_root}/node_modules"
+          export LORE_SEMANTIC_NATIVE_ROOT="$NODE_PATH"
+          node --import tsx --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { createRequire } from "node:module";
+            import { join, resolve } from "node:path";
+            import {
+              buildOrtPlatformPackages,
+              ORT_NPM_PLATFORMS,
+              ortPlatformTarget,
+            } from "./packages/gateway/script/ort-platform-package.ts";
+
+            const platform = ORT_NPM_PLATFORMS.find(p => p.target === ortPlatformTarget());
+            if (!platform) throw new Error("No native ONNX package for this runner");
+            const { version } = JSON.parse(readFileSync("packages/gateway/package.json", "utf8"));
+            buildOrtPlatformPackages(join(process.env.LORE_SEMANTIC_NATIVE_ROOT, "@loreai"), version, [platform]);
+
+            const load = createRequire(resolve("packages/gateway/dist/embedding-worker.cjs"));
+            const binding = load("@loreai/onnxruntime-" + platform.target + "/onnxruntime_binding.node");
+            if (typeof binding.listSupportedBackends !== "function") {
+              throw new Error("Native ONNX runtime is unavailable");
+            }
+          '
+          printf 'NODE_PATH=%s\n' "$NODE_PATH" >> "$GITHUB_ENV"
       # Build the CLI bundle. The CLI cannot run from source via tsx — its entry
       # (instrument.ts, lib/upgrade.ts, etc.) uses esbuild/Bun CJS `require()`
       # that throws under tsx's ESM. `bundle` esbuild-inlines @loreai/core + the
