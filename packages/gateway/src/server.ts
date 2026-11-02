@@ -696,8 +696,16 @@ export async function handleNodeRequest(
     response.headers.forEach((value, key) => {
       headerEntries.push([key, value]);
     });
-    nodeRes.writeHead(response.status, Object.fromEntries(headerEntries));
-    responseStarted = true;
+    // writeHead() commits Node's header state even though no bytes have reached
+    // the socket yet. Defer it until the first body byte (or clean EOF), so a
+    // stream that rejects its first read can still return a useful HTTP error.
+    // Destroying that unflushed response instead makes reverse proxies report
+    // an opaque 502 with an empty body.
+    const startResponse = (): void => {
+      if (responseStarted) return;
+      nodeRes.writeHead(response.status, Object.fromEntries(headerEntries));
+      responseStarted = true;
+    };
 
     if (response.body) {
       const reader = response.body.getReader();
@@ -707,6 +715,8 @@ export async function handleNodeRequest(
             signal: ingressAbort.signal,
           });
           if (done) break;
+          if (value.byteLength === 0) continue;
+          startResponse();
           // Coerce SharedArrayBuffer-typed Uint8Array views to a regular
           // Buffer — Node's write() expects a string, Buffer, or
           // Uint8Array<ArrayBuffer>, not ArrayBufferLike.
@@ -721,6 +731,7 @@ export async function handleNodeRequest(
         cancelAndReleaseReader(reader, ingressAbort.signal.reason);
       }
     }
+    startResponse();
     // Body EOF precedes the Node response's `finish`; finish-only work is
     // notified after writableFinished below.
     notifyResponseCompletion(response);
@@ -747,8 +758,25 @@ export async function handleNodeRequest(
           nodeRes,
           ingressAbort.signal,
         );
-        nodeRes.writeHead(500, { "content-type": "application/json" });
-        nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+        const bodyFailed = responseForCompletion !== undefined;
+        nodeRes.writeHead(bodyFailed ? 502 : 500, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        nodeRes.end(
+          JSON.stringify(
+            bodyFailed
+              ? {
+                  type: "error",
+                  error: {
+                    type: "api_error",
+                    message:
+                      "Gateway response stream failed before output; retry the request.",
+                  },
+                }
+              : { error: "Internal server error" },
+          ),
+        );
         await completed;
       } catch {
         if (!nodeRes.destroyed) nodeRes.destroy();

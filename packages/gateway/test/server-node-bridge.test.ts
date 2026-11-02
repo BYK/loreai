@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { IncomingMessage, ServerResponse } from "node:http";
+import type { Socket } from "node:net";
+import { Duplex } from "node:stream";
 import { describe, expect, test, vi } from "vitest";
 import { handleForegroundBodyRoute, handleNodeRequest } from "../src/server";
 import { decodeRequestBody } from "../src/http-body";
@@ -12,6 +14,7 @@ import {
 } from "../src/pipeline";
 import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import { loadConfig } from "../src/config";
+import { responseCompletionCallbacks } from "../src/response-completion";
 
 class FakeRequest extends EventEmitter {
   method = "GET";
@@ -27,14 +30,16 @@ class FakeResponse extends EventEmitter {
   destroyed = false;
   headersSent = false;
   status = 0;
+  headers: Record<string, string> = {};
   chunks: Uint8Array[] = [];
   writeResults: boolean[] = [];
   backpressureOnText?: string;
   backpressureTriggered = false;
   autoCloseOnEnd = true;
 
-  writeHead(status: number): this {
+  writeHead(status: number, headers: Record<string, string> = {}): this {
     this.status = status;
+    this.headers = headers;
     this.headersSent = true;
     return this;
   }
@@ -119,6 +124,161 @@ function loadLocalConfig() {
 }
 
 describe("node:http ingress lifecycle branches", () => {
+  test.each([false, true])(
+    "a response body failure before output returns a retryable JSON error (empty chunk: %s)",
+    async (emptyChunk) => {
+      const req = new FakeRequest();
+      req.complete = true;
+      const res = new FakeResponse();
+      const source = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (emptyChunk) controller.enqueue(new Uint8Array());
+          },
+          pull(controller) {
+            controller.error(new Error("private upstream transport detail"));
+          },
+        }),
+        {
+          headers: {
+            "content-type": "text/event-stream",
+            "content-length": "999",
+          },
+        },
+      );
+      const onDiscard = vi.fn();
+      const onComplete = vi.fn();
+      const onResponseFinished = vi.fn();
+      responseCompletionCallbacks.set(source, {
+        onDiscard,
+        onComplete,
+        onResponseFinished,
+      });
+      await handleNodeRequest(
+        asRequest(req),
+        asResponse(res),
+        () => source,
+        "127.0.0.1",
+        3207,
+      );
+      expect(res.status).toBe(502);
+      expect(res.writableFinished).toBe(true);
+      expect(res.destroyed).toBe(false);
+      expect(res.headers).toEqual({
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      });
+      const body = Buffer.concat(res.chunks).toString("utf8");
+      expect(JSON.parse(body)).toEqual({
+        type: "error",
+        error: {
+          type: "api_error",
+          message:
+            "Gateway response stream failed before output; retry the request.",
+        },
+      });
+      expect(body).not.toContain("private upstream");
+      expect(source.body?.locked).toBe(false);
+      expect(onDiscard).toHaveBeenCalledTimes(1);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(onResponseFinished).not.toHaveBeenCalled();
+      expectListenersCleaned(req, res);
+    },
+  );
+
+  test("real Node HTTP response sends error headers and body instead of closing an unflushed socket", async () => {
+    const wire: Buffer[] = [];
+    const socket = new Duplex({
+      read() {},
+      write(chunk, _encoding, callback) {
+        wire.push(Buffer.from(chunk));
+        callback();
+      },
+    }) as Socket;
+    const req = new IncomingMessage(socket);
+    req.method = "GET";
+    req.url = "/test";
+    req.complete = true;
+    const res = new ServerResponse(req);
+    res.assignSocket(socket);
+    try {
+      await handleNodeRequest(
+        req,
+        res,
+        () =>
+          new Response(
+            new ReadableStream({
+              pull(controller) {
+                controller.error(new Error("first read failed"));
+              },
+            }),
+          ),
+        "127.0.0.1",
+        3207,
+      );
+      const response = Buffer.concat(wire).toString("utf8");
+      expect(response).toMatch(/^HTTP\/1\.1 502 /);
+      expect(response).toContain("application/json");
+      expect(response).toContain(
+        "Gateway response stream failed before output",
+      );
+      expect(res.writableFinished).toBe(true);
+    } finally {
+      socket.destroy();
+    }
+  });
+
+  test("a body failure after output closes the socket without appending JSON", async () => {
+    const req = new FakeRequest();
+    req.complete = true;
+    const res = new FakeResponse();
+    let sent = false;
+    await handleNodeRequest(
+      asRequest(req),
+      asResponse(res),
+      () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (sent) controller.error(new Error("later read failed"));
+              else {
+                sent = true;
+                controller.enqueue(new TextEncoder().encode("partial"));
+              }
+            },
+          }),
+        ),
+      "127.0.0.1",
+      3207,
+    );
+    expect(res.status).toBe(200);
+    expect(res.destroyed).toBe(true);
+    expect(Buffer.concat(res.chunks).toString("utf8")).toBe("partial");
+    expectListenersCleaned(req, res);
+  });
+
+  test.each([200, 204])(
+    "a clean empty body preserves HTTP %s",
+    async (status) => {
+      const req = new FakeRequest();
+      req.complete = true;
+      const res = new FakeResponse();
+      await handleNodeRequest(
+        asRequest(req),
+        asResponse(res),
+        () => new Response(null, { status }),
+        "127.0.0.1",
+        3207,
+      );
+      expect(res.status).toBe(status);
+      expect(res.writableFinished).toBe(true);
+      expect(res.destroyed).toBe(false);
+      expect(res.chunks).toHaveLength(0);
+      expectListenersCleaned(req, res);
+    },
+  );
+
   test.each(["aborted", "incomplete-close", "request-error"] as const)(
     "%s aborts pending handler work and removes listeners",
     async (branch) => {
