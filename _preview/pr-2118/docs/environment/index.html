@@ -223,6 +223,10 @@
 <td>Default port preference order when LORE_LISTEN_PORT is not set. - 3207: flip upside-down → 7=L, 0=O, 2=R, 3=E → LORE (calculator-word) - 5673: T9 phone keypad → 5=L, 6=O, 7=R, 3=E → LORE</td>
 </tr>
 <tr>
+<td><code dir="auto">LORE_MANAGEMENT_ORIGINS</code><br><strong>Parser:</strong> <code dir="auto">parseManagementOrigins</code></td>
+<td>Trusted HTTP(S) dashboard origins for reverse proxies and public hostnames. Empty by default. Listener hostnames and accepted loopback hosts remain available; wildcard bind addresses never authorize a dashboard hostname. Public origins also require LORE_ALLOW_REMOTE_MANAGEMENT. Env: LORE_MANAGEMENT_ORIGINS (comma-separated origins).</td>
+</tr>
+<tr>
 <td><code dir="auto">LORE_SESSION_EVICTION_TIMEOUT</code></td>
 <td>Session eviction timeout in seconds. Sessions idle beyond this are evicted from memory (state is preserved in DB). Default: 1800 (30 min). Pending tool calls retain state for at least 1 hour after the latest request or completed response (or this timeout, if longer). Active requests, response finalizers, and queued/running session work prevent eviction. Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT</td>
 </tr>
