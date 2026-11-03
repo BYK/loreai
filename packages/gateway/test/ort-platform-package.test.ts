@@ -1,6 +1,13 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 import {
   buildOrtPlatformPackages,
@@ -99,3 +106,86 @@ describe("buildOrtPlatformPackages (real onnxruntime-node)", () => {
     expect(win.files).toContain("DirectML.dll");
   });
 });
+
+test.skipIf(process.platform !== "linux")(
+  "semantic lint prepares a private native package discoverable by a fresh worker",
+  () => {
+    const root = resolve(import.meta.dirname, "../../..");
+    const workflow = readFileSync(
+      join(root, ".github/workflows/semantic-linter.yml"),
+      "utf8",
+    );
+    const preparation = workflow.match(
+      /      - name: Prepare native embedding runtime\n        shell: bash\n        run: \|\n((?:          [^\n]*\n|\n)+)/,
+    );
+    if (!preparation) {
+      throw new Error("The trusted workflow must prepare native embeddings");
+    }
+    const script = preparation[1]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
+    const directory = mkdtempSync(join(tmpdir(), "lore-semantic-native-test-"));
+    try {
+      const exported = join(directory, "github-env");
+      // Do not give the packaging subprocess provider credentials or inherited
+      // Node module overrides; this must work with the locked source install.
+      const env = {
+        PATH: [dirname(process.execPath), process.env.PATH]
+          .filter(Boolean)
+          .join(delimiter),
+        HOME: directory,
+        RUNNER_TEMP: directory,
+        GITHUB_ENV: exported,
+        NODE_ENV: "test",
+        SENTRY_ENABLED: "0",
+      };
+      const staged = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+        cwd: root,
+        env,
+        timeout: 60_000,
+      });
+      expect(staged.status, "native preparation must succeed").toBe(0);
+      const assignment = readFileSync(exported, "utf8").trim();
+      expect(assignment).toMatch(/^NODE_PATH=[^\r\n]+$/);
+      const modulePath = assignment.slice("NODE_PATH=".length);
+      expect(modulePath.startsWith(`${directory}/`)).toBe(true);
+      expect(statSync(dirname(modulePath)).mode & 0o777).toBe(0o700);
+      const workerProgram = `
+        const { createRequire } = require("node:module");
+        const load = createRequire(${JSON.stringify(join(directory, "worker.cjs"))});
+        const addon = load.resolve(${JSON.stringify(`${ortPackageName(ortPlatformTarget())}/${ORT_PACKAGE_BINDING_SUBPATH}`)});
+        if (!addon.startsWith(${JSON.stringify(`${modulePath}/`)})) process.exit(1);
+        if (typeof load(addon).listSupportedBackends !== "function") process.exit(1);
+      `;
+      const worker = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+            import { Worker } from "node:worker_threads";
+            const worker = new Worker(${JSON.stringify(workerProgram)}, {
+              eval: true, execArgv: [], stdout: true, stderr: true,
+            });
+            worker.stdout.resume();
+            worker.stderr.resume();
+            worker.once("error", () => { process.exitCode = 1; });
+            worker.once("exit", (code) => { if (code !== 0) process.exitCode = 1; });
+          `,
+        ],
+        {
+          cwd: root,
+          env: { ...env, NODE_PATH: modulePath },
+          timeout: 15_000,
+        },
+      );
+      expect(
+        worker.status,
+        "a fresh worker must load the staged native addon",
+      ).toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
