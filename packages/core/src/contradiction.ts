@@ -194,6 +194,7 @@ export async function detectContradictions(input: {
         temperature: 0,
       },
     );
+    if (responseText === null) break;
 
     const verdict = parseContradictionVerdict(responseText);
     if (!verdict) continue; // unparseable — leave unrecorded, retry next pass

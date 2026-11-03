@@ -136,8 +136,7 @@ export class RecallChainBudget {
     // matching principal identity can separate its charge from recall spending.
     const matchesModel =
       completeUsage &&
-      !!model.expectedModel &&
-      model.expectedModel === model.actualModel;
+      recallModelMatches(model.expectedModel, model.actualModel);
     if (
       !Number.isSafeInteger(principalTokens) ||
       principalTokens >
@@ -211,7 +210,7 @@ export class RecallChainBudget {
   continuationModelMatches(model: string | undefined): boolean {
     return (
       !this.requiresVerifiedContinuation ||
-      (!!model && model === this.principalModel)
+      recallModelMatches(this.principalModel, model)
     );
   }
 
@@ -376,6 +375,23 @@ export class RecallChainBudget {
     this.stop ??= reason;
     return this.stop;
   }
+}
+
+function canonicalRecallModelId(model: string): string {
+  return /^(?:anthropic\.)?claude-/i.test(model)
+    ? model.replace(/(\d)\.(\d)/g, "$1-$2")
+    : model;
+}
+
+function recallModelMatches(
+  expected: string | undefined,
+  actual: string | undefined,
+): boolean {
+  return (
+    !!expected &&
+    !!actual &&
+    canonicalRecallModelId(expected) === canonicalRecallModelId(actual)
+  );
 }
 
 function validTokens(value: number | undefined): number {

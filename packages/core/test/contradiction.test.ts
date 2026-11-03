@@ -485,4 +485,21 @@ describe("detectContradictions", () => {
     expect(res).toEqual({ judged: 0, found: 0 });
     expect(prompt).not.toHaveBeenCalled();
   });
+
+  it("stops judging remaining pairs when llm.prompt returns null (e.g. auth failure)", async () => {
+    const P = "/test/contra/detect-abort-on-null";
+    await seed(P, "Rule 1", "one", v(1, 0, 0));
+    await seed(P, "Rule 2", "two", v(1, 0, 0));
+    await seed(P, "Rule 3", "three", v(1, 0, 0));
+    const { llm, prompt } = stubLLM(null);
+
+    const res = await detectContradictions({
+      projectPath: P,
+      sessionID: "s",
+      llm,
+    });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ judged: 1, found: 0 });
+    expect(ltm.listOpenContradictions(P)).toHaveLength(0);
+  });
 });
