@@ -2,6 +2,7 @@
 import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
 import { documentUri } from "../../lib/standard-site";
+import JournalArt from "../../components/JournalArt.astro";
 
 export async function getStaticPaths() {
   const posts = (await getCollection("blog")).filter((post) => !post.data.draft);
@@ -22,7 +23,7 @@ const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.leng
   <article class="blog-post">
     <a class="blog-back" href={`${import.meta.env.BASE_URL}blog/`}>Back to blog</a>
     <header>
-      <p class="eyebrow">{post.data.kind} · {post.data.author}</p>
+      <div class="article-field-label"><p class="eyebrow field-marker">Field notes / {post.data.kind} · {post.data.author}</p><JournalArt name="pattern" size={48} eager /></div>
       <h1>{post.data.title}</h1>
       {post.data.subtitle && <p class="blog-subtitle">{post.data.subtitle}</p>}
       <time datetime={post.data.pubDate.toISOString()}>
@@ -30,7 +31,7 @@ const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.leng
       </time>
       <p>{post.data.description}</p>
     </header>
-    {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><strong>In practice</strong><p>{post.data.takeaway}</p><a href={`${import.meta.env.BASE_URL}docs/team-memory/`}>Current availability: local Lore and Git sharing; Folk Lore early access →</a></aside>}
+    {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><p class="field-marker">Keep this lesson</p><strong>In practice</strong><p>{post.data.takeaway}</p><a href={`${import.meta.env.BASE_URL}docs/team-memory/`}>Current availability: local Lore and Git sharing; Folk Lore early access →</a></aside>}
     {showOutline && <details class="article-outline"><summary>On this page</summary><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></details>}
     <div class="blog-prose">
       <Content />

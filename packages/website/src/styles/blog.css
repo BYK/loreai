@@ -189,3 +189,16 @@
 .article-outline ul { list-style:none;padding:0;margin:.5rem 0; }
 .article-outline a { display:flex;align-items:center;min-height:44px; }
 .article-outline .outline-subsection { margin-inline-start:1rem; }
+
+/* Notes live in the same field journal, with a bounded reading column. */
+.blog-hero { border-bottom:1px solid var(--line); }
+.blog-hero.field-heading { padding-block:2.5rem 2rem; }
+.blog-hero.field-heading .journal-art { width:110px;height:110px; }
+.post-row { border-top:0;border-bottom:1px solid var(--line); }
+.post-row .post-kind { color:var(--accent);font-size:.625rem;letter-spacing:.06em; }
+.article-field-label { display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.75rem; }
+.article-field-label .eyebrow { margin:0; }
+.article-takeaway { border:1px solid var(--line);border-inline-start:2px solid var(--accent);border-radius:var(--radius-control);background:var(--journal-page); }
+.article-takeaway > .field-marker { font-size:.625rem;color:var(--accent);margin-top:0; }
+.article-next { background:var(--journal-page);border:1px solid var(--line);border-radius:var(--radius-card);padding:1.25rem; }
+@media(max-width:600px) { .blog-hero.field-heading .journal-art { width:68px;height:68px; }.blog-hero.field-heading { align-items:flex-start; }.article-field-label .field-marker { font-size:.625rem; } }

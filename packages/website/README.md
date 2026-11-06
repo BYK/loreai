@@ -4,7 +4,7 @@ Astro builds the marketing site, blog, and Starlight docs into `dist/` for
 withlore.ai. The gateway memory browser remains in `packages/ui`.
 
 - `pnpm site:dev` starts local development from the repo root.
-- `pnpm --filter @loreai/website test` exercises theme state transitions.
+- `pnpm --filter @loreai/website test` checks theme state, setup commands, and journal URL parsing.
 - `pnpm --filter @loreai/website test:browser` builds and checks desktop,
   intermediate, and 320px mobile pages in Chromium. Install the matching browser
   with `pnpm --filter @loreai/website exec playwright install chromium` first.
@@ -16,7 +16,7 @@ withlore.ai. The gateway memory browser remains in `packages/ui`.
 roles from `packages/ui/src/styles/app.css` (Tailwind 4.3.3 values). When changing
 the app's palette, update the website's scale values and role mappings too.
 Marketing/blog aliases live in `public/theme.css`; Starlight maps its roles in
-`src/styles/starlight.css`. Each consumes the same palette and controls CSS.
+`src/styles/starlight.css`. Each consumes the same palette, controls, and journal CSS.
 Logo SVGs and illustrative SVGs keep their existing artwork colours.
 
 `src/styles/fonts.css` uses the same pinned self-hosted DM Sans Variable and
@@ -47,32 +47,35 @@ are scoped in `docs/benchmark.md`, while `docs/installation-reference.md` preser
 the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
 
-The interactive homepage camp lives in `MemoryCamp.astro`. The campfire represents
-Conversation, the scribe’s desk represents curated Knowledge, and the quest gate
-represents context carried into the next session. Selecting a landmark or a native
-stage control updates the same fictional example. A traveller follows the path on
-pointer selections, then stops; keyboard selection updates immediately.
+The homepage's `QuestJournal.astro` is an illustrative RPG field journal with
+three native chapter choices, three knowledge cards with expandable sources, and
+three later tasks. `src/lib/quest-journal.ts` owns its static data, art map, types,
+and allowlisted parser. `src/scripts/quest-journal.ts` enhances native controls with
+atomic `chapter`, `entry`, and `task` query state, reload/history restoration, and
+focus transfer after explicit actions. URL values never become HTML or selectors.
+Valid URL choices take precedence; early native choices survive delayed loading.
+Keyboard selection retains radio focus; pointer-selected cards in the stacked
+phone layout bring their rule into view. No-JavaScript controls remain useful.
 
-`src/lib/memory-camp.ts` builds the shared geometry and orthographic camera;
-`memory-camp-fallback.ts` projects those meshes into an SVG at build time. The
-controller lazily loads pinned Three.js only while visible, with normal motion
-and sufficient device memory. Native stage controls work without JavaScript;
-static landmarks remain selectable when rendering is disabled or context is lost.
-The renderer supports touch scrolling, interrupted travel, theme changes, context
-restoration and resource disposal. Geometry and browser tests cover framing,
-projection, landmark selection, finite animation and failure paths.
+Four local Quiver SVGs live in `public/journal-art/`; see that directory's README
+for provenance and construction. `JournalArt.astro` prefixes their URLs and marks
+them decorative. `public/journal.css` provides the shared paper/margin/selection
+roles, native-control styling and field-guide frames. There is no 3D renderer,
+WebGL requirement, or Three.js dependency. Only explicit pointer actions receive
+short transitions; reduced-motion and keyboard interactions remain immediate.
 
 ## Visual language
 
 Public pages, articles, and docs use the local app’s functional DM Sans headings,
 neutral title colors, olive surfaces, amber actions, subtle borders, and 6–14px
-control/pane radii. Playfair is reserved for the wordmark. The camp retains its
-approved geometry and native controls inside an app-like surface; styling must not
-change the art’s aspect ratio or picking coordinates.
+control/pane radii. Playfair is reserved for the wordmark. The journal uses the same illustrated objects, page margins, numbered choices,
+and amber selection marks across the tour, client setup, docs and blog. Keep the
+ordinary product labels and bounded reading columns; illustration must not
+obscure commands, product captures, or source material.
 
 ## Product journey and documentation
 
-The homepage keeps the adventurer camp and one actual-app preview, with a concise
+The homepage pairs the interactive quest journal with one actual-app preview and a concise
 everyday workflow and installation entry. `/tour/` owns the full three-view app
 tour; benchmark details and team signup remain on their destination pages.
 `AgentSetup.astro` shares fixed definitions from `src/lib/agent-setup.ts` between

@@ -1,10 +1,11 @@
 ---
 import PublicLayout from "../layouts/PublicLayout.astro";
 import Waitlist from "../components/Waitlist.astro";
+import JournalArt from "../components/JournalArt.astro";
 const base = import.meta.env.BASE_URL;
 ---
 <PublicLayout title="Why Lore — Project memory for your existing coding agent" description="Decide whether Lore fits your workflow: existing coding agents, local history, reviewable project knowledge, and Git-based sharing.">
- <section class="section page-intro"><p class="eyebrow">Why Lore</p><h1>Keep the decisions behind the code. <em>Use the agent you already have.</em></h1><p class="hero-desc">Lore fits projects where the same reasoning gets explained again: why an approach was rejected, which convention matters, or what broke last time.</p><a class="button button-primary" href={`${base}docs/install/`}>Choose your setup →</a></section>
+ <section class="section page-intro field-heading"><div><p class="eyebrow">Why Lore</p><h1>Keep the decisions behind the code. <em>Use the agent you already have.</em></h1><p class="hero-desc">Lore fits projects where the same reasoning gets explained again: why an approach was rejected, which convention matters, or what broke last time.</p><a class="button button-primary" href={`${base}docs/install/`}>Choose your setup →</a></div><JournalArt size={120} eager /></section>
  <nav class="page-sections section" aria-label="On this page"><a href="#pillars">Is it a fit?</a><a href="#landscape">Compare approaches</a><a href="#cost">Data &amp; costs</a><a href="#portability">What’s available</a></nav>
  <section class="section" id="pillars"><div class="section-heading"><h2>Start with the job you need done.</h2></div><dl class="capabilities"><div><dt>Continue work across sessions</dt><dd>Keep searchable history and project knowledge when a conversation gets long or you start another session.</dd></div><div><dt>Inspect what was learned</dt><dd>Read the knowledge and its source, correct inaccurate entries, and review the <code>.lore.md</code> diff.</dd></div><div><dt>Carry conventions through Git</dt><dd>Share the reasoning alongside code changes, with a pull request that a teammate can review.</dd></div></dl></section>
  <section class="section" id="landscape"><div class="section-heading"><h2>Choose the approach that matches your workflow.</h2><p>Different tools serve different starting points. This is a guide to evaluating fit, rather than an exhaustive feature scorecard.</p></div>

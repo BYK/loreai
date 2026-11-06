@@ -66,6 +66,7 @@ export default defineConfig({
       components: {
         Header: "./src/components/SiteHeader.astro",
         Footer: "./src/components/DocsFooter.astro",
+        PageTitle: "./src/components/DocsPageTitle.astro",
         ThemeProvider: "./src/components/ThemeProvider.astro",
         ThemeSelect: "./src/components/ThemeToggle.astro",
         MobileMenuFooter: "./src/components/MobileMenuFooter.astro",

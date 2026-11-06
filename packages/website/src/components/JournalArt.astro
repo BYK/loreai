@@ -1,0 +1,6 @@
+---
+import { JOURNAL_ART } from "../lib/quest-journal";
+interface Props { name?: keyof typeof JOURNAL_ART; size?: number; class?: string; eager?: boolean; }
+const { name = "journal", size = 64, class: className = "", eager = false } = Astro.props;
+---
+<img class:list={["journal-art", className]} src={`${import.meta.env.BASE_URL}journal-art/${JOURNAL_ART[name]}`} width={size} height={size} loading={eager ? "eager" : "lazy"} decoding="async" alt="" aria-hidden="true" />

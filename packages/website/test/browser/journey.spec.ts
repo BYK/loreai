@@ -15,10 +15,10 @@ test("mobile introduction reaches a useful first action before decoration", asyn
   expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThan(
     page.viewportSize()?.height ?? 0,
   );
-  await expect(page.locator(".memory-example")).toContainText(
+  await expect(page.locator(".quest-journal")).toContainText(
     "Illustrative example",
   );
-  await expect(page.locator(".memory-example")).toContainText(".lore.md");
+  await expect(page.locator(".quest-journal")).toContainText(".lore.md");
   expect(await page.locator(".ticker, .hero-visual, .sr").count()).toBe(0);
 });
 

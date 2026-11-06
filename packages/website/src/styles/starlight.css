@@ -1,5 +1,6 @@
 @import "../../public/palette.css";
 @import "../../public/controls.css";
+@import "../../public/journal.css";
 
 :root {
   --sl-font: "DM Sans Variable", "DM Sans", sans-serif;
@@ -124,3 +125,16 @@
 
 /* Document titles follow the local app’s functional heading style. */
 .content-panel h1 { font-family:var(--sl-font);font-weight:600;font-size:clamp(1.75rem,3vw,2.25rem);letter-spacing:-.025em;line-height:1.2; }
+
+/* A field guide shares its paper, margin and selection language with the journal. */
+:root { --sl-color-bg-sidebar:var(--bg); }
+.docs-journal-title { align-items:flex-start; }
+.docs-journal-title h1 { margin-top:.5rem; }
+.docs-journal-title > .journal-art { width:80px;height:80px; }
+.docs-journal-title .field-marker { margin:0; }
+.sidebar-content a { border-inline-start:2px solid transparent; }
+.sidebar-content a[aria-current="page"] { border-inline-start-color:var(--accent);background:var(--journal-page); }
+.sidebar-content summary { font-weight:500; }
+.pagination-links a { box-shadow:none;border-color:var(--line);background:var(--journal-page); }
+.right-sidebar-panel a[aria-current="true"] { border-inline-start-color:var(--accent); }
+@media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
