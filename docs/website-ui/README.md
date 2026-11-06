@@ -262,3 +262,52 @@ this preview together with the existing page interactions; all 1,007 internal
 fragment links resolve. Separate correctness/security source reviews found no
 remaining spotlight blocker; full-repository validation remains separate before
 merge. Original PNGs are unchanged, and the journal and other page flows remain.
+
+## Shared accordion refinement
+
+Content disclosures now use one native Astro adaptation of the
+[shadcn/ui accordion pattern](https://ui.shadcn.com/docs/components/accordion), with
+[upstream attribution and MIT license](../../packages/website/src/components/ui/SHADCN-LICENSE.md).
+The composition supplies a full-row trigger, trailing stroke chevron, subtle hover,
+visible keyboard focus and consistent answer spacing while retaining the field
+journal palette. It adds no React/Radix dependency.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Browser triangles before each question | Right-aligned chevrons and full-row triggers | Make the available action clear without interrupting the question |
+| Large padding and an opening accent stripe that shifts content | Compact separators with a stable text column | Keep the FAQ calm and easy to scan |
+| Separate native presentations in journal and articles | Shared source, Markdown, inventory and article outline disclosures | Make repeated interactions predictable |
+| Small docs tree group targets | 44px minimum targets with visible focus | Make navigation easier to operate by touch and keyboard |
+
+FAQ answers are single-open and collapsible. Journal source and Markdown can stay
+open together; inventory and header menus do not share the FAQ group. Starlight
+retains its navigation controllers and stored sidebar state. All content disclosures
+work natively without JavaScript, and early opening survives deferred enhancement.
+Keyboard changes are immediate; pointer-only motion honors reduced motion and uses
+progressive CSS intrinsic-size interpolation where supported.
+
+![Expanded FAQ in dark appearance](screenshots/accordion-dark.jpg)
+![Expanded FAQ in light appearance](screenshots/accordion-light.jpg)
+![Long FAQ question and answer on a phone](screenshots/accordion-phone.jpg)
+![Docs navigation on a phone](screenshots/accordion-docs-phone.jpg)
+![Journal source and Markdown open together](screenshots/accordion-journal.jpg)
+
+Validation for this refinement covers keyboard Enter/Space and focus, native FAQ
+exclusivity, independent journal panels, early native input, no-JavaScript phone
+controls, long question/chevron wrapping, reduced motion and docs navigation/TOC.
+The adversarial review also reproduced and fixed mixed-input group closing: a
+keyboard-opened sibling must clear motion on the pointer-open answer it closes.
+The wider full-repository gate remains separate before merge; this draft update
+does not assert that the previously failing core/gateway suite is resolved.
+
+Final website verification: **507 browser passes / eight conditional skips** across
+five viewport/theme projects (including 35 accordion cases), 13 unit tests, clean
+Astro diagnostics for 58 files, workspace typecheck/lint/format, generated-doc parity
+and complete social metadata on 37 pages. The prefixed build exercises accordion
+exclusivity and docs links alongside the existing journal/setup/tour/search flows at
+1280px and 320px with no failed assets or runtime errors. All 1,007 internal fragment
+links resolve.
+
+Separate adversarial correctness and security source reviews pass after the mixed-input
+fix. Independent static checks and 10 seeded controller-property runs pass; both reviews
+retain the wider repository before-merge gate rather than claiming merge approval.

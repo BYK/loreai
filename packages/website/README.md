@@ -176,3 +176,22 @@ unmodified actual Knowledge detail PNG. The original asset stays linked. Its sty
 are scoped; homepage section spacing is overridden explicitly, and image links use
 an inward focus ring inside the crop. Public app captures also follow the device's
 dark appearance without JavaScript when no explicit theme exists.
+
+## Shared content accordions
+
+`Accordion.astro` and `AccordionItem.astro` adapt the
+[shadcn/ui accordion](https://ui.shadcn.com/docs/components/accordion) presentation
+into native Astro `details`/`summary`, with the upstream MIT notice alongside the
+components. This is an Astro adaptation, not a React/Radix dependency. FAQ items
+share the native `home-faq` name (single-open and collapsible); journal source,
+Markdown and inventory disclosures have no group name and remain independent.
+Article outlines reuse the same trigger/content composition. Public header menus
+keep their separate controller; Starlight sidebar and mobile TOC keep their own
+framework markup and state, with aligned target sizes and focus styling.
+
+`public/accordion.css` provides full-row triggers, trailing chevrons and answer
+spacing. The enhancement in `src/scripts/accordion.ts` sets pointer-modality
+metadata only; it never sets `open` or duplicates native expanded state. Keyboard
+interaction is immediate; pointer height/chevron motion is optional, honors reduced
+motion, and snaps where CSS intrinsic-size interpolation is unsupported. Native
+controls and links remain useful before scripts load and without JavaScript.

@@ -3,6 +3,7 @@ import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
 import { documentUri } from "../../lib/standard-site";
 import ArticleDiagram from "../../components/ArticleDiagram.astro";
+import AccordionItem from "../../components/ui/AccordionItem.astro";
 import JournalArt from "../../components/JournalArt.astro";
 
 export async function getStaticPaths() {
@@ -34,7 +35,7 @@ const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.leng
     </header>
     {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><p class="field-marker">Keep this lesson</p><strong>In practice</strong><p>{post.data.takeaway}</p></aside>}
     {["how-lore-remembers-and-forgets", "why-memory-is-not-enough"].includes(post.id) && <ArticleDiagram context={post.id === "why-memory-is-not-enough"} />}
-    {showOutline && <details class="article-outline"><summary>On this page</summary><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></details>}
+    {showOutline && <AccordionItem class="article-outline" title="On this page"><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></AccordionItem>}
     <div class="blog-prose">
       <Content />
     </div>

@@ -136,7 +136,11 @@
 .docs-journal-title .field-marker { margin:0; }
 .sidebar-content a { border-inline-start:2px solid transparent; }
 .sidebar-content a[aria-current="page"] { border-inline-start-color:var(--accent);background:var(--journal-page); }
-.sidebar-content summary { font-weight:500; }
+.sidebar-content summary { min-height:44px;font-weight:500;gap:.75rem;border-radius:6px; }
+.sidebar-content summary:focus-visible { outline:2px solid var(--accent);outline-offset:3px; }
+.sidebar-content summary .caret, #starlight__mobile-toc .caret { transition:none; }
+#starlight__on-this-page--mobile { min-height:44px; }
+@media(hover:hover) and (pointer:fine) { .sidebar-content summary:hover { background:var(--journal-page); } }
 .pagination-links a { box-shadow:none;border-color:var(--line);background:var(--journal-page); }
 .right-sidebar-panel a[aria-current="true"] { border-inline-start-color:var(--accent); }
 .agent-setup .setup-picker label:has(:checked) { box-shadow:inset 3px 0 var(--accent); }

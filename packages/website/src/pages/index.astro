@@ -3,6 +3,8 @@ import PublicLayout from "../layouts/PublicLayout.astro";
 import ProductSpotlight from "../components/ProductSpotlight.astro";
 import KnowledgeFile from "../components/KnowledgeFile.astro";
 import QuestJournal from "../components/QuestJournal.astro";
+import Accordion from "../components/ui/Accordion.astro";
+import AccordionItem from "../components/ui/AccordionItem.astro";
 import JournalArt from "../components/JournalArt.astro";
 const base = import.meta.env.BASE_URL;
 ---
@@ -24,12 +26,12 @@ const base = import.meta.env.BASE_URL;
     </nav>
     <p class="home-availability" id="features"><span id="local-first" class="fragment-anchor" aria-hidden="true"></span><strong>Available now:</strong> local session memory, reviewable knowledge, and sharing through Git.</p>
   </section>
-  <section class="section" id="questions"><div class="section-heading"><p class="eyebrow">Before you install</p><h2>A few practical questions.</h2></div><div class="faq">
-    <details><summary>Do I need a different coding agent?</summary><p>No. Lore supports existing clients including Claude Code, Codex, OpenCode, Pi, and Hermes. Follow the guide for your client; desktop apps and terminal launchers have different setup paths. <a href={`${base}docs/install/`}>Choose your setup</a>.</p></details>
-    <details><summary>Where does my data go?</summary><p>Memory is stored locally in SQLite and Markdown. Agent requests and Lore’s background LLM work use your configured providers. Production builds send privacy-filtered operational telemetry, which you can disable. <a href={`${base}docs/install/#operational-telemetry`}>Read the telemetry and storage details</a>.</p></details>
-    <details><summary>Will a knowledge file appear after one message?</summary><p>Not necessarily. Distillation and curation run in the background and depend on available conversation and configuration. Check recorded sessions in the local browser first, then review any knowledge Lore extracts. <a href={`${base}docs/troubleshooting/?issue=knowledge#diagnostic`}>Follow the knowledge checklist</a>.</p></details>
-    <details><summary>Does local Lore include live team sync?</summary><p>Git-based knowledge sharing is available today. Folk Lore’s hosted team experience is in early access; you can join its interest list on the Why Lore page. It does not enable sync.</p></details>
-    <p class="faq-help">Something missing? <a href={`${base}docs/troubleshooting/?issue=session#diagnostic`}>Check a missing session</a> or <a href={`${base}docs/troubleshooting/?issue=gateway#diagnostic`}>check your gateway</a>.</p>
+  <section class="section" id="questions"><div class="section-heading"><p class="eyebrow">Before you install</p><h2>A few practical questions.</h2></div><div class="faq"><Accordion>
+    <AccordionItem title="Do I need a different coding agent?" name="home-faq"><p>No. Lore supports existing clients including Claude Code, Codex, OpenCode, Pi, and Hermes. Follow the guide for your client; desktop apps and terminal launchers have different setup paths. <a href={`${base}docs/install/`}>Choose your setup</a>.</p></AccordionItem>
+    <AccordionItem title="Where does my data go?" name="home-faq"><p>Memory is stored locally in SQLite and Markdown. Agent requests and Lore’s background LLM work use your configured providers. Production builds send privacy-filtered operational telemetry, which you can disable. <a href={`${base}docs/install/#operational-telemetry`}>Read the telemetry and storage details</a>.</p></AccordionItem>
+    <AccordionItem title="Will a knowledge file appear after one message?" name="home-faq"><p>Not necessarily. Distillation and curation run in the background and depend on available conversation and configuration. Check recorded sessions in the local browser first, then review any knowledge Lore extracts. <a href={`${base}docs/troubleshooting/?issue=knowledge#diagnostic`}>Follow the knowledge checklist</a>.</p></AccordionItem>
+    <AccordionItem title="Does local Lore include live team sync?" name="home-faq"><p>Git-based knowledge sharing is available today. Folk Lore’s hosted team experience is in early access; you can join its interest list on the Why Lore page. It does not enable sync.</p></AccordionItem>
+    </Accordion><p class="faq-help">Something missing? <a href={`${base}docs/troubleshooting/?issue=session#diagnostic`}>Check a missing session</a> or <a href={`${base}docs/troubleshooting/?issue=gateway#diagnostic`}>check your gateway</a>.</p>
   </div></section>
   <section class="section home-start" id="get-started">
     <div><h2>Bring your next session along.</h2><p>Choose your agent and connect your first project.</p></div><a class="button button-primary" href={`${base}docs/install/`}>Get started <span aria-hidden="true">→</span></a>

@@ -2,6 +2,7 @@
 @import url("./controls.css");
 @import url("./navigation.css");
 @import url("./journal.css");
+@import url("./accordion.css");
 @import url("./page-field-guide.css");
 
 :root {
@@ -86,9 +87,10 @@ th, td { padding: .875rem 1rem; border-bottom: 1px solid var(--line); text-align
 thead { background: var(--surface); }
 th { font-weight: 500; }
 .evidence > .small { max-width: 80ch; margin-bottom: .5rem; }
-.faq details { border-top: 1px solid var(--line); padding-block: 1rem; }
-.faq summary { cursor: pointer; padding-block: .25rem; font-weight: 500; color: var(--heading); min-height: 44px; }
-.faq p { max-width: 75ch; color: var(--muted); margin-top: .75rem; }
+.faq .ui-accordion { border-top:1px solid var(--line); }
+
+.faq p { max-width:75ch;color:var(--muted); }
+.faq .faq-help { margin-top:1.25rem;font-size:.8125rem; }
 .waitlist-section { display: grid; grid-template-columns: 1fr 1fr; gap: 4rem; }
 .waitlist-section h2 { margin-bottom: 1rem; }
 .waitlist-section p { color: var(--muted); }
@@ -214,7 +216,7 @@ th { font-weight: 500; }
 .home-workflow .workflow li { position:relative;border:1px solid var(--line);border-radius:var(--radius-card);padding:1.25rem;background:var(--journal-page); }
 .home-workflow .workflow .journal-art { float:right;margin:-.25rem -.25rem .5rem .75rem;width:84px;height:84px;transform:rotate(-5deg); }
 .home-workflow .workflow li > .field-marker { color:var(--accent);font-size:.625rem; }
-.faq details[open] { border-inline-start:2px solid var(--accent);padding-inline-start:1rem; }
+
 .page-intro.field-heading { max-width:1120px;align-items:flex-start; }
 .page-intro.field-heading .journal-art { width:160px;height:160px;margin-top:2rem; }
 .page-intro.field-heading > div { max-width:800px; }

@@ -1,4 +1,5 @@
 ---
+import AccordionItem from "./ui/AccordionItem.astro";
 import JournalArt from "./JournalArt.astro";
 import { JOURNAL_CHAPTERS as chapters, JOURNAL_ENTRIES as entries } from "../lib/quest-journal";
 const base = import.meta.env.BASE_URL;
@@ -25,8 +26,8 @@ const base = import.meta.env.BASE_URL;
           <p class="journal-kicker">02 / Saved knowledge</p><h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Lore curates a reviewable rule in the background. Open its source or Markdown to check it.</p>
           {entries.map(entry => <div class="journal-entry" data-journal-entry={entry.id} id={`journal-entry-${entry.id}`}>
             <div class="journal-entry-heading"><div><p class="journal-category">{entry.category}</p><h4>{entry.title}</h4></div><JournalArt name={entry.art} size={64} /></div>
-            <p class="journal-carried-rule"><mark>{entry.rule.slice(0, entry.rule.indexOf(".") + 1)}</mark>{entry.rule.slice(entry.rule.indexOf(".") + 1)}</p><details class="journal-file"><summary>Review the .lore.md excerpt</summary><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></details>
-            <details><summary>Where it came from</summary><p class="journal-source">{entry.session}</p><blockquote>“{entry.source}”</blockquote></details>
+            <p class="journal-carried-rule"><mark>{entry.rule.slice(0, entry.rule.indexOf(".") + 1)}</mark>{entry.rule.slice(entry.rule.indexOf(".") + 1)}</p><AccordionItem class="journal-file" title="Review the .lore.md excerpt"><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></AccordionItem>
+            <AccordionItem title="Where it came from"><p class="journal-source">{entry.session}</p><blockquote>“{entry.source}”</blockquote></AccordionItem>
           </div>)}
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Try a later session <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
         </section>
@@ -38,7 +39,7 @@ const base = import.meta.env.BASE_URL;
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-inspect hidden>Inspect the supplied rule <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">03 / 03</span></div>
         </section>
       </div>
-      <details class="journal-inventory"><summary>Explore saved knowledge <span class="muted">3 example entries</span></summary><fieldset><legend class="visually-hidden">Knowledge inventory</legend><p class="journal-inventory-hint">Choose an entry to inspect its rule and source.</p><div class="journal-cards">{entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><JournalArt name={entry.art} size={52} /><span class="journal-card-copy"><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Included for this task</small><small class="journal-stored">Kept for another task</small></span></label>)}</div></fieldset></details>
+      <AccordionItem class="journal-inventory" title="Explore saved knowledge" meta="3 example entries"><fieldset><legend class="visually-hidden">Knowledge inventory</legend><p class="journal-inventory-hint">Choose an entry to inspect its rule and source.</p><div class="journal-cards">{entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><JournalArt name={entry.art} size={52} /><span class="journal-card-copy"><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Included for this task</small><small class="journal-stored">Kept for another task</small></span></label>)}</div></fieldset></AccordionItem>
       <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`}>Try the sample workflow <span aria-hidden="true">→</span></a></footer>
     </div>
   </div>
