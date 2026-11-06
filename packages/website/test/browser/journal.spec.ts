@@ -1,10 +1,17 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function openInventory(page: Page) {
+  const inventory = page.locator("details.journal-inventory");
+  // commit navigation can return before this later part of the document is parsed.
+  await inventory.locator("summary").first().click();
+}
 
 for (const chapter of ["conversation", "recall"]) {
   test(`clicking an already-selected card opens knowledge from ${chapter} in one history step`, async ({
     page,
   }) => {
     await page.goto(`/?chapter=${chapter}&entry=sqlite&task=sqlite#journal`);
+    await openInventory(page);
     const card = page.getByRole("radio", {
       name: "Inspect SQLite gotcha",
       exact: true,
@@ -13,7 +20,7 @@ for (const chapter of ["conversation", "recall"]) {
     await card.click();
     await expect(page.locator('[data-journal-entry="sqlite"]')).toBeVisible();
     await expect(
-      page.getByRole("radio", { name: "Project knowledge", exact: true }),
+      page.getByRole("radio", { name: "Saved knowledge", exact: true }),
     ).toBeChecked();
     await page.goBack();
     await expect(
@@ -32,6 +39,7 @@ test("a phone tap on an inventory card brings its rule into view", async ({
     "Focus transfer is for pointer selection in the stacked phone layout",
   );
   await page.goto("/");
+  await openInventory(page);
   await page
     .getByRole("radio", { name: "Inspect SQLite gotcha", exact: true })
     .check();
@@ -43,6 +51,7 @@ test("a phone tap on an inventory card brings its rule into view", async ({
 
 test("keyboard card inspection retains the focused radio", async ({ page }) => {
   await page.goto("/");
+  await openInventory(page);
   await page
     .getByRole("radio", { name: "Inspect webhook decision", exact: true })
     .focus();
@@ -57,6 +66,7 @@ test("a knowledge card reveals its own rule and original source", async ({
   page,
 }) => {
   await page.goto("/");
+  await openInventory(page);
   const journal = page.getByRole("region", {
     name: "The quest journal",
     exact: true,
@@ -77,8 +87,11 @@ test("a new task supplies the matching knowledge and keeps unrelated entries sto
   page,
 }) => {
   await page.goto("/");
+  await openInventory(page);
   const journal = page.locator(".quest-journal");
-  await journal.getByRole("radio", { name: "Next quest", exact: true }).check();
+  await journal
+    .getByRole("radio", { name: "Next session", exact: true })
+    .check();
   await journal
     .getByRole("radio", { name: "Speed up an import", exact: true })
     .check();
@@ -105,6 +118,7 @@ test("journal URL state reloads and restores all choices atomically through hist
   page,
 }) => {
   await page.goto("/?campaign=journal#journal");
+  await openInventory(page);
   const journal = page.locator(".quest-journal");
   await journal
     .getByRole("radio", { name: "Inspect settings pattern", exact: true })
@@ -112,7 +126,9 @@ test("journal URL state reloads and restores all choices atomically through hist
   await expect(page).toHaveURL(
     /campaign=journal.*chapter=knowledge.*entry=forms.*#journal$/,
   );
-  await journal.getByRole("radio", { name: "Next quest", exact: true }).check();
+  await journal
+    .getByRole("radio", { name: "Next session", exact: true })
+    .check();
   await journal
     .getByRole("radio", { name: "Speed up an import", exact: true })
     .check();
@@ -155,9 +171,12 @@ test("malformed journal choices cannot become a rule, source or selector", async
   await page.goto(
     "/?chapter=%22%5D%3Cscript%3E&entry=__proto__&task=constructor",
   );
-  await expect(page.locator('[data-journal-entry="webhook"]')).toBeVisible();
+  await openInventory(page);
   await expect(
-    page.locator('[data-journal-choice="chapter"][value="knowledge"]'),
+    page.locator('[data-journal-chapter="conversation"]'),
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-journal-choice="chapter"][value="conversation"]'),
   ).toBeChecked();
   await expect(
     page.locator('[data-journal-choice="task"][value="webhook"]'),
@@ -178,6 +197,7 @@ test("an early native choice survives delayed journal enhancement", async ({
   });
   try {
     await page.goto("/", { waitUntil: "commit" });
+    await openInventory(page);
     await page
       .getByRole("radio", { name: "Conversation", exact: true })
       .check();
@@ -195,7 +215,7 @@ test("an early native choice survives delayed journal enhancement", async ({
     page.getByRole("radio", { name: "Inspect SQLite gotcha", exact: true }),
   ).toBeChecked();
   await page
-    .getByRole("radio", { name: "Project knowledge", exact: true })
+    .getByRole("radio", { name: "Saved knowledge", exact: true })
     .check();
   await expect(page.locator('[data-journal-entry="sqlite"]')).toBeVisible();
 });
@@ -215,8 +235,9 @@ test("explicit journal URL state takes precedence over an early native selection
     await page.goto("/?chapter=knowledge&entry=forms&task=sqlite", {
       waitUntil: "commit",
     });
+    await openInventory(page);
     await page
-      .getByRole("radio", { name: "Conversation", exact: true })
+      .getByRole("radio", { name: "Next session", exact: true })
       .check();
   } finally {
     release();
@@ -233,14 +254,15 @@ test("keyboard chapter navigation retains focus and reduced motion stays still",
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
+  await openInventory(page);
   const chapter = page.getByRole("radio", {
-    name: "Project knowledge",
+    name: "Saved knowledge",
     exact: true,
   });
   await chapter.focus();
   await page.keyboard.press("ArrowRight");
   await expect(
-    page.getByRole("radio", { name: "Next quest", exact: true }),
+    page.getByRole("radio", { name: "Next session", exact: true }),
   ).toBeFocused();
   await page
     .getByRole("radio", { name: "Add a settings field", exact: true })
@@ -271,6 +293,7 @@ test("native journal chapters, cards, sources and tasks remain useful without Ja
   const page = await context.newPage();
   try {
     await page.goto(`${baseURL}/`);
+    await openInventory(page);
     await page
       .getByRole("radio", { name: "Conversation", exact: true })
       .check();
@@ -278,16 +301,18 @@ test("native journal chapters, cards, sources and tasks remain useful without Ja
       page.locator('[data-journal-chapter="conversation"]'),
     ).toBeVisible();
     await page
-      .getByRole("radio", { name: "Project knowledge", exact: true })
+      .getByRole("radio", { name: "Saved knowledge", exact: true })
       .check();
     await page
       .getByRole("radio", { name: "Inspect SQLite gotcha", exact: true })
       .check();
     const entry = page.locator('[data-journal-entry="sqlite"]');
     await expect(entry).toBeVisible();
-    await entry.locator("summary").click();
+    await entry.getByText("Where it came from", { exact: true }).click();
     await expect(entry).toContainText("Session 07 · data import");
-    await page.getByRole("radio", { name: "Next quest", exact: true }).check();
+    await page
+      .getByRole("radio", { name: "Next session", exact: true })
+      .check();
     await page
       .getByRole("radio", { name: "Add a settings field", exact: true })
       .check();
@@ -321,6 +346,7 @@ for (const path of [
         failed.push(r.url());
     });
     await page.goto(path);
+    if (path === "/") await openInventory(page);
     const art = page.locator("img.journal-art:visible");
     expect(await art.count()).toBeGreaterThan(0);
     for (const image of await art.all()) {
@@ -347,6 +373,7 @@ test("reduced-motion inventory cards stay in place on hover", async ({
   test.skip(isMobile, "Hover feedback applies to a fine pointer");
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
+  await openInventory(page);
   const card = page.locator('[data-journal-card="webhook"]');
   await card.scrollIntoViewIfNeeded();
   const before = await card.boundingBox();

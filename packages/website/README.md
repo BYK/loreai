@@ -17,7 +17,7 @@ roles from `packages/ui/src/styles/app.css` (Tailwind 4.3.3 values). When changi
 the app's palette, update the website's scale values and role mappings too.
 Marketing/blog aliases live in `public/theme.css`; Starlight maps its roles in
 `src/styles/starlight.css`. Each consumes the same palette, controls, and journal CSS.
-Logo SVGs and illustrative SVGs keep their existing artwork colours.
+Logo SVGs retain their brand colors. Journal illustrations have separate geometry-identical light and dark palettes.
 
 `src/styles/fonts.css` uses the same pinned self-hosted DM Sans Variable and
 Playfair Display fonts as the app, including latin and latin-ext subsets.
@@ -47,27 +47,35 @@ are scoped in `docs/benchmark.md`, while `docs/installation-reference.md` preser
 the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
 
-The homepage pairs a linked open-journal expedition illustration with the interactive
-journal. The hero link uses native fragment navigation and the existing sticky-header
-scroll offset.
+The homepage starts with a readable `.lore.md` artifact and a preview of the actual
+memory browser. The interactive journal follows that product evidence. Its default
+Conversation chapter follows one fictional webhook decision into Saved knowledge,
+then a relevant rule supplied for a Next session task. Temporary fixture details
+stay separate from the durable project rule. The `.lore.md` excerpt and source
+quote are native disclosures; the three-entry inventory is optional and becomes
+readable full-width rows on phones.
 
-The homepage's `QuestJournal.astro` is an illustrative RPG field journal with
-three native chapter choices, three knowledge cards with expandable sources, and
-three later tasks. `src/lib/quest-journal.ts` owns its static data, art map, types,
-and allowlisted parser. `src/scripts/quest-journal.ts` enhances native controls with
-atomic `chapter`, `entry`, and `task` query state, reload/history restoration, and
-focus transfer after explicit actions. URL values never become HTML or selectors.
-Valid URL choices take precedence; early native choices survive delayed loading.
-Keyboard selection retains radio focus; pointer-selected cards in the stacked
-phone layout bring their rule into view. No-JavaScript controls remain useful.
+`src/lib/quest-journal.ts` owns static example data, task explanations, art names,
+and the allowlisted parser. `src/scripts/quest-journal.ts` enhances native radio
+controls with atomic `chapter`, `entry`, and `task` query state, reload/history
+restoration, and focus transfer after explicit actions. Existing query values stay
+compatible. URL values never become HTML or selectors. Valid URL choices take
+precedence; early native choices survive delayed loading. Keyboard selection
+retains radio focus; pointer-selected cards bring their rule into view.
 
-Five local Quiver SVGs live in `public/journal-art/`; see that directory's README
-for provenance and construction. `JournalArt.astro` prefixes their URLs and marks
-them decorative. `public/journal.css` provides the shared paper/margin/selection
-roles, native-control styling and field-guide frames. There is no 3D renderer,
-WebGL requirement, or Three.js dependency. Chapter progress is decorative and follows the native selection. Cards have
-subtle lift/press feedback only for fine pointers with no reduced-motion preference.
-Only explicit pointer actions receive short transitions; reduced-motion and keyboard interactions remain immediate.
+Nine local Quiver objects ship in `public/journal-art/`, each with a dark and light
+version (18 SVG files). See that directory's README for provenance and paint
+adaptation. `JournalArt.astro` prefixes static URLs, marks the images decorative,
+and selects a palette by appearance, including the device preference without JS.
+Light art uses darker ink rather than a brightness filter. Chest, messenger bird,
+satchel and tools explain storage, providers, carried knowledge and setup. All
+variants preserve geometry and contain no scripts, external resources or inline
+styles. There is no 3D renderer or WebGL requirement.
+
+`public/journal.css` supplies paper, margins, selection marks, readable secondary
+text, native controls and field-guide diagrams. Fine-pointer lift/press feedback
+and short pointer transitions require no reduced-motion preference; keyboard and
+reduced-motion interactions remain immediate.
 
 ## Visual language
 
@@ -80,7 +88,7 @@ obscure commands, product captures, or source material.
 
 ## Product journey and documentation
 
-The homepage pairs the interactive quest journal with one actual-app preview and a concise
+The homepage presents actual-app proof before the interactive quest journal, followed by a concise
 everyday workflow and installation entry. `/tour/` owns the full three-view app
 tour; benchmark details and team signup remain on their destination pages.
 `AgentSetup.astro` shares fixed definitions from `src/lib/agent-setup.ts` between
@@ -109,7 +117,10 @@ It opens no gateway, account, provider connection, or production database, and b
 all nonlocal browser requests. Captures contain a fictional webhook project and
 sample counts; they are UI examples, not measurements or a live curation run. Both
 appearance variants are saved under `public/product-tour/`, with no DOM/CSS/image edits.
-Knowledge includes a 390×700 mobile capture alongside the 1120×760 desktop view.
+The same idempotency rule appears in the journal, knowledge record, two revisions,
+and linked source session. Additional knowledge-detail and recorded-session captures
+show what to inspect; the Knowledge tour links to its complete source/revision capture. Exact-message attribution is not promised. Knowledge includes a
+390×700 mobile capture alongside the 1120×760 desktop view.
 Responsive pictures retain explicit dimensions and link to the original full-size image.
 
 
@@ -117,3 +128,11 @@ Long blog posts expose a native collapsible outline using Astro’s rendered hea
 IDs. Signup errors remain associated with the email input in the visible form;
 the original submit action becomes a direct retry with the existing timeout,
 duplicate-submit guard, and timestamp-only rate tracking.
+
+The guided setup has one visible sequence and preserves the four original numbered
+installation fragments as aliases. Verification uses an actual recorded-session
+capture with an explicit sample-data label. Shared memory and data-boundary diagrams
+separate what is stored, supplied to the current request, sent to providers, and
+reported as operational telemetry. Why Lore keeps every comparison fact in stacked
+phone rows. Blog readers start with a practical article; availability notes remain
+specific to the relevant article rather than repeated on every post.

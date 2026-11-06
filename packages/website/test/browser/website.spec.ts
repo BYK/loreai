@@ -5,7 +5,7 @@ const surfaces = [
   {
     name: "comparison",
     path: "/different/",
-    heading: "Keep the decisions behind the code.",
+    heading: "When Lore fits your workflow.",
   },
   { name: "docs", path: "/docs/install/", heading: "Install Lore" },
   {

@@ -7,41 +7,35 @@ import AgentSetup from '../../../components/AgentSetup.astro';
 Connect the coding agent you already use. Have it installed and signed in before
 you begin; the hosted installer installs **Lore**, not your coding agent.
 
-## 1. Choose your agent
+<span id="1-choose-your-agent" class="legacy-setup-anchor" aria-hidden="true"></span>
+
+## Connect your agent
 
 <AgentSetup id="install-setup" />
 
-## 2. Install and check the executable
+<span id="4-verify-the-connection" class="legacy-setup-anchor" aria-hidden="true"></span>
 
-After running the installation command above, check:
+## Verify recording
 
-```bash
-lore --version
-```
+<span id="2-install-and-check-the-executable" class="legacy-setup-anchor" aria-hidden="true"></span>
 
-You should see a version, rather than “command not found.” If your terminal cannot
-find Lore, open a new terminal and check the installer's printed directory.
-[More installation help](/docs/troubleshooting/#lore-command-not-found).
+After installation, `lore --version` should print a version. If the command is
+missing, open a new terminal and check the installer's printed directory.
+[Installation troubleshooting](/docs/troubleshooting/#lore-command-not-found).
 
-## 3. Connect from your project
+Run the selected connection command from your project, then send a normal message.
+Open the **Dashboard URL printed by Lore**, select your project, and open
+**Sessions**. A recorded conversation confirms that activity reached Lore.
 
-Use the connection command for your selected agent above from the project directory.
-For terminal clients, keep the launched agent running. For Codex Desktop, keep the
-local gateway running, fully quit the Desktop app, then open it again.
-Persistent setup saves a backup; [setup undo](/docs/setup/#undoing-setup) restores
-settings Lore changed.
+[See verification steps](/docs/first-session/#verify) for the expected result.
+Knowledge curation happens later in the background; you do not need a `.lore.md`
+entry to verify the connection.
 
-For remote gateways or custom providers, use the
-[setup reference](/docs/setup/) and [custom upstream guide](/docs/guides/custom-upstreams/).
-
-## 4. Verify the connection
-
-Send a normal message, open the **Dashboard URL printed by Lore**, select your
-project, and open **Sessions**. A recorded session confirms that activity reached
-Lore. [Follow the first-session walkthrough](/docs/first-session/#verify).
-
-A knowledge file can take longer to appear: distillation and curation run in the
-background. [What to expect next](/docs/first-session/#knowledge-comes-later).
+For Codex Desktop, keep the local gateway running, fully quit the Desktop app,
+then open it again. Persistent setup saves a backup;
+[setup undo](/docs/setup/#undoing-setup) restores settings Lore changed.
+For remote gateways or custom providers, see the [setup reference](/docs/setup/)
+and [custom upstream guide](/docs/guides/custom-upstreams/).
 
 ## Next steps
 

@@ -16,7 +16,7 @@ test("mobile introduction reaches a useful first action before decoration", asyn
     page.viewportSize()?.height ?? 0,
   );
   await expect(page.locator(".quest-journal")).toContainText(
-    "Illustrative example",
+    "fictional project",
   );
   await expect(page.locator(".quest-journal")).toContainText(".lore.md");
   expect(await page.locator(".ticker, .hero-visual, .sr").count()).toBe(0);
@@ -113,11 +113,11 @@ test("installation guides lead through connection and verification before refere
 }) => {
   await page.goto("/docs/install/");
   await expect(
-    page.getByRole("heading", { name: "1. Choose your agent", exact: true }),
+    page.getByRole("heading", { name: "Connect your agent", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "4. Verify the connection",
+      name: "Verify recording",
       exact: true,
     }),
   ).toBeVisible();
@@ -128,7 +128,7 @@ test("installation guides lead through connection and verification before refere
   ).toHaveAttribute("href", /installation-reference/);
   const headings = await page.locator("main h2").allTextContents();
   expect(
-    headings.findIndex((text) => text.includes("Verify the connection")),
+    headings.findIndex((text) => text.includes("Verify recording")),
   ).toBeLessThan(headings.findIndex((text) => text.includes("Reference")));
   await expect(
     page

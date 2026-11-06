@@ -17,9 +17,9 @@ test("setup chooser supplies the Desktop route and preserves it into the first-s
   await expect(panel).toContainText("lore setup codex");
   await expect(panel).toContainText("lore start --bg --local");
   await expect(
-    panel.getByRole("link", { name: "Connect and verify" }),
+    panel.getByRole("link", { name: "See verification steps" }),
   ).toHaveAttribute("href", /first-session\/\?agent=codex-desktop/);
-  await panel.getByRole("link", { name: "Connect and verify" }).click();
+  await panel.getByRole("link", { name: "See verification steps" }).click();
   await expect(page.locator("h1")).toContainText("first session");
   await expect(
     page.locator(".agent-setup input[value=codex-desktop]"),
@@ -90,6 +90,7 @@ test("product tour shows the actual app and an accessible next step", async ({
     .getByRole("radio", { name: "Review knowledge", exact: true })
     .check();
   const panel = tour.locator("[data-tour-panel=knowledge]");
+  await expect(panel.locator(":scope > figcaption:last-child")).toHaveCount(1);
   await expect(panel).toBeVisible();
   await expect(panel.getByRole("img")).toBeVisible();
   const mobile = page.viewportSize()!.width <= 600;
@@ -105,6 +106,17 @@ test("product tour shows the actual app and an accessible next step", async ({
   await expect(
     panel.getByRole("link", { name: /Learn to review knowledge/ }),
   ).toHaveAttribute("href", /using-lore/);
+  const details = panel.getByRole("link", {
+    name: "Inspect source and revision details ↗",
+    exact: true,
+  });
+  await expect(details).toHaveAttribute(
+    "href",
+    `/product-tour/knowledge-detail-${theme}.png`,
+  );
+  expect(
+    (await page.request.get((await details.getAttribute("href"))!)).status(),
+  ).toBe(200);
 });
 
 test("built documentation search finds symptom-based help", async ({

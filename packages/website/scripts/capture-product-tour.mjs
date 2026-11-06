@@ -32,17 +32,34 @@ const project = {
 };
 const entry = {
   ...fixture("knowledge-entry"),
-  title: "Deduplicate webhook deliveries",
+  title: "Keep handlers idempotent",
   content:
-    "Check the event ID before applying a webhook. The provider can deliver the same event twice.",
+    "Check the event ID before applying a webhook. Reuse the existing duplicate-event guard so repeated deliveries never apply the same change twice.",
   confidence: 0.9,
+  created_at: Date.parse("2026-10-25T12:00:00Z"),
+  updated_at: Date.parse("2026-10-26T12:00:00Z"),
 };
 const versions = fixture("cursor/knowledge-versions");
-versions.versions[0] = {
-  ...versions.versions[0],
-  title: entry.title,
-  content: entry.content,
-};
+const originalVersion = versions.versions[0];
+versions.versions = [
+  {
+    ...originalVersion,
+    version: 2,
+    title: entry.title,
+    content: entry.content,
+    created_at: entry.updated_at,
+  },
+  {
+    ...originalVersion,
+    version_id: "00000000-0000-4000-8000-000000000002",
+    version: 1,
+    is_current: false,
+    superseded_at: entry.updated_at,
+    created_at: entry.created_at,
+    title: entry.title,
+    content: "Webhook deliveries should not apply the same change twice.",
+  },
+];
 const sessions = fixture("sessions-list");
 sessions[0].title = "Handle duplicate webhook deliveries";
 sessions.push(
@@ -58,13 +75,23 @@ sessions.push(
   },
 );
 project.session_count = 3;
+sessions.forEach((session, index) => {
+  session.first_message_at = entry.created_at + index * 86400000;
+  session.last_message_at = session.first_message_at + 1000;
+});
 const messages = fixture("session-detail");
 messages.messages[0].content =
-  "Keep webhook handlers idempotent. The provider can deliver the same event twice.";
+  "Keep webhook handlers idempotent. The provider can deliver the same event twice. Reuse the event-id check that’s already there.";
 messages.messages[1].content =
   "I’ll reuse the event-id check before applying the update.";
 messages.messages[1].role = "assistant";
 messages.title = sessions[0].title;
+messages.messages.forEach((message, index) => {
+  message.created_at = entry.created_at + index * 1000;
+});
+messages.distillations.forEach((item) => {
+  item.created_at = entry.created_at + 2000;
+});
 const effects = {
   scope: "project",
   project_id: projectId,
@@ -132,6 +159,21 @@ const responses = {
     ...messages,
     next_cursor: null,
     message_count: 2,
+  },
+  "/sessions/sample-session/context": {
+    session_id: "sample-session",
+    layer: 0,
+    history: { message_count: 2, token_estimate: 60 },
+    distilled_prefix: { token_count: 0, distillations: [] },
+    knowledge: {
+      cache_text: null,
+      cache_tokens: null,
+      pin_tokens: null,
+      stable_tokens: null,
+      injections: [],
+    },
+    prompt_deltas: [],
+    turns: [],
   },
   "/model-usage": {
     format: "model-tides-daily",
@@ -234,9 +276,26 @@ try {
         page.getByRole("heading", { name: heading, exact: true }),
       ).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
-      if (name === "knowledge")
+      if (name === "knowledge") {
         await page.getByText("Source & history", { exact: true }).click();
+        await expect(page.getByTestId("knowledge-version-2")).toHaveCount(1);
+        await expect(page.getByTestId("knowledge-version-1")).toHaveCount(1);
+      }
       await page.screenshot({ path: join(output, `${name}-${scheme}.png`) });
+      if (name === "knowledge") {
+        await page
+          .getByTestId("knowledge-document")
+          .screenshot({ path: join(output, `knowledge-detail-${scheme}.png`) });
+        await page
+          .getByRole("link", { name: "Distilled from session", exact: true })
+          .click();
+        await expect(
+          page.getByText(messages.messages[0].content, { exact: true }),
+        ).toBeVisible();
+        await page.screenshot({
+          path: join(output, `session-detail-${scheme}.png`),
+        });
+      }
       expect(unexpected).toEqual([]);
       console.log(`Captured ${name}-${scheme}`);
     }

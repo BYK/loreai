@@ -1,6 +1,10 @@
 export const JOURNAL_ART = {
   journal: "journal.svg",
   expedition: "expedition-desk.svg",
+  chest: "archive-chest.svg",
+  bird: "messenger-bird.svg",
+  satchel: "memory-satchel.svg",
+  tools: "field-tools.svg",
   decision: "decision-note.svg",
   pattern: "pattern-routes.svg",
   gotcha: "gotcha-lantern.svg",
@@ -15,11 +19,16 @@ export const JOURNAL_CHAPTERS = [
   },
   {
     id: "knowledge",
-    name: "Project knowledge",
-    title: "Keep the useful part",
+    name: "Saved knowledge",
+    title: "Save the project rule",
     number: "02",
   },
-  { id: "recall", name: "Next quest", title: "The next quest", number: "03" },
+  {
+    id: "recall",
+    name: "Next session",
+    title: "Use it next time",
+    number: "03",
+  },
 ] as const;
 
 export const JOURNAL_ENTRIES = [
@@ -35,6 +44,8 @@ export const JOURNAL_ENTRIES = [
     source:
       "Keep webhook handlers idempotent. The provider can deliver the same event twice. Reuse the event-id check that’s already there.",
     session: "Session 12 · webhook delivery",
+    reason:
+      "This task changes webhook delivery, so the duplicate-event rule is relevant.",
     response:
       "I’ll reuse the event-id guard before adding retry handling, so a repeated delivery won’t apply the change twice.",
   },
@@ -50,6 +61,8 @@ export const JOURNAL_ENTRIES = [
     source:
       "For the new notification preference, follow the current settings form. Put validation beside the field, like the other preferences.",
     session: "Session 09 · notification settings",
+    reason:
+      "This task adds a preference, so the existing form and validation convention are relevant.",
     response:
       "I’ll follow the current settings form and keep the new field’s validation inline, consistent with the other preferences.",
   },
@@ -65,6 +78,8 @@ export const JOURNAL_ENTRIES = [
     source:
       "The import hit SQLITE_BUSY when we ran all writers at once. Batch the records and serialize the writes.",
     session: "Session 07 · data import",
+    reason:
+      "This task changes imports, so the earlier SQLite write failure is relevant.",
     response:
       "I’ll batch records in a transaction and serialize writes. Running the import writers concurrently previously caused SQLITE_BUSY.",
   },
@@ -76,7 +91,7 @@ export type JournalState = {
   task: (typeof JOURNAL_ENTRIES)[number]["id"];
 };
 export const JOURNAL_DEFAULTS: JournalState = {
-  chapter: "knowledge",
+  chapter: "conversation",
   entry: "webhook",
   task: "webhook",
 };

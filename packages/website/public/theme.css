@@ -224,3 +224,16 @@ th { font-weight: 500; }
 @media(prefers-reduced-motion:no-preference) and (hover:hover) and (pointer:fine) { .button:active { transform:scale(.98); } }
 @media(max-width:850px) { .tour-journal { grid-template-columns:1fr; }.tour-journal .tour-picker { flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:.75rem; }.tour-journal .tour-picker label { flex:1; }.page-intro.field-heading .journal-art { width:80px;height:80px; } }
 @media(max-width:600px) { .tour-journal .tour-picker { display:grid;grid-template-columns:1fr;gap:.25rem; }.tour-journal .tour-picker label { padding:.5rem .75rem; }.tour-journal .tour-pages { padding:1rem; }.page-intro.field-heading { display:block;position:relative; }.page-intro.field-heading .eyebrow { padding-inline-end:70px; }.page-intro.field-heading > .journal-art { position:absolute;right:0;top:1.5rem;margin:0;width:56px;height:56px; }.home-workflow .workflow li { padding-top:.75rem; } }
+
+/* Product evidence leads; the journal is a compact optional walkthrough. */
+.home-page .home-hero { padding-block:2.5rem; }
+.hero-proof { min-width:0;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--journal-page);padding:1.25rem; }
+.hero-proof-title { display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:.75rem; }
+.hero-proof-title .field-marker { font-size:.75rem;margin-bottom:.375rem; }.hero-proof-title > div > strong { font:500 .875rem ui-monospace,monospace; }
+.hero-proof pre { white-space:pre-wrap;overflow-wrap:anywhere;font-size:.9375rem;line-height:1.7;padding-block:.75rem;border-block:1px solid var(--line);margin:0; }.hero-proof code { font-size:inherit; }
+.hero-proof > p { font-size:.8125rem;color:var(--muted);margin-top:.875rem; }.hero-proof > .text-link { font-size:.8125rem; }
+.home-journal { padding-block:3rem; }
+.home-page .product-spotlight { margin-block:0 1rem;padding:1.5rem; }.home-page .product-spotlight .spotlight-copy h2 { font-size:1.5rem; }
+.home-workflow .workflow li { border:0;border-inline-start:2px solid var(--line);border-radius:0;padding:0 0 0 1rem;background:transparent; }
+@media(max-width:600px) { .home-page .hero-copy { gap:1.5rem; }.hero-proof { padding:1rem; }.home-page .home-hero { padding-block:2rem; }.home-page .product-spotlight { padding:1rem; }.home-workflow .workflow .journal-art { width:64px;height:64px; } }
+@media(max-width:600px) { .fit-table { min-width:0!important; }.fit-table thead { position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%); }.fit-table tbody,.fit-table tr,.fit-table td,.fit-table th[scope="row"] { display:block;width:100%; }.fit-table tr { border-bottom:1px solid var(--line);padding-block:.875rem; }.fit-table th,.fit-table td { border:0;padding:.375rem .25rem; }.fit-table th[scope="row"] { font-size:1rem;font-weight:600; }.fit-table td::before { content:attr(data-label);display:block;font-size:.8125rem;color:var(--muted);margin-bottom:.25rem; } }

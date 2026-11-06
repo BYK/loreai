@@ -347,7 +347,7 @@ function renderPage(): string {
   for (const [key, schema] of Object.entries(topShape)) {
     const desc = (getDescription(schema) ?? "").replace(/\n/g, " ");
     lines.push(
-      `- [\`${key}\`](#${key.replace(/\./g, "")}) — ${desc || "_no description_"}`,
+      `- [\`${key}\`](#${key.replace(/\./g, "").toLowerCase()}) — ${desc || "_no description_"}`,
     );
   }
   lines.push("");

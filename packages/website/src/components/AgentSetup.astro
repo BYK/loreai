@@ -7,15 +7,16 @@ const { id = "agent-setup", installed = false } = Astro.props;
 const base = import.meta.env.BASE_URL;
 ---
 <section class="agent-setup field-frame" aria-label="Set up Lore with your agent">
-  <div class="setup-field-heading"><JournalArt name="pattern" size={48} /><div><p class="field-marker">Your first session</p><p>Choose a client, connect Lore, then verify the result.</p></div></div>
+  <div class="setup-field-heading"><JournalArt name="tools" size={48} /><div><p class="field-marker">Connect your agent</p><p>Choose your client, run its commands, then check for a recorded session.</p></div></div>
   <fieldset class="setup-picker"><legend>Which agent do you use?</legend>
     {SETUP_AGENTS.map((agent,index) => <label><input type="radio" name={`${id}-agent`} value={agent.id} checked={index===0} aria-label={agent.name} aria-controls={`${id}-${agent.id}`} /><span>{agent.name}</span></label>)}
   </fieldset>
-  {!installed && <div class="setup-install"><h3><span class="setup-step" aria-hidden="true">02</span>Install Lore</h3><p>Have your agent installed and signed in first. This command installs Lore.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  {!installed && <div class="setup-install"><h3>Install Lore</h3><p>Run this in your terminal. It installs Lore; your coding agent should already be installed and signed in.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  {id === "install-setup" && <span id="3-connect-from-your-project" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
-    <h3><span class="setup-step" aria-hidden="true">{installed ? "02" : "03"}</span>Connect {agent.name}</h3><p>{agent.detail}</p>
+    <h3>Connect {agent.name}</h3><p>{agent.detail}</p>
     <pre><code>{agent.command}</code></pre><button type="button" class="button button-secondary" data-copy-setup hidden aria-label={`Copy ${agent.name} connection command`}>Copy connection command</button><p class="setup-copy-status small muted" role="status"></p>
-    <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>Connect and verify</a><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide →</a></div>
+    <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide →</a></div>
   </div>)}
   <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
 </section>

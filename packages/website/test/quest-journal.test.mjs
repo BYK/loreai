@@ -19,7 +19,7 @@ await test("unknown, empty and object-property-like choices fall back safely", (
     "chapter=%22%5D%3Cscript%3E&entry=&task=javascript%3Aalert(1)",
   ]) {
     assert.deepEqual(readJournalState(new URLSearchParams(query)), {
-      chapter: "knowledge",
+      chapter: "conversation",
       entry: "webhook",
       task: "webhook",
     });
@@ -31,6 +31,6 @@ await test("unrelated search parameters never become journal state", () => {
     readJournalState(
       new URLSearchParams("agent=pi&view=usage&campaign=spring"),
     ),
-    { chapter: "knowledge", entry: "webhook", task: "webhook" },
+    { chapter: "conversation", entry: "webhook", task: "webhook" },
   );
 });

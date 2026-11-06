@@ -2,19 +2,14 @@
 title: Data and costs
 description: Understand local storage, configured providers, operational telemetry, and usage estimates.
 ---
+import DataBoundaries from '../../../components/DataBoundaries.astro';
 
 Local storage and model processing are different boundaries. A local database does
 not make requests to a configured remote model provider stay on your machine.
 
 ## Where information goes
 
-| Destination | What it is used for |
-| --- | --- |
-| Local SQLite database | Stored conversations, distilled context, knowledge, and related search data |
-| Project `.lore.md` | Reviewable project knowledge; can be shared when you commit it to Git |
-| Configured model providers | Agent requests and background model work such as distillation and curation |
-| Configured embedding provider | Recall embeddings; local by default, with hosted options and fallbacks depending on configuration |
-| Operational telemetry | Privacy-filtered usage, performance, and error metadata in production builds; enabled by default |
+<DataBoundaries />
 
 Git-based sharing exports curated knowledge, not the complete conversation database.
 Folk Lore's hosted team experience is early access; joining its list does not enable sync.

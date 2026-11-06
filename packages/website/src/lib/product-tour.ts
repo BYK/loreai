@@ -12,9 +12,9 @@ export const TOUR_SCREENS = [
   {
     id: "knowledge",
     choice: "Review knowledge",
-    title: "Read the rule and where it came from",
+    title: "Review the rule, source session and revisions",
     description:
-      "Open a knowledge entry, inspect Source & history, and edit inaccurate information. Review the resulting .lore.md diff before sharing it through Git.",
+      "Inspect the rule and its revisions in Source & history. The source link opens a recorded session; exact-message attribution is not always recorded. Review the .lore.md diff before sharing corrections through Git.",
     link: "using-lore/#review-knowledge",
     action: "Learn to review knowledge",
     alt: "Actual Lore app showing a sample webhook decision, its content, and source history",

@@ -34,7 +34,7 @@ Because `.lore.md` is just a tracked file:
 
 ## Configuration
 
-`.lore.md` export/import is on by default. See [`loreFile`](/docs/configuration/#loreFile) to disable it — knowledge then stays in the local database and is still injected into context — and [`crossProject`](/docs/configuration/#crossProject) for how knowledge that recurs across projects is promoted.
+`.lore.md` export/import is on by default. See [`loreFile`](/docs/configuration/#lorefile) to disable it — knowledge then stays in the local database and is still injected into context — and [`crossProject`](/docs/configuration/#crossproject) for how knowledge that recurs across projects is promoted.
 
 To keep shared knowledge inside an existing `AGENTS.md` instead of a standalone file, pair `loreFile.enabled=false` with `agentsFile.enabled=true`.
 

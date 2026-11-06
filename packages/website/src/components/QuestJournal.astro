@@ -4,49 +4,44 @@ import { JOURNAL_CHAPTERS as chapters, JOURNAL_ENTRIES as entries } from "../lib
 const base = import.meta.env.BASE_URL;
 ---
 <section class="quest-journal" id="journal" aria-label="The quest journal">
-  <div class="journal-intro"><div><p class="eyebrow">Illustrative example · fictional project</p><h2>The quest journal</h2></div><p>Keep the lesson. Carry it into whatever comes next.</p></div>
+  <div class="journal-intro"><div><p class="eyebrow field-marker">The quest journal · Interactive example</p><h2>One decision. Remembered next session.</h2></div><p>A fictional project, with a rule you can follow from conversation to reuse.</p></div>
   <div class="journal-frame">
     <aside class="journal-spine">
-      <fieldset class="journal-chapters"><legend>Follow a memory</legend>
-        {chapters.map(chapter => <label><input type="radio" name="journal-chapter" data-journal-choice="chapter" value={chapter.id} checked={chapter.id === "knowledge"} aria-label={chapter.name} aria-controls={`journal-${chapter.id}`} /><span class="journal-step" aria-hidden="true">{chapter.number}</span><span><strong>{chapter.title}</strong><small>{chapter.name}</small></span></label>)}
-      </fieldset>
-      <div class="journal-spine-note"><JournalArt size={140} eager /><strong>Leave with more than a transcript.</strong><p>Decisions, patterns, and lessons you can open and review.</p></div>
+      <fieldset class="journal-chapters"><legend>Follow a project decision</legend>{chapters.map(chapter => <label><input type="radio" name="journal-chapter" data-journal-choice="chapter" value={chapter.id} checked={chapter.id === "conversation"} aria-label={chapter.name} aria-controls={`journal-${chapter.id}`} /><span class="journal-step" aria-hidden="true">{chapter.number}</span><span><strong>{chapter.name}</strong><small>{chapter.title}</small></span></label>)}</fieldset>
+      <div class="journal-spine-note"><JournalArt size={100} /><p>Knowledge you can inspect and carry forward.</p></div>
     </aside>
     <div class="journal-book">
-      <header class="journal-book-header"><span>Webhook service <span class="muted">/ field notes</span></span><span class="journal-folio" aria-hidden="true">VOL. 001</span></header>
+      <header class="journal-book-header"><span>Webhook service <span class="muted">/ project journal</span></span><span class="journal-folio" aria-hidden="true">VOL. 001</span></header>
       <div class="journal-progress" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div class="journal-spread"><div class="journal-pages">
+      <div class="journal-pages">
         <section class="journal-chapter" id="journal-conversation" data-journal-chapter="conversation">
-          <p class="journal-kicker">Chapter 01 · The conversation</p><h3 tabindex="-1">A small decision.<br />A useful lesson.</h3><p class="journal-lead">A coding session contains decisions, tangents, and everything in between.</p>
+          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">During a coding session, you agree how this service should handle duplicate events.</p>
           <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> The provider can deliver the same event twice. Reuse the event-id check that’s already there.”</p></div>
-          <div class="journal-message"><span>A little later</span><p>“Also, let’s get lunch at noon.”</p></div>
-          <p class="journal-note">Both belong to the conversation. Only one is a lasting project rule.</p>
-          <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>Find the useful part <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
+          <div class="journal-message journal-transient"><span>Temporary troubleshooting</span><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p></div>
+          <p class="journal-note">The duplicate-event rule matters beyond this session. A temporary test port does not.</p>
+          <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>See saved knowledge <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-knowledge" data-journal-chapter="knowledge">
-          <p class="journal-kicker">Chapter 02 · Project knowledge</p><h3 tabindex="-1">The lesson earns<br />a place in your journal.</h3><p class="journal-lead">Useful decisions become knowledge you can inspect, correct, and share through Git.</p>
+          <p class="journal-kicker">02 / Saved knowledge</p><h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Knowledge is curated in the background. You can inspect a saved entry, correct it, and review its Markdown before sharing through Git.</p>
           {entries.map(entry => <div class="journal-entry" data-journal-entry={entry.id} id={`journal-entry-${entry.id}`}>
-            <div class="journal-entry-heading"><div><p class="journal-category">{entry.category} · Project knowledge</p><h4>{entry.title}</h4></div><JournalArt name={entry.art} size={60} /></div>
-            <p>{entry.rule}</p><p class="journal-file"><code>.lore.md</code><span>Reviewable entry</span></p>
+            <div class="journal-entry-heading"><div><p class="journal-category">{entry.category}</p><h4>{entry.title}</h4></div><JournalArt name={entry.art} size={64} /></div>
+            <p>{entry.rule}</p><details class="journal-file"><summary>Review the .lore.md excerpt</summary><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></details>
             <details><summary>Where it came from</summary><p class="journal-source">{entry.session}</p><blockquote>“{entry.source}”</blockquote></details>
           </div>)}
-          <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Choose the next quest <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
+          <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Try a later session <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-recall" data-journal-chapter="recall">
-          <p class="journal-kicker">Chapter 03 · Relevant context</p><h3 tabindex="-1">A new quest.<br />The right knowledge.</h3><p class="journal-lead">Choose what you’re working on. The relevant rule comes along; other entries stay available.</p>
-          <fieldset class="journal-tasks"><legend class="visually-hidden">Choose the next task</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
-          {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Supplied from project knowledge</p><h4>{entry.title}</h4><blockquote>“{entry.response}”</blockquote><p class="journal-source">Source · {entry.session}</p></div>)}
-          <p class="journal-note"><strong>Left out:</strong> the lunch plan and rules unrelated to this task.</p>
+          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">Choose a task. This example shows a relevant rule supplied to the agent, while other knowledge stays stored.</p>
+          <fieldset class="journal-tasks"><legend>What are you working on?</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
+          {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Included for this task</p><h4>{entry.title}</h4><blockquote>“{entry.response}”</blockquote><p class="journal-reason"><strong>Why this rule:</strong> {entry.reason}</p><p class="journal-source">Source · {entry.session}</p></div>)}
+          <p class="journal-note">Other entries remain available. The temporary test port stays out of this task’s project knowledge.</p>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-inspect hidden>Inspect the supplied rule <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">03 / 03</span></div>
         </section>
       </div>
-      <aside class="journal-inventory"><fieldset><legend>Knowledge inventory</legend><p class="journal-inventory-hint">Choose a card to inspect its rule and source.</p><div class="journal-cards">
-        {entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Supplied for this quest</small><small class="journal-stored">Kept for another task</small><JournalArt name={entry.art} size={76} /></label>)}
-      </div></fieldset><p class="journal-inventory-note">Reviewable project knowledge.<br />Kept in your local app and <code>.lore.md</code>.</p></aside></div>
-      <footer class="journal-book-footer"><span>Fictional walkthrough · no agent connected</span><a href={`${base}docs/example/`}>Try the sample project <span aria-hidden="true">→</span></a></footer>
+      <details class="journal-inventory"><summary>Explore saved knowledge <span class="muted">3 example entries</span></summary><fieldset><legend class="visually-hidden">Knowledge inventory</legend><p class="journal-inventory-hint">Choose an entry to inspect its rule and source.</p><div class="journal-cards">{entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><JournalArt name={entry.art} size={52} /><span class="journal-card-copy"><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Included for this task</small><small class="journal-stored">Kept for another task</small></span></label>)}</div></fieldset></details>
+      <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`}>Try the sample workflow <span aria-hidden="true">→</span></a></footer>
     </div>
   </div>
-  <p class="journal-disclosure">An illustration of the workflow, not a live curation run. Knowledge extraction runs in the background; context depends on relevance, scope, confidence, and budget.</p>
   <p class="visually-hidden" data-journal-status role="status"></p>
 </section>
 <script>import "../scripts/quest-journal";</script>

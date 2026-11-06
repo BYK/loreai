@@ -2,24 +2,20 @@
 title: How project memory works
 description: Understand stored conversations, summaries, knowledge, and current agent context.
 ---
+import MemoryFlow from '../../../components/MemoryFlow.astro';
 
 **Stored does not mean supplied on every request.** Lore keeps a record that can
 be searched and selects material for the current task within its context budget.
 
 ## Four things you can inspect
 
-| Material | Purpose | Where to look |
-| --- | --- | --- |
-| Stored conversation | Original messages and tool results available for later search | Sessions in the local app |
-| Distilled context | Compressed observations from older work | Session context and distillation views |
-| Project knowledge | Durable decisions, patterns, preferences, architecture, and gotchas | Knowledge and `.lore.md` |
-| Current context | Material composed for the request, including recent work and selected memory | Session context where recorded |
+<MemoryFlow />
 
 ## Follow one decision
 
-You discuss duplicate webhook deliveries. That conversation also mentions lunch.
+You discuss duplicate webhook deliveries. That conversation also mentions a temporary test port.
 A curated entry might retain the event-ID rule as project knowledge. Later, a
-webhook task can use that rule; lunch is unrelated to the task.
+webhook task can use that rule; the temporary port is unrelated to the task.
 
 This is an illustration of relevance, not a promise that every curation run produces
 exactly this entry or that every request includes it. Selection also depends on

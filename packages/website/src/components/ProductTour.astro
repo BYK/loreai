@@ -9,7 +9,8 @@ import JournalArt from "./JournalArt.astro";
  {screens.map(screen=><figure class="tour-panel" data-tour-panel={screen.id} id={`tour-${screen.id}`}>
   <div class="tour-caption"><h3>{screen.title}</h3><p>{screen.description}</p><a href={`${base}docs/${screen.link}`}>{screen.action} →</a></div>
   {(["light","dark"] as const).map(theme=><a class:list={["tour-image-link",`tour-shot-${theme}`]} href={`${base}product-tour/${screen.id}-${theme}.png`} target="_blank" rel="noopener noreferrer" aria-label={`Open full-size ${screen.choice.toLowerCase()} screenshot`}><picture>{screen.id === "knowledge" && <source media="(max-width: 600px)" srcset={`${base}product-tour/knowledge-mobile-${theme}.png`} width="390" height="700" />}<img src={`${base}product-tour/${screen.id}-${theme}.png`} width="1120" height="760" loading="lazy" decoding="async" alt={screen.alt} /></picture></a>)}
-  <figcaption class="small muted">Sample data in the actual Lore app. Select the image to inspect it at full size.</figcaption>
+  <figcaption class="small muted">Sample data in the actual Lore app. Select the image to inspect it at full size.
+  {screen.id === "knowledge" && <p class="small">{(["light","dark"] as const).map(theme => <a class={`tour-shot-${theme}`} href={`${base}product-tour/knowledge-detail-${theme}.png`} target="_blank" rel="noopener noreferrer">Inspect source and revision details ↗</a>)}</p>}</figcaption>
  </figure>)}
  </div></div>
 </section>

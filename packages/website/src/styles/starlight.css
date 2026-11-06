@@ -140,3 +140,5 @@
 .agent-setup .setup-picker label:has(:checked) { box-shadow:inset 3px 0 var(--accent); }
 @media(hover:hover) and (pointer:fine) { .sidebar-content a:hover,.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); }.agent-setup .setup-picker label:hover { border-color:var(--accent);background:var(--journal-card); } }
 @media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
+.docs-journal-title > .journal-art { width:64px;height:64px; }.docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
+.sl-markdown-content table { table-layout:auto; }.sl-markdown-content th,.sl-markdown-content td { overflow-wrap:normal;word-break:normal; }.sl-markdown-content :is(td,th) code { overflow-wrap:anywhere; }

@@ -6,15 +6,13 @@ quest journal replaces the 3D camp; its local Quiver illustrations, quiet margin
 numbered choices, and explicit selection marks now connect the homepage, actual-app
 tour, client setup, Starlight docs, Why Lore and blog.
 
-The homepage starts with a concrete description and installation action beside a
-larger open-journal expedition illustration generated with Quiver. The artwork
-links to the native journal. Distinct page, spine and card surfaces, chapter
-progress, larger illustrations and readable rule text strengthen its hierarchy.
-Fine-pointer hover/press movement is disabled for reduced motion. The
-journal follows a fictional decision from conversation into inspectable knowledge,
-then into a later task. Its inventory cards open their rule and native expandable
-source. Task selection highlights the relevant entry; unrelated entries remain
-stored. It is explicitly an illustration, not a live agent or curation run.
+The homepage starts with a concrete explanation and a readable `.lore.md` artifact.
+An actual-app preview comes before the journal. Conversation is the default chapter;
+one durable project decision becomes reviewable knowledge, then relevant context for
+a later task. An optional inventory keeps secondary choices out of the main reading
+path and uses full-width phone rows. Source and file excerpts expand natively.
+Task-specific reasons explain why a rule is supplied; unrelated rules remain stored.
+The journal is explicitly fictional rather than a live agent or curation run.
 
 The three native radio groups work without JavaScript. Enhancement keeps
 `chapter`, `entry`, and `task` in one allowlisted history entry and restores them
@@ -29,7 +27,7 @@ all six existing client choices, copy/error handling and the connection-to-first
 session path. Pagefind, generated references, public fragments, signup recovery,
 compact Light/System/Dark controls, and availability/cost distinctions remain.
 
-The five Quiver SVGs ship as static local geometry-only images, with no external
+Nine Quiver objects (18 geometry-identical light/dark SVG variants) ship as static local geometry-only images, with no external
 resources, scripts, or account metadata. Source provenance is in
 [the art directory](../../packages/website/public/journal-art/README.md). The old
 renderer, geometry/fallback code, and Three.js/type dependencies are removed.
@@ -43,16 +41,19 @@ remain available for the baseline design at `82e1af50`; the current captures bel
 show the journal rather than the earlier camp iterations.
 
 ![Homepage with the interactive journal](screenshots/journal-home-light.jpg)
-![Dark journal and inventory](screenshots/journal-home-dark.jpg)
+![Dark journal conversation](screenshots/journal-home-dark.jpg)
 ![Phone recall and relevant knowledge](screenshots/journal-recall-mobile-dark.jpg)
 ![Full actual-app tour](screenshots/journal-tour-dark.jpg)
 ![Field-guide docs](screenshots/journal-docs-dark.jpg)
 ![Phone setup](screenshots/journal-setup-mobile-light.jpg)
 ![Blog field notes](screenshots/journal-blog-light.jpg)
 ![Why Lore](screenshots/journal-why-dark.jpg)
+![Light artwork and data boundaries](screenshots/journal-data-light.jpg)
+![Full-width phone inventory](screenshots/journal-inventory-mobile-dark.jpg)
+![Phone comparison retains all facts](screenshots/journal-comparison-mobile-light.jpg)
 
 See [the website package](../../packages/website/README.md) and
-[the approved design](../superpowers/specs/2026-11-06-quest-journal-design.md)
+[the current approved design](../superpowers/specs/2026-11-06-website-story-design.md)
 for implementation and maintenance.
 
 ## Approved audit coverage
@@ -107,27 +108,34 @@ WCAG certification or a completed VoiceOver/NVDA audit. No real signup is submit
 while capturing or testing the error/retry flow.
 
 
-## Journal validation
+## Product-story and visual QA follow-up
 
-The final journal build passes 302 browser checks with eight conditional
-skips across five viewport/appearance configurations. Fifty repeated state checks
-cover checked-card navigation, atomic journal history, explicit URL precedence and
-the product tour. Thirteen website unit tests, Astro diagnostics (41 files, zero
-diagnostics), workspace typecheck/lint/format, generated-doc parity, all 37 pages’
-social metadata, and 77 internal HTTP destinations pass.
+| Area | Delivered behavior |
+| --- | --- |
+| Product proof | Readable knowledge-file artifact near the headline; actual app before the fictional journal |
+| Journal sequence | Conversation → Saved knowledge → Next session; optional inventory, real file excerpt and task-relevance reasons |
+| Readability | 15px reading text, 13px controls/status, full-width phone inventory; unrelated entries retain readable contrast |
+| Setup | One visible sequence, six clients, honest “See verification steps” action, recorded-session example and preserved legacy fragments |
+| Source fidelity | One consistent webhook rule across the journal, actual-app record, two revisions and linked conversation; exact-message limitation stated |
+| Illustration | Nine purposeful objects, separate light ink palettes, local inert geometry and no brightness filter |
+| Memory model | Recent conversation, distilled context and relevant knowledge shown as current-request inputs; stored history remains searchable |
+| Decision guide | Fit-first introduction, all comparison facts stacked on phones, explicit local/provider/telemetry boundaries |
+| Reading paths | Practical featured article, quiet metadata, relevant availability notes and compact, purpose-specific docs artwork |
 
-A separate prefixed build exercises all 37 HTML pages and tests journal history,
-setup/tour state, decoded illustrations, and Pagefind result navigation at 1280px
-and 320px. It reports zero failed assets or runtime errors. Separate correctness
-and security reviews checked static source binding, allowlisted query state and
-the geometry-only SVG assets. The checked-card navigation defect found during
-review has failing-before/passing-after regressions.
+One hundred fifty repeated delayed-load cases also pass across all five projects.
+The regression suite covers the new default, optional inventory, composed text
+contrast, light/dark artwork, setup destination, legacy fragments, no-JS dark
+verification, responsive comparisons, memory diagrams and article hierarchy.
+Existing URL/history, delayed-native, keyboard, reduced-motion, theme, setup and
+product-tour contracts remain covered. Test results and the broader root-suite
+limitations are recorded in the PR; website checks alone do not imply a passing
+core/gateway suite or completed assistive-technology certification.
 
-The broader root test result and hosted CI status are recorded in the PR; these
-website checks do not imply that every core/gateway test passed locally.
-
-The visual-polish review caught a reduced-motion hover jump. A real bounding-box
-regression reproduced the 3px movement before the fix and passes in all three
-desktop projects afterward. Geometry-only SVG checks and separate correctness/
-security reviews pass for this presentation-only delta; no controller, query,
-command, signup, or dependency behavior changes in this iteration.
+Current validation: 352 browser checks pass with eight conditional skips across five
+viewport/appearance configurations; the final diagram alignment regression passes
+in all five. Thirteen website unit tests and Astro diagnostics pass. A prefixed
+build serves all 37 HTML pages and exercises journal history, setup/tour state,
+local images and Pagefind navigation at 1280px and 320px without failed assets or
+runtime errors. All 817 internal fragment links and 91 local HTTP destinations pass. Separate correctness and security reviews audit parser stability,
+SVG geometry/paint safety, and factual boundaries. Full repository testing remains
+separate and is reported with exact local failures in the PR.
