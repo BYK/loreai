@@ -1,5 +1,6 @@
 @import "../../public/palette.css";
 @import "../../public/controls.css";
+@import "../../public/navigation.css";
 @import "../../public/journal.css";
 
 :root {
@@ -142,3 +143,12 @@
 @media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
 .docs-journal-title > .journal-art { width:64px;height:64px; }.docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
 .sl-markdown-content table { table-layout:auto; }.sl-markdown-content th,.sl-markdown-content td { overflow-wrap:normal;word-break:normal; }.sl-markdown-content :is(td,th) code { overflow-wrap:anywhere; }
+
+/* Leave room for the inset guide without moving Starlight's search/sidebar. */
+:root { --sl-nav-height:5.5rem; }
+.page > header.header { background:transparent;border:0;padding:12px 16px;height:var(--sl-nav-height);pointer-events:none; }
+.page > header.header > .docs-site-header { pointer-events:auto;height:64px;max-width:1280px;margin-inline:auto;padding:8px 12px; }
+@media (max-width:50rem) {
+  .page > header.header > .docs-site-header { padding-inline:8px 50px; }
+  starlight-menu-button button { inset-inline-end:26px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text);box-shadow:none; }
+}

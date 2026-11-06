@@ -1,0 +1,29 @@
+---
+import JournalArt from "./JournalArt.astro";
+import NavigationIcon from "./NavigationIcon.astro";
+import { currentSection, navigationGroups } from "../lib/site-navigation";
+const base = import.meta.env.BASE_URL;
+const groups = navigationGroups(base);
+---
+<nav class="primary-nav guide-navigation" aria-label="Primary navigation">
+  <ul class="guide-triggers">
+    {groups.map(group => <li>
+      <details class="guide-menu" data-menu name="field-guide">
+        <summary class:list={["guide-trigger", { "guide-current": group.links.some(link => currentSection(Astro.url.pathname, "section" in link ? link.section : undefined)) }]}>{group.label}<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></summary>
+        <div class="guide-panel">
+          <div class="guide-list">
+            <p class="guide-label">{group.heading}</p>
+            {group.links.map(link => <a class="guide-destination" href={link.href} aria-current={currentSection(Astro.url.pathname, "section" in link ? link.section : undefined)}><NavigationIcon name={link.icon} /><span><strong>{link.label}</strong><small>{link.description}</small></span></a>)}
+          </div>
+          <a class="guide-feature" href={group.feature.href}>
+            <JournalArt name={group.feature.art} size={118} eager />
+            <span class="guide-label">{group.feature.label}</span><strong>{group.feature.title}</strong><small>{group.feature.description}</small>
+            <span class="guide-feature-action">{group.feature.action}<span aria-hidden="true">→</span></span>
+          </a>
+          <div class="guide-bottom"><span>{group.footer}</span><a href={group.footerLink.href} {...(group.footerLink.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{group.footerLink.label}<span aria-hidden="true">↗</span></a></div>
+        </div>
+      </details>
+    </li>)}
+    <li><a class="guide-trigger" href={`${base}different/`} aria-current={currentSection(Astro.url.pathname, `${base}different/`)}>Why Lore</a></li>
+  </ul>
+</nav>

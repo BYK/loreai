@@ -223,5 +223,7 @@ test("documentation header search and navigation never overlap at intermediate w
       searchBox = await search.boundingBox(),
       themeBox = await header.locator(".docs-controls").boundingBox();
     expect(searchBox!.x + searchBox!.width).toBeLessThanOrEqual(themeBox!.x);
+    expect(searchBox!.height).toBeGreaterThanOrEqual(44);
+    if (width < 928) expect(searchBox!.width).toBe(44);
   }
 });

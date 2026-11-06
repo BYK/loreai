@@ -143,9 +143,14 @@ test("shared navigation identifies the current section and blog metadata is not 
   await page.goto("/blog/");
   const toggle = page.getByLabel("Toggle navigation menu", { exact: true });
   if (await toggle.isVisible()) await toggle.click();
+  else
+    await page
+      .locator(".guide-menu summary")
+      .filter({ hasText: "Resources" })
+      .click();
   const active = page
     .getByRole("navigation", { name: "Primary navigation" })
-    .getByRole("link", { name: "Blog", exact: true });
+    .getByRole("link", { name: /^Field notes/ });
   await expect(active).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".blog-card")).toHaveCount(0);
   await expect(page.locator(".post-row").first()).toBeVisible();

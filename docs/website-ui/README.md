@@ -140,29 +140,42 @@ runtime errors. All 817 internal fragment links and 91 local HTTP destinations p
 SVG geometry/paint safety, and factual boundaries. Full repository testing remains
 separate and is reported with exact local failures in the PR.
 
-## Top navigation refinement
+## Floating field guide navigation
 
-The latest header groups Docs, Why Lore and Blog beside the logo. Static GitHub,
-theme and installation controls sit together on the right; the journal and theme
-controller are unchanged. The mobile menu retains every text destination and
-works without JavaScript. Other feature captures above document the product-story
-pass; these screenshots show the current header across appearances and widths.
+The user-approved floating field guide replaces the earlier three-link bar on
+public pages, blog, tour and documentation. The RPG journal and product-story
+sections stay intact. All destinations are real native links beneath BASE_URL.
 
 | Before | After | Why |
 | --- | --- | --- |
-| Five equally weighted links | Three section links plus a clear Get started action | Separate browsing from starting setup |
-| GitHub text competes with page links | Quiet icon with an accessible GitHub name | Keep the utility available with less visual weight |
-| Filled active navigation tile | Short colored underline | Mark the current section without another container |
-| Plain mobile installation link | Full-width installation action in the native menu | Make the next action easy to find |
+| Full-width bar with a divider beside the logo | Inset rounded olive frame and modern DM Sans wordmark | Match the approved preview and app palette |
+| Three ungrouped section links | Product and Resources disclosures with descriptive destinations | Explain what a page helps the reader do |
+| All navigation uses text alone | Featured journal and setup artwork inside the menus | Carry the field-guide character into navigation |
+| Accent-filled installation utility | Neutral ink action with a small amber arrow | Give setup a clear endpoint without crowding the bar |
+| Desktop dropdown stays open after Tab leaves | Native disclosure closes when focus moves outside | Keep the next control unobscured without moving focus |
+| Compact docs search stretches into an empty field | 44px icon button with the original search dialog | Keep compact navigation deliberate and usable |
 
-![Light header](screenshots/header-home-light.jpg)
+![Floating light header](screenshots/header-home-light.jpg)
+![Product menu](screenshots/header-product-light.jpg)
+![Resources menu in dark appearance](screenshots/header-resources-dark.jpg)
 ![Dark documentation header](screenshots/header-docs-dark.jpg)
 ![Intermediate documentation header](screenshots/header-docs-834-light.jpg)
-![Light native phone menu](screenshots/header-menu-mobile-light.jpg)
-![Dark native phone menu](screenshots/header-menu-mobile-dark.jpg)
+![Light grouped phone menu](screenshots/header-menu-mobile-light.jpg)
+![Dark grouped phone menu](screenshots/header-menu-mobile-dark.jpg)
 
-The complete website suite passes 362 browser checks with eight conditional skips.
-The focused header/current-section/search/short-screen checks pass all 25 cases;
-Astro checks 45 files without diagnostics. Separate correctness/security reviews
-classify this as a mechanical presentation change and preserve the prior broad
-repository test limitations rather than treating them as green.
+Native disclosures work without JavaScript. The enhancement handles Escape,
+outside clicks, link selection and focus leaving; native named disclosures ensure
+rapidly opening another group keeps the newest menu open. Current-section marking
+is separate from setup actions, including when multiple Product links lead into
+the docs. The theme pill retains its existing behavior and contrast ring.
+
+The complete website suite passes 377 browser checks with eight conditional skips
+across five configurations. Coverage includes phone widths on either side of the
+wordmark breakpoint, coarse pointers, no-JavaScript navigation, native journal
+fragments, synchronous disclosure opening, and compact docs search. Thirteen
+website unit tests and Astro diagnostics for 48 files pass. A prefixed build serves
+all 37 HTML pages and exercises menu destinations, artwork, journal history,
+setup/tour state and Pagefind at 1280px and 320px. All 989 internal fragment links
+resolve. Independent correctness/security reviews and broad repository checks are
+reported separately in the PR; the website results do not imply a clean local
+full-repository suite.

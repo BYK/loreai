@@ -1,12 +1,9 @@
 ---
 import PrimaryLinks from "./PrimaryLinks.astro";
-const base = import.meta.env.BASE_URL;
 ---
 <details class="nav-mobile" data-menu>
   <summary class="nav-burger" aria-label="Toggle navigation menu"><span aria-hidden="true">☰</span><span class="visually-hidden">Navigation</span></summary>
   <div class="nav-mobile-panel">
     <PrimaryLinks mobile />
-    <a href={`${base}#how`} class="menu-secondary">How it works</a>
-    <a href={`${base}docs/troubleshooting/`} class="menu-secondary">Get help</a>
   </div>
 </details>

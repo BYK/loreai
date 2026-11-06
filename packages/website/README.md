@@ -34,14 +34,18 @@ navigation and readable content remain available without JavaScript.
 
 ## Page structure and first use
 
-`PublicLayout.astro` owns the common public header/footer. `PrimaryLinks.astro`
-is also used by the docs header and drawer. Desktop navigation groups three section
-links beside the logo. `HeaderActions.astro` shares the accessible GitHub icon,
-existing theme pill and clear installation action. Native mobile menus keep all
-five text destinations, with an emphasized Get started link.
+`PublicLayout.astro` owns the common public header/footer. `FieldGuideNav.astro`
+renders native Product and Resources disclosures beside Why Lore in the floating
+header shared with Starlight. `src/lib/site-navigation.ts` owns the static link
+copy and destinations; `PrimaryLinks.astro` renders the grouped phone menu and
+docs drawer. Product features the quest journal, and Resources features the first
+session guide, using existing appearance-aware Quiver artwork. GitHub, the theme
+pill and a neutral Get started action remain separate utilities. Docs retain
+Starlight search, with a 44px icon button at compact widths.
+`public/navigation.css` supplies the shared floating frame and menu presentation.
 `InstallCommand.astro` and `Waitlist.astro` keep command and signup copy consistent.
 Native disclosures provide navigation without JavaScript. `menus.js` adds dismissal
-and focus restoration; `site.js` owns copy receipts, a bounded release lookup, and
+and focus restoration, plus dismissal when keyboard focus leaves a menu; `site.js` owns copy receipts, a bounded release lookup, and
 signup submission/retry/timeout feedback. No response-supplied HTML or destination
 URLs are used.
 

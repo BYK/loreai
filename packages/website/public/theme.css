@@ -1,5 +1,6 @@
 @import url("./palette.css");
 @import url("./controls.css");
+@import url("./navigation.css");
 @import url("./journal.css");
 
 :root {
@@ -41,10 +42,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .button-secondary:hover { background: var(--chrome); color: var(--heading); }
 .button:disabled { cursor: wait; opacity: .65; }
 .text-link { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; }
-.top-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 64px; padding: .5rem max(1.5rem, calc((100% - 1120px) / 2)); background: var(--surface); border-bottom: 1px solid var(--line); }
+.top-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 64px; padding: .5rem .75rem; background: var(--surface); border-bottom: 1px solid var(--line); }
 .header-actions { display: flex; align-items: center; gap: .75rem; }
 .header-brand { display:flex;align-items:center;gap:1.5rem;min-width:0; }
-.header-brand .desktop-nav { padding-inline-start:1.5rem;border-inline-start:1px solid var(--line); }
+
 .logo { display: inline-flex; align-items: center; gap: .3rem; color: var(--heading); line-height: 1; text-decoration: none; flex-shrink: 0; }
 .logo-img { display: block; }
 .logo-text { font: italic 400 1.5rem/1 var(--serif); }
@@ -120,7 +121,7 @@ th { font-weight: 500; }
 @media (max-width: 600px) {
   .section { width: calc(100% - 2rem); padding-block: 2.5rem; }
   .home-hero { padding-top: 2rem; }
-  .top-nav { min-height: 64px; padding: .5rem 1rem; }
+  .top-nav { min-height:64px; padding:.5rem .625rem; }
   .workflow, .capabilities { grid-template-columns: 1fr; gap: 1.5rem; }
   .page-sections { padding-block: .75rem; gap: .25rem 1rem; }
   .site-footer { width: calc(100% - 2rem); }
@@ -201,7 +202,7 @@ th { font-weight: 500; }
 @media(max-width:600px) { .home-page .hero-copy { grid-template-columns:1fr;gap:.75rem; }.hero-expedition { max-width:320px;justify-self:center;width:100%; }.hero-expedition > .journal-art { max-height:190px; }.home-page .hero-desc { margin-top:1rem; }.home-page .home-hero { gap:1.75rem; } }
 
 /* Shared journal margins across the product tour and public pages. */
-.top-nav { background:var(--bg); }
+
 .eyebrow.field-marker { color:var(--accent);font-size:.6875rem; }
 .tour-journal { display:grid;grid-template-columns:190px minmax(0,1fr); }
 .tour-journal .tour-picker { display:flex;flex-direction:column;gap:.375rem;margin:0;padding:1rem .75rem;background:var(--journal-margin);border-right:1px solid var(--line); }

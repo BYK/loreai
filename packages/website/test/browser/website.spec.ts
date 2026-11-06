@@ -214,7 +214,7 @@ test("content and native navigation remain available without JavaScript", async 
     await expect(
       page
         .locator(".nav-mobile-panel")
-        .getByRole("link", { name: "Docs", exact: true }),
+        .getByRole("link", { name: "Documentation", exact: true }),
     ).toBeVisible();
   }
   await context.close();

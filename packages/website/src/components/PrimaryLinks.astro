@@ -1,19 +1,22 @@
 ---
+import { currentSection, navigationGroups } from "../lib/site-navigation";
 interface Props { mobile?: boolean; }
-const { mobile = false } = Astro.props;
 const base = import.meta.env.BASE_URL;
-type NavLink = { label: string; href: string; action?: boolean; external?: boolean; };
-const links: NavLink[] = [
-  { label: "Docs", href: `${base}docs/` },
-  { label: "Why Lore", href: `${base}different/` },
-  { label: "Blog", href: `${base}blog/` },
-];
-if (mobile) links.push(
-  { label: "GitHub", href: "https://github.com/BYK/loreai", external: true },
-  { label: "Get started", href: `${base}docs/install/`, action: true },
-);
-const current = (href: string) => Astro.url.pathname === href ? "page" : Astro.url.pathname.startsWith(href) ? "true" : undefined;
+const groups = navigationGroups(base);
 ---
-<nav aria-label="Primary navigation" class:list={["primary-nav", { "primary-nav-mobile": mobile }]}>
-  <ul>{links.map(link => <li><a class:list={{"nav-start":link.action}} href={link.href} aria-current={link.external || link.action ? undefined : current(link.href)} {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{link.label}</a></li>)}</ul>
+<nav aria-label="Primary navigation" class="primary-nav primary-nav-mobile">
+  {groups.map(group => <div class="mobile-nav-group">
+    <p class="guide-label">{group.label}</p>
+    <ul>{group.links.filter(link => link.label !== "Connect your coding agent" && link.label !== "Troubleshooting").map(link => <li><a href={link.href} aria-current={currentSection(Astro.url.pathname, "section" in link ? link.section : undefined)}>{link.label}</a></li>)}
+      {group.id === "product" ? <>
+        <li><a href={`${base}#journal`}>The quest journal</a></li>
+        <li><a href={`${base}different/`} aria-current={currentSection(Astro.url.pathname, `${base}different/`)}>Why Lore</a></li>
+        <li><a href={`${base}#how`}>How it works</a></li>
+      </> : <>
+        <li><a href={`${base}docs/troubleshooting/`}>Get help</a></li>
+        <li><a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub<span aria-hidden="true"> ↗</span></a></li>
+      </>}
+    </ul>
+  </div>)}
+  <a class="nav-start" href={`${base}docs/install/`}>Get started <span aria-hidden="true">↗</span></a>
 </nav>

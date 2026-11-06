@@ -6,6 +6,10 @@ function close(menu, restoreFocus = false) {
   if (restoreFocus) menu.querySelector("summary")?.focus();
 }
 menus.forEach((menu) => {
+  // Once keyboard focus leaves navigation, do not obscure the next control.
+  menu.addEventListener("focusout", (event) => {
+    if (!menu.contains(event.relatedTarget)) close(menu);
+  });
   menu.addEventListener("toggle", () => {
     if (menu.open)
       menus.forEach((other) => {
