@@ -338,15 +338,19 @@ describe("accumulateOpenAISSEStream", () => {
     ).rejects.toThrow("malformed OpenAI stream event");
   });
 
-  test("rejects total_tokens that contradict prompt and completion totals", async () => {
-    await expect(
-      accumulateOpenAISSEStream(
-        sse([
-          'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":6}}',
-        ]),
-        { stopAtTerminal: true, strict: true },
-      ),
-    ).rejects.toThrow("malformed OpenAI stream event");
+  test("accepts total_tokens that differ from prompt and completion totals", async () => {
+    const result = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":6}}',
+      ]),
+      { stopAtTerminal: true, strict: true },
+    );
+    expect(result.usage).toEqual({
+      inputTokens: 2,
+      outputTokens: 3,
+      cacheReadInputTokens: undefined,
+      cacheCreationInputTokens: undefined,
+    });
   });
 
   test("rejects total_tokens when a parent component is absent", async () => {

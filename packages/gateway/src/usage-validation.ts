@@ -133,16 +133,90 @@ const OPENAI_COMPLETION_DETAIL_FIELDS = [
   "rejected_prediction_tokens",
 ] as const;
 
+type OpenAIUsageField =
+  | "usage"
+  | "prompt_tokens"
+  | "completion_tokens"
+  | "total_tokens"
+  | "prompt_tokens_details"
+  | "completion_tokens_details"
+  | `prompt_tokens_details.${"cached_tokens" | "cache_write_tokens"}`
+  | `completion_tokens_details.${(typeof OPENAI_COMPLETION_DETAIL_FIELDS)[number]}`;
+
+type OpenAIUsageCategory =
+  | "invalid-container"
+  | "invalid-count"
+  | "sum-overflow"
+  | "missing-components"
+  | "invalid-subset";
+
+/** Carries only fixed schema paths and categories. */
+export class OpenAIUsageValidationError extends Error {
+  constructor(
+    message: string,
+    readonly field: OpenAIUsageField,
+    readonly category: OpenAIUsageCategory,
+  ) {
+    super(message);
+    this.name = "OpenAIUsageValidationError";
+  }
+}
+
+function usageDiagnostic<T>(
+  check: () => T,
+  message: string,
+  field: OpenAIUsageField,
+  category: OpenAIUsageCategory,
+): T {
+  try {
+    return check();
+  } catch {
+    throw new OpenAIUsageValidationError(message, field, category);
+  }
+}
+
 function validateOpenAIDetails(
   value: unknown,
   total: number | undefined,
   fields: readonly string[],
   message: string,
+  diagnosticField?: "prompt_tokens_details" | "completion_tokens_details",
 ): Record<string, unknown> | undefined {
-  const details = optionalDetails(value, message);
+  const details = diagnosticField
+    ? usageDiagnostic(
+        () => optionalDetails(value, message),
+        message,
+        diagnosticField,
+        "invalid-container",
+      )
+    : optionalDetails(value, message);
   if (!details) return undefined;
-  const components = fields.map((field) => tokenCount(details[field], message));
-  validateSubset(components, total, message);
+  const components = fields.map((field) =>
+    diagnosticField
+      ? usageDiagnostic(
+          () => tokenCount(details[field], message),
+          message,
+          `${diagnosticField}.${field}` as OpenAIUsageField,
+          "invalid-count",
+        )
+      : tokenCount(details[field], message),
+  );
+  if (diagnosticField) {
+    usageDiagnostic(
+      () => safeTokenSum(components, message),
+      message,
+      diagnosticField,
+      "sum-overflow",
+    );
+    usageDiagnostic(
+      () => validateSubset(components, total, message),
+      message,
+      diagnosticField,
+      "invalid-subset",
+    );
+  } else {
+    validateSubset(components, total, message);
+  }
   return details;
 }
 
@@ -151,27 +225,45 @@ export function validateOpenAIUsage(
   message: string,
 ): Record<string, unknown> | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!isRecord(value)) invalid(message);
+  if (!isRecord(value)) {
+    throw new OpenAIUsageValidationError(message, "usage", "invalid-container");
+  }
 
-  const prompt = tokenCount(value.prompt_tokens, message);
-  const completion = tokenCount(value.completion_tokens, message);
-  const total = tokenCount(value.total_tokens, message);
+  const count = (
+    field: "prompt_tokens" | "completion_tokens" | "total_tokens",
+  ) =>
+    usageDiagnostic(
+      () => tokenCount(value[field], message),
+      message,
+      field,
+      "invalid-count",
+    );
+  const prompt = count("prompt_tokens");
+  const completion = count("completion_tokens");
+  const total = count("total_tokens");
   if (
     total !== undefined &&
     (prompt === undefined || completion === undefined)
   ) {
-    invalid(message);
+    throw new OpenAIUsageValidationError(
+      message,
+      "total_tokens",
+      "missing-components",
+    );
   }
-  const componentTotal = safeTokenSum([prompt, completion], message);
-  // Cache counts are subsets of prompt_tokens; reasoning/audio/prediction
-  // counts are subsets of completion_tokens. They must not be added again.
-  if (total !== undefined && componentTotal !== total) invalid(message);
+  usageDiagnostic(
+    () => safeTokenSum([prompt, completion], message),
+    message,
+    "total_tokens",
+    "sum-overflow",
+  );
 
   const promptDetails = validateOpenAIDetails(
     value.prompt_tokens_details,
     prompt,
     ["cached_tokens", "cache_write_tokens"],
     message,
+    "prompt_tokens_details",
   );
   if (promptDetails) {
     const cached = tokenCount(promptDetails.cached_tokens, message);
@@ -183,6 +275,7 @@ export function validateOpenAIUsage(
     completion,
     OPENAI_COMPLETION_DETAIL_FIELDS,
     message,
+    "completion_tokens_details",
   );
 
   return value;
@@ -214,10 +307,7 @@ export function validateResponsesUsage(
   if (total !== undefined && (input === undefined || output === undefined)) {
     invalid(message);
   }
-  const componentTotal = safeTokenSum([input, output], message);
-  // Responses uses the same inclusive parent-count semantics as Chat:
-  // cache details belong to input_tokens and reasoning details to output_tokens.
-  if (total !== undefined && componentTotal !== total) invalid(message);
+  safeTokenSum([input, output], message);
 
   validateResponsesInputDetails(value.input_tokens_details, input, message);
   validateResponsesInputDetails(value.prompt_tokens_details, input, message);
@@ -274,7 +364,7 @@ export function validateGeminiUsageMetadata(
   // details as decompositions of their parent counts, so neither is added here.
   // thoughtsTokenCount and toolUsePromptTokenCount are separate billable
   // components of totalTokenCount.
-  const componentTotal = safeTokenSum(
+  safeTokenSum(
     [
       counts.promptTokenCount,
       counts.candidatesTokenCount,
@@ -286,8 +376,7 @@ export function validateGeminiUsageMetadata(
   if (
     counts.totalTokenCount !== undefined &&
     (counts.promptTokenCount === undefined ||
-      counts.candidatesTokenCount === undefined ||
-      componentTotal !== counts.totalTokenCount)
+      counts.candidatesTokenCount === undefined)
   ) {
     invalid(message);
   }
