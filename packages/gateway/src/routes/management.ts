@@ -27,7 +27,12 @@ export const managementRoutes: RouteModule = {
       const { handleAPIRequest } = await import("../api");
       const req = c.var.request;
       return withManagementCors(
-        await handleAPIRequest(req, new URL(req.url), ctx.config),
+        await handleAPIRequest(
+          req,
+          new URL(req.url),
+          ctx.config,
+          ctx.options.webLoginSignal,
+        ),
         c.var.allowedManagementOrigin,
       );
     });

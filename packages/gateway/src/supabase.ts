@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createClient,
@@ -32,14 +33,8 @@ import {
   withTransaction,
 } from "@loreai/core";
 
-/** Public project URL. Build-time default → Folk Lore's project; env override. */
-export const SUPABASE_URL =
-  process.env.SUPABASE_URL ?? "https://jlwxsrmvomocgngbxmcf.supabase.co";
-
-/** Public (publishable/anon) key — safe to ship; RLS enforces access. */
-export const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ??
-  "sb_publishable_P7FJq3V-Sui53nkbPsdpYg_N0U6lyZi";
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-settings";
+export { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-settings";
 
 /** team_config key under which the auth session is persisted. */
 const SESSION_KEY = "supabase.session";
@@ -58,10 +53,19 @@ export class SessionUnavailableError extends Error {
   }
 }
 
-const restores = new Map<
-  string,
-  { promise: Promise<SupabaseClient | null>; controller: AbortController }
->();
+type Restoration = {
+  promise: Promise<SupabaseClient | null>;
+  controller: AbortController;
+  owners: Set<symbol>;
+  settled: boolean;
+};
+const restores = new Map<string, Restoration>();
+const accountLifecycle = new AsyncLocalStorage<AbortSignal>();
+
+/** All on-demand account acquisition inherits the current listener/request owner. */
+export function withAccountLifecycle<T>(signal: AbortSignal, run: () => T): T {
+  return accountLifecycle.run(signal, run);
+}
 let unavailableSessionKey: string | null = null;
 const clientRevisions = new WeakMap<SupabaseClient, string>();
 
@@ -343,6 +347,55 @@ function memoryStorage() {
   };
 }
 
+/** Every factory, including service-role clients, shares credential containment. */
+function supabaseFetch(
+  signal?: () => AbortSignal | undefined,
+  dispatchToken?: () => string,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const active = signal?.();
+    // The SDK retries thrown fetch errors and 5xx responses with
+    // uninterruptible backoff. Local scheduling owns retries; turn
+    // temporary/aborted auth failures into a non-retryable SDK error.
+    const unavailable = () =>
+      Response.json({ msg: "Account service unavailable" }, { status: 499 });
+    try {
+      if (active?.aborted) return unavailable();
+      // The SDK awaits token acquisition before it enters this transport.
+      // Fence the generation again at dispatch, and use a rotation from
+      // that same generation without another asynchronous hand-off.
+      const headers = dispatchToken ? new Headers(init?.headers) : undefined;
+      if (dispatchToken && headers)
+        headers.set("authorization", `Bearer ${dispatchToken()}`);
+      const response = await fetch(input, {
+        ...init,
+        ...(headers ? { headers } : {}),
+        // Redirects can replay bodies AND the service-role apikey header
+        // even when Fetch strips cross-origin Authorization headers.
+        redirect: "error",
+        ...(active
+          ? {
+              signal: init?.signal
+                ? AbortSignal.any([active, init.signal])
+                : active,
+            }
+          : {}),
+      });
+      if (active && response.status >= 500) {
+        // The SDK never sees this body; retain operation ownership
+        // until its cancellation settles before replacing it.
+        await response.body?.cancel().catch(() => {});
+        return unavailable();
+      }
+      return response;
+    } catch {
+      // Auth logs rejected fetch exceptions before callers can sanitize
+      // them. Never hand it transport diagnostics, even without a signal.
+      return unavailable();
+    }
+  }) as typeof fetch;
+}
+
 /**
  * Construct a fresh Supabase client. We manage session persistence ourselves
  * (team_config), so the client's own persistence is in-memory and refresh is
@@ -351,45 +404,11 @@ function memoryStorage() {
 export function createSupabaseClient(
   signal?: () => AbortSignal | undefined,
   accessToken?: () => Promise<string>,
+  dispatchToken?: () => string,
 ): SupabaseClient {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     ...(accessToken ? { accessToken } : {}),
-    ...(signal
-      ? {
-          global: {
-            fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
-              const active = signal();
-              // The SDK retries thrown fetch errors and 5xx responses with
-              // uninterruptible backoff. Local scheduling owns retries; turn
-              // temporary/aborted auth failures into a non-retryable SDK error.
-              const unavailable = () =>
-                Response.json(
-                  { msg: "Account service unavailable" },
-                  { status: 499 },
-                );
-              try {
-                if (active?.aborted) return unavailable();
-                const response = await fetch(input, {
-                  ...init,
-                  ...(active
-                    ? {
-                        signal: init?.signal
-                          ? AbortSignal.any([active, init.signal])
-                          : active,
-                      }
-                    : {}),
-                });
-                return active && response.status >= 500
-                  ? unavailable()
-                  : response;
-              } catch (error) {
-                if (active) return unavailable();
-                throw error;
-              }
-            }) as typeof fetch,
-          },
-        }
-      : {}),
+    global: { fetch: supabaseFetch(signal, dispatchToken) },
     auth: {
       flowType: "pkce",
       persistSession: true,
@@ -416,6 +435,7 @@ export function getServiceRoleClient(): SupabaseClient | null {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!key) return null;
   return createClient(SUPABASE_URL, key, {
+    global: { fetch: supabaseFetch() },
     auth: {
       persistSession: false,
       autoRefreshToken: false,
@@ -432,42 +452,67 @@ export function getServiceRoleClient(): SupabaseClient | null {
  * shared authentication work but never limits the returned client's lifetime.
  */
 export async function getAuthedClient(
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined = accountLifecycle.getStore(),
 ): Promise<SupabaseClient | null> {
+  signal?.throwIfAborted();
   const snapshot = sessionSnapshot();
   const persisted = parsePersistedSession(snapshot?.raw ?? null);
   if (!persisted) return null;
   const { raw, revision } = snapshot!;
   const key = snapshotKey(snapshot!);
-  const existing = restores.get(key);
-  if (existing) {
-    // A scheduler joining an on-demand restore still owns gateway shutdown.
-    // Its lifecycle abort must cancel the shared operation whichever caller
-    // started it first.
-    const abort = () => existing.controller.abort();
-    if (signal?.aborted) abort();
-    signal?.addEventListener("abort", abort, { once: true });
-    try {
-      return await existing.promise;
-    } finally {
-      signal?.removeEventListener("abort", abort);
-    }
-  }
   // Shared by on-demand callers and the scheduler. A SQLite lease additionally
   // serializes CLI/gateway processes consuming the same rotating refresh token.
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (signal?.aborted) abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  const pending = restoreSession(persisted, raw, revision, controller.signal);
-  const record = { promise: pending, controller };
-  restores.set(key, record);
-  try {
-    return await pending;
-  } finally {
-    signal?.removeEventListener("abort", abort);
-    if (restores.get(key) === record) restores.delete(key);
-  }
+  const record =
+    restores.get(key) ??
+    (() => {
+      const controller = new AbortController();
+      const created: Restoration = {
+        controller,
+        owners: new Set(),
+        settled: false,
+        // Shared work belongs to the subscriber set, never the initiating
+        // request's ambient lifecycle. Its explicit controller owns cancellation.
+        promise: accountLifecycle
+          .exit(() =>
+            restoreSession(persisted, raw, revision, controller.signal),
+          )
+          .finally(() => {
+            created.settled = true;
+            if (restores.get(key) === created) restores.delete(key);
+          }),
+      };
+      restores.set(key, created);
+      return created;
+    })();
+  if (record.controller.signal.aborted) throw new SessionUnavailableError();
+  // Retiring one listener/request must never cancel another live subscriber.
+  // Keep the record until the underlying work settles, even if it ignores abort.
+  const owner = Symbol();
+  record.owners.add(owner);
+  return await new Promise<SupabaseClient | null>((resolve, reject) => {
+    const retire = () => {
+      signal?.removeEventListener("abort", abort);
+      record.owners.delete(owner);
+      if (record.owners.size === 0 && !record.settled)
+        record.controller.abort();
+    };
+    const abort = () => {
+      retire();
+      reject(new SessionUnavailableError());
+    };
+    record.promise.then(
+      (client) => {
+        retire();
+        resolve(client);
+      },
+      (error: unknown) => {
+        retire();
+        reject(error);
+      },
+    );
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }
 
 function rejectedSession(error: {
@@ -625,9 +670,13 @@ async function restoreSession(
 export function accountDataClient(
   revision: string | null,
   initial: PersistedSession,
+  signal?: () => AbortSignal | undefined,
 ): SupabaseClient {
   let initialized = false;
+  const lifecycle = () => signal?.() ?? accountLifecycle.getStore();
   const read = () => {
+    // A retired listener's late token callback must never reopen SQLite.
+    lifecycle()?.throwIfAborted();
     const current = sessionSnapshot();
     const session = parsePersistedSession(current?.raw ?? null);
     if (
@@ -640,20 +689,28 @@ export function accountDataClient(
       );
     return session;
   };
-  const client = createSupabaseClient(undefined, async () => {
-    let session = read();
-    // The SDK eagerly requests a realtime token in its constructor. The
-    // authenticated initial token is already restored; avoid recursive work.
-    if (
-      initialized &&
-      session.expires_at !== undefined &&
-      session.expires_at <= Date.now() / 1000 + SESSION_REFRESH_MARGIN_SECONDS
-    ) {
-      if (!(await getAuthedClient())) throw new SessionUnavailableError();
-      session = read();
-    }
-    return session.access_token;
-  });
+  const client = createSupabaseClient(
+    lifecycle,
+    async () => {
+      const currentSignal = lifecycle();
+      currentSignal?.throwIfAborted();
+      let session = read();
+      // The SDK eagerly requests a realtime token in its constructor. The
+      // authenticated initial token is already restored; avoid recursive work.
+      if (
+        initialized &&
+        session.expires_at !== undefined &&
+        session.expires_at <= Date.now() / 1000 + SESSION_REFRESH_MARGIN_SECONDS
+      ) {
+        if (!(await getAuthedClient(currentSignal)))
+          throw new SessionUnavailableError();
+        currentSignal?.throwIfAborted();
+        session = read();
+      }
+      return session.access_token;
+    },
+    () => read().access_token,
+  );
   initialized = true;
   return client;
 }

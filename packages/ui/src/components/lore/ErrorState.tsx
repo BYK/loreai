@@ -13,7 +13,7 @@ export function errorStateFor(
   if (isApiError(error) && error.kind === "unauthorized")
     return (
       <StateCard kind="locked" title={`${what} hidden by the gateway`}>
-        Only the machine running the gateway can access this view.
+        The gateway denied this request. Check its management access settings.
       </StateCard>
     );
   if (isApiError(error) && error.kind === "forbidden")

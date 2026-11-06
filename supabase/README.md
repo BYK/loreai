@@ -93,6 +93,7 @@ deploy them separately (they are not auto-deployed by CI):
 ```bash
 supabase functions deploy github-provision
 supabase functions deploy github-discover
+supabase functions deploy send-invite-email
 ```
 
 - **`github-provision`** (E-5-a, #827) — mirrors a user's GitHub org/team memberships into Lore
@@ -110,8 +111,18 @@ supabase functions deploy github-discover
   Used by `lore team discover`. Like `github-provision`, it verifies the JWT and binds the
   `provider_token` to the caller's GitHub identity. Requires `read:org` (org/team mirroring)
   **and** `repo` (to list contributors on private repos — the `/contributors` endpoint is
-  per-repo just like `/collaborators`). Backed by migration `0050`
-  (`lore_users_for_github_ids` service-role RPC).
+  per-repo just like `/collaborators`). Uses the service-role-only
+  `lore_users_for_github_ids` RPC. Migration `0058` replaces the metadata-based lookup from
+  `0050` with server-owned linked GitHub identities in `auth.identities`. Editable user
+  metadata never establishes GitHub ownership.
+
+- **`send-invite-email`** — sends an existing invite only when the caller created it and
+  administers its scope. GitHub recipient lookup uses the service-role-only
+  `lore_emails_for_github_ids` RPC (`0051`, hardened by `0058`), resolving the linked account's
+  email entirely server-side. Ambiguous linked identities never select a recipient.
+  Apply `0058` before relying on GitHub discovery or recipient
+  lookup. RPC and SMTP failures expose fixed messages and failure-site classifications,
+  never provider diagnostics or recipient addresses.
 
 ## Observability (Sentry)
 
@@ -153,21 +164,36 @@ These live in the Supabase dashboard because they involve secrets:
 1. **Authentication → Providers → GitHub**: enable, paste the GitHub OAuth App
    Client ID + secret. The GitHub OAuth App's *Authorization callback URL* must
    be `https://jlwxsrmvomocgngbxmcf.supabase.co/auth/v1/callback`.
-2. **Authentication → Providers → Email**: enabled by default. The CLI uses a
-   numeric OTP code (not a magic link — links are useless on a headless/remote
-   box; the OTP length is configurable, commonly 6–8 digits). Edit **BOTH**
-   email templates to include `{{ .Token }}` in the body:
-   - **Email Templates → Confirm signup** (sent on a first-time email login)
-   - **Email Templates → Magic Link** (sent to returning emails)
-
-   Without `{{ .Token }}`, the user receives a `{{ .ConfirmationURL }}` link
-   whose `?code=` is a PKCE code (not the OTP) — the CLI will reject it.
+2. **Authentication → Providers → Email**: enabled by default. Set both the
+   **Confirm signup** and **Magic Link** email templates to the contents of
+   [`templates/sign-in.html`](templates/sign-in.html), with the subject
+   `Your Folk Lore sign-in code`. The local Supabase configuration uses the same
+   template; hosted projects require this dashboard change separately. The CLI
+   also accepts sign-in links and redirect addresses from existing templates.
 3. **Authentication → URL Configuration → Redirect URLs**: the CLI redirects to
    a loopback `…/callback` path, so the allow-list entries must be **path-aware
    wildcards** (Supabase treats `/` as a separator, so a bare `http://127.0.0.1`
    or `http://127.0.0.1:*` will NOT match `/callback`). Add:
    - `http://127.0.0.1:*/**` — browser flow (ephemeral port + `/callback`)
    - `http://127.0.0.1/**` — headless `--no-browser` flow (`http://127.0.0.1/callback`)
+    - `http://localhost:*/**` and `http://localhost/**` — browser dashboard callbacks using localhost
+    - `http://\[::1\]:*/**` and `http://\[::1\]/**` — IPv6 loopback callbacks (the brackets are escaped for Supabase's glob matcher)
+
+   Supabase Auth v2.185.0 and current upstream accept numeric loopback addresses,
+   including the full `127.0.0.0/8` range and `::1`, before checking the redirect
+   allowlist. Verify the Auth version and redirect behavior of the deployed
+   project; the local configuration alone does not change a hosted project.
+
+   Browser sign-in is available on local, remote, and hosted gateways through
+   the authorized management surface. GitHub returns to the dashboard origin
+   used by the browser. For a dashboard at `https://gateway.example`, add
+   `https://gateway.example/api/v1/account/login/callback**` and
+   `https://gateway.example/ui` to the deployed project's redirect allowlist.
+   On the gateway, set `LORE_ALLOW_REMOTE_MANAGEMENT=1` and
+   `LORE_MANAGEMENT_ORIGINS=https://gateway.example`, including the public port
+   when it is not the scheme's default. This also supports a TLS reverse proxy
+   whose gateway-side connection is loopback. Forwarding headers never authorize
+   a different browser origin.
 
 ## Verifying
 

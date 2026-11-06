@@ -113,7 +113,9 @@ function embedDocument(
               return;
             storeEmbedding(connection, table, id, vector);
           });
-        if (options?.suppressSyncCapture) withSyncApplying(store);
+        // Vectors are device-local. Suppress capture by default so late writes
+        // never enqueue unchanged content after the content sync has settled.
+        if (options?.suppressSyncCapture !== false) withSyncApplying(store);
         else store();
       })
       .catch((error) => {

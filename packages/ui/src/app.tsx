@@ -1,20 +1,14 @@
 import type { Component, ParentProps } from "solid-js";
-import { lazy, createSignal, Show } from "solid-js";
+import { lazy } from "solid-js";
 import { type RouteDefinition, Router } from "@solidjs/router";
 
 import { Browse } from "./routes/Browse";
 import { NotFound } from "./routes/NotFound";
 import { WorkspaceProvider } from "./routes/workspace";
-import { setGatewayAuthToken, type ApiClient } from "./lib/api";
+import { FolkLoginDialog } from "./components/shell/FolkStatus";
+import type { ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
 import { theme } from "./lib/theme";
-import { Button } from "./components/ui/button";
-import {
-  TextField,
-  TextFieldInput,
-  TextFieldLabel,
-} from "./components/ui/text-field";
-import { useWorkspace } from "./routes/workspace";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
 export const ROUTER_BASE = "/ui";
@@ -177,61 +171,6 @@ export const routes: RouteDefinition[] = [
   { path: "*", component: NotFound },
 ];
 
-const RemoteGatewayAuthGate: Component<ParentProps> = (props) => {
-  const workspace = useWorkspace();
-  const [token, setToken] = createSignal("");
-
-  const connect = (event: SubmitEvent) => {
-    event.preventDefault();
-    const value = token().trim();
-    if (!value) return;
-    setGatewayAuthToken(value);
-    setToken("");
-    workspace.state.projects.list.reload();
-  };
-
-  return (
-    <Show
-      when={workspace.connection.state() === "unauthorized"}
-      fallback={props.children}
-    >
-      <main
-        class="mx-auto w-full max-w-xl p-5 text-sm sm:p-8"
-        data-testid="gateway-auth-gate"
-      >
-        <h1 class="text-[25px] font-semibold leading-tight">
-          Connect to your gateway
-        </h1>
-        <p class="mt-3 text-muted">
-          Enter the{" "}
-          <code class="text-xs [overflow-wrap:anywhere]">
-            LORE_GATEWAY_AUTH_TOKEN
-          </code>{" "}
-          configured on this gateway to open its dashboard.
-        </p>
-        <form class="mt-6 grid gap-4" onSubmit={connect}>
-          <TextField value={token()} onChange={setToken} required>
-            <TextFieldLabel>Gateway token</TextFieldLabel>
-            <TextFieldInput
-              id="gateway-token"
-              class="bg-surface"
-              type="password"
-              autocomplete="current-password"
-              onInput={(event) => setToken(event.currentTarget.value)}
-            />
-          </TextField>
-          <Button class="w-full sm:w-fit" type="submit">
-            Connect
-          </Button>
-          <p class="text-muted" role="status">
-            {workspace.connection.detail()}
-          </p>
-        </form>
-      </main>
-    </Show>
-  );
-};
-
 /**
  * Router root: provides the workspace (project list + connection state) to
  * every route. `client` is injected by tests; production uses the
@@ -243,7 +182,8 @@ export function createAppRoot(
 ): Component<ParentProps> {
   return (props) => (
     <WorkspaceProvider client={client} db={db}>
-      <RemoteGatewayAuthGate>{props.children}</RemoteGatewayAuthGate>
+      <FolkLoginDialog />
+      {props.children}
     </WorkspaceProvider>
   );
 }

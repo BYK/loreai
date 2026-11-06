@@ -99,7 +99,7 @@ describe("github-provision — fetch + mapping (E-5-a, #827)", () => {
     ).rejects.toThrow(/no id/);
   });
 
-  it("resolveJwtGithubId reads the github identity, then user_metadata, else null", () => {
+  it("resolveJwtGithubId trusts only the linked github identity", () => {
     expect(
       resolveJwtGithubId({
         identities: [{ provider: "github", id: "123" }],
@@ -111,7 +111,7 @@ describe("github-provision — fetch + mapping (E-5-a, #827)", () => {
         identities: [],
         user_metadata: { provider_id: 999 },
       }),
-    ).toBe("999"); // fallback, coerced to string
+    ).toBeNull(); // User-editable metadata never establishes identity.
     expect(
       resolveJwtGithubId({ identities: [{ provider: "google", id: "5" }] }),
     ).toBeNull(); // no github identity, no provider_id → fail-closed

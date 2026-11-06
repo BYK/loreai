@@ -31,6 +31,7 @@ function escapeHtml(s: string): string {
  * channel — same posture as the CLI printout today, just delivered by email.
  */
 export function buildInviteEmail(input: InviteEmailInput): InviteEmail {
+  if (!parseInviteToken(input.token)) throw new Error("Invalid invite token");
   const team = input.teamName?.trim() || "a Lore team";
   const role = input.role === "viewer" ? "viewer" : "editor";
   const accept = `lore team accept ${input.token}`;
@@ -56,14 +57,19 @@ export function buildInviteEmail(input: InviteEmailInput): InviteEmail {
 }
 
 /**
- * Return the capability (DB-stored) portion of an invite token. An offline invite token is
- * `<capability>.<base64url(secret)>`; only the capability is stored in pending_invites.token, so a DB
- * lookup MUST use this (mirrors acceptTeamInvite). A capability-only token has no `.` and is returned
- * unchanged. The full token (with any secret suffix) is what the invitee needs and what we email.
+ * create_scope_invite mints 64 lowercase hex characters; offline invites append
+ * the canonical unpadded base64url encoding of a 32-byte X25519 secret. Validate
+ * the WHOLE token before authorizing its capability or publishing a shell command.
  */
-export function capabilityOf(token: string): string {
-  const dot = token.indexOf(".");
-  return dot >= 0 ? token.slice(0, dot) : token;
+export function parseInviteToken(
+  token: string,
+): { capability: string; offlineKey: string | null } | null {
+  // The final base64url sextet has two zero padding bits. Equality also rejects
+  // a final newline, which JavaScript's $ anchor can otherwise leave unmatched.
+  const match =
+    /^([0-9a-f]{64})(?:\.([A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]))?$/.exec(token);
+  if (!match || match[0] !== token) return null;
+  return { capability: match[1], offlineKey: match[2] ?? null };
 }
 
 export interface Smtp2goOptions {
@@ -89,6 +95,9 @@ export async function sendViaSmtp2go(
   const f = opts.fetchImpl ?? fetch;
   const resp = await f(apiUrl, {
     method: "POST",
+    // Custom API-key headers survive redirects; never send them or invite bodies
+    // to a destination other than the configured SMTP endpoint.
+    redirect: "error",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",

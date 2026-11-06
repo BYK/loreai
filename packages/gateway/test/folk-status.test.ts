@@ -243,16 +243,17 @@ describe("Folk Lore status routes", () => {
       });
     });
 
-    test("hosted mode never discloses the operator's installation-global session", async () => {
+    test("hosted management shows the operator account without exposing its credentials", async () => {
       signIn();
       const body = await (await get(hosted, "/api/v1/account")).json();
-      expect(body).toEqual({
-        signed_in: false,
-        user: null,
-        provider: null,
-        expires_at: null,
-        state: "hosted",
+      expect(body).toMatchObject({
+        signed_in: true,
+        user: { id: USER, email: "octo@example.com", display_name: "Octo Cat" },
+        provider: "github",
+        state: "signed_in",
       });
+      for (const token of [ACCESS_TOKEN, REFRESH_TOKEN, PROVIDER_TOKEN])
+        expect(JSON.stringify(body)).not.toContain(token);
     });
 
     test("a non-local tenant context is treated as anonymous", () => {

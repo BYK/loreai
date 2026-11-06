@@ -1,7 +1,14 @@
-import { createClipboard } from "~/lib/clipboard";
 import { Button } from "~/components/ui/button";
 import type { Component } from "solid-js";
-import { For, Show, createMemo, createSignal } from "solid-js";
+import {
+  For,
+  Show,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
+import { createStore } from "solid-js/store";
 import * as PopoverPrimitive from "@kobalte/core/popover";
 
 import { summarizeFolkStatus, type FolkTone } from "~/lib/folk-status";
@@ -29,18 +36,300 @@ const DOT: Record<FolkTone, string> = {
   gold: "bg-gold",
   danger: "bg-danger",
 };
+const GITHUB_ATTEMPT_KEY = "lore.github-login-attempt";
 
-/**
- * Shell account/sync badge with an explicit, single-flight sync action.
- */
+function useLoginController() {
+  const ws = useWorkspace();
+  const folk = ws.state.folk;
+  return folk.retainLogin(() => {
+    const [dialog, setDialog] = createSignal(false);
+    const [login, setLogin] = createStore({
+      email: "",
+      code: "",
+      attempt: "",
+      githubAttempt: "",
+      cancelAttempts: [] as string[],
+      pending: false,
+      closing: false,
+      error: "",
+      generation: 0,
+    });
+    let pendingEmailStart: Promise<{ attempt: string }> | undefined;
+    let pendingGitHubStart:
+      | Promise<{ url: string; attempt: string }>
+      | undefined;
+    const showSignIn = () => {
+      setLogin({
+        email: "",
+        code: "",
+        attempt: "",
+        githubAttempt: "",
+        cancelAttempts: [],
+        pending: false,
+        closing: false,
+        error: "",
+        generation: login.generation + 1,
+      });
+      setDialog(true);
+    };
+    onMount(() => {
+      const url = new URL(window.location.href);
+      const result = url.searchParams.get("login");
+      const restoreAttempt = () => {
+        const attempt = (() => {
+          try {
+            return sessionStorage.getItem(GITHUB_ATTEMPT_KEY);
+          } catch {
+            return null;
+          }
+        })();
+        if (!attempt) return;
+        setLogin({ githubAttempt: attempt, pending: false });
+        setDialog(true);
+      };
+      const onPageShow = (event: PageTransitionEvent) => {
+        if (event.persisted) restoreAttempt();
+      };
+      window.addEventListener("pageshow", onPageShow);
+      onCleanup(() => window.removeEventListener("pageshow", onPageShow));
+      if (result !== "success" && result !== "failed") {
+        restoreAttempt();
+        return;
+      }
+      try {
+        // A result for an old or unknown callback cannot retire this tab's
+        // different live authorization or erase its cancellation handle.
+        const completedAttempt = url.searchParams.get("login_attempt");
+        if (
+          completedAttempt &&
+          sessionStorage.getItem(GITHUB_ATTEMPT_KEY) === completedAttempt
+        )
+          sessionStorage.removeItem(GITHUB_ATTEMPT_KEY);
+      } catch {
+        /* Storage may be blocked. */
+      }
+      restoreAttempt();
+      url.searchParams.delete("login");
+      url.searchParams.delete("login_attempt");
+      window.history.replaceState(window.history.state, "", url);
+      if (result === "failed") {
+        setDialog(true);
+        setLogin("error", "GitHub sign-in did not finish. Please try again.");
+      } else {
+        folk.refresh();
+      }
+    });
+    const startEmailLogin = async () => {
+      if (login.pending) return;
+      const generation = login.generation;
+      setLogin({ pending: true, error: "" });
+      try {
+        const request = ws.client.startEmailLogin(login.email);
+        pendingEmailStart = request;
+        const result = await request;
+        if (generation !== login.generation) {
+          return;
+        }
+        setLogin("attempt", result.attempt);
+      } catch (error) {
+        if (generation === login.generation)
+          setLogin(
+            "error",
+            error instanceof Error
+              ? error.message
+              : "Could not send a sign-in email.",
+          );
+      } finally {
+        pendingEmailStart = undefined;
+        if (generation === login.generation) setLogin("pending", false);
+      }
+    };
+    const dismissLogin = async () => {
+      if (login.closing) return;
+      const attempts = [
+        ...login.cancelAttempts,
+        login.attempt,
+        login.githubAttempt,
+      ].filter(Boolean);
+      const start = pendingEmailStart;
+      const githubStart = pendingGitHubStart;
+      setLogin({
+        closing: true,
+        pending: true,
+        generation: login.generation + 1,
+      });
+      try {
+        // Dismissal owns every pending start, even when an older attempt was restored.
+        const pending = start ?? githubStart;
+        const result = pending ? await pending.catch(() => null) : null;
+        const ids = [
+          ...new Set([...attempts, ...(result ? [result.attempt] : [])]),
+        ];
+        setLogin("cancelAttempts", ids);
+        const results = [];
+        for (const id of ids) {
+          results.push(await ws.client.cancelLogin(id));
+          try {
+            // Retired work owns only this attempt's key. Clear each completed
+            // cancellation before another one can fail and require a retry.
+            if (sessionStorage.getItem(GITHUB_ATTEMPT_KEY) === id)
+              sessionStorage.removeItem(GITHUB_ATTEMPT_KEY);
+          } catch {
+            /* Cancellation already succeeded. */
+          }
+          setLogin("cancelAttempts", (remaining) =>
+            remaining.filter((value) => value !== id),
+          );
+          if (login.attempt === id) setLogin("attempt", "");
+          if (login.githubAttempt === id) setLogin("githubAttempt", "");
+        }
+        setLogin("githubAttempt", "");
+        if (results.some((result) => !result.ok)) {
+          setLogin(
+            "error",
+            "Sign-in may already have completed. Check your account.",
+          );
+          folk.refresh();
+          return;
+        }
+        setDialog(false);
+        folk.refresh();
+      } catch {
+        setLogin("error", "Could not cancel sign-in. Please try again.");
+      } finally {
+        setLogin({ closing: false, pending: false });
+      }
+    };
+    const verifyLogin = async () => {
+      if (login.pending) return;
+      const generation = login.generation;
+      setLogin({ pending: true, error: "" });
+      try {
+        await ws.client.verifyEmailLogin(login.attempt, login.code);
+        if (generation !== login.generation) {
+          folk.refresh();
+          return;
+        }
+        setDialog(false);
+        folk.refresh();
+      } catch (error) {
+        if (generation === login.generation)
+          setLogin(
+            "error",
+            error instanceof Error ? error.message : "Could not sign in.",
+          );
+      } finally {
+        if (generation === login.generation) setLogin("pending", false);
+      }
+    };
+    const changeEmail = async () => {
+      if (login.pending) return;
+      const generation = login.generation;
+      setLogin({ pending: true, error: "" });
+      try {
+        if (login.attempt) {
+          const result = await ws.client.cancelLogin(login.attempt);
+          if (!result.ok) {
+            if (generation === login.generation) {
+              setLogin(
+                "error",
+                "Sign-in may already have completed. Check your account.",
+              );
+              // An unknown attempt may have committed; only a fresh anonymous
+              // account read permits abandoning it and starting another login.
+              try {
+                const current = await ws.client.getAccount();
+                if (
+                  generation === login.generation &&
+                  current.state === "anonymous"
+                )
+                  setLogin({ attempt: "", code: "" });
+              } catch {
+                // Keep the uncertainty warning when status cannot be confirmed.
+              }
+              folk.refresh();
+            }
+            return;
+          }
+        }
+        if (generation === login.generation)
+          setLogin({ attempt: "", code: "", error: "" });
+      } catch {
+        if (generation === login.generation)
+          setLogin("error", "Could not cancel sign-in. Please try again.");
+      } finally {
+        if (generation === login.generation) setLogin("pending", false);
+      }
+    };
+    const startGitHubLogin = async () => {
+      if (login.pending) return;
+      const generation = login.generation;
+      setLogin({ pending: true, error: "" });
+      try {
+        const request = ws.client.startGitHubLogin();
+        pendingGitHubStart = request;
+        const result = await request;
+        if (generation !== login.generation) return;
+        setLogin("githubAttempt", result.attempt);
+        const url = new URL(result.url);
+        if (
+          url.protocol !== "https:" &&
+          !(
+            url.protocol === "http:" &&
+            (url.hostname === "localhost" ||
+              url.hostname === "127.0.0.1" ||
+              url.hostname === "[::1]")
+          )
+        )
+          throw new Error("Could not start GitHub sign-in.");
+        try {
+          sessionStorage.setItem(GITHUB_ATTEMPT_KEY, result.attempt);
+        } catch {
+          // Navigation would lose the attempt needed to cancel on browser return.
+          throw new Error(
+            "GitHub sign-in requires browser session storage. Use email sign-in instead.",
+          );
+        }
+        window.location.assign(url.href);
+      } catch (error) {
+        if (generation === login.generation) {
+          setLogin(
+            "error",
+            error instanceof Error
+              ? error.message
+              : "Could not start GitHub sign-in.",
+          );
+          setLogin("pending", false);
+        }
+      } finally {
+        pendingGitHubStart = undefined;
+      }
+    };
+    onCleanup(() => {
+      // Workspace retirement fences delayed starts before they can navigate or
+      // write storage, and owns cancellation even after the last view disappears.
+      void dismissLogin();
+    });
+    return {
+      login,
+      setLogin,
+      dialog,
+      showSignIn,
+      startEmailLogin,
+      startGitHubLogin,
+      dismissLogin,
+      verifyLogin,
+      changeEmail,
+    };
+  });
+}
+
+/** Shell account/sync badge with an explicit, single-flight sync action. */
 export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
   const ws = useWorkspace();
   const folk = ws.state.folk;
-  let trigger: HTMLButtonElement | undefined;
   const [open, setOpen] = createSignal(false);
   const [tooltipOpen, setTooltipOpen] = createSignal(false);
-  const [dialog, setDialog] = createSignal(false);
-  const clipboard = createClipboard(dialog);
   const account = () =>
     ws.connection.state() === "reachable" ? folk.confirmedAccount() : undefined;
   const user = () => {
@@ -64,9 +353,9 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
       .slice(0, 2)
       .join("")
       .toUpperCase();
+  const { dialog, showSignIn: openSignIn } = useLoginController();
   const showSignIn = () => {
-    clipboard.reset();
-    setDialog(true);
+    openSignIn();
     setOpen(false);
   };
   const { syncing, syncError, syncReceipt, runSync } = folk;
@@ -134,9 +423,6 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
         >
           <TooltipTrigger
             as={PopoverPrimitive.Trigger}
-            ref={(element: HTMLButtonElement) => {
-              trigger = element;
-            }}
             data-testid="folk-status"
             data-workspace-navigation-open={open() || dialog() ? "" : undefined}
             data-folk-state={summary().state}
@@ -343,65 +629,134 @@ export const FolkStatus: Component<{ inDrawer?: boolean }> = (props) => {
           </PopoverPrimitive.Content>
         </PopoverPrimitive.Portal>
       </PopoverPrimitive.Root>
-      <Dialog
-        open={dialog()}
-        onOpenChange={(value) => {
-          if (!value) setDialog(false);
+    </>
+  );
+};
+
+/** Render once under the workspace, never inside a disposable navigation view. */
+export const FolkLoginDialog: Component = () => {
+  const {
+    login,
+    setLogin,
+    dialog,
+    startEmailLogin,
+    startGitHubLogin,
+    dismissLogin,
+    verifyLogin,
+    changeEmail,
+  } = useLoginController();
+  return (
+    <Dialog
+      open={dialog()}
+      onOpenChange={(value) => {
+        if (!value) void dismissLogin();
+      }}
+    >
+      <DialogContent
+        data-workspace-navigation-layer=""
+        class="max-w-sm rounded-lg"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          // Return to the account control while its navigation view survives;
+          // only a breakpoint-disposed view needs the mobile menu fallback.
+          const target =
+            document.querySelector<HTMLButtonElement>(
+              '[data-testid="folk-status"]',
+            ) ??
+            document.querySelector<HTMLButtonElement>(
+              '[data-testid="mobile-menu-trigger"]',
+            );
+          target?.focus({ preventScroll: true });
         }}
       >
-        <DialogContent
-          data-workspace-navigation-layer=""
-          class="max-w-sm rounded-lg"
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            trigger?.focus({ preventScroll: true });
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Sign in to Lore</DialogTitle>
-            <DialogDescription>
-              Sign in through the Lore CLI on the machine running your gateway.
-            </DialogDescription>
-          </DialogHeader>
-          <div class="space-y-3 text-sm">
-            <Show when={account()?.state === "hosted"}>
-              <p class="text-muted">
-                This gateway is running in hosted mode. For local account
-                access, restart it with <code>lore start --local</code>, then
-                sign in.
-              </p>
-            </Show>
-            <p>
-              Run this command in your terminal and follow the sign-in prompts:
-            </p>
-            <pre class="select-text rounded-md border border-line bg-chrome px-3 py-3">
-              <code>lore login</code>
-            </pre>
+        <DialogHeader>
+          <DialogTitle>Sign in to Lore</DialogTitle>
+          <DialogDescription>
+            Sign in to use your Lore account and teams.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-3 text-sm">
+          <Show
+            when={!login.attempt}
+            fallback={
+              <form
+                class="space-y-3"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void verifyLogin();
+                }}
+              >
+                <p class="text-muted">
+                  Check {login.email} for a sign-in code or link.
+                </p>
+                <label class="block space-y-1">
+                  <span>Code or sign-in link</span>
+                  <input
+                    class="w-full rounded-md border border-line bg-surface px-3 py-2"
+                    value={login.code}
+                    onInput={(event) =>
+                      setLogin("code", event.currentTarget.value)
+                    }
+                    autocomplete="one-time-code"
+                    required
+                  />
+                </label>
+                <Button type="submit" pending={login.pending}>
+                  Sign in
+                </Button>
+                <Button
+                  variant="ghost"
+                  type="button"
+                  disabled={login.pending}
+                  onClick={() => void changeEmail()}
+                >
+                  Use a different email
+                </Button>
+              </form>
+            }
+          >
             <Button
               variant="outline"
-              size="sm"
-              pending={clipboard.pending()}
-              icon={clipboard.copied() ? "check" : "copy"}
-              onClick={() => void clipboard.copy("lore login")}
+              class="w-full"
+              pending={login.pending}
+              onClick={() => void startGitHubLogin()}
             >
-              {clipboard.copied() ? "Copied command" : "Copy command"}
+              Continue with GitHub
             </Button>
-            <p class="text-xs text-muted" role="status">
-              {clipboard.copied() ? "Command copied to clipboard" : ""}
+            <p class="text-center text-xs text-muted">or continue with email</p>
+            <form
+              class="space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void startEmailLogin();
+              }}
+            >
+              <label class="block space-y-1">
+                <span>Email address</span>
+                <input
+                  class="w-full rounded-md border border-line bg-surface px-3 py-2"
+                  type="email"
+                  value={login.email}
+                  onInput={(event) =>
+                    setLogin("email", event.currentTarget.value)
+                  }
+                  autocomplete="email"
+                  disabled={login.pending}
+                  required
+                />
+              </label>
+              <Button type="submit" class="w-full" pending={login.pending}>
+                Send sign-in email
+              </Button>
+            </form>
+          </Show>
+          <Show when={login.error}>
+            <p role="alert" class="text-xs text-danger">
+              {login.error}
             </p>
-            <Show when={clipboard.error()}>
-              {(error) => (
-                <p role="alert" class="text-xs text-danger">
-                  {error()}
-                </p>
-              )}
-            </Show>
-            <p class="text-xs text-muted">
-              Return here after signing in. Your account updates automatically.
-            </p>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
+          </Show>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 };

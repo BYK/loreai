@@ -20,6 +20,7 @@ import {
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../supabase";
 import { acquireGitHubProviderToken } from "./login";
+import { UsageError } from "./lib/errors";
 import {
   addTeamMember,
   acceptTeamInvite,
@@ -173,7 +174,12 @@ export async function commandTeam(
           freshClient = acquired.client;
           providerToken = acquired.providerToken;
         } catch (e) {
-          console.error(`GitHub authorization failed: ${(e as Error).message}`);
+          // Only our own input-validation messages are safe for the terminal.
+          console.error(
+            e instanceof UsageError
+              ? `GitHub authorization failed: ${e.message}`
+              : "GitHub authorization failed. Please try again.",
+          );
           process.exitCode = 1;
           return;
         }

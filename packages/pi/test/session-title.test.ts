@@ -7,6 +7,8 @@
  * rerouted provider request. Sessions with no name emit no header.
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import lorePiExtension from "../src/index";
 import { discoverWorkspaceRoot, getGitRemote } from "@loreai/core";
 import { sessionIDFor } from "../src/internal";
@@ -34,9 +36,11 @@ function createMockPi() {
   return { pi, registrations, handlers };
 }
 
-const GATEWAY_BASE = "http://127.0.0.1:59999";
-
 describe("pi extension — x-lore-session-title", () => {
+  const gateway = createServer((req, res) => {
+    req.resume();
+    res.end("ok");
+  });
   let mock: ReturnType<typeof createMockPi>;
   let capturedHeaders: Headers | undefined;
   const originalFetch = globalThis.fetch;
@@ -73,6 +77,9 @@ describe("pi extension — x-lore-session-title", () => {
   }
 
   beforeAll(async () => {
+    await new Promise<void>((resolve) =>
+      gateway.listen(0, "127.0.0.1", resolve),
+    );
     // Stand in for the real network so nothing leaves the test process.
     globalThis.fetch = (input, init) => {
       const req = new Request(input, init);
@@ -85,7 +92,7 @@ describe("pi extension — x-lore-session-title", () => {
       );
     };
     process.env.LORE_PI_FORCE_ACTIVE = "1";
-    process.env.LORE_GATEWAY_URL = GATEWAY_BASE;
+    process.env.LORE_GATEWAY_URL = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
     delete process.env.LORE_DISABLED;
     delete process.env.LORE_REMOTE_URL;
 
@@ -93,11 +100,14 @@ describe("pi extension — x-lore-session-title", () => {
     await lorePiExtension(
       mock.pi as unknown as Parameters<typeof lorePiExtension>[0],
     );
+    expect(mock.registrations.length).toBeGreaterThan(0);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     globalThis.fetch = originalFetch;
     process.env = { ...originalEnv };
+    gateway.closeAllConnections();
+    await new Promise<void>((resolve) => gateway.close(() => resolve()));
   });
 
   test("header is absent until the session has a name", async () => {

@@ -1,7 +1,6 @@
-import {
-  GATEWAY_AUTH_HEADER,
-  type RecallToolContext,
-  type createGatewayRecallClient,
+import type {
+  RecallToolContext,
+  createGatewayRecallClient,
 } from "@loreai/core";
 
 type TurnGroup = {
@@ -22,7 +21,6 @@ type PiRequestMetadata = {
   sessionID: string;
   gitRemote: string;
   sessionTitle: string;
-  accessHeaders?: Readonly<Record<string, string>>;
   observeHeaders?: (headers: Headers) => void;
   recallClient?: ReturnType<typeof createGatewayRecallClient>;
 };
@@ -78,15 +76,12 @@ export function singlePiRequestOwner(
   if (!registry || registry.overflow > 0) return undefined;
   const project = headers?.get("x-lore-project");
   const session = headers?.get("x-lore-session-id");
-  const accessToken = headers?.get(GATEWAY_AUTH_HEADER);
+  // Retired gateway tokens never establish or disqualify request ownership.
   let candidate: { ownerID: string; metadata: PiRequestMetadata } | undefined;
   for (const [ownerID, metadata] of registry.owners) {
     if (
       (project && metadata.projectPath !== project) ||
-      (session && metadata.sessionID !== session) ||
-      (accessToken !== null &&
-        accessToken !== undefined &&
-        accessToken !== (metadata.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null))
+      (session && metadata.sessionID !== session)
     )
       continue;
     if (candidate) return undefined;
@@ -131,13 +126,10 @@ export function piRequestGateway(url: URL, headers: Headers): string | null {
     // another gateway's sole owner.
     const project = headers.get("x-lore-project");
     const session = headers.get("x-lore-session-id");
-    const token = headers.get(GATEWAY_AUTH_HEADER);
     const matching = [...registry.owners.values()].filter(
       (owner) =>
         (!project || owner.projectPath === project) &&
-        (!session || owner.sessionID === session) &&
-        (token === null ||
-          token === (owner.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null)),
+        (!session || owner.sessionID === session),
     );
     if (matching.length === 0) continue;
     if (matching.length !== 1 || candidate) return null;
@@ -155,13 +147,6 @@ export function observePiRequestHeaders(
     return;
   const owner = singlePiRequestOwner(gateway, headers);
   if (!owner) return;
-  // Observation must match the access credential actually used on the wire,
-  // including its absence, before assigning provider auth to compaction.
-  if (
-    headers.get(GATEWAY_AUTH_HEADER) !==
-    (owner.metadata.accessHeaders?.[GATEWAY_AUTH_HEADER] ?? null)
-  )
-    return;
   owner.metadata.observeHeaders?.(headers);
 }
 

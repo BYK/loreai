@@ -1,11 +1,10 @@
 /**
- * Integration tests for migration 0050 — the Lore-membership lookup for GitHub repo-collaborator
- * discovery (E-5-d, #630) against a real Postgres. Proves `lore_users_for_github_ids`:
+ * Real-Postgres tests for GitHub discovery and invite-recipient lookup. Proves:
  *  - returns exactly the subset of input github ids that have a Lore account (matched on
- *    auth.users.raw_user_meta_data->>'provider_id');
+ *    server-owned auth.identities with provider = 'github');
  *  - never returns user_ids/emails — only github ids;
  *  - is SERVICE-ROLE-ONLY (authenticated + anon cannot call it → not an enumeration oracle);
- *  - ignores users with no/invalid provider_id.
+ *  - editable metadata and foreign-provider identities never establish ownership.
  *
  * Gated behind LORE_INTEGRATION=1 (needs Docker). Run:
  *   LORE_INTEGRATION=1 pnpm exec vitest run packages/gateway/test/sync-github-discover.integration.test.ts
@@ -54,7 +53,7 @@ async function expectError(fn: () => Promise<unknown>): Promise<{
   throw new Error("expected the query to fail, but it succeeded");
 }
 
-/** Create an auth.users row with a GitHub provider_id in raw_user_meta_data (as superuser). */
+/** Simulate GoTrue's linked GitHub identity, separately from editable metadata. */
 async function createGitHubUser(providerId: string | null): Promise<string> {
   const meta =
     providerId === null ? "{}" : JSON.stringify({ provider_id: providerId });
@@ -62,7 +61,14 @@ async function createGitHubUser(providerId: string | null): Promise<string> {
     "insert into auth.users (email, raw_user_meta_data) values ($1, $2::jsonb) returning id",
     [`u${Math.random().toString(16).slice(2)}@test.dev`, meta],
   );
-  return rows[0].id as string;
+  const uid = rows[0].id as string;
+  if (providerId !== null) {
+    await h.client.query(
+      "insert into auth.identities (provider_id, user_id, provider) values ($1, $2, 'github')",
+      [providerId, uid],
+    );
+  }
+  return uid;
 }
 
 const lookup = (ids: number[]) =>
@@ -73,8 +79,16 @@ const lookup = (ids: number[]) =>
     ),
   );
 
+const lookupEmails = (ids: number[]) =>
+  h.asService((c) =>
+    c.query(
+      "select github_id, email from public.lore_emails_for_github_ids($1::bigint[])",
+      [ids],
+    ),
+  );
+
 describe.skipIf(gate())(
-  "migration 0050 — github-discover lookup (E-5-d, #630)",
+  "GitHub discovery uses verified linked identities",
   () => {
     it("returns exactly the input github ids that have a Lore account", async () => {
       await createGitHubUser("111");
@@ -126,5 +140,124 @@ describe.skipIf(gate())(
       );
       expect(err.code).toBe("42501");
     });
+
+    it.each(["membership", "email"])(
+      "editable provider metadata never establishes %s lookup membership",
+      async (kind) => {
+        const id = kind === "membership" ? 700001 : 700002;
+        const uid = await createGitHubUser(null);
+        await h.client.query(
+          "update auth.users set raw_user_meta_data = $1::jsonb where id = $2",
+          [JSON.stringify({ provider_id: String(id) }), uid],
+        );
+        const result = await (kind === "membership"
+          ? lookup([id])
+          : lookupEmails([id]));
+        expect(result.rows).toEqual([]);
+      },
+    );
+
+    it.each(["membership", "email"])(
+      "a foreign linked identity cannot forge GitHub %s lookup membership",
+      async (kind) => {
+        const id = kind === "membership" ? 700003 : 700004;
+        const uid = await createGitHubUser(null);
+        await h.client.query(
+          "insert into auth.identities (provider_id, user_id, provider) values ($1, $2, 'google')",
+          [String(id), uid],
+        );
+        await h.client.query(
+          "update auth.users set raw_user_meta_data = $1::jsonb where id = $2",
+          [JSON.stringify({ provider_id: String(id) }), uid],
+        );
+        const result = await (kind === "membership"
+          ? lookup([id])
+          : lookupEmails([id]));
+        expect(result.rows).toEqual([]);
+      },
+    );
+
+    it("invite email lookup chooses the linked GitHub owner despite forged or missing metadata", async () => {
+      const owner = await createGitHubUser("700005");
+      const attacker = await createGitHubUser("700006");
+      await h.client.query(
+        "update auth.users set raw_user_meta_data = '{}'::jsonb where id = $1",
+        [owner],
+      );
+      await h.client.query(
+        'update auth.users set raw_user_meta_data = \'{"provider_id":"700005"}\'::jsonb where id = $1',
+        [attacker],
+      );
+      const { rows: owners } = await h.client.query(
+        "select email from auth.users where id = $1",
+        [owner],
+      );
+      const result = await lookupEmails([700005, 700005]);
+      expect(result.fields.map((field) => field.name)).toEqual([
+        "github_id",
+        "email",
+      ]);
+      expect(result.rows).toEqual([
+        { github_id: "700005", email: owners[0].email },
+      ]);
+      expect((await lookup([700005, 700005])).rows).toEqual([
+        { github_id: "700005" },
+      ]);
+    });
+
+    it.each(["authenticated", "anon"])(
+      "invite email lookup never exposes emails to %s",
+      async (role) => {
+        const uid = await createGitHubUser(null);
+        const run = (c: import("pg").Client) =>
+          c.query(
+            "select * from public.lore_emails_for_github_ids($1::bigint[])",
+            [[700005]],
+          );
+        const error = await expectError(() =>
+          role === "authenticated" ? h.asUser(uid, run) : h.asAnon(run),
+        );
+        expect(error.code).toBe("42501");
+      },
+    );
+
+    it("malformed or oversized identity strings never break or enter numeric lookup results", async () => {
+      await createGitHubUser("999999999999999999999999999999999999999");
+      await createGitHubUser("../700005");
+      expect((await lookup([700005])).rows).toEqual([{ github_id: "700005" }]);
+      expect((await lookupEmails([700005])).rows).toHaveLength(1);
+    });
+
+    it.each(["membership", "email"])(
+      "ambiguous linked identities fail closed for %s lookup",
+      async (kind) => {
+        const id = kind === "membership" ? 700007 : 700008;
+        await createGitHubUser(String(id));
+        const duplicate = await createGitHubUser(null);
+        // GoTrue normally prevents this state. Exercise the lookup's own guard
+        // against legacy or corrupt mappings, then restore the schema constraint.
+        await h.client.query(
+          "alter table auth.identities drop constraint identities_provider_id_provider_key",
+        );
+        try {
+          await h.client.query(
+            "insert into auth.identities (provider_id, user_id, provider) values ($1, $2, 'github')",
+            [String(id), duplicate],
+          );
+          const result = await (kind === "membership"
+            ? lookup([id])
+            : lookupEmails([id]));
+          expect(result.rows).toEqual([]);
+        } finally {
+          await h.client.query(
+            "delete from auth.identities where user_id = $1",
+            [duplicate],
+          );
+          await h.client.query(
+            "alter table auth.identities add constraint identities_provider_id_provider_key unique (provider_id, provider)",
+          );
+        }
+      },
+    );
   },
 );

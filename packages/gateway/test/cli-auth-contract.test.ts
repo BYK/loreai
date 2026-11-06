@@ -1,19 +1,18 @@
 /**
  * Phase 3D.2 — typed `lore login` / `lore logout` contract.
  *
- * Pins the typed wrappers for both auth commands. The wrappers route
- * through the shared `runLegacyAndCollect` bridge; we mock the legacy
- * handlers at the module level so the tests don't touch Supabase or
- * any IO.
+ * Pins both typed auth commands. Interactive login writes directly, while
+ * logout uses `runLegacyAndCollect`. Mock their legacy handlers so these
+ * contract tests never authenticate or prompt for real input.
  *
  * What's verified:
  *   - Routing wiring: login/logout in STRICLI_ROUTES, NOT in
  *     LEGACY_ROUTES (per-slice removal rule).
  *   - Flag schema: login declares --email and --no-browser; logout
  *     declares nothing.
- *   - Bridge integration: the legacy handler's stdout reaches the
- *     Stricli stdout.write output path (the contract that downstream
- *     code depends on).
+ *   - Login instructions reach stdout before the pending input completes;
+ *     JSON mode refuses before starting authentication or prompting.
+ *   - Logout's captured stdout reaches Stricli's stdout.write output path.
  *   - Flag forwarding: typed --email is forwarded as `values.email`
  *     to the legacy handler.
  */
@@ -55,7 +54,11 @@ afterAll(() => {
 function setupLegacyMocks(): {
   loginCalls: FakeArgs[];
   logoutCalls: { n: number };
-  loginImpl: ReturnType<typeof vi.fn>;
+  loginImpl: ReturnType<
+    typeof vi.fn<
+      (positionals: string[], values: Record<string, unknown>) => Promise<void>
+    >
+  >;
   logoutImpl: ReturnType<typeof vi.fn>;
 } {
   const loginCalls: FakeArgs[] = [];
@@ -187,6 +190,102 @@ describe("Phase 3D.2 — typed lore login", () => {
     const lastCall = mocks.loginCalls[mocks.loginCalls.length - 1];
     expect(lastCall?.values["no-browser"]).toBe(true);
     vi.resetModules();
+  });
+
+  test("interactive instructions reach stdout before login input resolves and are never duplicated", async () => {
+    vi.resetModules();
+    const mocks = setupLegacyMocks();
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const pendingInput = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.loginImpl.mockImplementation(async () => {
+      console.log("Open the fixture sign-in URL, then enter its code.");
+      enter();
+      await pendingInput;
+      console.log("Fixture login complete.");
+    });
+    const { runCli } = await import("../src/cli/cli");
+    const argv = process.argv;
+    const exitCode = process.exitCode;
+    const stdout: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      stdout.push(`${args.map(String).join(" ")}\n`);
+    });
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    process.argv = ["node", "lore", "login", "--no-browser"];
+    process.exitCode = 0;
+    const run = runCli();
+    try {
+      await entered;
+      expect(stdout.join("")).toContain(
+        "Open the fixture sign-in URL, then enter its code.",
+      );
+      expect(stdout.join("")).not.toContain("Fixture login complete.");
+    } finally {
+      release();
+      await run;
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.argv = argv;
+      process.exitCode = exitCode;
+      vi.resetModules();
+    }
+    expect(mocks.loginImpl).toHaveBeenCalledTimes(1);
+    expect(stdout.join("").match(/Open the fixture sign-in URL/g)).toHaveLength(
+      1,
+    );
+    expect(stdout.join("").match(/Fixture login complete/g)).toHaveLength(1);
+  });
+
+  test("login --json refuses before authentication or prompting", async () => {
+    vi.resetModules();
+    const mocks = setupLegacyMocks();
+    const { runCli } = await import("../src/cli/cli");
+    const argv = process.argv;
+    const exitCode = process.exitCode;
+    const stdout: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      stdout.push(`${args.map(String).join(" ")}\n`);
+    });
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+    process.argv = [
+      "node",
+      "lore",
+      "login",
+      "--json",
+      "--email",
+      "fixture@example.test",
+    ];
+    process.exitCode = 0;
+    try {
+      await runCli();
+      expect(mocks.loginImpl).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(stdout.join(""))).toEqual({
+        output: "Login requires an interactive terminal; run without --json.",
+      });
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.argv = argv;
+      process.exitCode = exitCode;
+      vi.resetModules();
+    }
   });
 });
 

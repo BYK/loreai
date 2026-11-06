@@ -38,6 +38,8 @@ export type RouteHandler = (c: GatewayContext) => Response | Promise<Response>;
 
 export interface GatewayAppOptions {
   controlToken?: string;
+  /** Listener ownership of browser attempts and detached account work. */
+  webLoginSignal?: AbortSignal;
   /** Invoked asynchronously after an authenticated shutdown response flushes. */
   onShutdown?: () => void | Promise<void>;
 }
@@ -47,8 +49,8 @@ export interface GatewayAppOptions {
  *
  * - `management`: `/`, `/api*`, `/ui*` — socket-peer + Origin/Host checks,
  *   management CORS, hidden 404 for unauthorized peers.
- * - `data`: model/proxy endpoints — browser origins refused, gateway access
- *   token enforced in remote/hosted mode, conflicting provider auth rejected.
+ * - `data`: model/proxy endpoints — network-controlled access, browser origins
+ *   refused, conflicting provider auth rejected.
  * - `null`: neither (health, process control) — no plane-specific policy.
  */
 export const MANAGEMENT_PLANE = "management";

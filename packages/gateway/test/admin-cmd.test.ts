@@ -212,13 +212,16 @@ describe("lore admin grant", () => {
     expect(process.exitCode).toBe(0);
   });
 
-  it("surfaces a service-role update error", async () => {
+  it("reports a service-role update failure without provider diagnostics", async () => {
     mockClient = makeClient({
       profilesRows: [{ id: "u-1", email: "dev@acme.dev" }],
       updateErr: "permission denied",
     });
     await commandAdmin(["grant", "dev@acme.dev", "pro"], {});
-    expect(errs.join("\n")).toMatch(/lore admin: permission denied/);
+    expect(errs).toEqual([
+      "lore admin: Account service unavailable. Please try again.",
+    ]);
+    expect(errs.join("\n")).not.toContain("permission denied");
     expect(process.exitCode).toBe(1);
   });
 

@@ -246,7 +246,7 @@ describe("resolveLaunchTarget", () => {
     expect(target.env.ANTHROPIC_BASE_URL).toBe(GATEWAY);
   });
 
-  test("remote Claude launch uses an env/header, never a URL or CLI argument, for gateway access", () => {
+  test("remote Claude launch does not inject a legacy gateway token", () => {
     const token = "remote-launch-gateway-access-token-at-least-32";
     process.env.LORE_GATEWAY_AUTH_TOKEN = token;
     const target = resolveLaunchTarget(
@@ -259,14 +259,12 @@ describe("resolveLaunchTarget", () => {
     );
 
     expect(target.env.LORE_REMOTE_URL).toBe("https://lore.example");
-    expect(target.env.ANTHROPIC_CUSTOM_HEADERS).toContain(
-      `x-lore-gateway-token: ${token}`,
-    );
+    expect(target.env.ANTHROPIC_CUSTOM_HEADERS).not.toContain(token);
     expect(target.args.join(" ")).not.toContain(token);
     expect(target.env.LORE_REMOTE_URL).not.toContain(token);
   });
 
-  test("remote Claude launch replaces an inherited gateway token header", () => {
+  test("remote Claude launch removes an inherited gateway token header", () => {
     const token = "replacement-gateway-access-token-at-least-32";
     process.env.LORE_GATEWAY_AUTH_TOKEN = token;
     process.env.ANTHROPIC_CUSTOM_HEADERS =
@@ -291,7 +289,7 @@ describe("resolveLaunchTarget", () => {
             "x-lore-gateway-token"
         );
       }),
-    ).toEqual([`x-lore-gateway-token: ${token}`]);
+    ).toEqual([]);
     expect(headers).toContain("X-Custom: retain-me");
     expect(target.args.join(" ")).not.toContain(token);
   });

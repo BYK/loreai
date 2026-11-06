@@ -1320,6 +1320,10 @@ describe("temporal re-chunk backfill CPU throttle", () => {
   });
 
   it("recycles failed fair claims so a healthy later tenant can recover", async () => {
+    // Keep parked retries ineligible while measuring slot recycling. Polling
+    // timers still enforce their existing real deadlines.
+    const retryTime = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(retryTime);
     for (let i = 0; i < 512; i++) {
       const id = `a-parked-${String(i).padStart(5, "0")}`;
       insertMsg(id, pid);

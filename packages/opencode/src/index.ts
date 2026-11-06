@@ -15,7 +15,6 @@ import {
 // (`undefined is not an object (evaluating 'A.event')`). See ./internal.ts.
 import {
   applyLoreProviderConfig,
-  gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
   isLoopbackUrl,
   prepareLocalUiAssets,
@@ -60,8 +59,8 @@ function gatewayOriginForLog(value: string): string {
 /**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
- * Order: LORE_GATEWAY_URL env var → port file → known default ports (3207, 5673).
- * Returns the URL of a running gateway, or null if none found.
+ * Explicit URLs are authoritative: failure never selects another installation.
+ * Without an explicit URL, probe the port file then defaults (3207, 5673).
  */
 async function resolveGatewayUrl(): Promise<string | null> {
   // 0. Remote gateway — skip local discovery/startup entirely.
@@ -69,27 +68,27 @@ async function resolveGatewayUrl(): Promise<string | null> {
     const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
     if (await probeGateway(url)) return url;
     log.info(
-      "remote gateway is not reachable, falling through to local discovery",
+      "configured remote gateway is unavailable; local fallback is disabled",
     );
+    return null;
   }
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
-  let preparedLocalUi = false;
   if (process.env.LORE_GATEWAY_URL) {
     const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
     if (isLoopbackUrl(url)) {
       await prepareLocalUiAssets();
-      preparedLocalUi = true;
     }
     if (await probeGateway(url)) return url;
-    // env var set but gateway unreachable — fall through to discovery
+    log.info("configured gateway is unavailable; local fallback is disabled");
+    return null;
   }
 
   // A source-loaded plugin may be running before the workspace's postinstall
   // build has staged packages/ui/dist into the gateway. Prepare it before
   // probing/reusing a local gateway, so an already-running source gateway can
   // discover the newly staged manifest as well.
-  if (!preparedLocalUi) await prepareLocalUiAssets();
+  await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();
@@ -404,11 +403,18 @@ export const LorePlugin: Plugin = async (ctx) => {
       // Memoize so concurrent LorePlugin calls don't race on probe→spawn.
       if (!loreInitPromise) {
         loreInitPromise = (async () => {
+          const explicitGateway =
+            process.env.LORE_REMOTE_URL || process.env.LORE_GATEWAY_URL;
           // Try to find a running gateway first (probes port file + known ports).
           const existingUrl = await resolveGatewayUrl();
           if (existingUrl) {
             log.info(`gateway detected at ${gatewayOriginForLog(existingUrl)}`);
             return existingUrl;
+          }
+          // A failed configured target must never create a different memory owner.
+          if (explicitGateway) {
+            lastGatewayStartError = "The configured gateway is unavailable.";
+            return null;
           }
           // No running gateway — start one in-process (handles fallback chain).
           log.info("starting gateway in-process…");
@@ -450,6 +456,8 @@ export const LorePlugin: Plugin = async (ctx) => {
       // invisible to a user in the OpenCode TUI. Also raise a TUI-safe toast so
       // a totally-failed gateway isn't a silent no-op (Daniel's Windows report).
       surfaceGatewayUnavailable(ctx.client, msg);
+      // Do not rewrite provider URLs or disable host compaction after failure.
+      return {};
     }
   }
 
@@ -535,10 +543,6 @@ export const LorePlugin: Plugin = async (ctx) => {
       // Project path, git remote, and upstream URL are injected by the
       // fetch interceptor (installed once per process).
       "chat.headers": async (input, output) => {
-        Object.assign(
-          output.headers,
-          gatewayAccessHeadersForRemote(gatewayBase),
-        );
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
@@ -651,9 +655,7 @@ export const LorePlugin: Plugin = async (ctx) => {
           onRequestHeaders: (headers) =>
             nativeRecallClient?.observeRequestHeaders(headers),
           getHeaders: () => {
-            const headers: Record<string, string> = {
-              ...gatewayAccessHeadersForRemote(gatewayBase),
-            };
+            const headers: Record<string, string> = {};
             const cur = currentProject;
             if (cur?.path) {
               headers["x-lore-project"] = cur.path;
