@@ -1,0 +1,8 @@
+---
+const base=import.meta.env.BASE_URL;
+---
+<figure class="verification-example"><div class="field-marker">What to look for · Sample data</div><picture><img class="verification-light" src={`${base}product-tour/session-detail-light.png`} width="1120" height="760" loading="lazy" decoding="async" alt="Actual Lore app showing a recorded webhook session and its conversation" /><img class="verification-dark" src={`${base}product-tour/session-detail-dark.png`} width="1120" height="760" loading="lazy" decoding="async" alt="Actual Lore app showing a recorded webhook session and its conversation" /></picture><figcaption>A recorded conversation in the local Lore app. Open the Dashboard URL printed by your own gateway; this public website cannot check its connection.</figcaption></figure>
+<style is:global>
+.verification-example { margin-block:1.25rem;border:1px solid var(--line);border-radius:var(--radius-control);overflow:hidden;background:var(--surface); }
+.verification-example > .field-marker { padding:.75rem 1rem; }.verification-example img { display:block;width:100%;height:auto; }.verification-example figcaption { padding:.75rem 1rem;font-size:.8125rem;line-height:1.6;color:var(--muted); }.verification-dark { display:none!important; }:root[data-theme="dark"] .verification-light { display:none!important; }:root[data-theme="dark"] .verification-dark { display:block!important; }
+</style>

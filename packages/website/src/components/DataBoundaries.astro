@@ -1,0 +1,6 @@
+---
+import JournalArt from './JournalArt.astro';
+interface Props { compact?: boolean; }
+const { compact=false }=Astro.props;
+---
+<div class="data-boundaries"><section><JournalArt name="chest" size={72} /><div><h3>On your machine</h3><p>SQLite stores conversations and memory. The project’s <code>.lore.md</code> contains reviewable knowledge you can share through Git.</p></div></section><section><JournalArt name="bird" size={72} /><div><h3>Configured providers</h3><p>Agent requests and background distillation, curation and imports can make model calls. Embeddings are local by default, with hosted options and fallbacks.</p></div></section><p class="data-telemetry"><strong>Operational telemetry:</strong> privacy-filtered metadata is enabled in production builds. {compact ? 'Read the data guide for the opt-out and provider boundaries.' : <>Set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out.</>}</p></div>

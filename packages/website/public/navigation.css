@@ -1,0 +1,58 @@
+/* Shared field-guide navigation: public pages and the documentation shell. */
+.field-guide-header {
+  position:relative;
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:color-mix(in srgb,var(--surface) 94%,transparent);
+  box-shadow:var(--shadow-soft);
+  backdrop-filter:blur(16px);
+  color:var(--text);
+}
+.top-nav.field-guide-header { position:sticky;top:12px;width:min(1120px,calc(100% - 32px));margin:12px auto 0;border:1px solid var(--line);background:color-mix(in srgb,var(--surface) 94%,transparent); }
+.field-guide-header .logo { gap:.5rem;flex-shrink:0; }
+.field-guide-header .logo-text { font:600 1.25rem/1 "DM Sans Variable","DM Sans",sans-serif;letter-spacing:-.045em;color:var(--heading); }
+.field-guide-header .logo-suffix { font-size:.78em;font-weight:450;color:var(--muted);letter-spacing:-.025em; }
+.field-guide-header .logo-dot { color:inherit; }
+.guide-navigation .guide-triggers { display:flex;align-items:center;list-style:none;margin:0;padding:0;gap:.125rem; }
+.guide-navigation li { margin:0;padding:0; }
+.guide-menu > .guide-trigger, .guide-navigation a.guide-trigger { display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:8px 11px;border:0;border-radius:9px;background:transparent;font:500 .8125rem/1.4 "DM Sans Variable","DM Sans",sans-serif;color:var(--muted);white-space:nowrap;text-decoration:none;list-style:none;cursor:pointer; }
+.guide-trigger::-webkit-details-marker { display:none; }
+.guide-menu[open] > .guide-trigger,.guide-trigger.guide-current { background:var(--chrome);color:var(--heading); }
+.guide-menu[open] > .guide-trigger svg { transform:rotate(180deg); }
+.guide-panel { position:absolute;inset-inline-start:110px;top:calc(100% + 10px);display:grid;grid-template-columns:1.15fr 1fr;width:min(670px,calc(100% - 126px));max-height:calc(100dvh - 110px);overflow:auto;padding:8px;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:var(--shadow-lifted);font-family:"DM Sans Variable","DM Sans",sans-serif; }
+.guide-list { padding:9px; }
+.guide-label { margin:2px 8px 10px;color:var(--muted);font:400 .625rem/1.5 ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase; }
+.guide-navigation a.guide-destination { display:flex;align-items:flex-start;gap:12px;min-height:44px;padding:12px 8px;border-radius:10px;color:var(--text);text-decoration:none;white-space:normal; }
+.guide-destination > svg { flex-shrink:0;margin-top:3px;color:var(--muted); }
+.guide-destination strong { display:block;font-size:.875rem;font-weight:500; }
+.guide-destination small { display:block;margin-top:3px;font-size:.75rem;line-height:1.45;color:var(--muted); }
+.guide-navigation a[aria-current] { color:var(--heading);text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px;text-underline-offset:5px; }
+.guide-navigation a.guide-feature { display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-end;min-width:0;min-height:264px;padding:20px;border:1px solid var(--line);border-radius:12px;background:var(--chrome);color:var(--text);text-decoration:none;white-space:normal; }
+.guide-feature .journal-art { width:118px;height:118px;align-self:center;object-fit:contain;margin:0 auto 15px; }
+.guide-feature .guide-label { margin:0 0 7px; }
+.guide-feature > strong { font-size:1rem;font-weight:500;letter-spacing:-.02em; }
+.guide-feature > small { margin-top:5px;font-size:.75rem;line-height:1.5;color:var(--muted); }
+.guide-feature-action { display:flex;align-items:center;gap:9px;margin-top:16px;font-size:.75rem;font-weight:500;color:var(--accent); }
+.guide-bottom { grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:8px;padding:4px 16px 0;border-top:1px solid var(--line);font-size:.6875rem;color:var(--muted); }
+.guide-navigation .guide-bottom a { display:flex;align-items:center;gap:8px;min-height:44px;padding:3px;color:var(--text);font-size:.6875rem;text-decoration:none; }
+.field-guide-header .header-utilities { gap:8px; }
+.field-guide-header .header-start,.primary-nav-mobile a.nav-start { display:flex;align-items:center;justify-content:center;gap:15px;min-height:44px;padding:9px 14px;border:1px solid var(--text);border-radius:10px;background:var(--text);color:var(--surface);font-size:.8125rem;font-weight:500;white-space:nowrap;text-decoration:none; }
+.field-guide-header .header-start svg { color:var(--palette-accent-300); }
+:root[data-theme="dark"] .field-guide-header .header-start svg { color:var(--palette-accent-900); }
+@media (prefers-color-scheme:dark) { :root:not([data-theme]) .field-guide-header .header-start svg { color:var(--palette-accent-900); } }
+.field-guide-header .header-start:active { transform:scale(.98); }
+.primary-nav-mobile .mobile-nav-group { margin:0 0 12px; }
+.primary-nav-mobile .guide-label { margin:6px 12px; }
+.primary-nav-mobile ul { display:block;list-style:none;margin:0;padding:0; }
+.primary-nav-mobile a:not(.nav-start) { display:flex;align-items:center;min-height:44px;width:100%;padding:8px 12px;border-radius:9px;color:var(--text);font-size:.875rem;text-decoration:none; }
+.primary-nav-mobile a[aria-current] { text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px; }
+.top-nav .nav-mobile { position:static; }
+.top-nav .nav-mobile-panel { inset-inline:0;top:calc(100% + 10px);width:auto;max-height:calc(100dvh - 100px);padding:14px;border-radius:18px; }
+@media (hover:hover) and (pointer:fine) {
+  .guide-trigger:hover,.guide-navigation a.guide-destination:hover,.primary-nav-mobile a:not(.nav-start):hover { background:var(--chrome);color:var(--heading); }
+  .guide-navigation a.guide-feature:hover { border-color:var(--muted); }
+  .field-guide-header .header-start:hover,.primary-nav-mobile a.nav-start:hover { background:var(--heading);color:var(--surface); }
+}
+@media (max-width:70rem) { .docs-site-header .header-github { display:none; } }
+@media (max-width:58rem) { .docs-site-header .header-start { display:none; } .docs-site-header .guide-panel { inset-inline-start:16px;width:calc(100% - 32px); } }
+@media (max-width:900px) { .top-nav.field-guide-header .header-start,.top-nav.field-guide-header .header-github { display:none; } }

@@ -1,0 +1,9 @@
+---
+import PageTitle from "@astrojs/starlight/components/PageTitle.astro";
+import JournalArt from "./JournalArt.astro";
+import type { JOURNAL_ART } from "../lib/quest-journal";
+const path=Astro.url.pathname;
+const illustrations: Array<[string,keyof typeof JOURNAL_ART]> = [["/docs/install/","tools"],["/docs/first-session/","tools"],["/docs/troubleshooting/","tools"],["/docs/memory/","satchel"],["/docs/using-lore/","satchel"],["/docs/data-and-costs/","chest"],["/docs/import/","chest"],["/docs/team-memory/","satchel"]];
+const illustration=illustrations.find(([suffix])=>path.endsWith(suffix))?.[1];
+---
+<div class="docs-journal-title field-heading"><div><p class="field-marker">Lore / {illustration ? "Field guide" : "Documentation"}</p><PageTitle {...Astro.props} /></div>{illustration && <JournalArt name={illustration} size={64} eager />}</div>

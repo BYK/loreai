@@ -9,6 +9,11 @@ tags:
   - open standards
   - data
   - ownership
+kind: "Perspective"
+takeaway: "Local history and Git-based knowledge sharing are available now. The hosted Folk Lore team experience is early access; this essay describes the broader design direction."
+nextStep:
+  label: "See current data and sharing boundaries"
+  href: "/docs/data-and-costs/"
 ---
 
 In April, Harrison Chase wrote an essay called

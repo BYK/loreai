@@ -7,7 +7,17 @@ sidebar:
 
 <!-- Auto-generated from packages/core/src/config.ts. Hand-edit the header above; the reference below regenerates via pnpm generate:docs. Do not hand-edit field tables. -->
 
-Lore's configuration has three layers, in order of precedence (highest first):
+Most projects can start with the built-in defaults. Change one setting for a specific need, then restart Lore and verify its effect. The [day-to-day guide](/docs/using-lore/) covers normal use; [data and costs](/docs/data-and-costs/) explains provider calls and usage estimates. The budget field below allocates context space, not a dollar spending cap.
+
+## Choose a setting for your task
+
+- [Tune relevant knowledge](/docs/guides/tune-knowledge-injection/) when the supplied context needs adjustment.
+- [Local inference](/docs/guides/local-inference/) for an existing local model server.
+- [Custom upstreams](/docs/guides/custom-upstreams/) for a corporate proxy or alternate endpoint.
+
+## Configuration precedence
+
+Configuration has three layers, in order of precedence for settings with an environment override (highest first):
 
 1. **Environment variables** (the LORE_* family — see the env-vars reference page) — process-level overrides, used by the gateway CLI and runtime.
 2. The .lore.json file in the project root — per-project, JSONC-parseable, the primary config surface for memory behavior, budget, distillation, search, knowledge, and cross-project settings. This page documents it.
@@ -25,8 +35,7 @@ The file is **JSONC** (JSON with // line comments and slash-star block comments,
 
 ```jsonc
 {
-  // Use a cheaper worker model for distillation
-  "workerModel": { "providerID": "anthropic", "modelID": "claude-3-5-haiku-latest" },
+  // An optional example: allow up to 30 active curated entries.
   "curator": { "enabled": true, "maxEntries": 30 },
 }
 ```
@@ -39,9 +48,9 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 ## Field reference
 
 - [`model`](#model) — Default session model. When omitted, Lore uses the model from the first client request.
-- [`workerModel`](#workerModel) — Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.
+- [`workerModel`](#workermodel) — Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.
 - [`budget`](#budget) — Context-window budget fractions. Sum plus LTM ≈ 1.0.
-- [`idleResumeMinutes`](#idleResumeMinutes) — Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic's default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.
+- [`idleResumeMinutes`](#idleresumeminutes) — Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic's default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.
 - [`timeouts`](#timeouts) — Foreground and background provider request deadlines, in milliseconds. Non-hosted gateways read these values from `.lore.json`; hosted gateways use environment variables.
 - [`distillation`](#distillation) — Distillation pipeline tuning (segment size, thresholds, tool-output truncation).
 - [`knowledge`](#knowledge) — Long-term knowledge (curator, entity injection) controls.
@@ -50,11 +59,11 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 - [`search`](#search) — Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.
 - [`cache`](#cache) — Anthropic prompt cache TTL and speculative warming.
 - [`workspaces`](#workspaces) — Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
-- [`crossProject`](#crossProject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
-- [`agentsFile`](#agentsFile) — AGENTS.md/CLAUDE.md export/import configuration.
-- [`loreFile`](#loreFile) — `.lore.md` export/import configuration.
+- [`crossProject`](#crossproject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
+- [`agentsFile`](#agentsfile) — AGENTS.md/CLAUDE.md export/import configuration.
+- [`loreFile`](#lorefile) — `.lore.md` export/import configuration.
 - [`user`](#user) — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
-- [`invariantCheck`](#invariantCheck) — `lore lint` (semantic linter) tuning.
+- [`invariantCheck`](#invariantcheck) — `lore lint` (semantic linter) tuning.
 
 ## `model`
 

@@ -1,0 +1,10 @@
+---
+import PublicLayout from "../layouts/PublicLayout.astro";
+import ProductTour from "../components/ProductTour.astro";
+const base = import.meta.env.BASE_URL;
+---
+<PublicLayout title="Explore the app — Lore.AI" description="See how to find recorded sessions, review project knowledge, and inspect model activity in Lore’s local memory browser.">
+  <div class="section tour-intro"><a class="text-link" href={base}>← Back to Lore</a><h1>See what your agent remembers.</h1><p>Find a conversation, review a project rule, or check activity in the local memory browser.</p></div>
+  <ProductTour />
+  <section class="section home-start"><div><h2>Try it with your project.</h2><p>Connect your agent, then verify your first recorded session.</p></div><a class="button button-primary" href={`${base}docs/install/`}>Install Lore <span aria-hidden="true">→</span></a></section>
+</PublicLayout>

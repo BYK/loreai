@@ -6,6 +6,11 @@ author: Lore Team
 tags:
   - memory
   - agents
+kind: "Product note"
+takeaway: "Start with one recorded session, then inspect the knowledge Lore extracts."
+nextStep:
+  label: "Connect your first session"
+  href: "/docs/first-session/"
 ---
 
 The Lore blog is ready for longer-form writing: release notes, implementation notes, architecture posts, and the practical lessons that show up when AI coding agents work inside real codebases for days at a time.

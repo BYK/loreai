@@ -8,6 +8,11 @@ tags:
   - memory
   - principles
   - agents
+kind: "Engineering"
+takeaway: "Stored history, active knowledge, and the material supplied to a request have different lifecycles. Review inaccurate knowledge and check its source."
+nextStep:
+  label: "Review and correct knowledge"
+  href: "/docs/using-lore/#review-knowledge"
 ---
 
 Everywhere you look, agents are being taught to fix themselves. Self-healing loops,

@@ -70,3 +70,7 @@ packages/ui/playwright-report/
 packages/gateway/test/.sigkill-bundle-*/
 .vitest-durations/
 .shard-files
+
+# Website browser verification artifacts
+packages/website/test-results/
+packages/website/playwright-report/

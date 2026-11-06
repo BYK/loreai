@@ -1,0 +1,86 @@
+/* Olive / amber scales and semantic roles from packages/ui/src/styles/app.css.
+ * Values match the app's pinned Tailwind 4.3.3 palette. Keep these in sync when
+ * the app changes palette; the static website does not load app CSS. */
+:root {
+  --palette-base-50: oklch(98.8% 0.003 106.5);
+  --palette-base-100: oklch(96.6% 0.005 106.5);
+  --palette-base-200: oklch(93% 0.007 106.5);
+  --palette-base-300: oklch(88% 0.011 106.6);
+  --palette-base-400: oklch(73.7% 0.021 106.9);
+  --palette-base-500: oklch(58% 0.031 107.3);
+  --palette-base-600: oklch(46.6% 0.025 107.3);
+  --palette-base-700: oklch(39.4% 0.023 107.4);
+  --palette-base-800: oklch(28.6% 0.016 107.4);
+  --palette-base-900: oklch(22.8% 0.013 107.4);
+  --palette-base-950: oklch(15.3% 0.006 107.1);
+  --palette-accent-50: oklch(98.7% 0.022 95.277);
+  --palette-accent-100: oklch(96.2% 0.059 95.617);
+  --palette-accent-200: oklch(92.4% 0.12 95.746);
+  --palette-accent-300: oklch(87.9% 0.169 91.605);
+  --palette-accent-400: oklch(82.8% 0.189 84.429);
+  --palette-accent-500: oklch(76.9% 0.188 70.08);
+  --palette-accent-600: oklch(66.6% 0.179 58.318);
+  --palette-accent-700: oklch(55.5% 0.163 48.998);
+  --palette-accent-800: oklch(47.3% 0.137 46.201);
+  --palette-accent-900: oklch(41.4% 0.112 45.904);
+  --palette-accent-950: oklch(27.9% 0.077 45.635);
+  color-scheme: light;
+  --bg: var(--palette-base-100);
+  --surface: var(--palette-base-50);
+  --chrome: var(--palette-base-100);
+  --line: var(--palette-base-200);
+  --text: var(--palette-base-900);
+  --muted: var(--palette-base-600);
+  --heading: var(--palette-base-950);
+  --accent: var(--palette-accent-700);
+  --accent-hover: var(--palette-accent-800);
+  --accent-contrast: var(--palette-base-50);
+  --accent-soft: var(--palette-accent-50);
+  --accent-soft-text: var(--palette-accent-800);
+  --danger: #8b3a3a;
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 6%, transparent);
+  --shadow-lifted: 0 16px 48px color-mix(in srgb, var(--palette-base-950) 8%, transparent);
+  --radius-control: 6px;
+  --radius-card: 14px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--palette-base-950);
+  --surface: var(--palette-base-900);
+  --chrome: var(--palette-base-800);
+  --line: var(--palette-base-700);
+  --text: var(--palette-base-200);
+  --muted: var(--palette-base-400);
+  --heading: var(--palette-base-50);
+  --accent: var(--palette-accent-400);
+  --accent-hover: var(--palette-accent-300);
+  --accent-contrast: var(--palette-base-950);
+  --accent-soft: var(--palette-accent-950);
+  --accent-soft-text: var(--palette-accent-200);
+  --danger: #e39393;
+  --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 28%, transparent);
+  --shadow-lifted: 0 14px 34px color-mix(in srgb, var(--palette-base-950) 38%, transparent);
+}
+
+/* No-JavaScript fallback; an explicit choice always wins. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: var(--palette-base-950);
+    --surface: var(--palette-base-900);
+    --chrome: var(--palette-base-800);
+    --line: var(--palette-base-700);
+    --text: var(--palette-base-200);
+    --muted: var(--palette-base-400);
+    --heading: var(--palette-base-50);
+    --accent: var(--palette-accent-400);
+    --accent-hover: var(--palette-accent-300);
+    --accent-contrast: var(--palette-base-950);
+    --accent-soft: var(--palette-accent-950);
+    --accent-soft-text: var(--palette-accent-200);
+    --danger: #e39393;
+    --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 28%, transparent);
+    --shadow-lifted: 0 14px 34px color-mix(in srgb, var(--palette-base-950) 38%, transparent);
+  }
+}

@@ -1,0 +1,16 @@
+---
+const base = import.meta.env.BASE_URL;
+const cases = [
+ {id:"session",label:"Missing session",observe:"The agent responds, but the conversation is not in Lore’s Sessions list.",check:"Open the printed Dashboard URL, select the project that launched your agent, and clear the session search filter. Send a fresh message through your client’s Lore connection path.",result:"A newly recorded message is the connection check. Knowledge does not have to appear yet.",href:"docs/first-session/#verify",action:"Verify the connection",reference:"missing-session"},
+ {id:"knowledge",label:"No knowledge yet",observe:"Sessions contains your conversation, but Knowledge or .lore.md has no new entry.",check:"Check Sessions first. Distillation and curation happen in the background; one short message is not a reliable extraction test. Inspect processing and provider errors before restarting or importing again.",result:"Recording and knowledge extraction are separate milestones. An absent rule alone does not mean the connection failed.",href:"docs/memory/",action:"Understand the memory stages",reference:"knowledge-has-not-appeared"},
+ {id:"gateway",label:"Gateway unavailable",observe:"The Dashboard cannot be reached, or a separately launched client cannot connect.",check:"Keep Lore running and use its printed Dashboard URL. Run lore doctor from the affected project and inspect gateway/process findings; optional checks do not all need to be green.",result:"Use the printed Dashboard URL rather than assuming a fixed port. Follow the relevant finding before restarting.",href:"docs/install/",action:"Check your connection path",reference:"gateway-unavailable"},
+] as const;
+---
+<section class="diagnostic-guide" id="diagnostic" aria-label="Find your next troubleshooting check">
+ <p class="field-marker">Follow the observation</p><fieldset class="guide-segments"><legend>What can you observe?</legend>{cases.map((item,index)=><label><input type="radio" name="diagnostic-issue" value={item.id} checked={index===0} aria-label={item.label} aria-controls={`diagnostic-${item.id}`} /><span>{item.label}</span></label>)}</fieldset>
+ {cases.map(item=><div class="diagnostic-panel" data-issue-panel={item.id} id={`diagnostic-${item.id}`}><ol class="diagnostic-checks"><li><span>01 / Observe</span><p>{item.observe}</p></li><li><span>02 / Check</span><p>{item.check}</p></li><li><span>03 / Expected result</span><p>{item.result}</p></li></ol><div class="diagnostic-next"><a href={`${base}${item.href}`}>{item.action} <span aria-hidden="true">→</span></a><a href={`${base}docs/troubleshooting/#${item.reference}`}>Full reference</a></div></div>)}
+</section>
+<script>
+import { bindUrlChoice } from "../scripts/url-choice";
+bindUrlChoice(".diagnostic-guide", "issue", ["session", "knowledge", "gateway"]);
+</script>

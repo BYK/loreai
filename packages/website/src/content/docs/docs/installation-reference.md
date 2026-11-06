@@ -1,9 +1,11 @@
 ---
-title: Install Lore
-description: Install Lore locally and launch your coding agent through the memory gateway.
+title: Installer and uninstall reference
+description: Detailed telemetry, installation paths, lifecycle, uninstall, and alternative-runtime reference.
 sidebar:
-  order: 1
+  order: 20
 ---
+
+[Follow the guided installation](/docs/install/) for client selection, connection, and verification. This page retains the detailed installation and cleanup reference.
 
 Install Lore with the hosted install script:
 

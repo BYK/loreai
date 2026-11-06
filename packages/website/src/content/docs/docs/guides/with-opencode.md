@@ -62,6 +62,9 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 
 ## Next steps
 
+- [Verify a recorded session](/docs/first-session/?agent=opencode#verify).
+- [Use Lore day to day](/docs/using-lore/).
+
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](/docs/configuration/) — full reference for `.lore.json`.
 - [Local inference](/docs/guides/local-inference/) — running OpenCode against Ollama, vLLM, or llama.cpp.

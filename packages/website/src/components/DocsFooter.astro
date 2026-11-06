@@ -1,0 +1,7 @@
+---
+import Footer from '@astrojs/starlight/components/Footer.astro';
+const base=import.meta.env.BASE_URL;
+---
+<Footer {...Astro.props} />
+<nav class="docs-help-links" aria-label="Documentation help"><a href={`${base}docs/install/`}>Get started</a><a href={`${base}docs/using-lore/`}>Using Lore</a><a href={`${base}docs/troubleshooting/`}>Troubleshooting</a><a href={`${base}docs/data-and-costs/`}>Data &amp; costs</a></nav>
+<style>.docs-help-links { display:flex;flex-wrap:wrap;gap:.5rem 1.25rem;border-top:1px solid var(--line);padding-top:1rem;margin-top:1rem; }.docs-help-links a { display:inline-flex;align-items:center;min-height:44px;font-size:.8125rem;color:var(--accent); }</style>

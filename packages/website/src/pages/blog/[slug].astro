@@ -2,6 +2,9 @@
 import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
 import { documentUri } from "../../lib/standard-site";
+import ArticleDiagram from "../../components/ArticleDiagram.astro";
+import AccordionItem from "../../components/ui/AccordionItem.astro";
+import JournalArt from "../../components/JournalArt.astro";
 
 export async function getStaticPaths() {
   const posts = (await getCollection("blog")).filter((post) => !post.data.draft);
@@ -9,7 +12,9 @@ export async function getStaticPaths() {
 }
 
 const { post } = Astro.props;
-const { Content } = await render(post);
+const { Content, headings } = await render(post);
+const outline = headings.filter(heading => heading.depth === 2 || heading.depth === 3);
+const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.length >= 4;
 ---
 
 <BlogLayout
@@ -20,7 +25,7 @@ const { Content } = await render(post);
   <article class="blog-post">
     <a class="blog-back" href={`${import.meta.env.BASE_URL}blog/`}>Back to blog</a>
     <header>
-      <p class="eyebrow">{post.data.author}</p>
+      <div class="article-field-label"><p class="eyebrow field-marker">Field notes / {post.data.kind} · {post.data.author}</p><JournalArt name={post.data.kind === "Tutorial" ? "tools" : post.data.kind === "Engineering" ? "satchel" : "journal"} size={48} eager /></div>
       <h1>{post.data.title}</h1>
       {post.data.subtitle && <p class="blog-subtitle">{post.data.subtitle}</p>}
       <time datetime={post.data.pubDate.toISOString()}>
@@ -28,8 +33,12 @@ const { Content } = await render(post);
       </time>
       <p>{post.data.description}</p>
     </header>
+    {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><p class="field-marker">Keep this lesson</p><strong>In practice</strong><p>{post.data.takeaway}</p></aside>}
+    {["how-lore-remembers-and-forgets", "why-memory-is-not-enough"].includes(post.id) && <ArticleDiagram context={post.id === "why-memory-is-not-enough"} />}
+    {showOutline && <AccordionItem class="article-outline" title="On this page"><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></AccordionItem>}
     <div class="blog-prose">
       <Content />
     </div>
+    <nav class="article-next" aria-label="Put this into practice"><JournalArt name={post.data.kind === "Engineering" ? "decision" : "tools"} size={56} /><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`}>{post.data.nextStep?.label ?? "Connect and verify your first Lore session"} →</a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
   </article>
 </BlogLayout>
