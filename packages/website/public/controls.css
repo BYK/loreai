@@ -8,10 +8,10 @@
 @media (pointer:coarse) { .theme-toggle button { width:44px;height:44px; } }
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 ::selection { background: var(--accent-soft); color: var(--accent-soft-text); }
-.primary-nav ul { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .25rem; list-style: none; padding: 0; margin: 0; }
-.primary-nav a { display: inline-flex; align-items: center; min-height: 44px; padding:.5rem .75rem; border-radius:var(--radius-control); color: var(--muted); font-size: .875rem; text-decoration: none; }
+.primary-nav ul { display: flex; align-items: center; flex-wrap: nowrap; gap: .125rem; list-style: none; padding: 0; margin: 0; }
+.primary-nav a { display: inline-flex; align-items: center; min-height: 44px; padding:.5rem .75rem; border-radius:var(--radius-control); color: var(--muted); font-size: .875rem; font-weight:500; text-decoration: none; }
 .primary-nav a:hover { color: var(--heading); background:var(--chrome); }
-.primary-nav a[aria-current] { color:var(--accent-soft-text); background:var(--accent-soft); }
+.primary-nav a[aria-current] { color:var(--heading); background:transparent;text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px;text-underline-offset:.55rem; }
 .primary-nav-mobile ul { display: block; }
 .primary-nav-mobile a { display: flex; padding-inline: .75rem; }
 .primary-nav-mobile a:hover { background: var(--chrome); }
@@ -26,3 +26,14 @@
 }
 @media (max-width: 380px) { .logo .logo-text { display: none; } }
 @media (forced-colors: active) { .theme-toggle button[aria-pressed="true"] { outline: 2px solid Highlight; } }
+
+/* Navigation is separate from utilities and the single installation action. */
+.header-utilities { display:flex;align-items:center;gap:.5rem;flex-shrink:0; }
+.header-github { display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:var(--radius-control);color:var(--muted);text-decoration:none; }
+.header-github:hover { background:var(--chrome);color:var(--heading); }
+.header-github svg { display:block; }
+.header-start,.primary-nav a.nav-start { display:inline-flex;align-items:center;justify-content:center;gap:.75rem;min-height:44px;padding:.5rem .875rem;border:1px solid transparent;border-radius:var(--radius-control);background:var(--accent);color:var(--accent-contrast);font-size:.875rem;font-weight:600;text-decoration:none;white-space:nowrap; }
+.header-start:hover,.primary-nav a.nav-start:hover { background:var(--accent-hover);color:var(--accent-contrast); }
+.primary-nav-mobile a { width:100%; }
+.primary-nav-mobile a.nav-start { margin-top:.5rem; }
+@media(max-width:50rem) { .header-github,.header-start { display:none; } }

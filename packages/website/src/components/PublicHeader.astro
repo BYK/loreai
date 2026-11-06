@@ -1,10 +1,10 @@
 ---
 import Logo from "./Logo.astro";
 import PrimaryLinks from "./PrimaryLinks.astro";
-import ThemeToggle from "./ThemeToggle.astro";
+import HeaderActions from "./HeaderActions.astro";
 import MobileNav from "./MobileNav.astro";
 ---
 <header class="top-nav">
-  <Logo theme="auto" size={36} />
-  <div class="header-actions"><div class="desktop-nav"><PrimaryLinks /></div><ThemeToggle /><MobileNav /></div>
+  <div class="header-brand"><Logo theme="auto" size={36} /><div class="desktop-nav"><PrimaryLinks /></div></div>
+  <div class="header-actions"><HeaderActions /><MobileNav /></div>
 </header>

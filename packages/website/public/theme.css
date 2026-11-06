@@ -42,7 +42,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .button:disabled { cursor: wait; opacity: .65; }
 .text-link { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; }
 .top-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 64px; padding: .5rem max(1.5rem, calc((100% - 1120px) / 2)); background: var(--surface); border-bottom: 1px solid var(--line); }
-.header-actions { display: flex; align-items: center; gap: 1rem; }
+.header-actions { display: flex; align-items: center; gap: .75rem; }
+.header-brand { display:flex;align-items:center;gap:1.5rem;min-width:0; }
+.header-brand .desktop-nav { padding-inline-start:1.5rem;border-inline-start:1px solid var(--line); }
 .logo { display: inline-flex; align-items: center; gap: .3rem; color: var(--heading); line-height: 1; text-decoration: none; flex-shrink: 0; }
 .logo-img { display: block; }
 .logo-text { font: italic 400 1.5rem/1 var(--serif); }
@@ -108,6 +110,7 @@ th { font-weight: 500; }
 .skip-link:focus { transform: none; }
 @media (max-width: 900px) {
   .desktop-nav { display: none; }
+  .top-nav :is(.header-github,.header-start) { display:none; }
   .nav-mobile { display: block; }
   .header-actions { gap: .75rem; }
   .home-hero { grid-template-columns: 1fr; gap: 2rem; }

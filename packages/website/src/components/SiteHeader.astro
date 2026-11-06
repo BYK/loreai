@@ -4,10 +4,10 @@ import Search from "virtual:starlight/components/Search";
 import LanguageSelect from "virtual:starlight/components/LanguageSelect";
 import Logo from "./Logo.astro";
 import PrimaryLinks from "./PrimaryLinks.astro";
-import ThemeToggle from "./ThemeToggle.astro";
+import HeaderActions from "./HeaderActions.astro";
 const shouldRenderSearch = config.pagefind || config.components.Search !== "@astrojs/starlight/components/Search.astro";
 ---
-<div class="header docs-site-header"><Logo theme="auto" size={36} /><div class="docs-primary"><PrimaryLinks /></div>{shouldRenderSearch && <Search />}<div class="docs-controls"><ThemeToggle /><LanguageSelect /></div></div>
+<div class="header docs-site-header"><Logo theme="auto" size={36} /><div class="docs-primary"><PrimaryLinks /></div>{shouldRenderSearch && <Search />}<div class="docs-controls"><HeaderActions /><LanguageSelect /></div></div>
 <script>import "../scripts/menus.js";</script>
 <style>
   .docs-site-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; height: 100%; }

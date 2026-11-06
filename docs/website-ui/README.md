@@ -131,7 +131,7 @@ product-tour contracts remain covered. Test results and the broader root-suite
 limitations are recorded in the PR; website checks alone do not imply a passing
 core/gateway suite or completed assistive-technology certification.
 
-Current validation: 352 browser checks pass with eight conditional skips across five
+Current validation: 362 browser checks pass with eight conditional skips across five
 viewport/appearance configurations; the final diagram alignment regression passes
 in all five. Thirteen website unit tests and Astro diagnostics pass. A prefixed
 build serves all 37 HTML pages and exercises journal history, setup/tour state,
@@ -139,3 +139,30 @@ local images and Pagefind navigation at 1280px and 320px without failed assets o
 runtime errors. All 817 internal fragment links and 91 local HTTP destinations pass. Separate correctness and security reviews audit parser stability,
 SVG geometry/paint safety, and factual boundaries. Full repository testing remains
 separate and is reported with exact local failures in the PR.
+
+## Top navigation refinement
+
+The latest header groups Docs, Why Lore and Blog beside the logo. Static GitHub,
+theme and installation controls sit together on the right; the journal and theme
+controller are unchanged. The mobile menu retains every text destination and
+works without JavaScript. Other feature captures above document the product-story
+pass; these screenshots show the current header across appearances and widths.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Five equally weighted links | Three section links plus a clear Get started action | Separate browsing from starting setup |
+| GitHub text competes with page links | Quiet icon with an accessible GitHub name | Keep the utility available with less visual weight |
+| Filled active navigation tile | Short colored underline | Mark the current section without another container |
+| Plain mobile installation link | Full-width installation action in the native menu | Make the next action easy to find |
+
+![Light header](screenshots/header-home-light.jpg)
+![Dark documentation header](screenshots/header-docs-dark.jpg)
+![Intermediate documentation header](screenshots/header-docs-834-light.jpg)
+![Light native phone menu](screenshots/header-menu-mobile-light.jpg)
+![Dark native phone menu](screenshots/header-menu-mobile-dark.jpg)
+
+The complete website suite passes 362 browser checks with eight conditional skips.
+The focused header/current-section/search/short-screen checks pass all 25 cases;
+Astro checks 45 files without diagnostics. Separate correctness/security reviews
+classify this as a mechanical presentation change and preserve the prior broad
+repository test limitations rather than treating them as green.

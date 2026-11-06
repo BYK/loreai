@@ -35,7 +35,10 @@ navigation and readable content remain available without JavaScript.
 ## Page structure and first use
 
 `PublicLayout.astro` owns the common public header/footer. `PrimaryLinks.astro`
-is also used by the docs header and drawer; section links remain secondary.
+is also used by the docs header and drawer. Desktop navigation groups three section
+links beside the logo. `HeaderActions.astro` shares the accessible GitHub icon,
+existing theme pill and clear installation action. Native mobile menus keep all
+five text destinations, with an emphasized Get started link.
 `InstallCommand.astro` and `Waitlist.astro` keep command and signup copy consistent.
 Native disclosures provide navigation without JavaScript. `menus.js` adds dismissal
 and focus restoration; `site.js` owns copy receipts, a bounded release lookup, and
