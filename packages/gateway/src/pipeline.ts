@@ -26796,14 +26796,7 @@ async function handleRequestInner(
       const detail =
         err instanceof OpenAIStreamValidationError
           ? config.exposeProviderDiagnostics
-            ? `: ${err.message} (rule=${err.rule})${
-                err.usageDiagnostic
-                  ? ` usage=${JSON.stringify({
-                      field: err.usageDiagnostic.field,
-                      category: err.usageDiagnostic.category,
-                    })}`
-                  : ""
-              }`
+            ? `: ${err.message} (rule=${err.rule})`
             : `: ${err.message}`
           : err instanceof Error &&
               [

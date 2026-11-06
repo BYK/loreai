@@ -31,11 +31,7 @@ import {
   cancelAndReleaseReader,
 } from "./anthropic";
 import type { SSEStreamOptions } from "./options";
-import {
-  OpenAIUsageValidationError,
-  safeTokenSum,
-  validateOpenAIUsage,
-} from "../usage-validation";
+import { safeTokenSum, validateOpenAIUsage } from "../usage-validation";
 
 // ---------------------------------------------------------------------------
 // Types for in-flight tool call tracking
@@ -91,10 +87,7 @@ const OPENAI_STREAM_VALIDATION_MESSAGES: Record<
 export class OpenAIStreamValidationError extends Error {
   readonly rule: OpenAIStreamValidationRule;
 
-  constructor(
-    rule: OpenAIStreamValidationRule,
-    readonly usageDiagnostic?: OpenAIUsageValidationError,
-  ) {
+  constructor(rule: OpenAIStreamValidationRule) {
     super(OPENAI_STREAM_VALIDATION_MESSAGES[rule]);
     this.name = "OpenAIStreamValidationError";
     this.rule = rule;
@@ -593,14 +586,12 @@ export async function accumulateOpenAISSEStream(
     if (details?.cache_write_tokens !== undefined)
       cacheWriteTokens = details.cache_write_tokens;
   };
-  const validateUsage = (usage: unknown): void => {
+  const malformedUsage = (usage: unknown): boolean => {
     try {
       validateOpenAIUsage(usage, "malformed OpenAI stream event");
-    } catch (error) {
-      throw new OpenAIStreamValidationError(
-        "invalid-usage",
-        error instanceof OpenAIUsageValidationError ? error : undefined,
-      );
+      return false;
+    } catch {
+      return true;
     }
   };
   const malformedChoice = (choice: unknown): boolean => {
@@ -728,11 +719,17 @@ export async function accumulateOpenAISSEStream(
         | Array<Record<string, unknown>>
         | undefined;
       const postTerminalNoop = isPostTerminalNoopFrame(normalizedChoices);
-      if (opts.strict) {
-        if (!Array.isArray(choices) || choices.some(malformedChoice)) {
-          throw malformedOpenAIStream("invalid-choices");
-        }
-        validateUsage(parsed.usage);
+      if (
+        opts.strict &&
+        (!Array.isArray(choices) ||
+          choices.some(malformedChoice) ||
+          malformedUsage(parsed.usage))
+      ) {
+        throw malformedOpenAIStream(
+          !Array.isArray(choices) || choices.some(malformedChoice)
+            ? "invalid-choices"
+            : "invalid-usage",
+        );
       }
 
       if (
