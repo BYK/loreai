@@ -15,25 +15,25 @@ const base = import.meta.env.BASE_URL;
       <div class="journal-progress" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="journal-pages">
         <section class="journal-chapter" id="journal-conversation" data-journal-chapter="conversation">
-          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">During a coding session, you agree how this service should handle duplicate events.</p>
+          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">One decision from a coding session, carried into the next task.</p>
           <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> The provider can deliver the same event twice. Reuse the event-id check that’s already there.”</p></div>
           <div class="journal-message journal-transient"><span>Temporary troubleshooting</span><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p></div>
           <p class="journal-note">The duplicate-event rule matters beyond this session. A temporary test port does not.</p>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>See saved knowledge <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-knowledge" data-journal-chapter="knowledge">
-          <p class="journal-kicker">02 / Saved knowledge</p><h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Knowledge is curated in the background. You can inspect a saved entry, correct it, and review its Markdown before sharing through Git.</p>
+          <p class="journal-kicker">02 / Saved knowledge</p><h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Lore curates a reviewable rule in the background. Open its source or Markdown to check it.</p>
           {entries.map(entry => <div class="journal-entry" data-journal-entry={entry.id} id={`journal-entry-${entry.id}`}>
             <div class="journal-entry-heading"><div><p class="journal-category">{entry.category}</p><h4>{entry.title}</h4></div><JournalArt name={entry.art} size={64} /></div>
-            <p>{entry.rule}</p><details class="journal-file"><summary>Review the .lore.md excerpt</summary><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></details>
+            <p class="journal-carried-rule"><mark>{entry.rule.slice(0, entry.rule.indexOf(".") + 1)}</mark>{entry.rule.slice(entry.rule.indexOf(".") + 1)}</p><details class="journal-file"><summary>Review the .lore.md excerpt</summary><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></details>
             <details><summary>Where it came from</summary><p class="journal-source">{entry.session}</p><blockquote>“{entry.source}”</blockquote></details>
           </div>)}
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Try a later session <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-recall" data-journal-chapter="recall">
-          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">Choose a task. This example shows a relevant rule supplied to the agent, while other knowledge stays stored.</p>
+          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">Choose a task to see the relevant rule supplied. Other knowledge stays stored.</p>
           <fieldset class="journal-tasks"><legend>What are you working on?</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
-          {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Included for this task</p><h4>{entry.title}</h4><blockquote>“{entry.response}”</blockquote><p class="journal-reason"><strong>Why this rule:</strong> {entry.reason}</p><p class="journal-source">Source · {entry.session}</p></div>)}
+          {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Included for this task</p><h4>{entry.title}</h4><blockquote>“<mark>{entry.response.slice(0, entry.response.indexOf(".") + 1)}</mark>{entry.response.slice(entry.response.indexOf(".") + 1)}”</blockquote><p class="journal-reason"><strong>Why this rule:</strong> {entry.reason}</p><p class="journal-source">Source · {entry.session}</p></div>)}
           <p class="journal-note">Other entries remain available. The temporary test port stays out of this task’s project knowledge.</p>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-inspect hidden>Inspect the supplied rule <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">03 / 03</span></div>
         </section>

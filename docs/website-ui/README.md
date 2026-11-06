@@ -179,3 +179,53 @@ setup/tour state and Pagefind at 1280px and 320px. All 989 internal fragment lin
 resolve. Independent correctness/security reviews and broad repository checks are
 reported separately in the PR; the website results do not imply a clean local
 full-repository suite.
+
+## Field-guide pages
+
+All ten approved page improvements are implemented. These captures supersede the
+older homepage, tour, docs directory and blog compositions shown above.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Hero opens with raw Markdown | Readable rule / Markdown selector with an example source | Explain the saved knowledge before its syntax |
+| Tour mainly switches screenshots | Rule/source/history inspection points with readable notes | Explain the actual app while preserving original captures |
+| Journal repeats its explanation | Shorter chapter copy and carried-rule highlights | Make the decision-to-reuse connection easier to follow |
+| Everyday section repeats the overview | Three concise task links | Give each homepage section a distinct purpose |
+| Large agent tiles and separate success explanation | Compact client pills, numbered sequence and reader observation | Keep commands and verification clear without simulated detection |
+| Docs starts as a list of prose links | Illustrated task directory | Lead readers to the result they need |
+| Comparison is only a table | Workflow selector with highlighted row and complete table | Explain fit without hiding alternatives |
+| Blog illustration floats beside the masthead | Illustrated featured article and contextual diagrams | Give the artwork a role in the story |
+| Troubleshooting begins with reference text | Symptom → check → expected result guide | Help readers choose their next observable check |
+| Shared controls inherit prose spacing | Consistent surfaces, selected borders and scoped control spacing | Carry the header's deliberate design across pages |
+
+![Readable knowledge file](screenshots/field-guide-home-light.jpg)
+![Homepage in dark appearance](screenshots/field-guide-home-dark.jpg)
+![Guided app inspection](screenshots/field-guide-tour-dark.jpg)
+![Task-based documentation entry](screenshots/field-guide-docs-light.jpg)
+![Compact setup chooser](screenshots/field-guide-setup-light.jpg)
+![Workflow fit guide](screenshots/field-guide-fit-light.jpg)
+![Illustrated field notes](screenshots/field-guide-blog-light.jpg)
+![Phone knowledge file](screenshots/field-guide-file-mobile-light.jpg)
+![Phone troubleshooting](screenshots/field-guide-diagnostic-mobile-light.jpg)
+![Phone source inspection](screenshots/field-guide-tour-mobile-dark.jpg)
+![Reader-controlled connection check](screenshots/field-guide-setup-mobile-light.jpg)
+
+The final website browser run passes **447 checks with eight conditional skips**
+across five configurations. New regressions cover independently restored choices,
+malformed queries, delayed enhancement, native fallbacks, per-client confirmations,
+article-specific destinations, 44px targets, compact label margins, selection-border
+contrast, and markers remaining within the actual image at 1001–1280px. The marker
+and contrast regressions were observed failing before their fixes. Phone coverage
+also exercises 320px, 390px, 768px and 1024px widths. Thirteen units, Astro diagnostics for 54 files,
+workspace typecheck/lint/format, generated-doc parity and 37-page social metadata checks
+pass. All 1,003 internal fragment links resolve. The prefixed build verifies the four
+new query groups alongside journal history, setup/tour state, artwork and Pagefind
+at 1280px on desktop and 320px on phone.
+
+Independent correctness and security source reviews found no remaining blocker for
+the draft update and exercised the real URL helper with seeded adversarial inputs.
+These are source/UI results; no fresh full-repository pass is claimed. Broad local
+core/gateway test failures remain a separate before-merge gate, and hosted CI is
+reported for the pushed head. The RPG journal, floating header, canonical setup
+commands, existing fragments and complete comparison stay available. No backend,
+new dependency or automatic connection detection is introduced.

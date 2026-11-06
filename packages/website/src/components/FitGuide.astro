@@ -1,0 +1,15 @@
+---
+const choices = [
+ {id:"coding",label:"Use an existing coding agent",title:"Keep your client. Add reviewable project memory.",text:"Start with Lore’s supported connection paths. Check that your client is supported and that local history and Markdown knowledge fit your workflow."},
+ {id:"rules",label:"Keep a few stable rules",title:"A concise instruction file may be enough.",text:"Start with AGENTS.md or your client’s instruction file when the rules are small and stable. Check who will keep them accurate as the project changes."},
+ {id:"application",label:"Build an application",title:"Evaluate memory as part of your application.",text:"Start with memory infrastructure such as Mem0 or Supermemory. Check the SDK/API, deployment options, data boundaries and retrieval behavior against your application’s needs."},
+ {id:"framework",label:"Build an agent workflow",title:"Choose the framework around the agent you own.",text:"An agent framework such as Mastra is a starting point when you are building the agent, tools and workflows yourself. Evaluate memory as part of that stack."},
+] as const;
+---
+<div class="fit-guide"><fieldset class="guide-segments"><legend>What are you trying to do?</legend>{choices.map((choice,index)=><label><input type="radio" name="workflow-fit" value={choice.id} checked={index===0} aria-label={choice.label} aria-controls={`fit-${choice.id}`} /><span>{choice.label}</span></label>)}</fieldset>
+ {choices.map(choice=><div class="fit-explanation" data-fit-panel={choice.id} id={`fit-${choice.id}`}><p class="field-marker">A starting point for your workflow</p><h3>{choice.title}</h3><p>{choice.text}</p></div>)}<p class="fit-table-hint">Your selection highlights a row below. The complete comparison stays available.</p>
+</div>
+<script>
+import { bindUrlChoice } from "../scripts/url-choice";
+bindUrlChoice(".fit-guide", "fit", ["coding", "rules", "application", "framework"]);
+</script>

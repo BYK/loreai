@@ -2,6 +2,7 @@
 @import "../../public/controls.css";
 @import "../../public/navigation.css";
 @import "../../public/journal.css";
+@import "../../public/page-field-guide.css";
 
 :root {
   --sl-font: "DM Sans Variable", "DM Sans", sans-serif;

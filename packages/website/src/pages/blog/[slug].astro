@@ -2,6 +2,7 @@
 import { getCollection, render } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
 import { documentUri } from "../../lib/standard-site";
+import ArticleDiagram from "../../components/ArticleDiagram.astro";
 import JournalArt from "../../components/JournalArt.astro";
 
 export async function getStaticPaths() {
@@ -32,10 +33,11 @@ const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.leng
       <p>{post.data.description}</p>
     </header>
     {post.data.takeaway && <aside class="article-takeaway" aria-label="Practical takeaway"><p class="field-marker">Keep this lesson</p><strong>In practice</strong><p>{post.data.takeaway}</p></aside>}
+    {["how-lore-remembers-and-forgets", "why-memory-is-not-enough"].includes(post.id) && <ArticleDiagram context={post.id === "why-memory-is-not-enough"} />}
     {showOutline && <details class="article-outline"><summary>On this page</summary><nav aria-label="Article sections"><ul>{outline.map(heading => <li class:list={{ "outline-subsection": heading.depth === 3 }}><a href={`#${heading.slug}`}>{heading.text}</a></li>)}</ul></nav></details>}
     <div class="blog-prose">
       <Content />
     </div>
-    <nav class="article-next" aria-label="Put this into practice"><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`}>{post.data.nextStep?.label ?? "Connect and verify your first Lore session"} →</a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
+    <nav class="article-next" aria-label="Put this into practice"><JournalArt name={post.data.kind === "Engineering" ? "decision" : "tools"} size={56} /><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`}>{post.data.nextStep?.label ?? "Connect and verify your first Lore session"} →</a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
   </article>
 </BlogLayout>

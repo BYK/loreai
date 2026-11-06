@@ -2,6 +2,7 @@
 @import url("./controls.css");
 @import url("./navigation.css");
 @import url("./journal.css");
+@import url("./page-field-guide.css");
 
 :root {
   --sans: "DM Sans Variable", "DM Sans", sans-serif;
@@ -101,7 +102,7 @@ th { font-weight: 500; }
 .receipt p, .receipt a, .receipt button { margin-top: .75rem; }
 #waitlist-error { border-color: var(--danger); }
 .site-footer { width: min(1120px, calc(100% - 3rem)); margin-inline: auto; padding-block: 2.5rem; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1.5rem; align-items: center; color: var(--muted); font-size: .8125rem; }
-.footer-brand { font: italic 1.25rem var(--serif); color: var(--heading); text-decoration: none; }
+.footer-brand { font:600 1.25rem/1 var(--sans);letter-spacing:-.04em; color: var(--heading); text-decoration: none; }
 .footer-links { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
 .footer-links a { display: inline-flex; align-items: center; min-height: 44px; }
 .site-footer > small { width: 100%; }

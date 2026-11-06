@@ -143,3 +143,28 @@ separate what is stored, supplied to the current request, sent to providers, and
 reported as operational telemetry. Why Lore keeps every comparison fact in stacked
 phone rows. Blog readers start with a practical article; availability notes remain
 specific to the relevant article rather than repeated on every post.
+
+## Field-guide page interactions
+
+`KnowledgeFile.astro` presents the hero rule in readable form or Markdown (`format`).
+`KnowledgeInspector.astro` places native inspection points over the actual Knowledge
+capture and shows illustrative rule/source/revision notes beside it (`inspect`). The
+outer tour binds `view` only to `.tour-picker`; it must not collect inspector radios.
+On compact screens the same inspection choices become a labeled row above the image.
+The image-sized `.inspection-stage` keeps points within the capture even when a note
+is taller. Full-size originals remain ordinary links.
+
+`FitGuide.astro` highlights an existing comparison row (`fit`) while retaining the
+complete table. `TroubleshootingGuide.astro` provides observation/check/result paths
+(`issue`), with full reference headings preserved. `DocsTasks.astro` supplies the
+illustrated docs directory. `public/page-field-guide.css` owns these shared native
+controls, 44px targets, contrast markers and scoped spacing. Starlight prose margins
+are reset inside controls so they match the public pages.
+
+All four query groups reuse the allowlisted `bindUrlChoice` helper and preserve
+unrelated queries, fragments, early native choices, reload and Back/Forward. Native
+radio/CSS selection works without JavaScript; query restoration is an enhancement.
+Setup confirmation is a reader-controlled checkbox per client, with no gateway probe,
+storage or automatic completion. Copying a command never confirms the connection.
+Editorial diagrams and article-specific next steps keep source and relevance concepts
+separate from automatic extraction or exact-message attribution guarantees.
