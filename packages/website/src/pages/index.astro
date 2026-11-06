@@ -1,5 +1,6 @@
 ---
 import PublicLayout from "../layouts/PublicLayout.astro";
+import ProductSpotlight from "../components/ProductSpotlight.astro";
 import KnowledgeFile from "../components/KnowledgeFile.astro";
 import QuestJournal from "../components/QuestJournal.astro";
 import JournalArt from "../components/JournalArt.astro";
@@ -12,13 +13,7 @@ const base = import.meta.env.BASE_URL;
       <p class="compatibility">Works with Claude Code, Codex, OpenCode, Pi, and Hermes.</p>
     </div></div><KnowledgeFile /></div>
   </section>
-  <section class="section product-spotlight" id="product" aria-labelledby="product-title">
-    <div class="spotlight-copy"><p class="eyebrow">Inside Lore</p><h2 id="product-title">See and correct what Lore keeps.</h2><p>Inspect the rule, the session behind it, and its earlier revisions in the local memory browser.</p><a class="text-link" href={`${base}tour/?view=knowledge#product`}>Explore the app <span aria-hidden="true">→</span></a></div>
-    <figure class="spotlight-image">
-      {(["light", "dark"] as const).map(theme => <a class:list={["tour-image-link", `tour-shot-${theme}`]} href={`${base}tour/?view=knowledge#product`} aria-label="Explore the Lore memory browser"><picture><source media="(max-width: 600px)" srcset={`${base}product-tour/knowledge-mobile-${theme}.png`} width="390" height="700" /><img src={`${base}product-tour/knowledge-${theme}.png`} width="1120" height="760" loading="lazy" decoding="async" alt="Lore’s Knowledge view with a project rule and its source history" /></picture></a>)}
-      <figcaption class="small muted">The local Lore app, shown with fictional project data. {(["light", "dark"] as const).map(theme => <a class:list={["text-link", `tour-shot-${theme}`]} href={`${base}product-tour/knowledge-${theme}.png`} target="_blank" rel="noopener noreferrer">Open full-size screenshot ↗</a>)}</figcaption>
-    </figure>
-  </section>
+  <ProductSpotlight />
   <section class="section home-journal"><QuestJournal /></section>
   <section class="section home-workflow" id="how" aria-labelledby="workflow-title"><span id="unified" class="fragment-anchor" aria-hidden="true"></span><span id="everyday" class="fragment-anchor" aria-hidden="true"></span>
     <div class="section-heading"><p class="eyebrow">In your everyday work</p><h2 id="workflow-title">Less explaining the same things again.</h2></div>

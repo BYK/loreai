@@ -229,3 +229,36 @@ core/gateway test failures remain a separate before-merge gate, and hosted CI is
 reported for the pushed head. The RPG journal, floating header, canonical setup
 commands, existing fragments and complete comparison stay available. No backend,
 new dependency or automatic connection detection is introduced.
+
+## Product spotlight refinement
+
+The homepage product proof is a compact workbench with the heading above it,
+replacing the large split text/screenshot panel shown in earlier captures. Rule,
+Source and History select focused crops of the actual app detail and concise notes.
+The image and notes link into the matching full tour; the original capture remains
+available. History uses the actual v2/current and v1/superseded labels, and Source
+retains the exact-message qualification.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Vertically centered copy in a large empty column | Short heading and tour action above the preview | Give the app detail the space |
+| Whole interface shrunk into one screenshot | Close-ups of the selected record area | Keep the proof easier to read |
+| Static image with a separate caption/link | Native Rule / Source / History controls and matching tour links | Let visitors inspect the part that interests them |
+| Extra accent stripe and nested frame | One inset workbench with a quiet divider | Reduce competing containers |
+
+![Rule view in light appearance](screenshots/product-spotlight-light.jpg)
+![Source view in dark appearance](screenshots/product-spotlight-dark.jpg)
+![Recorded history](screenshots/product-spotlight-history-dark.jpg)
+![Phone product walkthrough](screenshots/product-spotlight-mobile-dark.jpg)
+
+The final website suite passes 472 browser checks with eight conditional skips. New
+regressions cover compact dimensions, independent preview/history state, matching
+tour destinations, malformed values, early native choices, keyboard focus and
+no-JavaScript dark captures. The image link draws its focus ring inward to keep it
+visible inside the clipped frame. Explicit themes retain precedence over the
+system appearance. Thirteen unit tests, Astro checks for 55 files, workspace
+typecheck/lint/format and social metadata checks pass. The prefixed build checks
+this preview together with the existing page interactions; all 1,007 internal
+fragment links resolve. Separate correctness/security source reviews found no
+remaining spotlight blocker; full-repository validation remains separate before
+merge. Original PNGs are unchanged, and the journal and other page flows remain.

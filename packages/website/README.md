@@ -168,3 +168,11 @@ Setup confirmation is a reader-controlled checkbox per client, with no gateway p
 storage or automatic completion. Copying a command never confirms the connection.
 Editorial diagrams and article-specific next steps keep source and relevance concepts
 separate from automatic extraction or exact-message attribution guarantees.
+
+`ProductSpotlight.astro` is the compact homepage workbench. Its Rule/Source/History
+radios bind `preview` separately from `format`, journal state and the tour's `inspect`
+parameter. Each view links to the corresponding full tour state and crops the
+unmodified actual Knowledge detail PNG. The original asset stays linked. Its styles
+are scoped; homepage section spacing is overridden explicitly, and image links use
+an inward focus ring inside the crop. Public app captures also follow the device's
+dark appearance without JavaScript when no explicit theme exists.
