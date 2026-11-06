@@ -6,7 +6,11 @@ quest journal replaces the 3D camp; its local Quiver illustrations, quiet margin
 numbered choices, and explicit selection marks now connect the homepage, actual-app
 tour, client setup, Starlight docs, Why Lore and blog.
 
-The homepage starts with a concrete description and installation action. The
+The homepage starts with a concrete description and installation action beside a
+larger open-journal expedition illustration generated with Quiver. The artwork
+links to the native journal. Distinct page, spine and card surfaces, chapter
+progress, larger illustrations and readable rule text strengthen its hierarchy.
+Fine-pointer hover/press movement is disabled for reduced motion. The
 journal follows a fictional decision from conversation into inspectable knowledge,
 then into a later task. Its inventory cards open their rule and native expandable
 source. Task selection highlights the relevant entry; unrelated entries remain
@@ -25,7 +29,7 @@ all six existing client choices, copy/error handling and the connection-to-first
 session path. Pagefind, generated references, public fragments, signup recovery,
 compact Light/System/Dark controls, and availability/cost distinctions remain.
 
-The four Quiver SVGs ship as static local geometry-only images, with no external
+The five Quiver SVGs ship as static local geometry-only images, with no external
 resources, scripts, or account metadata. Source provenance is in
 [the art directory](../../packages/website/public/journal-art/README.md). The old
 renderer, geometry/fallback code, and Three.js/type dependencies are removed.
@@ -105,7 +109,7 @@ while capturing or testing the error/retry flow.
 
 ## Journal validation
 
-The final journal build passes 299 browser checks with six conditional desktop
+The final journal build passes 302 browser checks with eight conditional
 skips across five viewport/appearance configurations. Fifty repeated state checks
 cover checked-card navigation, atomic journal history, explicit URL precedence and
 the product tour. Thirteen website unit tests, Astro diagnostics (41 files, zero
@@ -121,3 +125,9 @@ review has failing-before/passing-after regressions.
 
 The broader root test result and hosted CI status are recorded in the PR; these
 website checks do not imply that every core/gateway test passed locally.
+
+The visual-polish review caught a reduced-motion hover jump. A real bounding-box
+regression reproduced the 3px movement before the fix and passes in all three
+desktop projects afterward. Geometry-only SVG checks and separate correctness/
+security reviews pass for this presentation-only delta; no controller, query,
+command, signup, or dependency behavior changes in this iteration.

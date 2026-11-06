@@ -1,5 +1,6 @@
 export const JOURNAL_ART = {
   journal: "journal.svg",
+  expedition: "expedition-desk.svg",
   decision: "decision-note.svg",
   pattern: "pattern-routes.svg",
   gotcha: "gotcha-lantern.svg",

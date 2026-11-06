@@ -183,11 +183,19 @@ th { font-weight: 500; }
 .signup-error p { color:var(--text);font-size:.875rem; }
 
 /* The full-width journal sits below a concise product introduction. */
-.home-page .home-hero { grid-template-columns:1fr;gap:1.75rem; }
-.home-page .hero-copy { display:grid;grid-template-columns:1.1fr 1fr;gap:2.5rem;max-width:none;align-items:start; }
-.home-page .hero-desc { margin-top:0; }
+.home-page .home-hero { grid-template-columns:1fr;gap:2.5rem; }
+.home-page .hero-copy { display:grid;grid-template-columns:1.25fr 1fr;gap:2.5rem;max-width:none;align-items:center; }
+.hero-overview { min-width:0; }
+.home-page .hero-copy h1 { font-size:clamp(2rem,3.8vw,3.25rem);max-width:19ch;line-height:1.12;letter-spacing:-.04em; }
+.home-page .hero-desc { margin-top:1.25rem;max-width:52ch; }
 .home-page .hero-actions { margin-top:1rem; }
-@media(max-width:850px) { .home-page .hero-copy { grid-template-columns:1fr;gap:1rem; }.home-page .hero-copy h1 { max-width:24ch; } }
+.hero-expedition { display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.25rem;color:var(--muted);font-size:.75rem;text-decoration:none;min-width:0; }
+.hero-expedition > .journal-art { width:100%;max-width:440px;height:auto;aspect-ratio:640/440;transform:rotate(-3deg); }
+.hero-expedition > span { display:inline-flex;align-items:center;gap:.75rem;min-height:44px;border-bottom:1px solid var(--line); }
+.hero-expedition:hover > span { color:var(--accent);border-color:var(--accent); }
+@media(prefers-reduced-motion:no-preference) and (hover:hover) and (pointer:fine) { .hero-expedition > .journal-art { transition:transform 250ms cubic-bezier(.23,1,.32,1); }.hero-expedition:hover > .journal-art { transform:rotate(0deg) translateY(-4px); } }
+@media(max-width:850px) { .home-page .hero-copy { grid-template-columns:1fr 230px;gap:1.5rem; }.home-page .hero-copy h1 { max-width:22ch; }.hero-expedition > span { font-size:.6875rem; } }
+@media(max-width:600px) { .home-page .hero-copy { grid-template-columns:1fr;gap:.75rem; }.hero-expedition { max-width:320px;justify-self:center;width:100%; }.hero-expedition > .journal-art { max-height:190px; }.home-page .hero-desc { margin-top:1rem; }.home-page .home-hero { gap:1.75rem; } }
 
 /* Shared journal margins across the product tour and public pages. */
 .top-nav { background:var(--bg); }
@@ -201,15 +209,18 @@ th { font-weight: 500; }
 .tour-journal .tour-caption { margin-bottom:1rem; }
 .tour-journal .tour-caption p { font-size:.875rem;line-height:1.7; }
 .tour-journal .tour-caption h3 { font-size:1.125rem; }
-.home-workflow .workflow li { position:relative;border-top:1px solid var(--line);padding-top:1rem; }
-.home-workflow .workflow .journal-art { float:right;margin:0 0 .5rem .75rem;width:52px;height:52px; }
+.home-workflow .workflow li { position:relative;border:1px solid var(--line);border-radius:var(--radius-card);padding:1.25rem;background:var(--journal-page); }
+.home-workflow .workflow .journal-art { float:right;margin:-.25rem -.25rem .5rem .75rem;width:84px;height:84px;transform:rotate(-5deg); }
 .home-workflow .workflow li > .field-marker { color:var(--accent);font-size:.625rem; }
-.product-spotlight { box-shadow:none;background:var(--journal-page); }
+.product-spotlight { box-shadow:none;background:var(--journal-page);border-inline-start:3px solid var(--accent); }
 .faq details[open] { border-inline-start:2px solid var(--accent);padding-inline-start:1rem; }
 .page-intro.field-heading { max-width:1120px;align-items:flex-start; }
-.page-intro.field-heading .journal-art { width:120px;height:120px;margin-top:2rem; }
+.page-intro.field-heading .journal-art { width:160px;height:160px;margin-top:2rem; }
 .page-intro.field-heading > div { max-width:800px; }
 .page-sections a { border-bottom:1px solid transparent; }
 .page-sections a:hover { border-bottom-color:var(--accent); }
+.home-start { background:var(--journal-page);border:1px solid var(--line);border-radius:var(--radius-card);padding:2rem;margin-block:1rem 3rem; }
+@media(hover:hover) and (pointer:fine) { .tour-journal .tour-picker label:hover { border-color:var(--line);background:var(--journal-card); }.button-primary:hover { box-shadow:0 3px 0 color-mix(in srgb,var(--accent) 45%,var(--bg)); } }
+@media(prefers-reduced-motion:no-preference) and (hover:hover) and (pointer:fine) { .button:active { transform:scale(.98); } }
 @media(max-width:850px) { .tour-journal { grid-template-columns:1fr; }.tour-journal .tour-picker { flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:.75rem; }.tour-journal .tour-picker label { flex:1; }.page-intro.field-heading .journal-art { width:80px;height:80px; } }
 @media(max-width:600px) { .tour-journal .tour-picker { display:grid;grid-template-columns:1fr;gap:.25rem; }.tour-journal .tour-picker label { padding:.5rem .75rem; }.tour-journal .tour-pages { padding:1rem; }.page-intro.field-heading { display:block;position:relative; }.page-intro.field-heading .eyebrow { padding-inline-end:70px; }.page-intro.field-heading > .journal-art { position:absolute;right:0;top:1.5rem;margin:0;width:56px;height:56px; }.home-workflow .workflow li { padding-top:.75rem; } }

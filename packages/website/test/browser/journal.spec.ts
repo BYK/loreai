@@ -339,3 +339,21 @@ for (const path of [
     expect(failed).toEqual([]);
   });
 }
+
+test("reduced-motion inventory cards stay in place on hover", async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(isMobile, "Hover feedback applies to a fine pointer");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  const card = page.locator('[data-journal-card="webhook"]');
+  await card.scrollIntoViewIfNeeded();
+  const before = await card.boundingBox();
+  await card.hover();
+  const after = await card.boundingBox();
+  expect(before).not.toBeNull();
+  expect(after).not.toBeNull();
+  expect(after!.y).toBeCloseTo(before!.y, 1);
+  expect(after!.x).toBeCloseTo(before!.x, 1);
+});

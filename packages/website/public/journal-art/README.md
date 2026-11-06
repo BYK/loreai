@@ -2,6 +2,7 @@
 
 Created with QuiverAI Arrow 2 for Lore's approved quest-journal design.
 
+- `expedition-desk.svg`: open field journal, three-point route, sealed note, compass and botanical sprig; generated with QuiverAI Arrow 2 on 2026-11-06.
 - `journal.svg`: clothbound notebook, ribbon bookmark, quill, botanical sprig.
 - `decision-note.svg`: folded note with a wax seal.
 - `pattern-routes.svg`: overlapping route slips with matching branching paths.

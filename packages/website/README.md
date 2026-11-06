@@ -47,6 +47,10 @@ are scoped in `docs/benchmark.md`, while `docs/installation-reference.md` preser
 the detailed installer and cleanup documentation. Existing installation anchors
 remain on the guided page and link to their full reference sections.
 
+The homepage pairs a linked open-journal expedition illustration with the interactive
+journal. The hero link uses native fragment navigation and the existing sticky-header
+scroll offset.
+
 The homepage's `QuestJournal.astro` is an illustrative RPG field journal with
 three native chapter choices, three knowledge cards with expandable sources, and
 three later tasks. `src/lib/quest-journal.ts` owns its static data, art map, types,
@@ -57,12 +61,13 @@ Valid URL choices take precedence; early native choices survive delayed loading.
 Keyboard selection retains radio focus; pointer-selected cards in the stacked
 phone layout bring their rule into view. No-JavaScript controls remain useful.
 
-Four local Quiver SVGs live in `public/journal-art/`; see that directory's README
+Five local Quiver SVGs live in `public/journal-art/`; see that directory's README
 for provenance and construction. `JournalArt.astro` prefixes their URLs and marks
 them decorative. `public/journal.css` provides the shared paper/margin/selection
 roles, native-control styling and field-guide frames. There is no 3D renderer,
-WebGL requirement, or Three.js dependency. Only explicit pointer actions receive
-short transitions; reduced-motion and keyboard interactions remain immediate.
+WebGL requirement, or Three.js dependency. Chapter progress is decorative and follows the native selection. Cards have
+subtle lift/press feedback only for fine pointers with no reduced-motion preference.
+Only explicit pointer actions receive short transitions; reduced-motion and keyboard interactions remain immediate.
 
 ## Visual language
 
