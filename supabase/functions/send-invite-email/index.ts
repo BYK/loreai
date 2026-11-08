@@ -17,8 +17,9 @@
 // SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are injected by the platform. INVITE_SENDER defaults
 // to keeper@withlore.ai; SMTP2GO_API_URL optional; GITHUB_API_URL optional (default api.github.com).
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { buildInviteEmail, capabilityOf, sendViaSmtp2go } from "./send.ts";
+import { buildInviteEmail, parseInviteToken, sendViaSmtp2go } from "./send.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
+import { supabaseFetch } from "../_shared/supabase-fetch.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -60,6 +61,9 @@ async function fetchGitHubUserByLogin(
 
 initSentry("send-invite-email");
 
+// capture() exports fixed failure-site diagnostics. RPC and SMTP errors can
+// contain recipient addresses or invite secrets; never echo them to console
+// or responses, including successful public-email fallback after a lookup error.
 Deno.serve(
   wrapHandler("send-invite-email", async (req: Request): Promise<Response> => {
     if (req.method !== "POST")
@@ -82,7 +86,7 @@ Deno.serve(
     ).replace(/\/$/, "");
 
     const userClient = createClient(url, anonKey, {
-      global: { headers: { Authorization: authHeader } },
+      global: { headers: { Authorization: authHeader }, fetch: supabaseFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const {
@@ -99,6 +103,32 @@ Deno.serve(
     };
     const token = typeof body.token === "string" ? body.token : "";
     if (!token) return json({ error: "missing token" }, 400);
+    const parsedToken = parseInviteToken(token);
+    if (!parsedToken) return json({ error: "invalid invite token" }, 400);
+
+    // Authorize the stored invite before looking up ANY recipient. Even different
+    // not-found bodies would otherwise expose private GitHub-linked accounts.
+    const admin = createClient(url, serviceKey, {
+      global: { fetch: supabaseFetch },
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data: inv, error: invErr } = await admin
+      .from("pending_invites")
+      .select("scope_id, role, invited_by, eph_pub, expires_at")
+      .eq("token", parsedToken.capability)
+      .maybeSingle();
+    if (invErr) {
+      await capture(invErr, "send-invite-email.lookup-invite");
+      return json({ error: "lookup failed" }, 500);
+    }
+    if (!inv || new Date(inv.expires_at as string).getTime() <= Date.now())
+      return json({ error: "invite not found" }, 404);
+    const { data: roleRow } = await userClient.rpc("scope_role", {
+      p_scope: inv.scope_id,
+    });
+    if (roleRow !== "admin" || inv.invited_by !== user.id)
+      return json({ error: "forbidden" }, 403);
+
     const explicitEmail =
       typeof body.email === "string" ? body.email.trim() : "";
     const githubLogin =
@@ -137,16 +167,12 @@ Deno.serve(
       );
       // Try Lore email first (private-bound recipient path: admin knows the user, it's their team).
       if (ghId !== null) {
-        const admin = createClient(url, serviceKey, {
-          auth: { persistSession: false, autoRefreshToken: false },
-        });
         const { data: loreRows, error: loreErr } = await admin.rpc(
           "lore_emails_for_github_ids",
           { p_github_ids: [ghId] },
         );
         if (loreErr) {
           await capture(loreErr, "send-invite-email.lookup-lore-email");
-          console.error("lore_emails_for_github_ids failed:", loreErr.message);
           // Continue — public email below may still work.
         } else if (
           Array.isArray(loreRows) &&
@@ -180,31 +206,6 @@ Deno.serve(
       return json({ error: "missing email or github_login" }, 400);
     }
 
-    const capability = capabilityOf(token);
-
-    const admin = createClient(url, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-    const { data: inv, error: invErr } = await admin
-      .from("pending_invites")
-      .select("scope_id, role, invited_by, eph_pub, expires_at")
-      .eq("token", capability)
-      .maybeSingle();
-    if (invErr) {
-      await capture(invErr, "send-invite-email.lookup-invite");
-      console.error("pending_invites read failed:", invErr.message);
-      return json({ error: "lookup failed" }, 500);
-    }
-    if (!inv || new Date(inv.expires_at as string).getTime() <= Date.now())
-      return json({ error: "invite not found" }, 404);
-
-    const { data: roleRow } = await userClient.rpc("scope_role", {
-      p_scope: inv.scope_id,
-    });
-    const isAdmin = roleRow === "admin";
-    const isCreator = inv.invited_by === user.id;
-    if (!isAdmin || !isCreator) return json({ error: "forbidden" }, 403);
-
     const { data: scopeRow } = await admin
       .from("scopes")
       .select("name")
@@ -226,7 +227,6 @@ Deno.serve(
       });
     } catch (e) {
       await capture(e, "send-invite-email.send-smtp");
-      console.error("smtp2go send failed:", (e as Error).message);
       return json({ error: "send failed" }, 502);
     }
     return json({ ok: true, resolved_via: resolvedVia });

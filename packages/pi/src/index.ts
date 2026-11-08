@@ -45,7 +45,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   buildProviderRegistrations,
-  gatewayAccessHeadersForRemote,
   resolveGatewayUrl,
   runCompaction,
   type SessionBeforeCompactResult,
@@ -119,7 +118,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       log.info(`pi: gateway detected at ${existingUrl}`);
       gatewayBase = existingUrl;
       loreActive = true;
-    } else {
+    } else if (!factoryEnv.LORE_REMOTE_URL && !factoryEnv.LORE_GATEWAY_URL) {
       // No running gateway — start one in-process (handles fallback chain).
       log.info("pi: starting gateway in-process…");
       const startedUrl = await startInProcess();
@@ -134,7 +133,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   if (!loreActive && !inTestEnv && !loreDisabled) {
     const msg =
       "Lore failed to start — memory features are unavailable. " +
-      "Ensure @loreai/gateway is installed.";
+      (factoryEnv.LORE_REMOTE_URL || factoryEnv.LORE_GATEWAY_URL
+        ? "The configured gateway is unavailable. Check its URL and connection."
+        : "Ensure @loreai/gateway is installed.");
     log.error("pi:", msg);
     return;
   }
@@ -152,11 +153,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   // The harness's own session name (user-set via /name) — forwarded as
   // x-lore-session-title so the gateway can persist it (#1921).
   let currentSessionTitle = "";
-  let compactAuthHeaders: Record<string, string> = {};
-  const gatewayAccessHeaders = gatewayAccessHeadersForRemote(
-    gatewayBase,
-    factoryEnv,
-  );
+  let compactAuthHeaders: Record<string, string> | undefined = {};
   let currentTurn: RecallToolContext | undefined;
   // null means overlapping requests cannot yet be assigned to an assistant.
   // A later message must never be attributed to whichever turn started last.
@@ -215,19 +212,19 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     sessionID: currentSessionID,
     gitRemote: cachedGitRemote,
     sessionTitle: currentSessionTitle,
-    accessHeaders: gatewayAccessHeaders,
     recallClient: nativeRecallClient,
     observeHeaders: (headers: Headers) => {
-      const apiKey = headers.get("x-api-key");
-      const googleApiKey = headers.get("x-goog-api-key");
-      const authorization = headers.get("authorization");
-      compactAuthHeaders = apiKey
-        ? { "x-api-key": apiKey }
-        : googleApiKey
-          ? { "x-goog-api-key": googleApiKey }
-          : authorization
-            ? { authorization }
-            : {};
+      const present = ["x-api-key", "x-goog-api-key", "authorization"].filter(
+        (name) => headers.has(name),
+      );
+      // Conflicting model credentials invalidate the observation and the prior
+      // snapshot. Never choose one by precedence or replay a previous key.
+      compactAuthHeaders =
+        present.length > 1 || present.some((name) => !headers.get(name))
+          ? undefined
+          : Object.fromEntries(
+              present.map((name) => [name, headers.get(name)!]),
+            );
     },
   });
   const requestOwner = trackPiRequestOwner(
@@ -258,7 +255,6 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         });
         const turn = singlePendingPiTurn(selectedGateway, scope, owner.ownerID);
         const headers: Record<string, string> = {
-          ...metadata.accessHeaders,
           "x-lore-session-id": metadata.sessionID,
           "x-lore-project": metadata.projectPath,
           ...(turn?.turnID ? { [NATIVE_RECALL_TURN_HEADER]: turn.turnID } : {}),
@@ -447,6 +443,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
     ): Promise<SessionBeforeCompactResult | undefined> => {
       if (retired) return undefined;
       retireCurrentOwnership();
+      if (compactAuthHeaders === undefined) return undefined;
       return runCompaction({
         gatewayBase,
         sessionID: currentSessionID,
@@ -454,7 +451,8 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         previousSummary: event.preparation.previousSummary,
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
-        authHeaders: { ...gatewayAccessHeaders, ...compactAuthHeaders },
+        authHeaders: { ...compactAuthHeaders },
+        signal: event.signal,
       });
     },
   );

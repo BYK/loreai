@@ -38,6 +38,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     port: 0,
     portExplicit: false,
     hosts: ["127.0.0.1"],
+    managementOrigins: [],
     upstreamAnthropic: "https://api.anthropic.com",
     upstreamOpenAI: "https://api.openai.com",
     callerUpstreamAllowlist: [],

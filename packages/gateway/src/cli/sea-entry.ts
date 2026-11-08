@@ -64,6 +64,8 @@ async function main(): Promise<void> {
   const vectorWorkerData = sea.getRawAsset("vector-worker.cjs");
   (globalThis as Record<string, unknown>).__LORE_VECTOR_WORKER_SOURCE__ =
     Buffer.from(vectorWorkerData).toString("utf8");
+  (globalThis as Record<string, unknown>).__LORE_LOGIN_WORKER_SOURCE__ =
+    Buffer.from(sea.getRawAsset("login-optional-task.cjs")).toString("utf8");
 
   // ---------------------------------------------------------------------------
   // 2. Vendor model materialization

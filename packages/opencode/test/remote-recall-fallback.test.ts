@@ -35,7 +35,7 @@ afterEach(() => {
   internalMock.surfaceGatewayUnavailable.mockReset();
 });
 
-test("does not expose local recall when remote and embedded gateways fail", async () => {
+test("an unavailable configured remote never starts or exposes local recall", async () => {
   process.env.LORE_OPENCODE_FORCE_ACTIVE = "1";
   process.env.LORE_REMOTE_URL = "https://remote-gateway.example";
   process.env.LORE_GATEWAY_URL = "http://127.0.0.1:3207";
@@ -67,6 +67,7 @@ test("does not expose local recall when remote and embedded gateways fail", asyn
   });
 
   expect(internalMock.probeGateway).toHaveBeenCalled();
-  expect(gatewayMock.startGateway).toHaveBeenCalledOnce();
+  expect(gatewayMock.startGateway).not.toHaveBeenCalled();
+  expect(hooks).toEqual({});
   expect(hooks.tool?.[RECALL_TOOL_NAME]).toBeUndefined();
 });

@@ -12,11 +12,16 @@ const h = vi.hoisted(() => ({
     exchangeCodeForSession: vi.fn(),
   },
   from: vi.fn(),
+  invoke: vi.fn(),
   answer: { value: "" },
 }));
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => ({ auth: h.auth, from: h.from }),
+  createClient: () => ({
+    auth: h.auth,
+    from: h.from,
+    functions: { invoke: h.invoke },
+  }),
 }));
 
 vi.mock("node:readline/promises", () => ({
@@ -24,6 +29,54 @@ vi.mock("node:readline/promises", () => ({
     question: async () => h.answer.value,
     close: () => {},
   }),
+}));
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: vi.fn(() => ({ on: vi.fn(), unref: vi.fn() })),
+}));
+
+// Login orchestration uses worker results; worker transport and lifetime are
+// covered separately with real workers and a local HTTP server.
+vi.mock("../src/cli/login-optional-worker", () => ({
+  runOptionalLoginWorker: async (
+    session: { user_id: string },
+    work: { kind: string; providerToken?: string },
+  ) => {
+    const operation =
+      work.kind === "profile"
+        ? Promise.resolve(
+            h
+              .from("profiles")
+              .select("github_login, display_name, email")
+              .eq("id", session.user_id)
+              .maybeSingle(),
+          ).then((result: { data: unknown }) =>
+            result.data ? { kind: "profile", profile: result.data } : undefined,
+          )
+        : Promise.resolve(
+            h.invoke("github-provision", {
+              body: { provider_token: work.providerToken },
+            }),
+          ).then((result: { data?: { teams?: number }; error?: unknown }) =>
+            !result.error && result.data?.teams
+              ? { kind: "provision", teams: result.data.teams }
+              : undefined,
+          );
+    let timer!: ReturnType<typeof setTimeout>;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), 30_000);
+        }),
+      ]);
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
 }));
 
 import {
@@ -42,6 +95,7 @@ import {
   persistProviderTokenCache,
   persistSession,
 } from "../src/supabase";
+import * as supabase from "../src/supabase";
 
 const SAMPLE = {
   access_token: "at-1",
@@ -73,6 +127,7 @@ beforeEach(() => {
   }
   h.auth.admin.signOut.mockReset();
   h.from.mockReset();
+  h.invoke.mockReset();
   h.answer.value = "";
   process.exitCode = undefined;
   logs = [];
@@ -185,6 +240,55 @@ describe("commandLogout", () => {
 });
 
 describe("commandLogin (email OTP)", () => {
+  test("a stalled profile cannot block login or update a later account", async () => {
+    h.answer.value = "123456";
+    h.auth.signInWithOtp.mockResolvedValue({ error: null });
+    h.auth.verifyOtp.mockResolvedValue({
+      data: {
+        session: {
+          access_token: SAMPLE.access_token,
+          refresh_token: SAMPLE.refresh_token,
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          user: { id: SAMPLE.user_id, email: SAMPLE.email },
+        },
+      },
+      error: null,
+    });
+    let finish!: (value: unknown) => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    h.from.mockReturnValue({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () => {
+            started();
+            return new Promise((resolve) => {
+              finish = resolve;
+            });
+          },
+        }),
+      }),
+    });
+    vi.useFakeTimers();
+    try {
+      const login = commandLogin([], { email: SAMPLE.email });
+      await entered;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await login;
+      expect(loadPersistedSession()?.user_id).toBe(SAMPLE.user_id);
+      expect(logs.join("\n")).toContain("Signed in as");
+      const newer = { ...SAMPLE, user_id: "newer-user", display_name: "Newer" };
+      persistSession(newer);
+      finish({ data: { display_name: "Stale" }, error: null });
+      await Promise.resolve();
+      expect(loadPersistedSession()).toEqual(newer);
+    } finally {
+      finish?.({ data: null, error: null });
+      vi.useRealTimers();
+    }
+  });
   test.each(["login", "logout"])(
     "an older OTP response cannot undo a later %s",
     async (operation) => {
@@ -327,6 +431,7 @@ describe("commandLogin (email OTP)", () => {
 
     expect(h.auth.signInWithOtp).toHaveBeenCalledWith({
       email: "me@example.com",
+      options: { emailRedirectTo: "http://127.0.0.1/callback" },
     });
     expect(h.auth.verifyOtp).toHaveBeenCalledWith({
       email: "me@example.com",
@@ -390,25 +495,89 @@ describe("commandLogin (email OTP)", () => {
 
     // Non-token error → fail fast, no redundant second verifyOtp call.
     expect(h.auth.verifyOtp).toHaveBeenCalledTimes(1);
-    expect(errs.join("\n")).toMatch(/ECONNREFUSED/);
+    expect(errs.join("\n")).toContain("Login failed. Please try again");
+    expect(errs.join("\n")).not.toContain("ECONNREFUSED");
     expect(exitSpy).toHaveBeenCalledWith(1);
     exitSpy.mockRestore();
   });
 
-  test("rejects a pasted magic-link URL with a helpful hint", async () => {
+  test.each([
+    ["not a code", "Enter the code or sign-in link from your email", 0],
+    ["123456", "Token has expired or is invalid. Request a new code.", 2],
+  ] as const)(
+    "shows fixed local validation for %s without provider diagnostics",
+    async (input, message, verifies) => {
+      h.answer.value = input;
+      h.auth.signInWithOtp.mockResolvedValue({ error: null });
+      h.auth.verifyOtp.mockResolvedValue({
+        data: { session: null },
+        error: { message: "expired private-validation-sentinel\u001b[2J" },
+      });
+      const exit = vi
+        .spyOn(process, "exit")
+        .mockImplementation(() => undefined as never);
+      try {
+        await commandLogin([], { email: "me@example.com" });
+        expect(errs.join("\n")).toContain(message);
+        expect(errs.join("\n")).not.toContain("private-validation-sentinel");
+        expect(errs.join("\n")).not.toContain("\u001b[2J");
+        expect(h.auth.verifyOtp).toHaveBeenCalledTimes(verifies);
+        expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
+        expect(loadPersistedSession()).toBeNull();
+        expect(exit).toHaveBeenCalledWith(1);
+      } finally {
+        exit.mockRestore();
+      }
+    },
+  );
+
+  test("exchanges the code from a pasted redirect URL", async () => {
     h.answer.value =
       "http://localhost:3000/?code=53a25354-2f36-4822-8a8f-8a26345214c5";
     h.auth.signInWithOtp.mockResolvedValue({ error: null });
-    const exitSpy = vi
-      .spyOn(process, "exit")
-      .mockImplementation(() => undefined as never);
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-new",
+          refresh_token: "rt-new",
+          user: { id: "user-123", email: "me@example.com", user_metadata: {} },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
 
     await commandLogin([], { email: "me@example.com" });
 
-    // Never reaches verifyOtp — caught by the shape guard.
     expect(h.auth.verifyOtp).not.toHaveBeenCalled();
-    expect(errs.join("\n")).toMatch(/\{\{ \.Token \}\}/);
+    expect(h.auth.exchangeCodeForSession).toHaveBeenCalledWith(
+      "53a25354-2f36-4822-8a8f-8a26345214c5",
+    );
+    expect(loadPersistedSession()?.access_token).toBe("at-new");
+  });
+
+  test("rejects a pasted link for another email account", async () => {
+    h.answer.value = "https://auth.example/verify?token=hash&type=magiclink";
+    h.auth.signInWithOtp.mockResolvedValue({ error: null });
+    h.auth.verifyOtp.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "access",
+          refresh_token: "refresh",
+          user: { id: "other", email: "other@example.com", user_metadata: {} },
+        },
+      },
+      error: null,
+    });
+    const exitSpy = vi
+      .spyOn(process, "exit")
+      .mockImplementation(() => undefined as never);
+    await commandLogin([], { email: "me@example.com" });
+    expect(loadPersistedSession()).toBeNull();
     expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errs.join("\n")).toContain(
+      "This sign-in link belongs to a different email address.",
+    );
     exitSpy.mockRestore();
   });
 
@@ -495,6 +664,297 @@ describe("canOpenBrowser", () => {
 });
 
 describe("commandLogin (GitHub --no-browser)", () => {
+  test.each(["failed", "succeeded"] as const)(
+    "the real loopback callback uses fixed diagnostics when OAuth %s",
+    async (outcome) => {
+      for (const name of [
+        "CI",
+        "LORE_NO_BROWSER",
+        "SSH_CONNECTION",
+        "SSH_TTY",
+        "SSH_CLIENT",
+      ]) {
+        vi.stubEnv(name, undefined);
+      }
+      vi.stubEnv("DISPLAY", ":fixture");
+      let started!: (url: string) => void;
+      const ready = new Promise<string>((resolve) => {
+        started = resolve;
+      });
+      h.auth.signInWithOAuth.mockImplementation(async ({ options }) => {
+        started(options.redirectTo);
+        return { data: { url: "https://example.test/oauth" }, error: null };
+      });
+      h.auth.exchangeCodeForSession.mockResolvedValue({
+        data: {
+          session: {
+            access_token: "fixture-access",
+            refresh_token: "fixture-refresh",
+            user: { id: SAMPLE.user_id, email: SAMPLE.email },
+          },
+        },
+        error: null,
+      });
+      h.from.mockReturnValue(profileChain(null));
+      const exit = vi
+        .spyOn(process, "exit")
+        .mockImplementation(() => undefined as never);
+      try {
+        const login = commandLogin([], {});
+        const callback = new URL(await ready);
+        callback.searchParams.set(
+          "error_description",
+          "private-callback-sentinel person@example.test fixture-secret\u001b[2J",
+        );
+        if (outcome === "succeeded")
+          callback.searchParams.set("code", "fixture-code");
+        const response = await fetch(callback);
+        const html = await response.text();
+        await login;
+        expect(response.status).toBe(200);
+        const output = [html, ...logs, ...errs].join("\n");
+        expect(output).not.toMatch(
+          /private-callback-sentinel|person@example\.test|fixture-secret/,
+        );
+        expect(output).not.toContain("\u001b[2J");
+        if (outcome === "succeeded") {
+          expect(html).toContain("You're signed in");
+          expect(loadPersistedSession()?.access_token).toBe("fixture-access");
+          expect(exit).not.toHaveBeenCalled();
+        } else {
+          expect(html).toContain("Sign-in failed.");
+          expect(html).toContain(
+            "Return to the terminal and try signing in again.",
+          );
+          expect(loadPersistedSession()).toBeNull();
+          expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
+          expect(exit).toHaveBeenCalledWith(1);
+        }
+      } finally {
+        exit.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+  test.each(["manual", "browser"] as const)(
+    "%s login remains committed and provisions when optional provider caching fails",
+    async (mode) => {
+      for (const name of [
+        "CI",
+        "LORE_NO_BROWSER",
+        "SSH_CONNECTION",
+        "SSH_TTY",
+        "SSH_CLIENT",
+      ]) {
+        vi.stubEnv(name, undefined);
+      }
+      vi.stubEnv("DISPLAY", ":fixture");
+      h.answer.value = "fixture-code";
+      h.auth.signInWithOAuth.mockImplementation(async ({ options }) => {
+        if (mode === "browser") {
+          const callback = new URL(options.redirectTo);
+          callback.searchParams.set("code", "fixture-code");
+          const response = await fetch(callback);
+          expect(response.status).toBe(200);
+          await response.text();
+        }
+        return { data: { url: "https://example.test/oauth" }, error: null };
+      });
+      h.auth.exchangeCodeForSession.mockResolvedValue({
+        data: {
+          session: {
+            access_token: "fixture-access",
+            refresh_token: "fixture-refresh",
+            provider_token: "fixture-provider",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            user: { id: SAMPLE.user_id, email: SAMPLE.email },
+          },
+        },
+        error: null,
+      });
+      h.from.mockReturnValue(profileChain(null));
+      h.invoke.mockResolvedValue({ data: { teams: 2 }, error: null });
+      const cache = vi
+        .spyOn(supabase, "persistProviderTokenCache")
+        .mockImplementation(() => {
+          // Failure must happen after the real session commit, not instead of it.
+          expect(loadPersistedSession()?.access_token).toBe("fixture-access");
+          throw new Error("private-cache-sentinel\u001b[2J");
+        });
+      const exit = vi
+        .spyOn(process, "exit")
+        .mockImplementation(() => undefined as never);
+      try {
+        await commandLogin([], mode === "manual" ? { "no-browser": true } : {});
+        expect(cache).toHaveBeenCalledTimes(1);
+        expect(exit).not.toHaveBeenCalled();
+        expect(process.exitCode).not.toBe(1);
+        expect(loadPersistedSession()?.access_token).toBe("fixture-access");
+        expect(h.invoke).toHaveBeenCalledWith("github-provision", {
+          body: { provider_token: "fixture-provider" },
+        });
+        expect(logs.join("\n")).toContain("Signed in as");
+        expect(logs.join("\n")).toContain("Synced 2 GitHub teams");
+        const output = [...logs, ...errs].join("\n");
+        expect(output).not.toMatch(/private-cache-sentinel|Login failed/);
+        expect(output).not.toContain("\u001b[2J");
+      } finally {
+        cache.mockRestore();
+        exit.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+  test.each(["before", "after"] as const)(
+    "revision check failure %s provisioning never fails a committed login",
+    async (when) => {
+      h.auth.signInWithOAuth.mockResolvedValue({
+        data: { url: "https://gh.example/oauth" },
+        error: null,
+      });
+      h.answer.value = "abc-123-def";
+      h.auth.exchangeCodeForSession.mockResolvedValue({
+        data: {
+          session: {
+            access_token: "at-gh",
+            refresh_token: "rt-gh",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            provider_token: "fake-token",
+            user: { id: SAMPLE.user_id, email: SAMPLE.email },
+          },
+        },
+        error: null,
+      });
+      let release!: (result: unknown) => void;
+      let start!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        start = resolve;
+      });
+      const revision = vi.spyOn(supabase, "captureLoginRevision");
+      if (when === "before") {
+        h.from.mockReturnValue({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () => {
+                start();
+                return new Promise((resolve) => {
+                  release = resolve;
+                });
+              },
+            }),
+          }),
+        });
+      } else {
+        h.from.mockReturnValue(profileChain(null));
+        h.invoke.mockImplementation(() => {
+          start();
+          return new Promise((resolve) => {
+            release = resolve;
+          });
+        });
+      }
+      try {
+        const login = commandLogin([], { "no-browser": true });
+        await entered;
+        revision.mockImplementationOnce(() => {
+          throw new Error("database busy");
+        });
+        release(
+          when === "before"
+            ? { data: null }
+            : { data: { teams: 1 }, error: null },
+        );
+        await login;
+        expect(process.exitCode).not.toBe(1);
+        expect(loadPersistedSession()?.user_id).toBe(SAMPLE.user_id);
+        expect(logs.join("\n")).not.toContain("Synced 1 GitHub team");
+      } finally {
+        revision.mockRestore();
+      }
+    },
+  );
+  test("a provisioning result cannot report success for a superseded account", async () => {
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth" },
+      error: null,
+    });
+    h.answer.value = "abc-123-def";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-gh",
+          refresh_token: "rt-gh",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          provider_token: "fake-token",
+          user: { id: SAMPLE.user_id, email: SAMPLE.email },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+    let finish!: (value: unknown) => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    h.invoke.mockImplementation(() => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const login = commandLogin([], { "no-browser": true });
+    await entered;
+    persistSession({ ...SAMPLE, user_id: "newer-user" });
+    finish({ data: { teams: 1 }, error: null });
+    await login;
+    expect(logs.join("\n")).not.toContain("Synced 1 GitHub team");
+  });
+  test("a stalled provisioning request cannot block a committed login", async () => {
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth" },
+      error: null,
+    });
+    h.answer.value = "abc-123-def";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-gh",
+          refresh_token: "rt-gh",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          provider_token: "fake-token",
+          user: { id: SAMPLE.user_id, email: SAMPLE.email },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+    let finish!: (value: unknown) => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    h.invoke.mockImplementation(() => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    vi.useFakeTimers();
+    try {
+      const login = commandLogin([], { "no-browser": true });
+      await entered;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await login;
+      expect(loadPersistedSession()?.user_id).toBe(SAMPLE.user_id);
+      finish({ data: { teams: 1 }, error: null });
+      await Promise.resolve();
+      expect(logs.join("\n")).not.toContain("Synced 1 GitHub team");
+    } finally {
+      finish?.({ data: null, error: null });
+      vi.useRealTimers();
+    }
+  });
   test("prints the URL and exchanges a pasted redirect URL for a session", async () => {
     h.auth.signInWithOAuth.mockResolvedValue({
       data: { url: "https://gh.example/oauth?x=1" },

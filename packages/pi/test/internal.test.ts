@@ -4,7 +4,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   ANTHROPIC_PROVIDERS,
   buildProviderRegistrations,
-  gatewayAccessHeadersForRemote,
   GATEWAY_PROVIDERS,
   OPENAI_PROVIDERS,
   prepareLocalUiAssets,
@@ -144,7 +143,7 @@ describe("buildProviderRegistrations", () => {
     ).toBeUndefined();
   });
 
-  test("injects remote gateway access into every provider registration", () => {
+  test("does not inject a legacy gateway token into provider registrations", () => {
     const token = "pi-remote-gateway-access-token-at-least-32";
     const regs = buildProviderRegistrations({
       gatewayBase: "https://lore.example",
@@ -156,7 +155,7 @@ describe("buildProviderRegistrations", () => {
       },
     });
     for (const reg of regs) {
-      expect(reg.headers["x-lore-gateway-token"]).toBe(token);
+      expect(reg.headers["x-lore-gateway-token"]).toBeUndefined();
     }
   });
 
@@ -165,7 +164,6 @@ describe("buildProviderRegistrations", () => {
       LORE_REMOTE_URL: "https://lore.example",
       LORE_GATEWAY_AUTH_TOKEN: "pi-remote-gateway-access-token-at-least-32",
     };
-    expect(gatewayAccessHeadersForRemote(GW, env)).toEqual({});
     const regs = buildProviderRegistrations({
       gatewayBase: GW,
       sessionID: "s",
@@ -507,7 +505,7 @@ describe("resolveGatewayUrl diagnostics", () => {
       await resolveGatewayUrl();
 
       const output = messages.join("\n");
-      expect(output).toContain("https://example.com/gateway");
+      expect(output).toContain("configured remote gateway is unavailable");
       expect(output).not.toContain(userinfoMarker);
       expect(output).not.toContain(queryMarker);
       expect(output).not.toContain(fragmentMarker);

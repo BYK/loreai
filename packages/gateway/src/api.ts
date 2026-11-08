@@ -938,10 +938,25 @@ export async function handleAPIRequest(
   req: Request,
   url: URL,
   config: GatewayConfig,
+  webLoginSignal?: AbortSignal,
 ): Promise<Response> {
   const { pathname } = url;
   const method = req.method;
   let params: RouteParams | null;
+
+  if (pathname.startsWith("/api/v1/account/login/")) {
+    const { handleWebLoginRequest } = await import("./web-login");
+    const response = await handleWebLoginRequest(
+      req,
+      url,
+      config,
+      webLoginSignal,
+    );
+    if (response) {
+      response.headers.set("cache-control", "no-store");
+      return response;
+    }
+  }
 
   // -----------------------------------------------------------------------
   // Data read endpoints

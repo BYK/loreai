@@ -1,7 +1,7 @@
--- Minimal Supabase-compatible shim so supabase/migrations/0001..0006 can be
+-- Minimal Supabase-compatible shim so supabase/migrations can be
 -- applied and exercised against a PLAIN Postgres (no GoTrue / PostgREST stack).
 -- Replicates ONLY what the migrations depend on:
---   auth schema + auth.users, auth.uid(), auth.role(), and the three roles.
+--   auth schema + auth.users/auth.identities, auth.uid(), auth.role(), and roles.
 -- RLS is exercised by `set local role authenticated; set local request.jwt.claims`
 -- exactly as PostgREST does after validating a JWT.
 
@@ -14,6 +14,19 @@ create table if not exists auth.users (
   email_confirmed_at timestamptz,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
   created_at         timestamptz not null default now()
+);
+
+-- OAuth identities are server-owned, unlike editable raw_user_meta_data.
+-- Match GoTrue's provider/provider_id uniqueness and user deletion lifecycle.
+create table if not exists auth.identities (
+  id            uuid primary key default gen_random_uuid(),
+  provider_id   text not null,
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  identity_data jsonb not null default '{}'::jsonb,
+  provider      text not null,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  unique (provider_id, provider)
 );
 
 -- auth.uid()/auth.role() read the request JWT claims GUC, exactly like Supabase.

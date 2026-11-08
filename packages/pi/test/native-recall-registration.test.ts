@@ -37,7 +37,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function register(remoteUrl?: string, gatewayUrl?: string) {
+async function register(
+  remoteUrl?: string,
+  gatewayUrl?: string,
+  active = true,
+) {
   process.env.LORE_PI_FORCE_ACTIVE = "1";
   process.env.LORE_GATEWAY_AUTH_TOKEN = "remote-access-token";
   delete process.env.LORE_DISABLED;
@@ -53,7 +57,8 @@ async function register(remoteUrl?: string, gatewayUrl?: string) {
   await lorePiExtension(pi as unknown as Parameters<typeof lorePiExtension>[0]);
   // A zero-tool result must come from a live remote configuration, not an
   // inert extension or failed gateway discovery.
-  expect(pi.registerProvider).toHaveBeenCalled();
+  if (active) expect(pi.registerProvider).toHaveBeenCalled();
+  else expect(pi.registerProvider).not.toHaveBeenCalled();
   return pi;
 }
 
@@ -103,17 +108,16 @@ test("keeps native recall for a verified local gateway", async () => {
   expect(pi.registerTool.mock.calls[0][0].name).toBe(RECALL_TOOL_NAME);
 });
 
-test("preserves access-token forwarding for an exact remote URL", async () => {
+test("ignores a legacy access token while preserving remote recall ownership", async () => {
   const pi = await register(localUrl);
   expect(pi.registerTool).not.toHaveBeenCalled();
-  expect(pi.registerProvider.mock.calls[0][1].headers).toHaveProperty(
+  expect(pi.registerProvider.mock.calls[0][1].headers).not.toHaveProperty(
     "x-lore-gateway-token",
-    "remote-access-token",
   );
 });
 
 test.each(["different host", "different path"])(
-  "keeps local recall after an unreachable remote at a %s falls back",
+  "never registers local recall after an unreachable remote at a %s",
   async (kind) => {
     vi.stubGlobal(
       "fetch",
@@ -123,12 +127,8 @@ test.each(["different host", "different path"])(
       kind === "different host"
         ? "https://gateway.example"
         : `${localUrl}/remote`;
-    const pi = await register(remoteUrl, localUrl);
-    expect(pi.registerTool).toHaveBeenCalledOnce();
-    expect(pi.registerProvider.mock.calls[0][1].baseUrl).toBe(localUrl);
-    expect(pi.registerProvider.mock.calls[0][1].headers).not.toHaveProperty(
-      "x-lore-gateway-token",
-    );
+    const pi = await register(remoteUrl, localUrl, false);
+    expect(pi.registerTool).not.toHaveBeenCalled();
   },
 );
 

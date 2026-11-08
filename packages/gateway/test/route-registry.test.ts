@@ -249,7 +249,7 @@ describe("registry-driven access policy", () => {
   );
 
   test.each(DATA_PLANE_PATHS)(
-    "%s: hosted mode requires the gateway access token",
+    "%s: hosted mode treats the retired gateway token like no token",
     async (p) => {
       const app = createGatewayApp(
         makeConfig({ hostedMode: true, gatewayAuthToken: "tok" }),
@@ -258,7 +258,14 @@ describe("registry-driven access policy", () => {
         new Request(`http://gateway.local${p}`, { method: "POST" }),
         env,
       );
-      expect(res.status).toBe(401);
+      const legacy = await app.fetch(
+        new Request(`http://gateway.local${p}`, {
+          method: "POST",
+          headers: { "x-lore-gateway-token": "tok" },
+        }),
+        env,
+      );
+      expect(legacy.status).toBe(res.status);
     },
   );
 

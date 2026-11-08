@@ -23,10 +23,11 @@ import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Readable } from "node:stream";
-import { db, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { db, log } from "@loreai/core";
 import {
   assertGatewayAccessConfigured,
   DEFAULT_PORT,
+  parseManagementOrigins,
   type GatewayConfig,
 } from "./config";
 import {
@@ -50,11 +51,12 @@ import {
 } from "./response-completion";
 import { responseAgainstAbort } from "./abort-race";
 import {
-  constantTimeTokenMatches,
   hasRawConflictingProviderAuth,
-  singleRawHeaderValue,
+  managementAccessDecision,
 } from "./management-access";
-import { isDataPlanePath } from "./routes/registry";
+import { isDataPlanePath, isManagementPath } from "./routes/registry";
+import { startSessionRefreshScheduler } from "./session-refresh";
+import { withAccountLifecycle } from "./supabase";
 
 export { handleForegroundBodyRoute, handleModelsPassthrough } from "./app";
 export { isLoopbackAddress } from "./management-access";
@@ -91,12 +93,11 @@ export async function startServer(
   /** Resolves when all bound servers are listening. */
   ready: Promise<void>;
 }> {
+  const shutdownDeadline = (deadlineMs?: number) =>
+    options.shutdownDeadlineMs ?? deadlineMs ?? SERVER_DRAIN_DEADLINE_MS;
   const closeBoundServer = (server: Server, deadlineMs?: number) =>
     options.closeServer?.(server) ??
-    closeServer(
-      server,
-      options.shutdownDeadlineMs ?? deadlineMs ?? SERVER_DRAIN_DEADLINE_MS,
-    );
+    closeServer(server, shutdownDeadline(deadlineMs));
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
   config = config ?? ({} as GatewayConfig);
@@ -110,6 +111,14 @@ export async function startServer(
   if (!Number.isFinite(config.port) || config.port < 0) {
     config = { ...config, port: DEFAULT_PORT };
   }
+  // Every HTTP and Upgrade listener must consume the normalized policy that
+  // validation accepts, including configurations supplied by embedded callers.
+  config = {
+    ...config,
+    managementOrigins: parseManagementOrigins(
+      config.managementOrigins?.join(","),
+    ),
+  };
   assertGatewayAccessConfigured(config);
   if (config.allowRemoteManagement) {
     log.notice(
@@ -153,13 +162,20 @@ export async function startServer(
 
   // Shared fetch handler for all server instances. Access policy and routing
   // live in the Hono app (`app.ts`); the bridge only supplies socket metadata.
-  const app = createGatewayApp(config, options);
+  const webLoginController = new AbortController();
+  const app = createGatewayApp(config, {
+    ...options,
+    webLoginSignal: webLoginController.signal,
+  });
   const fetch = (
     req: Request,
     peerAddress: string | undefined,
     rawHeaders?: readonly string[],
   ): Promise<Response> =>
-    Promise.resolve(app.fetch(req, { peerAddress, rawHeaders }));
+    withAccountLifecycle(
+      AbortSignal.any([webLoginController.signal, req.signal]),
+      () => Promise.resolve(app.fetch(req, { peerAddress, rawHeaders })),
+    );
 
   // Spawn one node:http server per host address. This allows binding to
   // specific interfaces (e.g. 127.0.0.1 + a Tailscale IP) without
@@ -198,8 +214,51 @@ export async function startServer(
       // install a dedicated listener that writes a 426 + closes the socket.
       // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
       s.on("upgrade", (req, socket) => {
-        const pathname = new URL(req.url ?? "/", "http://gateway.local")
-          .pathname;
+        // Upgrade events bypass the HTTP error handler. Never let a malformed
+        // request target escape this listener and terminate the process.
+        const pathname = (() => {
+          try {
+            return new URL(req.url ?? "/", "http://gateway.local").pathname;
+          } catch {
+            return undefined;
+          }
+        })();
+        if (pathname === undefined) {
+          socket.end(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+          );
+          return;
+        }
+        if (isManagementPath(pathname)) {
+          // Upgrades bypass Hono. Authorize from the same socket/authority policy
+          // before returning even an unsupported-protocol response or diagnostic.
+          const allowed = (() => {
+            try {
+              const request = new Request(
+                new URL(
+                  req.url ?? "/",
+                  `http://${bracketHost(host)}:${resolvedPort}`,
+                ),
+                {
+                  method: req.method,
+                  headers: req.headers as Record<string, string>,
+                },
+              );
+              const peer = options.peerAddressForRequest
+                ? options.peerAddressForRequest(req)
+                : req.socket.remoteAddress;
+              return managementAccessDecision(request, peer, config).allowed;
+            } catch {
+              return false;
+            }
+          })();
+          if (!allowed) {
+            socket.end(
+              "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            return;
+          }
+        }
         if (isDataPlanePath(pathname) && req.headers.origin !== undefined) {
           socket.end(
             "HTTP/1.1 403 Forbidden\r\n" +
@@ -210,26 +269,6 @@ export async function startServer(
           return;
         }
         if (isDataPlanePath(pathname)) {
-          const accessHeader = singleRawHeaderValue(
-            req.rawHeaders,
-            GATEWAY_AUTH_HEADER,
-          );
-          const accessAllowed =
-            !(config.remoteGateway || config.hostedMode) ||
-            !config.gatewayAuthToken ||
-            (typeof config.gatewayAuthToken === "string" &&
-              accessHeader !== null &&
-              constantTimeTokenMatches(accessHeader, config.gatewayAuthToken));
-          if (!accessAllowed) {
-            socket.end(
-              "HTTP/1.1 401 Unauthorized\r\n" +
-                "Content-Length: 0\r\n" +
-                "Cache-Control: no-store\r\n" +
-                "Connection: close\r\n" +
-                "\r\n",
-            );
-            return;
-          }
           if (hasRawConflictingProviderAuth(req.rawHeaders)) {
             const body = JSON.stringify({
               type: "error",
@@ -252,15 +291,14 @@ export async function startServer(
         }
         if (config.debug && !log.isStderrSilenced()) {
           console.error(
-            `[lore] rejecting WebSocket upgrade for ${req.url ?? "/"} (HTTP-only gateway)`,
+            `[lore] rejecting WebSocket upgrade for ${pathname} (HTTP-only gateway)`,
           );
         }
-        const url = req.url ?? "/";
         const body = JSON.stringify({
           type: "error",
           error: {
             type: "websocket_not_supported",
-            message: `WebSocket transport is not supported for ${url}; use HTTP.`,
+            message: `WebSocket transport is not supported for ${pathname}; use HTTP.`,
           },
         });
         // `socket.end(data)` flushes the response, then signals EOF — the
@@ -317,6 +355,7 @@ export async function startServer(
     // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
     // already bound — close the successfully-bound servers so we don't leak
     // file descriptors, then re-throw for startGateway() to handle.
+    webLoginController.abort();
     await Promise.all(servers.map((server) => closeBoundServer(server)));
     throw e;
   }
@@ -334,18 +373,35 @@ export async function startServer(
     .map((s) => serverReadyPromises.get(s))
     .filter((p): p is Promise<void> => p !== undefined);
 
+  // Every listener exposes the browser account, including embedded gateways.
+  // Keep refresh ownership here rather than in CLI-only or cloud-sync policy.
+  const stopSessionRefresh = startSessionRefreshScheduler(config);
   let stopPromise: Promise<void> | undefined;
   const result = {
     stop: (deadlineMs?: number): Promise<void> => {
       if (!stopPromise) {
-        stopPromise = Promise.all(
-          servers.map((server) => closeBoundServer(server, deadlineMs)),
-        )
+        // Detached login work can outlive its HTTP response. Retire only this
+        // listener's work before SQLite teardown; abort-ignoring completions
+        // must never reopen the writer or acquire operator credentials later.
+        webLoginController.abort();
+        const refreshDeadline = Promise.withResolvers<void>();
+        const refreshTimer = setTimeout(
+          refreshDeadline.resolve,
+          shutdownDeadline(deadlineMs),
+        );
+        // Abort fences all late refresh writes before listener shutdown. A
+        // transport that ignores abort must not extend the listener's existing
+        // drain deadline; the coordinator retains ownership until it settles.
+        stopPromise = Promise.all([
+          Promise.race([stopSessionRefresh(), refreshDeadline.promise]),
+          ...servers.map((server) => closeBoundServer(server, deadlineMs)),
+        ])
           .then(() => {})
           .catch((error: unknown) => {
             stopPromise = undefined;
             throw error;
-          });
+          })
+          .finally(() => clearTimeout(refreshTimer));
       }
       return stopPromise;
     },

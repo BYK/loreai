@@ -31,8 +31,6 @@ export const DEFAULT_PORTS = [3207, 5673] as const;
 export const DEFAULT_PORT = DEFAULT_PORTS[0];
 
 /** Match the existing owner-control token bounds used by gateway pid records. */
-export const GATEWAY_AUTH_TOKEN_MIN_LENGTH = 32;
-export const GATEWAY_AUTH_TOKEN_MAX_LENGTH = 256;
 /** Default upstream origin for native Gemini (Generative Language API). */
 export const GEMINI_DEFAULT_UPSTREAM =
   "https://generativelanguage.googleapis.com";
@@ -57,6 +55,14 @@ export interface GatewayConfig {
    * Disabled by default. Env: LORE_ALLOW_REMOTE_MANAGEMENT.
    */
   allowRemoteManagement: boolean;
+  /**
+   * Trusted HTTP(S) dashboard origins for reverse proxies and public hostnames.
+   * Empty by default. Listener hostnames and accepted loopback hosts remain
+   * available; wildcard bind addresses never authorize a dashboard hostname.
+   * Public origins also require LORE_ALLOW_REMOTE_MANAGEMENT.
+   * Env: LORE_MANAGEMENT_ORIGINS (comma-separated origins).
+   */
+  managementOrigins: readonly string[];
   /** Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC */
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
@@ -100,12 +106,7 @@ export interface GatewayConfig {
   exposeProviderDiagnostics: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
-  /**
-   * Optional gateway access credential. When configured, remote/hosted
-   * data-plane requests and remote management API requests require it.
-   * This is separate from provider credentials. Env:
-   * LORE_GATEWAY_AUTH_TOKEN.
-   */
+  /** @deprecated Ignored; the gateway no longer authenticates clients. */
   gatewayAuthToken?: string;
   /**
    * Hosted/remote mode — disables all filesystem operations that use
@@ -151,9 +152,9 @@ export interface GatewayConfig {
    * `lore start` also defaults to remote-gateway mode. Use
    * `lore start --local` when the gateway shares its filesystem with
    * the agents it serves. For equivalent service configuration, set both
-   * `LORE_HOSTED_MODE=0` and `LORE_REMOTE_GATEWAY=0`. Local mode disables
-   * gateway access authentication, so use it only on loopback or a fully
-   * trusted isolated network; use remote/hosted mode for untrusted clients.
+   * `LORE_HOSTED_MODE=0` and `LORE_REMOTE_GATEWAY=0`. These flags control
+   * filesystem access and routing, not client authentication. Every mode
+   * requires network access controls that admit only trusted clients.
    */
   remoteGateway: boolean;
   /**
@@ -267,6 +268,7 @@ export function loadConfig(): GatewayConfig {
     portExplicit: !!env.LORE_LISTEN_PORT,
     hosts,
     allowRemoteManagement: isTruthy(env.LORE_ALLOW_REMOTE_MANAGEMENT),
+    managementOrigins: parseManagementOrigins(env.LORE_MANAGEMENT_ORIGINS),
     upstreamAnthropic,
     upstreamOpenAI,
     callerUpstreamAllowlist,
@@ -289,7 +291,6 @@ export function loadConfig(): GatewayConfig {
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
-    gatewayAuthToken: parseGatewayAuthToken(env.LORE_GATEWAY_AUTH_TOKEN),
     hostedMode: hostedModeEnv,
     workerApiKey: env.LORE_WORKER_API_KEY || undefined,
     workerUpstream,
@@ -319,36 +320,20 @@ export function loadConfig(): GatewayConfig {
   };
 }
 
-/** Parse a header-safe, brute-force-resistant gateway access token. */
-export function parseGatewayAuthToken(
-  value: string | undefined,
-): string | undefined {
-  if (value === undefined || value === "") return undefined;
-  if (
-    value.length < GATEWAY_AUTH_TOKEN_MIN_LENGTH ||
-    value.length > GATEWAY_AUTH_TOKEN_MAX_LENGTH ||
-    // Visible ASCII excluding comma keeps one configured token distinguishable
-    // from Fetch/Node's comma-joined duplicate-header representation.
-    !/^[\x21-\x2b\x2d-\x7e]+$/.test(value)
-  ) {
-    throw new Error(
-      `LORE_GATEWAY_AUTH_TOKEN must be ${GATEWAY_AUTH_TOKEN_MIN_LENGTH}-${GATEWAY_AUTH_TOKEN_MAX_LENGTH} visible ASCII characters without commas`,
-    );
-  }
-  return value;
-}
-
-/** Validate optional gateway credentials and upstream headers after CLI overrides. */
+/** Validate management authorities and upstream headers after CLI overrides. */
 export function assertGatewayAccessConfigured(
   config: Pick<
     GatewayConfig,
     "remoteGateway" | "hostedMode" | "gatewayAuthToken"
   > &
     Partial<
-      Pick<GatewayConfig, "allowRemoteManagement" | "upstreamExtraHeaders">
+      Pick<
+        GatewayConfig,
+        "allowRemoteManagement" | "managementOrigins" | "upstreamExtraHeaders"
+      >
     >,
 ): void {
-  parseGatewayAuthToken(config.gatewayAuthToken);
+  parseManagementOrigins(config.managementOrigins?.join(","));
   if (hasConflictingAuthHeaders(config.upstreamExtraHeaders)) {
     throw new Error(
       "Configured upstream headers contain conflicting authentication mechanisms",
@@ -486,6 +471,25 @@ const MAX_UPSTREAM_URL_LENGTH = 2048;
 export function parseCallerUpstreamAllowlist(
   input: string | undefined,
 ): readonly string[] {
+  return parseConfiguredOrigins(input, "LORE_CALLER_UPSTREAM_ALLOWLIST", [
+    "https:",
+  ]);
+}
+
+export function parseManagementOrigins(
+  input: string | undefined,
+): readonly string[] {
+  return parseConfiguredOrigins(input, "LORE_MANAGEMENT_ORIGINS", [
+    "http:",
+    "https:",
+  ]);
+}
+
+function parseConfiguredOrigins(
+  input: string | undefined,
+  setting: string,
+  protocols: readonly string[],
+): readonly string[] {
   if (input === undefined || input.trim() === "") return Object.freeze([]);
 
   const origins: string[] = [];
@@ -494,13 +498,13 @@ export function parseCallerUpstreamAllowlist(
     const raw = entry.trim();
     const invalid = (): never => {
       throw new Error(
-        `Invalid LORE_CALLER_UPSTREAM_ALLOWLIST entry ${index + 1}: expected a unique HTTPS origin`,
+        `Invalid ${setting} entry ${index + 1}: expected a unique ${protocols.length === 1 ? "HTTPS" : "HTTP(S)"} origin`,
       );
     };
     if (
       !raw ||
       raw.length > MAX_UPSTREAM_URL_LENGTH ||
-      !/^https:\/\//i.test(raw) ||
+      !/^https?:\/\//i.test(raw) ||
       raw.includes("*") ||
       raw.includes("\\") ||
       raw.includes("?") ||
@@ -527,7 +531,7 @@ export function parseCallerUpstreamAllowlist(
       }
     })();
     if (
-      parsed.protocol !== "https:" ||
+      !protocols.includes(parsed.protocol) ||
       parsed.username ||
       parsed.password ||
       parsed.pathname !== "/" ||
@@ -539,7 +543,7 @@ export function parseCallerUpstreamAllowlist(
     const origin = parsed.origin;
     if (seen.has(origin)) {
       throw new Error(
-        `Invalid LORE_CALLER_UPSTREAM_ALLOWLIST entry ${index + 1}: duplicate normalized origin`,
+        `Invalid ${setting} entry ${index + 1}: duplicate normalized origin`,
       );
     }
     seen.add(origin);

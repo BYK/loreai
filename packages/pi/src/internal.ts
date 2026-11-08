@@ -10,7 +10,6 @@
  * relying on the `NODE_ENV=test` inert path.
  */
 import { createHash } from "node:crypto";
-import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { log } from "@loreai/core";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -212,13 +211,10 @@ export async function prepareLocalUiAssets(): Promise<void> {
 /**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
- * Order: LORE_REMOTE_URL → LORE_GATEWAY_URL → port file → known default
- * ports (3207, 5673). Returns the URL of a running gateway, or null if none
- * found.
+ * Explicit URLs are authoritative: failure never selects another installation.
+ * Without an explicit URL, probe the port file then defaults (3207, 5673).
  */
 export async function resolveGatewayUrl(): Promise<string | null> {
-  let preparedLocalUi = false;
-
   // 0. Remote gateway — skip local discovery/startup entirely.
   if (process.env.LORE_REMOTE_URL) {
     const url = gatewayUrlForLog(
@@ -226,8 +222,9 @@ export async function resolveGatewayUrl(): Promise<string | null> {
     );
     if (url !== "invalid" && (await probeGateway(url))) return url;
     log.info(
-      `pi: remote gateway at ${url} not reachable, falling through to local discovery`,
+      "pi: configured remote gateway is unavailable; local fallback is disabled",
     );
+    return null;
   }
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
@@ -237,16 +234,18 @@ export async function resolveGatewayUrl(): Promise<string | null> {
     );
     if (isLoopbackUrl(url)) {
       await prepareLocalUiAssets();
-      preparedLocalUi = true;
     }
     if (url !== "invalid" && (await probeGateway(url))) return url;
-    // env var set but gateway unreachable — fall through to discovery
+    log.info(
+      "pi: configured gateway is unavailable; local fallback is disabled",
+    );
+    return null;
   }
 
   // Prepare the source checkout before probing/reusing a local gateway. This
   // also lets an already-running source gateway see a manifest staged by this
   // extension process.
-  if (!preparedLocalUi) await prepareLocalUiAssets();
+  await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();
@@ -309,18 +308,6 @@ export function sessionIDFor(sessionFile: string | undefined): string {
   return `pi-${createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)}`;
 }
 
-/** Access headers are injected only for the URL selected by LORE_REMOTE_URL. */
-export function gatewayAccessHeadersForRemote(
-  gatewayBase: string,
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  const remoteUrl = env.LORE_REMOTE_URL?.replace(/\/+$/, "");
-  const token = env.LORE_GATEWAY_AUTH_TOKEN;
-  return remoteUrl === gatewayBase.replace(/\/+$/, "") && token
-    ? { [GATEWAY_AUTH_HEADER]: token }
-    : {};
-}
-
 /** Native recall reads the host DB, so only a discovered local gateway owns it. */
 export function shouldRegisterNativeRecallTool(
   gatewayBase: string,
@@ -374,7 +361,6 @@ export function buildProviderRegistrations(opts: {
   const registrations: ProviderRegistration[] = [];
   for (const provider of GATEWAY_PROVIDERS) {
     const headers: Record<string, string> = {
-      ...gatewayAccessHeadersForRemote(gatewayBase, env),
       "x-lore-session-id": sessionID,
       "x-lore-project": projectPath,
       // Inject provider ID so the gateway uses provider-based routing
@@ -426,7 +412,7 @@ export function buildProviderRegistrations(opts: {
  * the core `log` module (file-based, TUI-safe). `fetchImpl` is injectable for
  * testing.
  */
-export async function runCompaction(opts: {
+type CompactionOptions = {
   gatewayBase: string;
   sessionID: string;
   projectPath: string;
@@ -434,8 +420,32 @@ export async function runCompaction(opts: {
   firstKeptEntryId: string;
   tokensBefore: number;
   authHeaders?: Readonly<Record<string, string>>;
+  signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-}): Promise<SessionBeforeCompactResult | undefined> {
+};
+
+export async function runCompaction(
+  opts: CompactionOptions,
+): Promise<SessionBeforeCompactResult | undefined> {
+  const { signal } = opts;
+  if (!signal) return await performCompaction(opts);
+  if (signal.aborted) return undefined;
+  const cancelled = Promise.withResolvers<undefined>();
+  const onAbort = () => cancelled.resolve(undefined);
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (signal.aborted) return undefined;
+    // Pi checks cancellation only after awaiting this hook. Settle promptly
+    // even if a fetch wrapper ignores abort; the work still fences late output.
+    return await Promise.race([performCompaction(opts), cancelled.promise]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function performCompaction(
+  opts: CompactionOptions,
+): Promise<SessionBeforeCompactResult | undefined> {
   const {
     gatewayBase,
     sessionID,
@@ -444,6 +454,7 @@ export async function runCompaction(opts: {
     firstKeptEntryId,
     tokensBefore,
     authHeaders,
+    signal,
     fetchImpl = fetch,
   } = opts;
 
@@ -453,6 +464,7 @@ export async function runCompaction(opts: {
       // The request carries gateway and provider credentials. Do not let fetch
       // forward them to a redirect target outside the configured gateway.
       redirect: "manual",
+      signal,
       headers: {
         "content-type": "application/json",
         "x-lore-session-id": sessionID,
@@ -465,52 +477,61 @@ export async function runCompaction(opts: {
       }),
     });
 
-    if (!res.ok) {
-      // Gateway returned an error — fall back to Pi's default compaction.
-      const sessionNotFound =
-        res.status === 404 &&
-        (await res
-          .text()
-          .then((body) => body.includes("session_not_found"))
-          .catch(() => false));
-      // A 404 `session_not_found` is expected when this session was never
-      // routed through Lore (e.g. a provider Lore doesn't proxy, or a
-      // websocket-only transport that bypassed the gateway). That's not a
-      // failure — log it quietly and let Pi's default compaction run.
-      if (sessionNotFound) {
-        log.info(
-          "pi: lore compaction unavailable — this session was not routed " +
-            "through Lore; falling back to Pi compaction.",
-        );
+    try {
+      signal?.throwIfAborted();
+      if (!res.ok) {
+        // Gateway returned an error — fall back to Pi's default compaction.
+        const sessionNotFound =
+          res.status === 404 &&
+          (await res
+            .text()
+            .then((body) => body.includes("session_not_found"))
+            .catch(() => false));
+        signal?.throwIfAborted();
+        // A 404 `session_not_found` is expected when this session was never
+        // routed through Lore (e.g. a provider Lore doesn't proxy, or a
+        // websocket-only transport that bypassed the gateway). That's not a
+        // failure — log it quietly and let Pi's default compaction run.
+        if (sessionNotFound) {
+          log.info(
+            "pi: lore compaction unavailable — this session was not routed " +
+              "through Lore; falling back to Pi compaction.",
+          );
+          return undefined;
+        }
+        log.warn(`pi: compaction endpoint returned HTTP ${res.status}`);
         return undefined;
       }
-      log.warn(`pi: compaction endpoint returned HTTP ${res.status}`);
-      return undefined;
-    }
 
-    const body = (await res.json()) as { cancel?: boolean; summary?: string };
-    // Gateway's authoritative cancel decision wins. If the gateway says
-    // "this session's raw context fits; don't compact", we relay as
-    // { cancel: true } and skip the summary branch.
-    if (body.cancel === true) {
-      log.info(
-        "pi: gateway returned cancel=true — keeping raw context " +
-          "(Lore manages the window via recall on the next turn).",
-      );
-      return { cancel: true };
+      const body = (await res.json()) as { cancel?: boolean; summary?: string };
+      signal?.throwIfAborted();
+      // Gateway's authoritative cancel decision wins. If the gateway says
+      // "this session's raw context fits; don't compact", we relay as
+      // { cancel: true } and skip the summary branch.
+      if (body.cancel === true) {
+        log.info(
+          "pi: gateway returned cancel=true — keeping raw context " +
+            "(Lore manages the window via recall on the next turn).",
+        );
+        return { cancel: true };
+      }
+      if (typeof body.summary !== "string" || body.summary === "") {
+        return undefined;
+      }
+      return {
+        compaction: {
+          summary: body.summary,
+          firstKeptEntryId,
+          tokensBefore,
+        },
+      };
+    } finally {
+      // A late, abort-ignoring transport response remains ours to discard.
+      if (signal?.aborted) await res.body?.cancel().catch(() => {});
     }
-    if (typeof body.summary !== "string" || body.summary === "") {
-      return undefined;
-    }
-    return {
-      compaction: {
-        summary: body.summary,
-        firstKeptEntryId,
-        tokensBefore,
-      },
-    };
   } catch {
-    log.warn("pi: custom compaction failed, falling back to default");
+    if (!signal?.aborted)
+      log.warn("pi: custom compaction failed, falling back to default");
     return undefined;
   }
 }

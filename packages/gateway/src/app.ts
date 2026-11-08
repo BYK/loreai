@@ -33,14 +33,10 @@ import {
   conflictingProviderAuthResponse,
   errorResponse,
   errorResponseWithoutCors,
-  gatewayAccessDeniedResponse,
-  gatewayAccessMatches,
   hasRawConflictingProviderAuth,
   headersToRecord,
   hiddenManagementResponse,
-  isLoopbackAddress,
-  managementBearerMatches,
-  managementCorsOrigin,
+  managementAccessDecision,
   withManagementCors,
   withoutCors,
   withoutGatewayAccessHeader,
@@ -145,29 +141,6 @@ function debugLog(config: GatewayConfig, message: string): void {
   if (config.debug && !log.isStderrSilenced()) console.error(message);
 }
 
-function isGatewayOperatorMutation(method: string, path: string): boolean {
-  if (method === "GET" || method === "HEAD" || method === "OPTIONS")
-    return false;
-  // These actions consume the gateway operator's persisted Supabase session;
-  // a remote gateway token must never confer that operator's identity.
-  return (
-    path === "/api/v1/teams" ||
-    path.startsWith("/api/v1/teams/") ||
-    /^\/api\/v1\/orgs\/[^/]+\/domains(?:\/|$)/.test(path) ||
-    /^\/api\/v1\/projects\/[^/]+\/sharing\/link$/.test(path) ||
-    (method === "POST" &&
-      (path === "/api/v1/sync/run" ||
-        /^\/api\/v1\/knowledge\/[^/]+\/promote$/.test(path) ||
-        /^\/api\/v1\/promotions\/[^/]+\/(?:approve|reject|withdraw)$/.test(
-          path,
-        )))
-  );
-}
-
-function isGatewayTokenRequiredManagementPath(path: string): boolean {
-  return /^\/api\/v1\/costs\/pacing\/?$/.test(path);
-}
-
 /**
  * Management authorization (`/`, `/api*`, `/ui*`). Authorizes from node:http's
  * socket metadata, never from Forwarded, X-Forwarded-For, Host, or another
@@ -175,6 +148,12 @@ function isGatewayTokenRequiredManagementPath(path: string): boolean {
  * request body consumption. An unauthorized peer receives the same bodyless
  * 404 as an absent route (the UI classifies that signal as "unauthorized").
  */
+function closeManagementUpload(response: Response): Response {
+  // Access decisions and preflights can return before a request body is read.
+  response.headers.set("connection", "close");
+  return response;
+}
+
 function managementAccess(config: GatewayConfig): GatewayMiddleware {
   return async (c, next) => {
     const managementPath = classifyPath(c.req.path) === MANAGEMENT_PLANE;
@@ -183,54 +162,24 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
     c.set("allowedManagementOrigin", null);
     if (!managementPath) return next();
 
-    const remotePeer = !isLoopbackAddress(c.env.peerAddress);
-    if (!config.allowRemoteManagement && remotePeer) {
-      return hiddenManagementResponse();
-    }
-
-    const origin = managementCorsOrigin(
+    const { allowed, origin } = managementAccessDecision(
       c.req.raw,
-      config.allowRemoteManagement,
       c.env.peerAddress,
+      config,
     );
-    if (origin === false) return hiddenManagementResponse();
+    if (!allowed) {
+      return closeManagementUpload(
+        withManagementCors(hiddenManagementResponse(), origin),
+      );
+    }
     c.set("allowedManagementOrigin", origin);
 
-    // The gateway Bearer token authenticates access to this process; it does not
-    // identify the caller represented by the gateway's persisted Supabase session.
-    if (remotePeer && isGatewayOperatorMutation(c.req.method, c.req.path)) {
-      return withManagementCors(hiddenManagementResponse(), origin);
-    }
-
-    // Pacing changes local provider-account behavior, so remote callers must
-    // configure and present a gateway token even when anonymous remote
-    // dashboard access is enabled. Check before OPTIONS and body reads.
-    if (
-      remotePeer &&
-      isGatewayTokenRequiredManagementPath(c.req.path) &&
-      !config.gatewayAuthToken
-    ) {
-      return withManagementCors(hiddenManagementResponse(), origin);
-    }
-
     if (c.req.method === "OPTIONS") {
-      return withManagementCors(new Response(null, { status: 204 }), origin);
+      return closeManagementUpload(
+        withManagementCors(new Response(null, { status: 204 }), origin),
+      );
     }
 
-    const managementApiPath =
-      c.req.path === "/api" || c.req.path.startsWith("/api/");
-    if (
-      remotePeer &&
-      managementApiPath &&
-      config.gatewayAuthToken &&
-      !managementBearerMatches(
-        c.req.raw.headers,
-        config.gatewayAuthToken,
-        c.env.rawHeaders,
-      )
-    ) {
-      return withManagementCors(hiddenManagementResponse(), origin);
-    }
     return next();
   };
 }
@@ -238,26 +187,18 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
 /**
  * Data-plane access. Provider credentials authorize an upstream, not this
  * gateway: browser origins cannot invoke any model route (even from loopback),
- * a configured gateway access credential is enforced centrally, and mixed
- * provider-auth pairs are rejected — all before OPTIONS handling, body reads,
+ * mixed provider-auth pairs are rejected before OPTIONS handling, body reads,
  * session/storage/cost state, auth learning, configured credential overlays,
  * or upstream/interceptor calls. The access credential is stripped from the
  * request every later handler sees.
  */
-function dataPlaneAccess(config: GatewayConfig): GatewayMiddleware {
+function dataPlaneAccess(): GatewayMiddleware {
   return async (c, next) => {
     if (classifyPath(c.req.path) !== DATA_PLANE) return next();
     const req = c.req.raw;
     if (req.headers.has("origin")) return browserOriginDeniedResponse();
 
     const { rawHeaders } = c.env;
-    if (
-      (config.remoteGateway || config.hostedMode) &&
-      config.gatewayAuthToken &&
-      !gatewayAccessMatches(req.headers, config.gatewayAuthToken, rawHeaders)
-    ) {
-      return gatewayAccessDeniedResponse();
-    }
     if (
       hasConflictingAuthHeaders(headersToRecord(req.headers)) ||
       (rawHeaders !== undefined && hasRawConflictingProviderAuth(rawHeaders))
@@ -272,7 +213,10 @@ function dataPlaneAccess(config: GatewayConfig): GatewayMiddleware {
 /** No-Origin OPTIONS stays a 204 without enabling browser CORS. */
 const genericPreflight: GatewayMiddleware = async (c, next) => {
   if (c.req.method === "OPTIONS") {
-    return withoutCors(new Response(null, { status: 204 }));
+    // No handler consumes a preflight body; terminate incomplete uploads.
+    return withoutCors(
+      new Response(null, { status: 204, headers: { connection: "close" } }),
+    );
   }
   return next();
 };
@@ -346,7 +290,7 @@ export function createGatewayApp(
   // and unknown paths. Order matters: management → data plane → preflight →
   // upgrade rejection.
   app.use(managementAccess(config));
-  app.use(dataPlaneAccess(config));
+  app.use(dataPlaneAccess());
   app.use(genericPreflight);
   app.use(requestLogAndUpgradeGuard(config));
 
