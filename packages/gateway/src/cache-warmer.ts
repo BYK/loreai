@@ -2768,7 +2768,8 @@ export function recordGlobalGap(projectPath: string, gapMs: number): void {
  * Read-only snapshot of persisted and pending global histograms, keyed by the
  * canonical project_id. This avoids loading or reconciling the process cache
  * and includes history even before an active session touches a project after
- * restart.
+ * restart. Pool the current return segments for display and use the legacy
+ * reply-only histogram only for projects without any current observations.
  */
 export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   string,
@@ -2789,26 +2790,34 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   }
 
   const exactCountsByProject = new Map<string, bigint[]>();
+  const segmentedCounts = new Map<string, bigint[]>();
   const rows = database
     .query(
-      "SELECT project_id, counts, CAST(total AS TEXT) AS total FROM warmup_histograms",
+      "SELECT project_id, time_slot, counts, CAST(total AS TEXT) AS total FROM warmup_histograms",
     )
-    .all() as Array<{ project_id: string; counts: string; total: string }>;
+    .all() as Array<{
+    project_id: string;
+    time_slot: string;
+    counts: string;
+    total: string;
+  }>;
   for (const row of rows) {
     const pid = canonicalProjectId(row.project_id, { committed: true });
     if (!pid) continue;
     const decoded = decodeWarmupHistogram(row.counts, row.total);
     if (!decoded) continue;
-    const current =
-      exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
-    exactCountsByProject.set(pid, mergeWarmupHistogramCounts(current, decoded));
+    const target = row.time_slot.startsWith("return:")
+      ? segmentedCounts
+      : exactCountsByProject;
+    const current = target.get(pid) ?? emptyWarmupHistogramCounts();
+    target.set(pid, mergeWarmupHistogramCounts(current, decoded));
   }
 
   // Dirty histograms contain observations since the persisted base was
   // loaded. Rebase them onto the canonical ID without changing dirty maps.
   for (const [sourceId, dirty] of dirtyHistograms) {
     const pid = canonicalProjectId(sourceId, { committed: true });
-    if (!pid) continue;
+    if (!pid || segmentedCounts.has(pid)) continue;
     const current =
       exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
     const dirtyCounts = dirty.counts.map(BigInt);
@@ -2816,6 +2825,10 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
       pid,
       mergeWarmupHistogramCounts(current, dirtyCounts),
     );
+  }
+
+  for (const [pid, counts] of segmentedCounts) {
+    exactCountsByProject.set(pid, counts);
   }
 
   for (const [pid, counts] of exactCountsByProject) {
