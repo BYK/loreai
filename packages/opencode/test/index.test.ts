@@ -261,10 +261,10 @@ describe("LorePlugin hooks", () => {
     }
   });
 
-  test("returns an empty tool map", async () => {
+  test("does not register native recall without a resolved gateway target", async () => {
     const { hooks, cleanup } = await initPlugin();
     try {
-      expect(hooks.tool).toEqual({});
+      expect(Object.keys(hooks.tool ?? {})).toEqual([]);
     } finally {
       cleanup();
     }

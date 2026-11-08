@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { db, ltm, loadSessionTracking, temporal } from "@loreai/core";
+import { db, log, ltm, loadSessionTracking, temporal } from "@loreai/core";
 import { getSessionCosts } from "../src/cost-tracker";
 import {
   handleRequest,
@@ -22,6 +22,12 @@ import {
   settled,
   resetRecallBufferedForTest,
 } from "./helpers/recall-buffered";
+import {
+  RECALL_GATEWAY_TOOL,
+  RECALL_TOOL_NAME,
+  buildAnchoredRecallMarker,
+  recallAnchorContext,
+} from "../src/recall";
 
 // These tests assert on recall/buffered-transaction behaviour, never on
 // vectors; skip the ONNX embedding provider so stored messages bypass the
@@ -39,6 +45,85 @@ vi.mock("../../core/src/config", async (importOriginal) => {
 });
 
 afterEach(resetRecallBufferedForTest);
+
+test("normalizes native recall ownership before replaying stored markers", async () => {
+  const diagnostics = vi.spyOn(log, "info").mockImplementation(() => {});
+  const alias = crypto.randomUUID();
+  setUpstreamInterceptor(async () =>
+    providerResponse("anthropic", 1, "answer"),
+  );
+  const initialResponse = await handleRequest(
+    request("anthropic", alias),
+    config(),
+  );
+  await initialResponse.text();
+
+  const state = stateFor(alias);
+  const replayRequest = request("anthropic", alias);
+  const anchorId = crypto.randomUUID();
+  const toolUseId = `call_${crypto.randomUUID()}`;
+  const input = { query: "prior project memory", scope: "all" };
+  state.recallStore.set(`anchor:${anchorId}`, {
+    toolUseId,
+    input,
+    position: 0,
+    result: "Previously retrieved project memory.",
+    anchorId,
+    anchorContextId: recallAnchorContext(replayRequest.messages),
+  });
+  replayRequest.messages.push({
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text: buildAnchoredRecallMarker(
+          input.query,
+          input.scope,
+          undefined,
+          undefined,
+          anchorId,
+        ),
+      },
+    ],
+  });
+  replayRequest.messages.push({ role: "user", content: [] });
+  const nativeTool = { ...RECALL_GATEWAY_TOOL };
+  delete nativeTool.gatewayOwned;
+  replayRequest.tools = [nativeTool];
+
+  let forwarded: unknown;
+  diagnostics.mockClear();
+  setUpstreamInterceptor(async (body) => {
+    forwarded = body;
+    return providerResponse("anthropic", 1, "answer");
+  });
+  const response = await handleRequest(replayRequest, config());
+  await response.text();
+
+  const forwardedMessages = (
+    forwarded as { messages: Array<{ role: string; content: unknown[] }> }
+  ).messages;
+  const assistant = forwardedMessages.find(
+    (message) => message.role === "assistant",
+  );
+  const serializedMessages = JSON.stringify(forwardedMessages);
+  expect(assistant?.content).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool_use",
+        id: toolUseId,
+        name: RECALL_TOOL_NAME,
+        input,
+      }),
+    ]),
+  );
+  expect(serializedMessages).toContain("Previously retrieved project memory.");
+  expect(serializedMessages).not.toContain("lore-recall:");
+  const expansionDiagnostics = diagnostics.mock.calls
+    .map(([message]) => String(message))
+    .filter((message) => message.startsWith("expanded recall markers"));
+  expect(expansionDiagnostics).toEqual(["expanded recall markers"]);
+});
 
 describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
   "native Anthropic recall transaction for %s client",

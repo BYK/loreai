@@ -112,7 +112,7 @@ describe("recall — cross-session raw history demotion", () => {
     expect(otherScore).toBeLessThan(currentScore * 0.6);
   });
 
-  test("bounds malformed distillation source references", async () => {
+  test("does not expose distillation source references", async () => {
     const id = seedDistillation(
       OTHER_SESSION,
       "bounded source reference evidence",
@@ -141,7 +141,8 @@ describe("recall — cross-session raw history demotion", () => {
       scope: "project",
     });
 
-    expect(result).toContain("t:valid-source");
+    expect(result).toContain("bounded source reference evidence");
+    expect(result).not.toContain("t:valid-source");
     expect(result).not.toContain("x".repeat(257));
     expect(result).not.toContain("bad\nheading");
   });

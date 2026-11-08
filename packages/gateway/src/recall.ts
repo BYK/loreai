@@ -20,12 +20,13 @@
 import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
-  MAX_RECALL_ID_CHARS,
-  MAX_RECALL_QUERY_CHARS,
+  isRecallDetailRef,
   isValidRecallId,
   isValidRecallQuery,
+  RECALL_TOOL_INPUT_SCHEMA,
+  RECALL_TOOL_NAME as CORE_RECALL_TOOL_NAME,
   RECALL_TOOL_DESCRIPTION,
-  RECALL_PARAM_DESCRIPTIONS,
+  parseRecallToolArguments,
   config as loreConfig,
   type RecallScope,
   type RecallCoverage,
@@ -53,60 +54,59 @@ import { reportRecallDiagnostic } from "./recall-diagnostics";
 // Tool definition
 // ---------------------------------------------------------------------------
 
-/** Recall tool definition for injection into upstream requests. */
-export const RECALL_GATEWAY_TOOL: GatewayTool = {
-  name: "recall",
-  description: RECALL_TOOL_DESCRIPTION,
-  gatewayOwned: true,
-  inputSchema: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        maxLength: MAX_RECALL_QUERY_CHARS,
-        description: RECALL_PARAM_DESCRIPTIONS.query,
-      },
-      scope: {
-        type: "string",
-        enum: ["all", "session", "project", "knowledge"],
-        description: RECALL_PARAM_DESCRIPTIONS.scope,
-      },
-      id: {
-        type: "string",
-        minLength: 1,
-        maxLength: MAX_RECALL_ID_CHARS,
-        description: RECALL_PARAM_DESCRIPTIONS.id,
-      },
-      ids: {
-        type: "array",
-        minItems: 1,
-        maxItems: MAX_RECALL_BATCH_IDS,
-        items: {
-          type: "string",
-          minLength: 1,
-          maxLength: MAX_RECALL_ID_CHARS,
-        },
-        description: RECALL_PARAM_DESCRIPTIONS.ids,
-      },
-      detailOffset: {
-        type: "integer",
-        minimum: 0,
-        description: RECALL_PARAM_DESCRIPTIONS.detailOffset,
-      },
-      detailLimit: {
-        type: "integer",
-        minimum: 1,
-        maximum: 16_000,
-        description: RECALL_PARAM_DESCRIPTIONS.detailLimit,
-      },
-    },
-    // No root anyOf/oneOf/allOf: providers reject them (Copilot Gemini 400s).
-    // parseRecallInput enforces "query, id, or ids" at execution instead.
-    additionalProperties: false,
-  },
+const GATEWAY_RECALL_TOOL_BRAND = Symbol("lore.gateway-recall-tool");
+
+type BrandedGatewayRecallTool = GatewayTool & {
+  readonly [GATEWAY_RECALL_TOOL_BRAND]: true;
 };
 
-export const RECALL_TOOL_NAME = "recall";
+function brandGatewayRecallTool(tool: GatewayTool): BrandedGatewayRecallTool {
+  return { ...tool, [GATEWAY_RECALL_TOOL_BRAND]: true };
+}
+
+function hasGatewayRecallBrand(tool: GatewayTool): boolean {
+  return (
+    (tool as Partial<BrandedGatewayRecallTool>)[GATEWAY_RECALL_TOOL_BRAND] ===
+    true
+  );
+}
+
+function withoutGatewayRecallBrand(tool: GatewayTool): GatewayTool {
+  const { [GATEWAY_RECALL_TOOL_BRAND]: _brand, ...unbranded } =
+    tool as GatewayTool & {
+      [GATEWAY_RECALL_TOOL_BRAND]?: true;
+    };
+  return unbranded;
+}
+
+// Description decoration is gateway-owned. Brand only exact contracts before
+// decoration so matching names or client-supplied ownership flags never grant
+// the private marker/replay path.
+// Provider-facing schemas omit root combinators for compatibility; the shared
+// argument parser enforces the query/id/ids requirement at execution.
+const RECALL_GATEWAY_INPUT_SCHEMA = Object.fromEntries(
+  Object.entries(RECALL_TOOL_INPUT_SCHEMA).filter(
+    ([keyword]) =>
+      keyword !== "anyOf" &&
+      keyword !== "oneOf" &&
+      keyword !== "allOf" &&
+      keyword !== "not" &&
+      keyword !== "if",
+  ),
+);
+
+/** Gateway representation of the shared recall tool contract. */
+export const RECALL_GATEWAY_TOOL = brandGatewayRecallTool({
+  name: CORE_RECALL_TOOL_NAME,
+  description: RECALL_TOOL_DESCRIPTION,
+  gatewayOwned: true,
+  inputSchema: RECALL_GATEWAY_INPUT_SCHEMA,
+});
+
+export const RECALL_TOOL_NAME = CORE_RECALL_TOOL_NAME;
+
+// Durable replay needs the result and anchor, never the free-form search input.
+const PERSISTED_RECALL_QUERY = "[recall query omitted from persistent state]";
 
 /**
  * Prevent an Anthropic-compatible model from issuing parallel recall calls.
@@ -136,6 +136,7 @@ export function withParallelToolUseDisabled(
 export const MAX_RECALL_DEPTH = MAX_RECALL_EXECUTIONS;
 export const MAX_RECALL_STORE_ENTRIES = 128;
 export const MAX_RECALL_STORE_BYTES = 1024 * 1024;
+const MAX_RECALL_COMPANION_TOOL_USES = 128;
 
 // ---------------------------------------------------------------------------
 // Marker utilities — human-readable text ↔ recall tool round-trip
@@ -180,7 +181,7 @@ export function buildRecallMarker(
     return `📚 Fetching details for ${ids.length} sources…`;
   if (id)
     return `📚 Fetching detail for ${
-      isValidRecallId(id) ? id : "an invalid source"
+      isValidRecallId(id) || isRecallDetailRef(id) ? id : "an invalid source"
     }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
@@ -192,6 +193,8 @@ const MAX_RECALL_MARKER_CHARS = 1024;
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
 const BATCH_MARKER_REGEX = /^📚 Fetching details for ([1-8]) sources…(?=\n|$)/;
+const TRUNCATED_DETAIL_ID_RE =
+  /^(?:(?:k|xk|d|e|r):[0-9a-f-]{1,64}|t:(?:[0-9a-f-]{1,64}|lore_tm_v1_[a-z0-9_-]{1,64}))$/i;
 
 function isValidBatchMarker(text: string): boolean {
   const match = BATCH_MARKER_REGEX.exec(text);
@@ -418,8 +421,16 @@ function insertCompanionBundle(
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
+  const detailProgress = ID_MARKER_REGEX.exec(text);
+  const isDetailProgress =
+    detailProgress !== null &&
+    detailProgress[0].length <= MAX_RECALL_MARKER_CHARS &&
+    (isValidRecallId(detailProgress[1]) ||
+      isRecallDetailRef(detailProgress[1]) ||
+      TRUNCATED_DETAIL_ID_RE.test(detailProgress[1]));
   return (
     parseRecallMarker(text) !== null ||
+    isDetailProgress ||
     parseRecallAnchorFromText(text) !== null ||
     isValidBatchMarker(text)
   );
@@ -464,6 +475,66 @@ function storedRecallForText(
   return null;
 }
 
+function suppressedRecallContinuation(
+  text: string,
+  store: RecallStore,
+): string | undefined {
+  const match = storedRecallForText(text, store);
+  if (match) return match.continuation;
+  if (!isRecallMarker(text)) return undefined;
+  const anchorId = parseRecallAnchorFromText(text);
+  return anchorId
+    ? recallAnchorContinuation(text, anchorId)
+    : recallMarkerContinuation(text);
+}
+
+function suppressRecallProvenance(
+  message: GatewayMessage,
+  store: RecallStore,
+): boolean {
+  let changed = false;
+  for (const block of message.provenanceContent ?? []) {
+    if (block.type === "text") {
+      const continuation = suppressedRecallContinuation(block.text, store);
+      if (continuation !== undefined) {
+        block.text = continuation;
+        changed = true;
+      }
+      continue;
+    }
+    if (
+      block.type !== "opaque" ||
+      block.responsesItem !== true ||
+      block.raw.type !== "message" ||
+      !Array.isArray(block.raw.content)
+    ) {
+      continue;
+    }
+
+    let itemChanged = false;
+    const content = block.raw.content.map((part: unknown) => {
+      if (
+        !isRecord(part) ||
+        part.type !== "output_text" ||
+        typeof part.text !== "string"
+      ) {
+        return part;
+      }
+      const continuation = suppressedRecallContinuation(part.text, store);
+      if (continuation === undefined) return part;
+      itemChanged = true;
+      return { ...part, text: continuation };
+    });
+    if (itemChanged) {
+      // Retain each native item and its index: provenancePositions addresses
+      // these blocks, and the envelope may carry protocol-required metadata.
+      block.raw = { ...block.raw, content };
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function recallMarkerContinuation(text: string): string {
   const idMatch = ID_MARKER_REGEX.exec(text);
   const markerMatch = MARKER_REGEX.exec(text);
@@ -497,7 +568,8 @@ export function parseRecallMarker(
   const idMatch = ID_MARKER_REGEX.exec(text);
   if (idMatch) {
     if (idMatch[0].length > MAX_RECALL_MARKER_CHARS) return null;
-    if (!isValidRecallId(idMatch[1])) return null;
+    if (!isValidRecallId(idMatch[1]) && !isRecallDetailRef(idMatch[1]))
+      return null;
     return { query: "", scope: "all", id: idMatch[1] };
   }
   const match = MARKER_REGEX.exec(text);
@@ -511,16 +583,49 @@ export function parseRecallMarker(
 }
 
 /**
- * Serialize a recall store to JSON for cross-restart persistence.
+ * Serialize anchored recall results for cross-restart persistence.
  *
  * The store is in-memory per session; without persistence a gateway restart
  * loses it, so historical recall markers can no longer be expanded into their
  * tool_use + tool_result pair and instead leak upstream as raw marker TEXT —
  * rewriting that (deep) assistant message and busting the prompt cache
- * (ses_14b9bf3d… incident). Persisting + restoring keeps expansion byte-stable.
+ * (ses_14b9bf3d… incident). Durable anchors preserve replay structure while
+ * replacing the original query with a fixed placeholder and dropping selectors,
+ * pagination details, and provider-chosen call IDs. Pre-anchor query-keyed
+ * records are omitted because replaying them requires that query.
  */
 export function serializeRecallStore(store: RecallStore): string {
-  return JSON.stringify([...store.entries()]);
+  const entries: Array<[string, StoredRecall]> = [];
+  for (const [key, value] of store) {
+    if (
+      !key.startsWith("anchor:") ||
+      !isStoredRecall(value) ||
+      !isValidRecallStoreEntry(key, value)
+    ) {
+      continue;
+    }
+    const companionToolUseCounts = companionCountsFor(value);
+    const companionToolUseFingerprints = companionFingerprintsFor(value);
+    entries.push([
+      key,
+      {
+        toolUseId: persistedRecallToolUseId(key.slice("anchor:".length)),
+        anchorId: value.anchorId,
+        input: {
+          query: PERSISTED_RECALL_QUERY,
+          ...(value.input.scope ? { scope: value.input.scope } : {}),
+        },
+        position: value.position,
+        result: value.result,
+        anchorContextId: value.anchorContextId,
+        ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
+        ...(companionToolUseFingerprints
+          ? { companionToolUseFingerprints }
+          : {}),
+      },
+    ]);
+  }
+  return JSON.stringify(entries);
 }
 
 /** Add one record without evicting a still-live replay anchor. */
@@ -582,13 +687,34 @@ export function deserializeRecallStore(json: string): RecallStore {
         Array.isArray(entry) &&
         entry.length === 2 &&
         typeof entry[0] === "string" &&
+        entry[0].startsWith("anchor:") &&
         entry[1] &&
         typeof entry[1] === "object" &&
         isStoredRecall(entry[1]) &&
         isValidRecallStoreEntry(entry[0], entry[1])
       ) {
         try {
-          addRecallStoreEntry(store, entry[0], entry[1]);
+          const companionToolUseCounts = companionCountsFor(entry[1]);
+          const companionToolUseFingerprints = companionFingerprintsFor(
+            entry[1],
+          );
+          addRecallStoreEntry(store, entry[0], {
+            toolUseId: persistedRecallToolUseId(
+              entry[0].slice("anchor:".length),
+            ),
+            anchorId: entry[1].anchorId,
+            anchorContextId: entry[1].anchorContextId,
+            input: {
+              query: PERSISTED_RECALL_QUERY,
+              ...(entry[1].input.scope ? { scope: entry[1].input.scope } : {}),
+            },
+            position: entry[1].position,
+            result: entry[1].result,
+            ...(companionToolUseCounts ? { companionToolUseCounts } : {}),
+            ...(companionToolUseFingerprints
+              ? { companionToolUseFingerprints }
+              : {}),
+          });
         } catch {
           break;
         }
@@ -598,6 +724,91 @@ export function deserializeRecallStore(json: string): RecallStore {
     // Corrupt blob — start empty; orphaned markers are removed before forwarding.
   }
   return store;
+}
+
+function persistedRecallToolUseId(anchorId: string): string {
+  // Provider-generated call IDs are untrusted and may themselves contain the
+  // private query. The anchor is local UUID provenance, so derive replay IDs
+  // from it instead of carrying the provider value across restarts.
+  return `lore-recall-${anchorId}`;
+}
+
+/** Canonical JSON keeps object key order from changing companion identity. */
+function companionFingerprint(
+  anchorId: string | undefined,
+  item: { id: string; name: string; input: unknown; side: "before" | "after" },
+): string {
+  const input = JSON.stringify(item.input, (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : value,
+  );
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "lore-recall-companion-v1",
+        anchorId ?? "",
+        item.side,
+        item.id,
+        item.name,
+        input,
+      ]),
+    )
+    .digest("hex");
+}
+
+function companionFingerprintsFor(
+  item: StoredRecall,
+): StoredRecall["companionToolUseFingerprints"] {
+  return item.companionToolUses
+    ? item.companionToolUses.map((companion) => ({
+        hash: companionFingerprint(item.anchorId, companion),
+        side: companion.side,
+      }))
+    : item.companionToolUseFingerprints?.map(({ hash, side }) => ({
+        hash,
+        side,
+      }));
+}
+
+function companionCountsFor(
+  item: StoredRecall,
+): { before: number; after: number } | undefined {
+  if (item.companionToolUseCounts !== undefined) {
+    const { before, after } = item.companionToolUseCounts;
+    return { before, after };
+  }
+  const companions =
+    item.companionToolUses ?? item.companionToolUseFingerprints;
+  if (!companions || companions.length === 0) return undefined;
+  let before = 0;
+  let after = 0;
+  for (const companion of companions) {
+    if (companion.side === "before") before++;
+    else after++;
+  }
+  return { before, after };
+}
+
+function isValidCompanionToolUseCounts(
+  value: unknown,
+): value is { before: number; after: number } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const counts = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(counts.before) &&
+    Number.isSafeInteger(counts.after) &&
+    (counts.before as number) >= 0 &&
+    (counts.after as number) >= 0 &&
+    (counts.before as number) + (counts.after as number) <=
+      MAX_RECALL_COMPANION_TOOL_USES
+  );
 }
 
 function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {
@@ -647,11 +858,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     !isValidRecallQuery(input.query) ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
-      !isValidRecallId((item.input as Record<string, unknown>).id)) ||
+      !isValidRecallId((item.input as Record<string, unknown>).id) &&
+      !isRecallDetailRef((item.input as Record<string, unknown>).id)) ||
     ((item.input as Record<string, unknown>).ids !== undefined &&
       (!Array.isArray((item.input as Record<string, unknown>).ids) ||
         !((item.input as Record<string, unknown>).ids as unknown[]).every(
-          (id: unknown) => isValidRecallId(id),
+          (id: unknown) => isValidRecallId(id) || isRecallDetailRef(id),
         ))) ||
     ((item.input as Record<string, unknown>).detailOffset !== undefined &&
       (!Number.isSafeInteger(
@@ -669,12 +881,16 @@ function isStoredRecall(value: unknown): value is StoredRecall {
   }
   const ids = input.ids;
   if (
-    (typeof input.id === "string" && !isValidRecallId(input.id)) ||
+    (typeof input.id === "string" &&
+      !isValidRecallId(input.id) &&
+      !isRecallDetailRef(input.id)) ||
     (ids !== undefined &&
       (!Array.isArray(ids) ||
         ids.length === 0 ||
         ids.length > MAX_RECALL_BATCH_IDS ||
-        !ids.every((id): id is string => isValidRecallId(id)))) ||
+        !ids.every(
+          (id): id is string => isValidRecallId(id) || isRecallDetailRef(id),
+        ))) ||
     (input.id !== undefined && ids !== undefined) ||
     ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
       typeof input.id !== "string") ||
@@ -693,7 +909,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     return false;
   }
   if (item.companionToolUses !== undefined) {
-    if (!Array.isArray(item.companionToolUses)) return false;
+    if (
+      !Array.isArray(item.companionToolUses) ||
+      item.companionToolUses.length > MAX_RECALL_COMPANION_TOOL_USES
+    ) {
+      return false;
+    }
     for (const companion of item.companionToolUses) {
       if (!companion || typeof companion !== "object") return false;
       const record = companion as Record<string, unknown>;
@@ -706,6 +927,29 @@ function isStoredRecall(value: unknown): value is StoredRecall {
         return false;
       }
     }
+  }
+  if (item.companionToolUseFingerprints !== undefined) {
+    if (
+      !Array.isArray(item.companionToolUseFingerprints) ||
+      item.companionToolUseFingerprints.length >
+        MAX_RECALL_COMPANION_TOOL_USES ||
+      !item.companionToolUseFingerprints.every((value: unknown) => {
+        if (!value || typeof value !== "object") return false;
+        const record = value as Record<string, unknown>;
+        return (
+          typeof record.hash === "string" &&
+          /^[0-9a-f]{64}$/.test(record.hash) &&
+          (record.side === "before" || record.side === "after")
+        );
+      })
+    )
+      return false;
+  }
+  if (
+    item.companionToolUseCounts !== undefined &&
+    !isValidCompanionToolUseCounts(item.companionToolUseCounts)
+  ) {
+    return false;
   }
   return true;
 }
@@ -738,9 +982,32 @@ export function expandRecallMarkers(
   store: RecallStore,
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
-  if (options.gatewayRecallEnabled === false) return false;
+  if (options.gatewayRecallEnabled === false) {
+    // A caller-owned colliding tool cannot receive Lore's synthetic replay,
+    // but its internal anchor must not leak as ordinary provider-visible text.
+    // Keep the stored result intact so a later request with the canonical
+    // gateway-owned tool can still replay it.
+    let suppressed = false;
+    for (const message of req.messages) {
+      if (message.role !== "assistant") continue;
+      for (let index = 0; index < message.content.length; index++) {
+        const block = message.content[index];
+        if (block.type !== "text") continue;
+        const continuation = suppressedRecallContinuation(block.text, store);
+        if (continuation === undefined) continue;
+        if (continuation) block.text = continuation;
+        else removeVisibleContentBlock(message, index--);
+        suppressed = true;
+      }
+      suppressed = suppressRecallProvenance(message, store) || suppressed;
+    }
+    return suppressed;
+  }
   let expanded = false;
-  const anchorValidity = new Map<string, boolean[]>();
+  const anchorValidity = new Map<
+    string,
+    Array<{ valid: boolean; before: string[] }>
+  >();
   const incomingMessages = structuredClone(req.messages);
   for (let i = 0; i < incomingMessages.length; i++) {
     const message = incomingMessages[i];
@@ -765,7 +1032,30 @@ export function expandRecallMarkers(
               recallMessagePrefix(message, j),
             );
       const occurrences = anchorValidity.get(candidate.key) ?? [];
-      occurrences.push(valid);
+      const previous = incomingMessages[i - 1];
+      occurrences.push({
+        valid,
+        before:
+          valid &&
+          candidate.key.startsWith("anchor:") &&
+          candidate.stored.companionToolUses === undefined &&
+          candidate.stored.companionToolUseFingerprints === undefined &&
+          !message.content
+            .slice(0, j)
+            .some((block) => block.type === "tool_use") &&
+          previous?.role === "assistant"
+            ? previous.content.flatMap((block) =>
+                block.type === "tool_use"
+                  ? [
+                      companionFingerprint(candidate.stored.anchorId, {
+                        ...block,
+                        side: "before",
+                      }),
+                    ]
+                  : [],
+              )
+            : [],
+      });
       anchorValidity.set(candidate.key, occurrences);
     }
   }
@@ -810,8 +1100,9 @@ export function expandRecallMarkers(
       expanded = true;
       continue;
     }
-    const { stored } = match;
-    if (!(anchorValidity.get(match.key)?.shift() ?? false)) {
+    const { stored, key: matchedKey } = match;
+    const validatedAnchor = anchorValidity.get(match.key)?.shift();
+    if (!validatedAnchor?.valid) {
       const block = msg.content[markerIdx];
       if (block.type !== "text") throw new Error("recall marker is not text");
       const continuation = match.key.startsWith("anchor:")
@@ -833,28 +1124,56 @@ export function expandRecallMarkers(
     // which parse into adjacent assistant messages. Rejoin only tool calls that
     // were companions of the original recall. Continuation tool calls are not
     // companions and must stay after the synthetic recall result turn.
-    const companions = stored.companionToolUses;
-    const beforeCompanions = companions?.filter(
-      (item) => item.side === "before",
-    );
-    const afterCompanions = companions?.filter((item) => item.side === "after");
+    const companions = companionFingerprintsFor(stored);
+    const counts = companionCountsFor(stored);
+    const beforeCompanions = companions
+      ? companions.filter((item) => item.side === "before")
+      : (counts?.before ?? 0);
+    const afterCompanions = companions
+      ? companions.filter((item) => item.side === "after")
+      : (counts?.after ?? 0);
     const matchesCompanions = (
       content: GatewayContentBlock[],
       expected: typeof beforeCompanions,
-    ): boolean =>
-      content.filter((block) => block.type === "tool_use").length ===
-        expected?.length &&
-      content
-        .filter((block) => block.type === "tool_use")
-        .every((block, index) => {
+      side: "before" | "after",
+    ): boolean => {
+      const toolUses = content.filter(
+        (block): block is GatewayToolUseBlock => block.type === "tool_use",
+      );
+      // Legacy counts do not prove identity. The validated canonical anchor
+      // context above hashes the complete preceding transcript, including this
+      // adjacent group's exact IDs, names and inputs. That independent proof
+      // permits restoring a preceding legacy group only. Following groups are
+      // outside the context hash and always require companion fingerprints.
+      if (typeof expected === "number") {
+        return (
+          side === "before" &&
+          matchedKey.startsWith("anchor:") &&
+          stored.anchorContextId !== undefined &&
+          toolUses.length === expected &&
+          validatedAnchor.before.length === expected &&
+          toolUses.every(
+            (block, index) =>
+              companionFingerprint(stored.anchorId, {
+                ...block,
+                side: "before",
+              }) === validatedAnchor.before[index],
+          )
+        );
+      }
+      return (
+        toolUses.length === expected.length &&
+        toolUses.every((block, index) => {
           const item = expected[index];
           return (
-            block.type === "tool_use" &&
-            block.id === item.id &&
-            block.name === item.name &&
-            JSON.stringify(block.input) === JSON.stringify(item.input)
+            companionFingerprint(stored.anchorId, {
+              ...block,
+              side: item.side,
+            }) === item.hash
           );
-        });
+        })
+      );
+    };
     const takeCompanions = (message: GatewayMessage): CompanionBundle => {
       if (
         message.content.every((block) => block.type === "tool_use") &&
@@ -893,40 +1212,46 @@ export function expandRecallMarkers(
       }
       return { content: moved };
     };
-    while ((beforeCompanions?.length ?? 0) > 0 && i > 0) {
+    const beforeCompanionCount =
+      typeof beforeCompanions === "number"
+        ? beforeCompanions
+        : (beforeCompanions?.length ?? 0);
+    if (beforeCompanionCount > 0 && i > 0) {
       const previous = req.messages[i - 1];
       if (
-        previous.role !== "assistant" ||
-        !matchesCompanions(previous.content, beforeCompanions)
+        previous.role === "assistant" &&
+        matchesCompanions(previous.content, beforeCompanions, "before")
       ) {
-        break;
-      }
-      const moved = takeCompanions(previous);
-      insertCompanionBundle(msg, 0, moved);
-      markerIdx += moved.content.length;
-      if (
-        previous.content.length === 0 &&
-        (previous.provenanceContent?.length ?? 0) === 0
-      ) {
-        req.messages.splice(i - 1, 1);
-        i -= 1;
+        const moved = takeCompanions(previous);
+        insertCompanionBundle(msg, 0, moved);
+        markerIdx += moved.content.length;
+        if (
+          previous.content.length === 0 &&
+          (previous.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(i - 1, 1);
+          i -= 1;
+        }
       }
     }
-    while ((afterCompanions?.length ?? 0) > 0) {
+    const afterCompanionCount =
+      typeof afterCompanions === "number"
+        ? afterCompanions
+        : (afterCompanions?.length ?? 0);
+    if (afterCompanionCount > 0) {
       const next = req.messages[i + 1];
       if (
-        !next ||
-        next.role !== "assistant" ||
-        !matchesCompanions(next.content, afterCompanions)
+        next &&
+        next.role === "assistant" &&
+        matchesCompanions(next.content, afterCompanions, "after")
       ) {
-        break;
-      }
-      insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
-      if (
-        next.content.length === 0 &&
-        (next.provenanceContent?.length ?? 0) === 0
-      ) {
-        req.messages.splice(i + 1, 1);
+        insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
+        if (
+          next.content.length === 0 &&
+          (next.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(i + 1, 1);
+        }
       }
     }
 
@@ -969,6 +1294,51 @@ export function expandRecallMarkers(
       ],
     };
 
+    if (hasContinuationAfter || req.messages[i + 1]?.role !== "user") {
+      // A legacy following group stays independent. Its shared result turn may
+      // also contain outputs for calls now preceding Lore's synthetic result.
+      // Move those real outputs with their exact native envelopes; resolving
+      // only their semantic parts later would strand or discard provenance.
+      let resultSourceIndex = i + 1;
+      while (req.messages[resultSourceIndex]?.role === "assistant")
+        resultSourceIndex++;
+      const resultSource = req.messages[resultSourceIndex];
+      if (resultSource?.role === "user") {
+        let resultIndex = 0;
+        for (const call of msg.content) {
+          if (call.type !== "tool_use") continue;
+          if (call.id === stored.toolUseId) {
+            resultIndex++;
+            continue;
+          }
+          const sourceIndex = resultSource.content.findIndex(
+            (block) =>
+              block.type === "tool_result" && block.toolUseId === call.id,
+          );
+          if (sourceIndex < 0) continue;
+          const provenanceIndex =
+            resultSource.provenancePositions?.[sourceIndex];
+          const provenance =
+            provenanceIndex === undefined
+              ? undefined
+              : resultSource.provenanceContent?.[provenanceIndex];
+          const block = removeVisibleContentBlock(resultSource, sourceIndex);
+          insertCompanionBundle(toolResultMsg, resultIndex++, {
+            content: [block],
+            ...(provenance
+              ? { provenanceContent: [provenance], provenancePositions: [0] }
+              : {}),
+          });
+        }
+        if (
+          resultSource.content.length === 0 &&
+          (resultSource.provenanceContent?.length ?? 0) === 0
+        ) {
+          req.messages.splice(resultSourceIndex, 1);
+        }
+      }
+    }
+
     if (hasContinuationAfter) {
       // Split: insert tool_result user message + continuation assistant
       // message after the current assistant message.
@@ -988,12 +1358,7 @@ export function expandRecallMarkers(
         const resultIndex = msg.content
           .slice(0, markerIdx)
           .filter((block) => block.type === "tool_use").length;
-        nextMsg.content.splice(resultIndex, 0, {
-          type: "tool_result",
-          toolUseId: stored.toolUseId,
-          toolName: RECALL_TOOL_NAME,
-          content: [{ type: "text", text: stored.result }],
-        });
+        insertVisibleContentBlocks(nextMsg, resultIndex, toolResultMsg.content);
       } else {
         // No following user message — insert a synthetic one
         req.messages.splice(i + 1, 0, toolResultMsg);
@@ -1016,7 +1381,23 @@ export function cleanupRecallStore(
   store: RecallStore,
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
-  if (options.gatewayRecallEnabled === false) return false;
+  if (options.gatewayRecallEnabled === false) {
+    let changed = false;
+    for (const message of req.messages) {
+      if (message.role !== "assistant") continue;
+      for (let index = 0; index < message.content.length; index++) {
+        const block = message.content[index];
+        if (block.type !== "text") continue;
+        const continuation = suppressedRecallContinuation(block.text, store);
+        if (continuation === undefined) continue;
+        if (continuation) block.text = continuation;
+        else removeVisibleContentBlock(message, index--);
+        changed = true;
+      }
+      changed = suppressRecallProvenance(message, store) || changed;
+    }
+    return changed;
+  }
   if (store.size === 0) return false;
 
   // Collect all marker keys still present in assistant messages
@@ -1083,10 +1464,138 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+function schemaEquals(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((value, index) => schemaEquals(value, right[index]))
+    );
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && schemaEquals(left[key], right[key]),
+    )
+  );
+}
+
+function normalizeRecallScopeSchema(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.anyOf)) return value;
+  const values = value.anyOf.map((member) => {
+    if (!isRecord(member)) return null;
+    const keys = Object.keys(member).sort();
+    if (
+      keys.some((key) => key !== "const" && key !== "type") ||
+      member.type !== "string" ||
+      typeof member.const !== "string"
+    ) {
+      return null;
+    }
+    return member.const;
+  });
+  const expected = ["all", "session", "project", "knowledge"];
+  if (
+    values.some((scope) => scope === null) ||
+    values.length !== expected.length ||
+    new Set(values).size !== expected.length ||
+    expected.some((scope) => !values.includes(scope))
+  ) {
+    return value;
+  }
+  const scopeKeys = Object.keys(value).sort();
+  if (
+    scopeKeys.some((key) => key !== "anyOf" && key !== "description") ||
+    value.description !== RECALL_TOOL_INPUT_SCHEMA.properties.scope.description
+  ) {
+    return value;
+  }
+  return RECALL_TOOL_INPUT_SCHEMA.properties.scope;
+}
+
+function hasCanonicalRecallInputSchema(tool: GatewayTool): boolean {
+  if (!isRecord(tool.inputSchema) || !isRecord(tool.inputSchema.properties)) {
+    return false;
+  }
+  const hasRootAnyOf = Object.hasOwn(tool.inputSchema, "anyOf");
+  const expected: Record<string, unknown> = {
+    type: RECALL_TOOL_INPUT_SCHEMA.type,
+    properties: RECALL_TOOL_INPUT_SCHEMA.properties,
+    additionalProperties: RECALL_TOOL_INPUT_SCHEMA.additionalProperties,
+  };
+  if (hasRootAnyOf) expected.anyOf = RECALL_TOOL_INPUT_SCHEMA.anyOf;
+  const actual = {
+    ...tool.inputSchema,
+    properties: {
+      ...tool.inputSchema.properties,
+      scope: normalizeRecallScopeSchema(tool.inputSchema.properties.scope),
+    },
+  };
+  return schemaEquals(actual, expected);
+}
+
+/**
+ * Only tools created inside this gateway module can own gateway marker replay.
+ * A wire definition is caller-controlled, even when its public contract is an
+ * exact copy of the shared host tool; JSON cannot carry this private brand.
+ */
+export function markNativeRecallTool(tools: GatewayTool[]): GatewayTool[] {
+  return tools.map((tool) => {
+    if (tool.name !== RECALL_TOOL_NAME) return tool;
+    if (
+      hasGatewayRecallBrand(tool) &&
+      tool.strict !== true &&
+      tool.responsesBuiltin === undefined &&
+      hasCanonicalRecallInputSchema(tool)
+    ) {
+      // The private brand proves gateway ownership; normalize its public flag
+      // on trusted clones instead of treating that caller-visible flag as proof.
+      return tool.gatewayOwned === true
+        ? tool
+        : { ...tool, gatewayOwned: true };
+    }
+    return tool.gatewayOwned === true || hasGatewayRecallBrand(tool)
+      ? { ...withoutGatewayRecallBrand(tool), gatewayOwned: false }
+      : tool;
+  });
+}
+
+/** Add the knowledge-file reminder without granting gateway tool ownership. */
+export function appendNativeRecallToolReminder(
+  tools: GatewayTool[],
+  reminder: string,
+): GatewayTool[] {
+  if (!reminder.trim()) return tools;
+  const suffix = `\n\n${reminder}`;
+  return tools.map((tool) => {
+    const description = tool.description;
+    if (
+      tool.name !== RECALL_TOOL_NAME ||
+      typeof description !== "string" ||
+      (description !== RECALL_TOOL_DESCRIPTION &&
+        description !== `${RECALL_TOOL_DESCRIPTION}${suffix}`)
+    ) {
+      return tool;
+    }
+    if (description.endsWith(suffix)) return tool;
+    return { ...tool, description: `${description}${suffix}` };
+  });
+}
+
 /** Check whether the gateway injected and owns the recall tool. */
 export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
   return tools.some(
-    (tool) => tool.name === RECALL_TOOL_NAME && tool.gatewayOwned === true,
+    (tool) =>
+      tool.gatewayOwned === true &&
+      hasGatewayRecallBrand(tool) &&
+      tool.name === RECALL_TOOL_NAME &&
+      tool.strict !== true &&
+      tool.responsesBuiltin === undefined &&
+      hasCanonicalRecallInputSchema(tool),
   );
 }
 
@@ -1102,113 +1611,31 @@ export function shouldEnableRecallMarkerReplay(tools: GatewayTool[]): boolean {
 /** Parse recall input from the tool_use block. */
 function parseRecallInput(block: GatewayToolUseBlock): {
   query: string;
-  scope: RecallScope;
+  scope?: RecallScope;
   id?: string;
   ids?: string[];
   detailOffset?: number;
   detailLimit?: number;
 } {
-  const input = block.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("Recall input must be an object");
-  }
-  const record = input as Record<string, unknown>;
-  const allowed = new Set([
-    "query",
-    "scope",
-    "id",
-    "ids",
-    "detailOffset",
-    "detailLimit",
-  ]);
-  const unknown = Object.keys(record).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`Unknown recall property: ${unknown}`);
-  // OpenAI strict function schemas require every property to be present. The
-  // wire projection therefore represents omitted optional values as `null`;
-  // normalize those sentinels before applying the provider-neutral contract.
-  const queryValue = record.query === null ? undefined : record.query;
-  const scopeValue = record.scope === null ? undefined : record.scope;
-  const idValue = record.id === null ? undefined : record.id;
-  const idsValue = record.ids === null ? undefined : record.ids;
-  const detailOffsetValue =
-    record.detailOffset === null ? undefined : record.detailOffset;
-  const detailLimitValue =
-    record.detailLimit === null ? undefined : record.detailLimit;
-  if (queryValue !== undefined && typeof queryValue !== "string") {
-    throw new Error("Recall query must be a string");
-  }
-  if (typeof queryValue !== "undefined" && !isValidRecallQuery(queryValue)) {
-    throw new Error(
-      `Recall query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
-    );
-  }
-  if (
-    idValue !== undefined &&
-    (typeof idValue !== "string" || !idValue || !isValidRecallId(idValue))
-  ) {
-    throw new Error("Recall id must be a non-empty string");
-  }
-  if (
-    idsValue !== undefined &&
-    (!Array.isArray(idsValue) ||
-      idsValue.length === 0 ||
-      idsValue.length > MAX_RECALL_BATCH_IDS ||
-      idsValue.some((id) => !isValidRecallId(id)))
-  ) {
-    throw new Error(
-      `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
-    );
-  }
-  if (idValue !== undefined && idsValue !== undefined) {
-    throw new Error("Recall id and ids cannot be used together");
-  }
-  if (
-    detailOffsetValue !== undefined &&
-    (!Number.isSafeInteger(detailOffsetValue) ||
-      (detailOffsetValue as number) < 0)
-  ) {
-    throw new Error("Recall detailOffset must be a non-negative integer");
-  }
-  if (
-    detailLimitValue !== undefined &&
-    (!Number.isSafeInteger(detailLimitValue) ||
-      (detailLimitValue as number) < 1 ||
-      (detailLimitValue as number) > 16_000)
-  ) {
-    throw new Error("Recall detailLimit must be an integer from 1 to 16000");
-  }
-  const query = queryValue ?? "";
-  if (!query.trim() && !idValue && !idsValue) {
-    throw new Error("Recall query, id, or ids is required");
-  }
-  if (
-    (detailOffsetValue !== undefined || detailLimitValue !== undefined) &&
-    typeof idValue !== "string"
-  ) {
-    throw new Error("Recall detail ranges require exactly one id");
-  }
-  const validScopes: ReadonlySet<string> = new Set([
-    "all",
-    "session",
-    "project",
-    "knowledge",
-  ]);
-  if (
-    scopeValue !== undefined &&
-    (typeof scopeValue !== "string" || !validScopes.has(scopeValue))
-  ) {
-    throw new Error("Invalid recall scope");
-  }
+  const parsed = parseRecallToolArguments(block.input);
+  if (!parsed.valid) throw new Error(parsed.error);
   return {
-    query,
-    scope: (scopeValue as RecallScope | undefined) ?? "all",
-    ...(typeof idValue === "string" && idValue ? { id: idValue } : {}),
-    ...(Array.isArray(idsValue) ? { ids: [...idsValue] } : {}),
-    ...(typeof detailOffsetValue === "number"
-      ? { detailOffset: detailOffsetValue }
+    query: parsed.value.query ?? "",
+    // Opaque detail refs carry their bound scope, including in mixed batches;
+    // raw IDs and searches still default to all in the core recall runner.
+    scope:
+      parsed.value.scope ??
+      (isRecallDetailRef(parsed.value.id) ||
+      parsed.value.ids?.some(isRecallDetailRef)
+        ? undefined
+        : "all"),
+    ...(parsed.value.id ? { id: parsed.value.id } : {}),
+    ...(parsed.value.ids ? { ids: [...parsed.value.ids] } : {}),
+    ...(parsed.value.detailOffset !== undefined
+      ? { detailOffset: parsed.value.detailOffset }
       : {}),
-    ...(typeof detailLimitValue === "number"
-      ? { detailLimit: detailLimitValue }
+    ...(parsed.value.detailLimit !== undefined
+      ? { detailLimit: parsed.value.detailLimit }
       : {}),
   };
 }
@@ -1256,7 +1683,7 @@ export async function executeRecall(
   coverage?: RecallCoverage[];
 }> {
   let query = "";
-  let scope: RecallScope = "all";
+  let scope: RecallScope | undefined;
   let id: string | undefined;
   let ids: string[] | undefined;
   let detailOffset: number | undefined;
@@ -1289,6 +1716,7 @@ export async function executeRecall(
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
+      detailRefs: true,
       llm,
       signal,
       searchConfig: cfg.search,

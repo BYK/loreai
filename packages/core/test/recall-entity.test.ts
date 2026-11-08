@@ -22,15 +22,17 @@ describe("recallById('k:..') — append-only logical_id resolution (A2, #823)", 
     ltm.update(id, { content: "v2 detail body" }); // appends → id is now superseded
     // id is the stable logical_id; without the getByLogical fallback this returns
     // "No entry found" because get(id) misses the superseded v1 row.
-    const detail = recallById(`k:${id}`);
-    expect(detail).not.toContain("No entry found");
+    const detail = recallById(`k:${id}`, { projectPath: PROJECT });
+    expect(detail).not.toContain("No matching recall detail");
     expect(detail).toContain("v2 detail body"); // current version content
+    expect(detail).not.toContain(`k:${id}`);
   });
 
   test("returns not-found for an unknown knowledge id", () => {
-    expect(recallById("k:019eac47-0000-0000-0000-000000000000")).toContain(
-      "No entry found",
-    );
+    const id = "k:019eac47-0000-0000-0000-000000000000";
+    const detail = recallById(id, { projectPath: PROJECT });
+    expect(detail).toContain("No matching recall detail");
+    expect(detail).not.toContain(id);
   });
 });
 
@@ -108,16 +110,19 @@ describe("recall — entity source", () => {
 
   test("recallById('e:..') returns full detail including relations", () => {
     const { wifeId } = seedPeople();
-    const detail = recallById(`e:${wifeId}`);
+    const detail = recallById(`e:${wifeId}`, { projectPath: PROJECT });
     expect(detail).toContain("Recall Detail");
     expect(detail).toContain("Seylan Çinar Kaya");
     // Drill-down must not be less informative than the summary line.
     expect(detail).toContain("partner of Burak Yigit Kaya");
+    expect(detail).not.toContain(`e:${wifeId}`);
   });
 
   test("recallById returns not-found for a missing entity id", () => {
-    const detail = recallById("e:019eac47-0000-0000-0000-000000000000");
-    expect(detail).toContain("No entry found");
+    const id = "e:019eac47-0000-0000-0000-000000000000";
+    const detail = recallById(id, { projectPath: PROJECT });
+    expect(detail).toContain("No matching recall detail");
+    expect(detail).not.toContain(id);
   });
 
   test("does not leak another project's project-scoped infra entity", async () => {

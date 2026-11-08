@@ -18,6 +18,7 @@ import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 /** A non-streaming Anthropic message response (Vertex returns native shape). */
 function vertexJSONResponse(): Response {
@@ -132,7 +133,9 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
     expect("model" in (capturedBody ?? {})).toBe(false);
     expect("stream" in (capturedBody ?? {})).toBe(false);
     expect(capturedBody?.tools).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "recall" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ name: RECALL_TOOL_NAME }),
+      ]),
     );
     expect(capturedBody?.tool_choice).toEqual({
       type: "auto",

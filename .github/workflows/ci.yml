@@ -462,7 +462,8 @@ jobs:
           BUMP_TYPE="patch"  # conservative fallback
           CURRENT=$(jq -r .version packages/gateway/package.json)
           CRAFT_ERR=$(mktemp)
-          if CRAFT_JSON=$(craft changelog --since "$CURRENT" --format json 2>"$CRAFT_ERR"); then
+          # Version analysis needs only the bump type, never AI summaries.
+          if CRAFT_JSON=$(craft changelog --dry-run --since "$CURRENT" --format json 2>"$CRAFT_ERR"); then
             DETECTED=$(echo "$CRAFT_JSON" | jq -r '.bumpType // empty')
             if [ -n "$DETECTED" ]; then
               BUMP_TYPE="$DETECTED"

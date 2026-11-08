@@ -7,6 +7,7 @@ import {
   setPostResponseStartObserverForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 function stream(items: Array<Record<string, unknown>>, id: string): string {
   const frame = (type: string, body: Record<string, unknown>) =>
@@ -407,7 +408,7 @@ describe("current Codex through real gateway ingress", () => {
     setUpstreamInterceptor((body, _model, _stream, makeReal) => {
       injected =
         (body as { tools?: Array<{ name?: string }> }).tools?.some(
-          (tool) => tool.name === "recall",
+          (tool) => tool.name === RECALL_TOOL_NAME,
         ) === true;
       return makeReal();
     });
@@ -486,7 +487,7 @@ describe("current Codex through real gateway ingress", () => {
       type: "function_call",
       id: "fc_lore",
       call_id: "call_lore",
-      name: "recall",
+      name: RECALL_TOOL_NAME,
       arguments:
         '{"query":"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron"}',
       status: "completed",
@@ -508,7 +509,8 @@ describe("current Codex through real gateway ingress", () => {
           typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body),
         ) as { tools?: Array<{ name?: string }> };
         injected =
-          request.tools?.some((tool) => tool.name === "recall") === true;
+          request.tools?.some((tool) => tool.name === RECALL_TOOL_NAME) ===
+          true;
         return {
           statusCode: 200,
           data: stream([recall, custom], "resp_mixed"),

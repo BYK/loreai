@@ -18,7 +18,7 @@ import {
   buildStreamingResponse,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { executeRecall } from "../src/recall";
+import { executeRecall, RECALL_TOOL_NAME } from "../src/recall";
 import {
   setRecallContinuationFailureHook,
   type RecallContinuationFailureCategory,
@@ -57,7 +57,7 @@ function parallelRecallResponse(): Response {
       content_block: {
         type: "tool_use",
         id: "tool_recall_a",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: {},
       },
     }) +
@@ -71,7 +71,7 @@ function parallelRecallResponse(): Response {
       content_block: {
         type: "tool_use",
         id: "tool_recall_b",
-        name: "recall",
+        name: RECALL_TOOL_NAME,
         input: {},
       },
     }) +
@@ -96,7 +96,7 @@ function request(): GatewayRequest {
     model: "claude-opus-5",
     system: "test",
     messages: [{ role: "user", content: [{ type: "text", text: "question" }] }],
-    tools: [{ name: "recall", description: "recall", inputSchema: {} }],
+    tools: [{ name: RECALL_TOOL_NAME, description: "recall", inputSchema: {} }],
     stream: true,
     maxTokens: 32,
     rawHeaders: {

@@ -14,7 +14,11 @@ import {
   resetPipelineState,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
+import {
+  executeRecall,
+  MAX_RECALL_DEPTH,
+  RECALL_TOOL_NAME,
+} from "../src/recall";
 import type { GatewayRequest } from "../src/translate/types";
 
 vi.mock("../src/recall", async (importOriginal) => {
@@ -146,7 +150,7 @@ function upstream(
   const tool = {
     type: "tool_use",
     id: `call_${round}`,
-    name: kind === "tool" ? "Read" : "recall",
+    name: kind === "tool" ? "Read" : RECALL_TOOL_NAME,
     input: { query: `query ${round}` },
   };
   const content =
@@ -179,7 +183,7 @@ function upstream(
           type: "function_call",
           id: `fc_${round}_${index}`,
           call_id: index ? `call_other_${round}` : `call_${round}`,
-          name: kind === "tool" ? "Read" : "recall",
+          name: kind === "tool" ? "Read" : RECALL_TOOL_NAME,
           arguments: JSON.stringify({ query: `query ${round}` }),
           status: "completed",
         },
@@ -310,11 +314,11 @@ describe.each([
         maxTokens: 1024,
         metadata:
           protocol === "anthropic" && upstreamProtocol === "anthropic"
-            ? { tool_choice: { type: "tool", name: "recall" } }
+            ? { tool_choice: { type: "tool", name: RECALL_TOOL_NAME } }
             : {},
         extras:
           protocol === "openai-responses"
-            ? { tool_choice: { type: "function", name: "recall" } }
+            ? { tool_choice: { type: "function", name: RECALL_TOOL_NAME } }
             : {},
         rawHeaders: {
           ...(upstreamProtocol === "anthropic"
@@ -399,7 +403,7 @@ describe.each([
                 .map((tool) => tool.name)
             : [];
           expect(recoveryTools).toContain("Read");
-          expect(recoveryTools).not.toContain("recall");
+          expect(recoveryTools).not.toContain(RECALL_TOOL_NAME);
           expect(recoveryBody).not.toHaveProperty("tool_choice");
           expect(JSON.stringify(recoveryBody)).not.toContain(
             `query ${calls - 1}`,

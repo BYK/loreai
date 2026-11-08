@@ -19,6 +19,11 @@ export * as crypto from "./crypto";
 // Stateful, db-backed key store (C-2, #825): account identity, per-scope DEKs, escrow.
 export * as keystore from "./crypto/keystore";
 export * as references from "./references";
+export { isRemoteGatewayTarget } from "./remote-gateway";
+export {
+  createGatewayRecallClient,
+  NATIVE_RECALL_TURN_HEADER,
+} from "./recall-gateway-client";
 export {
   DirectFsResolver,
   NoopResolver,
@@ -109,6 +114,7 @@ export {
   MAX_RECALL_QUERY_CHARS,
   isValidRecallQuery,
   assertValidRecallQuery,
+  isRecallDetailRef,
   isValidRecallId,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_DETAIL_CHARS,
@@ -123,6 +129,19 @@ export {
   type TaggedResult,
   type ScoredTaggedResult,
 } from "./recall";
+export {
+  RECALL_TOOL_NAME,
+  RECALL_TOOL_SCOPES,
+  RECALL_TOOL_INPUT_SCHEMA,
+  parseRecallToolArguments,
+  createRecallToolExecutor,
+  executeRecallTool,
+  type RecallToolArguments,
+  type RecallToolContext,
+  type RecallToolExecutor,
+  type RecallToolParseResult,
+  type RecallToolRunner,
+} from "./recall-tool";
 
 export type {
   LoreMessage,

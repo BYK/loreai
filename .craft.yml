@@ -1,6 +1,12 @@
-minVersion: '2.21.1'
+minVersion: '3.3.0'
 changelog:
   policy: auto
+  aiSummary:
+    llm:
+      model: gpt-5.6-luna-utility
+    levels: [release, category, scope]
+    minItems: 0
+    style: Keep it concise and friendly for developers; avoid hype.
 versioning:
   policy: auto
 # Custom version bump script — bypasses craft's built-in npm-based auto-bumping

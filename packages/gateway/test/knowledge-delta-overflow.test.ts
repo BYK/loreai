@@ -231,8 +231,8 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
     );
     const token = out.match(RECALL_ID_RE)?.[1];
     expect(token).toBe(`k:${realId}`);
-    const detail = recallById(token as string);
-    expect(detail).not.toMatch(/No entry found/);
+    const detail = recallById(token as string, { projectPath: RTPROJ });
+    expect(detail).not.toMatch(/No matching recall detail/);
     expect(detail).toContain("Round-trip catalog entry");
   });
 
@@ -255,8 +255,8 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
     // The changed-entry section uses an 8-char correlation handle; ensure we
     // matched the overflow ToC's full recall id, not that.
     expect(token).toBe(`k:${realId}`);
-    const detail = recallById(token as string);
-    expect(detail).not.toMatch(/No entry found/);
+    const detail = recallById(token as string, { projectPath: RTPROJ });
+    expect(detail).not.toMatch(/No matching recall detail/);
     expect(detail).toContain("Round-trip overflow entry");
   });
 });

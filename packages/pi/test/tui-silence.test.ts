@@ -35,6 +35,7 @@ describe("pi extension — TUI stderr silencing on activation", () => {
 
     const mockPi = {
       registerProvider: () => {},
+      registerTool: () => {},
       on: () => {},
     } as unknown as ExtensionAPI;
     await lorePiExtension(mockPi);

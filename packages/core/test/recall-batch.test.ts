@@ -4,6 +4,7 @@ import * as entities from "../src/entities";
 import * as ltm from "../src/ltm";
 import {
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_BATCH_CHARS,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_QUERY_CHARS,
   recallById,
@@ -72,11 +73,12 @@ describe("recall detail batches", () => {
 
     const result = await runRecall({
       query: "",
-      ids: ["k:missing"],
+      ids: ["k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c"],
       projectPath: PROJECT,
     });
     expect(result).toContain("Outcome: unavailable");
-    expect(result).toContain("No entry found for id: k:missing");
+    expect(result).toContain("No matching recall detail");
+    expect(result).not.toContain("k:019e18ec-e328-76c4-9c3c-09dbe8d51c6c");
   });
 
   test("reports bounded partial detail with an offset for the remaining range", async () => {
@@ -104,6 +106,31 @@ describe("recall detail batches", () => {
       { identity: `k:${knowledge(id).logical_id}`, offset: 400 },
     ]);
     expect(second.result).not.toEqual(first.result);
+  });
+
+  test("keeps the complete rendered batch within its character bound", async () => {
+    const projectId = ensureProject(PROJECT);
+    const now = Date.now();
+    const ids = Array.from({ length: MAX_RECALL_BATCH_IDS }, (_, index) => {
+      const id = crypto.randomUUID();
+      db()
+        .query(
+          `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+           VALUES (?, ?, ?, '', '[]', ?, '[]', 0, 1000, 0, ?)`,
+        )
+        .run(id, projectId, `session-${index}`, "x".repeat(5_000), now + index);
+      return `d:${id}`;
+    });
+
+    const result = await runRecall({
+      query: "",
+      ids,
+      projectPath: PROJECT,
+    });
+
+    expect(Array.from(result).length).toBeLessThanOrEqual(
+      MAX_RECALL_BATCH_CHARS,
+    );
   });
 
   test("paginates astral Unicode without skipping a trailing character", async () => {

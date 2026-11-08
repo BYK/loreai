@@ -693,6 +693,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           q: opts.q,
           scope: opts.scope,
           expand: false,
+          link_knowledge: true,
           limit: Math.max(1, Math.min(50, opts.limit ?? 20)),
           git_remote: opts.project.git_remote,
           path: opts.project.git_remote ? null : opts.project.path,

@@ -455,6 +455,13 @@ describe("install*", () => {
     vi.spyOn(core.embedding, "shutdownProvider").mockResolvedValue(undefined);
     vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
     vi.spyOn(core, "close").mockImplementation(() => {});
+    const stopRefresh = vi.fn(async () => {});
+    const startRefresh = vi
+      .spyOn(
+        await import("../src/session-refresh"),
+        "startSessionRefreshScheduler",
+      )
+      .mockReturnValue(stopRefresh);
 
     let processRecord: GatewayProcessRecord | null = null;
     let releasePublication!: () => void;
@@ -510,6 +517,8 @@ describe("install*", () => {
       lifecycle.attachShutdown(handle.shutdown);
 
       await vi.waitFor(() => expect(exitNormally).toHaveBeenCalledWith(143));
+      expect(startRefresh).toHaveBeenCalledTimes(1);
+      expect(stopRefresh).toHaveBeenCalledTimes(1);
       expect(stop).toHaveBeenCalledTimes(1);
       expect(processRecord).toBeNull();
     } finally {

@@ -38,6 +38,7 @@ const DATA_PLANE_PATHS = [
   "/v1/codex/responses",
   "/v1/responses/compact",
   "/v1/compact",
+  "/v1/recall",
   "/v1/models",
   "/v1beta/models/gemini-2.5-pro:generateContent",
   "/v1/models/gemini-2.5-pro:streamGenerateContent",

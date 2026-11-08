@@ -114,6 +114,189 @@ describe("db", () => {
     expect(names).toContain("temporal_embedding_parked");
   });
 
+  test("redacts persisted recall queries while preserving anchor replay", () => {
+    const connection = db();
+    const anchorId = "123e4567-e89b-42d3-a456-426614174000";
+    const anchorContextId = "a".repeat(64);
+    const legacyQuery = "private legacy recall query";
+    const anchorQuery = "private anchored recall query";
+    const privateSelector = "private selector text";
+    const privateToolUseId = "private tool-use query text";
+    const privateCompanionId = "private companion call id";
+    const privateCompanionName = "private companion tool name";
+    const privateCompanionInput = "private companion tool input";
+    const anchorValue = {
+      toolUseId: privateToolUseId,
+      anchorId,
+      anchorContextId,
+      input: {
+        query: anchorQuery,
+        scope: "all",
+        id: privateSelector,
+        ids: [privateSelector],
+        detailOffset: 20,
+        detailLimit: 40,
+      },
+      position: 2,
+      result: "anchored recall result",
+      companionToolUseIds: [privateToolUseId],
+      companionToolUses: [
+        {
+          id: privateCompanionId,
+          name: privateCompanionName,
+          input: { query: privateCompanionInput },
+          side: "before",
+        },
+      ],
+      privateMetadata: anchorQuery,
+    };
+    const anchorRecord: [string, typeof anchorValue] = [
+      `anchor:${anchorId}`,
+      anchorValue,
+    ];
+    const privateAnchor = "private anchor key leak";
+    const invalidAnchorRecord = [
+      `anchor:${privateAnchor}`,
+      {
+        ...anchorValue,
+        anchorId: privateAnchor,
+      },
+    ];
+    const privateContext = "private anchor context leak";
+    const invalidContextRecord = [
+      "anchor:123e4567-e89b-42d3-a456-426614174002",
+      {
+        ...anchorValue,
+        anchorId: "123e4567-e89b-42d3-a456-426614174002",
+        anchorContextId: privateContext,
+      },
+    ];
+    connection
+      .query(
+        "INSERT INTO session_state (session_id, updated_at, recall_store) VALUES (?, ?, ?)",
+      )
+      .run(
+        "recall-redaction",
+        Date.now(),
+        JSON.stringify([
+          [
+            `all:${legacyQuery}`,
+            {
+              toolUseId: "call-legacy",
+              input: { query: legacyQuery, scope: "all" },
+              result: "legacy recall result",
+            },
+          ],
+          anchorRecord,
+          invalidAnchorRecord,
+          invalidContextRecord,
+          "malformed non-array entry",
+        ]),
+      );
+    connection
+      .query(
+        "INSERT INTO session_state (session_id, updated_at, recall_store) VALUES (?, ?, ?)",
+      )
+      .run("recall-invalid-json", Date.now(), "{invalid");
+    connection.query("UPDATE schema_version SET version = ?").run(105);
+    connection.exec(
+      "ALTER TABLE session_state DROP COLUMN parent_session_pending",
+    );
+    connection.exec(
+      "ALTER TABLE session_state DROP COLUMN parent_session_primary",
+    );
+    close();
+
+    const migrated = db();
+    const loadRecallStore = (sessionId: string): string => {
+      const row = migrated
+        .query("SELECT recall_store FROM session_state WHERE session_id = ?")
+        .get(sessionId) as { recall_store: string };
+      return row.recall_store;
+    };
+    const persisted = loadRecallStore("recall-redaction");
+    expect(persisted).not.toContain(legacyQuery);
+    expect(persisted).not.toContain(anchorQuery);
+    expect(persisted).not.toContain(privateSelector);
+    expect(persisted).not.toContain(privateToolUseId);
+    expect(persisted).not.toContain(privateCompanionId);
+    expect(persisted).not.toContain(privateCompanionName);
+    expect(persisted).not.toContain(privateCompanionInput);
+    expect(persisted).not.toContain(privateAnchor);
+    expect(persisted).not.toContain(privateContext);
+    expect(persisted).not.toContain("privateMetadata");
+    expect(JSON.parse(persisted)).toEqual([
+      [
+        `anchor:${anchorId}`,
+        {
+          toolUseId: `lore-recall-${anchorId}`,
+          anchorId,
+          anchorContextId,
+          input: {
+            query: "[recall query omitted from persistent state]",
+            scope: "all",
+          },
+          position: 2,
+          result: "anchored recall result",
+          companionToolUseCounts: { before: 1, after: 0 },
+        },
+      ],
+    ]);
+    expect(loadRecallStore("recall-invalid-json")).toBe("[]");
+  });
+
+  test("version 107 adds durable provisional parent-lookup state", () => {
+    const connection = db();
+    connection.exec(`
+      ALTER TABLE session_state DROP COLUMN parent_session_pending;
+      ALTER TABLE session_state DROP COLUMN parent_session_primary;
+      UPDATE schema_version SET version = 106;
+    `);
+    close();
+
+    const migrated = db();
+    const columns = migrated
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain(
+      "parent_session_pending",
+    );
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+  });
+
+  test("version 108 leaves existing sessions unconfirmed until an explicit primary observation", () => {
+    const connection = db();
+    saveSessionTracking("unconfirmed-root", { messageCount: 10 });
+    saveSessionTracking("pending-child", {
+      isSubagent: true,
+      parentSessionPending: true,
+    });
+    connection.exec(`
+      ALTER TABLE session_state DROP COLUMN parent_session_primary;
+      UPDATE schema_version SET version = 107;
+    `);
+    close();
+
+    expect(loadSessionTracking("unconfirmed-root")?.parentSessionPrimary).toBe(
+      false,
+    );
+    expect(loadSessionTracking("pending-child")).toMatchObject({
+      isSubagent: true,
+      parentSessionPending: true,
+      parentSessionPrimary: false,
+    });
+    saveSessionTracking("unconfirmed-root", { parentSessionPrimary: true });
+    close();
+    expect(loadSessionTracking("unconfirmed-root")?.parentSessionPrimary).toBe(
+      true,
+    );
+    expect(db().query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+  });
+
   test("upgrades v95 with a source-owned fair-retry park", () => {
     const connection = db();
     connection.exec(`DROP TABLE temporal_embedding_parked;
@@ -4376,6 +4559,9 @@ describe("db", () => {
       lastKnownMessageCount: 137,
       lastAcceptedProvenanceLayer: 1,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
+      parentSessionId: "parent-session",
+      isSubagent: true,
+      parentSessionPending: true,
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -4398,6 +4584,9 @@ describe("db", () => {
     expect(loaded?.lastKnownMessageCount).toBe(137);
     expect(loaded?.lastAcceptedProvenanceLayer).toBe(1);
     expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
+    expect(loaded?.parentSessionId).toBe("parent-session");
+    expect(loaded?.isSubagent).toBe(true);
+    expect(loaded?.parentSessionPending).toBe(true);
   });
 
   test("stable LTM (system[1]) freeze round-trips and survives partial updates (v45)", () => {

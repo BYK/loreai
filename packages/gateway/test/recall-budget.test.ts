@@ -217,6 +217,87 @@ describe("RecallChainBudget", () => {
     expect(unverified.maxTokens).toBe(128_000);
   });
 
+  test("matches Claude dot-versioned catalog IDs against hyphenated Anthropic wire IDs", () => {
+    const budget = new RecallChainBudget({ modelContextTokens: 1_000_000 });
+    expect(
+      budget.recordPrincipalUsage(
+        {
+          inputTokens: 6_128,
+          cacheReadInputTokens: 119_181,
+          outputTokens: 340,
+        },
+        {
+          expectedModel: "claude-sonnet-5.5",
+          actualModel: "claude-sonnet-5-5",
+        },
+        true,
+      ),
+    ).toBeUndefined();
+    expect(budget.maxTokens).toBe(502_596);
+    expect(budget.snapshot().inputTokens).toBe(0);
+    expect(budget.continuationModelMatches("claude-sonnet-5-5")).toBe(true);
+    expect(budget.continuationModelMatches("claude-sonnet-5.5")).toBe(true);
+    expect(budget.continuationModelMatches("claude-sonnet-5")).toBe(false);
+    expect(budget.continuationModelMatches("claude-haiku-5-5")).toBe(false);
+    expect(
+      budget.recordContinuationUsage(
+        {
+          inputTokens: 6_458,
+          cacheReadInputTokens: 119_181,
+          outputTokens: 512,
+        },
+        "claude-sonnet-5-5",
+        true,
+      ),
+    ).toBeUndefined();
+    expect(budget.canRecover()).toBe(true);
+  });
+
+  test.each([
+    { inputTokens: 110_000, model: "small", completeUsage: true },
+    { inputTokens: 31_000, model: "other", completeUsage: true },
+    { inputTokens: 31_000, model: "small", completeUsage: false },
+    { inputTokens: undefined, model: "small", completeUsage: false },
+  ])(
+    "validates small-principal continuations at the 128K floor ($inputTokens, $model, complete=$completeUsage)",
+    ({ inputTokens, model, completeUsage }) => {
+      const budget = new RecallChainBudget({ modelContextTokens: 80_000 });
+      expect(
+        budget.recordPrincipalUsage(
+          { inputTokens: 30_000, outputTokens: 10 },
+          { expectedModel: "small", actualModel: "small" },
+          true,
+        ),
+      ).toBeUndefined();
+      expect(budget.maxTokens).toBe(128_000);
+      expect(
+        budget.recordContinuationUsage(
+          inputTokens === undefined
+            ? undefined
+            : { inputTokens, outputTokens: 10 },
+          model,
+          completeUsage,
+        ),
+      ).toBe("tokens");
+      expect(budget.exceedsTokenCeiling()).toBe(false);
+      expect(budget.canRecover()).toBe(false);
+      expect(budget.admit(1)).toBe("tokens");
+    },
+  );
+
+  test("stops unmetered small-principal continuations at the 128K floor", () => {
+    const budget = new RecallChainBudget({ modelContextTokens: 80_000 });
+    budget.recordPrincipalUsage(
+      { inputTokens: 30_000, outputTokens: 10 },
+      { expectedModel: "small", actualModel: "small" },
+      true,
+    );
+    expect(budget.maxTokens).toBe(128_000);
+    expect(budget.continuationModelMatches("other")).toBe(false);
+    expect(budget.recordUsage(undefined)).toBe("tokens");
+    expect(budget.admit(1)).toBe("tokens");
+  });
+
   test("charges a smaller mismatched principal against the conservative budget", () => {
     const budget = new RecallChainBudget({ modelContextTokens: 1_000_000 });
     expect(

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as core from "@loreai/core";
 import { db, ltm, loadSessionTracking, temporal } from "@loreai/core";
 import { getSessionCosts } from "../src/cost-tracker";
+import { RECALL_TOOL_NAME } from "../src/recall";
 import {
   buildStreamingResponse,
   handleRequest,
@@ -111,7 +112,7 @@ describe.each([
         expect(
           envelope.output.some(
             (item: Record<string, unknown>) =>
-              item.type === "function_call" && item.name === "recall",
+              item.type === "function_call" && item.name === RECALL_TOOL_NAME,
           ),
         ).toBe(false);
       }

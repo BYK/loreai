@@ -14,6 +14,7 @@ import {
   type AnthropicRequestOptions,
 } from "../src/translate/anthropic";
 import type { GatewayRequest } from "../src/translate/types";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,7 +116,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     const req = makeRequest({
       tools: [
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "recall",
           gatewayOwned: true,
           inputSchema: schema,
@@ -171,7 +172,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     const req = makeRequest({
       tools: [
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "recall",
           gatewayOwned: true,
           inputSchema: { anyOf: [{ type: "object" }] },
@@ -561,6 +562,61 @@ describe("buildAnthropicRequest — distilled-prefix breakpoint", () => {
   });
 });
 
+describe("buildAnthropicRequest — Anthropic 4-breakpoint cap", () => {
+  const marked = { type: "ephemeral" as const };
+  // Client (opencode / ai-sdk) marks its own last text block; a block after it
+  // means Lore's tail breakpoint lands on a different block → 2 on one message.
+  function clientMarkedReq() {
+    const clientRaw = {
+      type: "text",
+      text: "client-marked",
+      cache_control: marked,
+    };
+    return makeRequest({
+      tools: [{ name: "t", description: "d", inputSchema: { type: "object" } }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "<distilled user>" }] },
+        { role: "assistant", content: [{ type: "text", text: "<summary>" }] },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "q" },
+            { type: "text", text: "client-marked" },
+            { type: "text", text: "trailing" },
+          ],
+          provenanceContent: [
+            { type: "text", text: "q" },
+            { type: "opaque", raw: clientRaw, requestOnly: true },
+            { type: "text", text: "trailing" },
+          ],
+          provenancePositions: [0, 1, 2],
+        },
+      ],
+    });
+  }
+  const fullCache: AnthropicCacheOptions = {
+    systemTTL: "1h",
+    stableLtmSystem: "prefs",
+    cacheTools: true,
+    cacheConversation: true,
+    distilledPrefixLength: 2,
+  };
+
+  test("client-supplied markers never push the body past 4 cache_control blocks", () => {
+    const body = getBody(clientMarkedReq(), fullCache);
+    const n = JSON.stringify(body).match(/"cache_control"/g)?.length;
+    expect(n).toBe(4); // system[1] + prefix boundary + tail + last tool
+  });
+
+  test("client markers are kept when Lore adds no conversation breakpoints", () => {
+    const body = getBody(clientMarkedReq(), {
+      systemTTL: "1h",
+      cacheConversation: false,
+    });
+    expect(JSON.stringify(body.messages)).toContain('"cache_control"');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Combined: system + conversation caching (conversation turn config)
 // ---------------------------------------------------------------------------
@@ -795,7 +851,7 @@ describe("buildAnthropicRequest — tool caching", () => {
           inputSchema: { type: "object" },
         },
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "Search memory",
           inputSchema: { type: "object" },
         },
@@ -891,7 +947,7 @@ describe("buildAnthropicRequest — full layered caching", () => {
           inputSchema: { type: "object" },
         },
         {
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           description: "Search memory",
           inputSchema: { type: "object" },
         },

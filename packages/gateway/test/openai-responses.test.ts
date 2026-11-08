@@ -26,12 +26,16 @@ import {
   buildOpenAIResponsesUpstreamRequest,
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
+import { isValidResponsesToolSearchItem } from "../src/translate/responses-tool-search";
 import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import { gzipSync, inflateSync } from "node:zlib";
 import { decodedRequestChunks } from "../src/http-body";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeConversationFixtures } from "./helpers/fixtures";
-import { buildOpenAIResponse } from "../src/translate/openai";
+import {
+  buildOpenAIResponse,
+  buildOpenAIUpstreamRequest,
+} from "../src/translate/openai";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,
@@ -706,6 +710,467 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(body.input).not.toContainEqual(
       expect.objectContaining({ content: [refusal] }),
     );
+  });
+
+  test("preserves valid tool-search call and output items as native provenance", () => {
+    const toolSearchCall = {
+      type: "tool_search_call",
+      id: "tsc_1",
+      call_id: "call_1",
+      execution: "client",
+      status: "completed",
+      arguments: { query: "weather forecast" },
+    };
+    const toolSearchOutput = {
+      type: "tool_search_output",
+      id: "tso_1",
+      call_id: "call_1",
+      execution: "client",
+      status: "completed",
+      tools: [
+        {
+          type: "function",
+          name: "lookup_weather",
+          description: "Look up weather.",
+          parameters: { type: "object", properties: {} },
+          strict: true,
+          defer_loading: true,
+        },
+        {
+          type: "custom",
+          name: "run_query",
+          format: { type: "text" },
+          defer_loading: true,
+        },
+        {
+          type: "namespace",
+          name: "crm",
+          description: "CRM tools.",
+          tools: [
+            {
+              type: "function",
+              name: "lookup_contact",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        },
+      ],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "find a tool" },
+          toolSearchCall,
+          toolSearchOutput,
+        ],
+      },
+      headers,
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+
+    expect(body.input).toContainEqual(toolSearchCall);
+    expect(body.input).toContainEqual(toolSearchOutput);
+  });
+
+  test("rejects tool-search history when translating Responses to Chat Completions", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "find a tool" },
+          {
+            type: "tool_search_call",
+            id: "tsc_1",
+            call_id: "call_1",
+            execution: "client",
+            status: "completed",
+            arguments: { query: "weather" },
+          },
+          {
+            type: "tool_search_output",
+            id: "tso_1",
+            call_id: "call_1",
+            execution: "client",
+            status: "completed",
+            tools: [],
+          },
+        ],
+      },
+      headers,
+    );
+
+    expect(() =>
+      buildOpenAIUpstreamRequest(req, "https://api.openai.com"),
+    ).toThrow("Unsupported cross-provider request");
+  });
+
+  test("accepts omitted client execution and pairs server-owned null call IDs", () => {
+    const clientHistory = [
+      {
+        type: "tool_search_call",
+        id: "tsc_client",
+        call_id: "call_client",
+        status: "completed",
+        arguments: {},
+      },
+      {
+        type: "tool_search_output",
+        id: "tso_client",
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+        tools: [],
+      },
+    ];
+    const serverHistory = [
+      {
+        type: "tool_search_call",
+        id: "tsc_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        arguments: {},
+      },
+      {
+        type: "tool_search_output",
+        id: "tso_server",
+        call_id: null,
+        execution: "server",
+        status: "completed",
+        tools: [],
+      },
+    ];
+
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        { model: "gpt-5.6", input: clientHistory },
+        headers,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        { model: "gpt-5.6", input: serverHistory },
+        headers,
+      ),
+    ).not.toThrow();
+  });
+
+  test.each([
+    [
+      "client call without call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+      },
+    ],
+    [
+      "client call with null call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        call_id: null,
+      },
+    ],
+    [
+      "server call with a non-null call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "server",
+        call_id: "call_server",
+      },
+    ],
+    [
+      "unfinished call status",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        call_id: "call_client",
+        execution: "client",
+        status: "in_progress",
+      },
+    ],
+    [
+      "null call status",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        call_id: "call_client",
+        execution: "client",
+        status: null,
+      },
+    ],
+    [
+      "incomplete output status",
+      {
+        type: "tool_search_output",
+        tools: [],
+        call_id: "call_client",
+        execution: "client",
+        status: "incomplete",
+      },
+    ],
+    [
+      "malformed function definition",
+      {
+        type: "tool_search_output",
+        tools: [{ type: "function", name: "lookup" }],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+    [
+      "unknown nested tool type",
+      {
+        type: "tool_search_output",
+        tools: [{ type: "unrecognized_tool", name: "lookup" }],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+    [
+      "malformed custom format",
+      {
+        type: "tool_search_output",
+        tools: [
+          {
+            type: "custom",
+            name: "run_query",
+            format: { type: "grammar", syntax: "unknown", definition: "x" },
+          },
+        ],
+        call_id: "call_client",
+        execution: "client",
+        status: "completed",
+      },
+    ],
+  ] as const)("rejects invalid tool-search input: %s", (_label, item) => {
+    expect(isValidResponsesToolSearchItem(item, "input")).toBe(false);
+  });
+
+  test.each([
+    ["function missing parameters", [{ type: "function", name: "lookup" }]],
+    [
+      "custom with an invalid format",
+      [
+        {
+          type: "custom",
+          name: "run_query",
+          format: { type: "grammar", syntax: "unknown", definition: "x" },
+        },
+      ],
+    ],
+    [
+      "namespace with an invalid child",
+      [
+        {
+          type: "namespace",
+          name: "crm",
+          description: "CRM tools.",
+          tools: [{ type: "function" }],
+        },
+      ],
+    ],
+    ["unknown tool type", [{ type: "unrecognized_tool", name: "lookup" }]],
+  ] as const)("rejects malformed output tools: %s", (_label, tools) => {
+    expect(
+      isValidResponsesToolSearchItem(
+        {
+          type: "tool_search_output",
+          id: "tso_invalid",
+          call_id: "call_client",
+          execution: "client",
+          status: "completed",
+          tools,
+        },
+        "output",
+      ),
+    ).toBe(false);
+  });
+
+  test.each([
+    [
+      "an orphan client output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_orphan",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an unmatched client call",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_unmatched",
+          call_id: "call_missing",
+          execution: "client",
+          status: "completed",
+          arguments: {},
+        },
+      ],
+    ],
+    [
+      "duplicate client outputs",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_duplicate_output",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          arguments: {},
+        },
+        {
+          type: "tool_search_output",
+          id: "tso_duplicate_output_1",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+        {
+          type: "tool_search_output",
+          id: "tso_duplicate_output_2",
+          call_id: "call_duplicate_output",
+          execution: "client",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an orphan server output",
+      [
+        {
+          type: "tool_search_output",
+          id: "tso_server_orphan",
+          call_id: null,
+          execution: "server",
+          status: "completed",
+          tools: [],
+        },
+      ],
+    ],
+    [
+      "an unmatched server call",
+      [
+        {
+          type: "tool_search_call",
+          id: "tsc_server_unmatched",
+          call_id: null,
+          execution: "server",
+          status: "completed",
+          arguments: {},
+        },
+      ],
+    ],
+  ] as const)("rejects %s at Responses ingress", (_label, input) => {
+    expect(() =>
+      parseOpenAIResponsesRequest({ model: "gpt-5.6", input }, headers),
+    ).toThrow();
+  });
+
+  test.each([
+    [
+      "tool_search_call without arguments",
+      {
+        type: "tool_search_call",
+        execution: "client",
+      },
+    ],
+    [
+      "tool_search_call with invalid execution",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "gateway",
+      },
+    ],
+    [
+      "tool_search_call with invalid call_id",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        call_id: 7,
+      },
+    ],
+    [
+      "tool_search_call with an unknown field",
+      {
+        type: "tool_search_call",
+        arguments: {},
+        execution: "client",
+        private_marker: "unexpected",
+      },
+    ],
+    [
+      "tool_search_output without tools",
+      { type: "tool_search_output", execution: "server" },
+    ],
+    [
+      "tool_search_output with invalid execution",
+      { type: "tool_search_output", tools: [], execution: "provider" },
+    ],
+    [
+      "tool_search_output with invalid call_id",
+      { type: "tool_search_output", tools: [], call_id: false },
+    ],
+    [
+      "tool_search_output with an unknown field",
+      {
+        type: "tool_search_output",
+        tools: [],
+        unexpected: "private",
+      },
+    ],
+  ] as const)("rejects %s at Responses ingress", (_label, item) => {
+    expect(() =>
+      parseOpenAIResponsesRequest({ model: "gpt-5.6", input: [item] }, headers),
+    ).toThrow();
+  });
+
+  test("rejects tool-search output attributed to a different execution owner", () => {
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        {
+          model: "gpt-5.6",
+          input: [
+            {
+              type: "tool_search_call",
+              id: "tsc_owner",
+              call_id: "call_owner",
+              execution: "client",
+              status: "completed",
+              arguments: {},
+            },
+            {
+              type: "tool_search_output",
+              id: "tso_owner",
+              call_id: "call_owner",
+              execution: "server",
+              status: "completed",
+              tools: [],
+            },
+          ],
+        },
+        headers,
+      ),
+    ).toThrow();
   });
 
   test("coalesces canonical fragments from one assistant message", () => {
@@ -1843,7 +2308,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     ).body as { tools: Array<Record<string, unknown>> };
 
     expect(body.tools[0]).not.toHaveProperty("strict");
-    expect(body.tools[1]).toMatchObject({ name: "recall", strict: true });
+    expect(body.tools[1]).toMatchObject({
+      name: RECALL_GATEWAY_TOOL.name,
+      strict: true,
+    });
     const parameters = body.tools[1].parameters as Record<string, unknown>;
     expect(parameters).not.toHaveProperty("anyOf");
     expect(parameters).toMatchObject({
@@ -1877,25 +2345,30 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(RECALL_GATEWAY_TOOL.inputSchema).not.toHaveProperty("required");
   });
 
-  test("rejects a null-only strict projection for an ill-formed recall property", () => {
+  test("does not strictly project an unbranded recall-shaped tool", () => {
     const req = parseOpenAIResponsesRequest(
       { model: "gpt-4o", input: "Hello" },
       {},
     );
+    const inputSchema = {
+      type: "object",
+      properties: { query: { anyOf: [{ type: "string" }] } },
+      additionalProperties: false,
+    };
     req.tools.push({
-      name: "recall",
+      name: RECALL_GATEWAY_TOOL.name,
       description: "Recall memory",
       gatewayOwned: true,
-      inputSchema: {
-        type: "object",
-        properties: { query: { anyOf: [{ type: "string" }] } },
-        additionalProperties: false,
-      },
+      inputSchema,
     });
 
-    expect(() =>
-      buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com"),
-    ).toThrow('Recall schema property "query" must declare a non-null type');
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { tools: Array<Record<string, unknown>> };
+
+    expect(body.tools[0]).not.toHaveProperty("strict");
+    expect(body.tools[0].parameters).toEqual(inputSchema);
   });
 
   test("does NOT forward previous_response_id (gateway is stateless full-history)", () => {

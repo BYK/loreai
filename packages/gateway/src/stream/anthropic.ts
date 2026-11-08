@@ -11,6 +11,7 @@
  * All functions are pure (no side effects) except `parseSSEStream` which is
  * an async generator consuming a byte stream.
  */
+import { RECALL_TOOL_NAME } from "@loreai/core";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -1471,7 +1472,7 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
 /**
  * Create a recall-aware stream accumulator.
  *
- * @param recallToolName - The name of the recall tool to intercept (default: "recall")
+ * @param recallToolName - The name of the recall tool to intercept (default: Lore's shared tool name)
  * @param options.scaleClientUsage - Scale usage numbers for the client (anti-compaction)
  * @param options.maxReportedUsage - Per-model usage cap (from `maxReportedUsageForModel`)
  * @param options.blockOffset - Added to all emitted block indices (for continuation streams
@@ -1480,7 +1481,7 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
  *   where the client already received one from the original stream)
  */
 export function createRecallAwareAccumulator(
-  recallToolName = "recall",
+  recallToolName = RECALL_TOOL_NAME,
   options?: {
     scaleClientUsage?: boolean;
     maxReportedUsage?: number;

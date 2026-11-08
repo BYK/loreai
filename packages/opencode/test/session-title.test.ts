@@ -1,17 +1,17 @@
 /**
  * OpenCode session title forwarding (#1921).
  *
- * The harness's own `Session.title` is resolved alongside parentID in the
- * `chat.headers` hook and forwarded percent-encoded as `x-lore-session-title`
- * so the gateway can persist it as the session's explicit title. OpenCode's
- * auto "New session" placeholder is suppressed and polled until a real title
- * appears; a harness that reports no title is never re-queried.
+ * The harness's own `Session.title` is fetched best-effort from the `chat.headers`
+ * hook and forwarded percent-encoded as `x-lore-session-title` so the gateway
+ * can persist it as the session's explicit title. OpenCode's auto "New session"
+ * placeholder is suppressed and polled until a real title appears; a harness
+ * that reports no title is never re-queried.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { LorePlugin } from "../src/index";
 
 interface MockOpts {
@@ -80,6 +80,17 @@ async function headersFor(
   return output.headers;
 }
 
+async function waitForTitle(
+  hooks: Hooks,
+  sessionID: string,
+  expected: string,
+): Promise<void> {
+  await vi.waitFor(async () => {
+    const headers = await headersFor(hooks, sessionID);
+    expect(headers["x-lore-session-title"]).toBe(expected);
+  });
+}
+
 describe("OpenCode plugin — session title forwarding (#1921)", () => {
   let tmpDirs: string[] = [];
   function makeTmp(label: string): string {
@@ -103,10 +114,9 @@ describe("OpenCode plugin — session title forwarding (#1921)", () => {
       titles: { s1: "Fix the Ünïcode bug" },
     });
     const hooks = await initPlugin(makeTmp("enc"), client);
-    const headers = await headersFor(hooks, "s1");
-    expect(headers["x-lore-session-title"]).toBe(
-      "Fix%20the%20%C3%9Cn%C3%AFcode%20bug",
-    );
+    const first = await headersFor(hooks, "s1");
+    expect(first["x-lore-session-title"]).toBeUndefined();
+    await waitForTitle(hooks, "s1", "Fix%20the%20%C3%9Cn%C3%AFcode%20bug");
   });
 
   test("placeholder title is not forwarded and is re-queried next turn", async () => {
@@ -117,13 +127,13 @@ describe("OpenCode plugin — session title forwarding (#1921)", () => {
 
     const first = await headersFor(hooks, "ph");
     expect(first["x-lore-session-title"]).toBeUndefined();
+    await vi.waitFor(() => expect(calls).toEqual(["ph"]));
     // Placeholder is kept but polled: the real title may land any turn.
     titles.ph = "Investigate FTS tokenizer";
     const second = await headersFor(hooks, "ph");
+    expect(second["x-lore-session-title"]).toBeUndefined();
+    await waitForTitle(hooks, "ph", "Investigate%20FTS%20tokenizer");
     expect(calls).toEqual(["ph", "ph"]);
-    expect(second["x-lore-session-title"]).toBe(
-      "Investigate%20FTS%20tokenizer",
-    );
   });
 
   test("a real title is cached — session.get runs once across turns", async () => {
@@ -133,7 +143,9 @@ describe("OpenCode plugin — session title forwarding (#1921)", () => {
       calls,
     });
     const hooks = await initPlugin(makeTmp("real"), client);
-    await headersFor(hooks, "real");
+    const first = await headersFor(hooks, "real");
+    expect(first["x-lore-session-title"]).toBeUndefined();
+    await waitForTitle(hooks, "real", "Refactor%20the%20sync%20outbox");
     const again = await headersFor(hooks, "real");
     expect(calls).toEqual(["real"]);
     expect(again["x-lore-session-title"]).toBe(
@@ -146,6 +158,7 @@ describe("OpenCode plugin — session title forwarding (#1921)", () => {
     const client = createMockClient({ calls });
     const hooks = await initPlugin(makeTmp("none"), client);
     const first = await headersFor(hooks, "none");
+    await vi.waitFor(() => expect(calls).toEqual(["none"]));
     const second = await headersFor(hooks, "none");
     expect(first["x-lore-session-title"]).toBeUndefined();
     expect(second["x-lore-session-title"]).toBeUndefined();

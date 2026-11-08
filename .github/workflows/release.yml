@@ -18,6 +18,7 @@ jobs:
     permissions:
       contents: write
       issues: write
+      copilot-requests: write
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
@@ -30,10 +31,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - uses: getsentry/craft@v2
+      - uses: getsentry/craft@v3
         with:
           version: ${{ inputs.version }}
           force: ${{ inputs.force }}
           publish_repo: self
+          # Keep AI requests separate from the release bot's GitHub access.
+          llm_api_key: ${{ github.token }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

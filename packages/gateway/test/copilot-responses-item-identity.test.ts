@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { log } from "@loreai/core";
 import { streamResponsesRecallAware } from "../src/pipeline";
+import { RECALL_TOOL_NAME } from "../src/recall";
 import { createHarness } from "./helpers/harness";
 import { upstreamFetch } from "../src/fetch";
 import {
@@ -946,7 +947,7 @@ test("normalizes recall continuation aliases without changing recall identity", 
     type: "function_call",
     id: "recall_item",
     call_id: "recall_call",
-    name: "recall",
+    name: RECALL_TOOL_NAME,
     arguments: '{"query":"hello"}',
   };
   const principal = [

@@ -15,7 +15,7 @@
  */
 
 import type { PluginInput } from "@opencode-ai/plugin";
-import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import { GATEWAY_AUTH_HEADER, isRemoteGatewayTarget, log } from "@loreai/core";
 import * as http from "node:http";
 import * as https from "node:https";
 
@@ -85,11 +85,19 @@ export function gatewayAccessHeadersForRemote(
   gatewayBase: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
-  const remoteUrl = env.LORE_REMOTE_URL?.replace(/\/+$/, "");
   const token = env.LORE_GATEWAY_AUTH_TOKEN;
-  return remoteUrl === gatewayBase.replace(/\/+$/, "") && token
+  return isRemoteGatewayTarget(gatewayBase, env) && token
     ? { [GATEWAY_AUTH_HEADER]: token }
     : {};
+}
+
+export function shouldRegisterNativeRecallTool(
+  gatewayBase: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  // Native recall reads the host's local database. Keep it available only
+  // when model traffic goes to a local gateway, never a remote target.
+  return isLoopbackUrl(gatewayBase) && !isRemoteGatewayTarget(gatewayBase, env);
 }
 
 /** Provider and Lore credentials are applied by the gateway, never this hop. */

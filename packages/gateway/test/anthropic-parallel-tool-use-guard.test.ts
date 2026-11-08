@@ -14,7 +14,7 @@ import { DEFAULT_MODEL, DEFAULT_SYSTEM } from "./helpers/fixtures";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import { setUpstreamInterceptor } from "../src/pipeline";
-import { withParallelToolUseDisabled } from "../src/recall";
+import { RECALL_TOOL_NAME, withParallelToolUseDisabled } from "../src/recall";
 
 const TOOL = {
   name: "bash",
@@ -116,7 +116,9 @@ describe("Anthropic effective wire routing", () => {
 
     expect(response.status, await response.text()).toBe(200);
     expect(captured?.tools).toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "recall" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ name: RECALL_TOOL_NAME }),
+      ]),
     );
     expect(captured?.tool_choice).toEqual({
       type: "auto",

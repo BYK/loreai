@@ -13,6 +13,8 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_QUERY_CHARS,
+  isRecallDetailRef,
+  isValidRecallId,
   type RecallScope,
 } from "@loreai/core";
 import {
@@ -289,18 +291,27 @@ describe("recall marker property battery", () => {
   test("id markers round-trip and oversized ids are rejected", () => {
     fc.assert(
       fc.property(
-        hostileString().filter(
-          (s) =>
-            s.length > 0 &&
-            s.length <= MAX_RECALL_ID_CHARS &&
-            !Array.from(s).some((char) => {
-              const code = char.charCodeAt(0);
-              return code < 32 || code === 127 || char === "…";
-            }),
+        fc.oneof(
+          fc.uuid().map((id) => `k:${id}`),
+          fc.uuid().map((id) => `xk:${id}`),
+          fc.uuid().map((id) => `d:${id}`),
+          fc.uuid().map((id) => `e:${id}`),
+          fc.uuid().map((id) => `t:${id}`),
+          fc.stringMatching(/^[0-9a-f]{32}$/).map((id) => `t:${id}`),
+          fc.uuid().map((id) => `r:${id}`),
+          hostileString().filter(
+            (s) => s.length > 0 && s.length <= MAX_RECALL_ID_CHARS,
+          ),
         ),
         (id) => {
-          const parsed = parseRecallMarker(buildRecallMarker("", "all", id));
-          expect(parsed).toEqual({ query: "", scope: "all", id });
+          const marker = buildRecallMarker("", "all", id);
+          const parsed = parseRecallMarker(marker);
+          if (isValidRecallId(id) || isRecallDetailRef(id)) {
+            expect(parsed).toEqual({ query: "", scope: "all", id });
+          } else {
+            expect(marker).toContain("an invalid source");
+            expect(parsed).toBeNull();
+          }
         },
       ),
       NUM_RUNS,

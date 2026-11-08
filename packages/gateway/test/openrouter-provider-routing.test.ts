@@ -16,6 +16,7 @@ import type { GatewayConfig } from "../src/config";
 import { fetchArgUrl } from "./helpers/fetch-url";
 import { loopbackRequest } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { RECALL_TOOL_NAME } from "../src/recall";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -107,7 +108,7 @@ function recallResponse(): Response {
         {
           type: "tool_use",
           id: "call_recall",
-          name: "recall",
+          name: RECALL_TOOL_NAME,
           input: { query: "provider routing" },
         },
       ],
@@ -123,7 +124,7 @@ function recallResponse(): Response {
                 id: "call_recall",
                 type: "function",
                 function: {
-                  name: "recall",
+                  name: RECALL_TOOL_NAME,
                   arguments: JSON.stringify({ query: "provider routing" }),
                 },
               },

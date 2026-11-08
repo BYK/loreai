@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { log } from "@loreai/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
@@ -262,6 +263,70 @@ describe("runCompaction", () => {
         tokensBefore: 4242,
       },
     });
+  });
+
+  test("does not forward compaction credentials across an origin redirect", async () => {
+    let targetRequests = 0;
+    let targetSawCredential = false;
+    const target = createServer((req, res) => {
+      targetRequests++;
+      targetSawCredential = Boolean(
+        req.headers.authorization ||
+        req.headers["x-api-key"] ||
+        req.headers["x-lore-gateway-token"],
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ summary: "redirect reached target" }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen(0, "127.0.0.1", resolve);
+    });
+    const targetAddress = target.address();
+    if (!targetAddress || typeof targetAddress === "string") {
+      throw new Error("target server did not bind a TCP port");
+    }
+
+    const gateway = createServer((_req, res) => {
+      res.writeHead(302, {
+        location: `http://127.0.0.1:${targetAddress.port}/capture`,
+      });
+      res.end();
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        gateway.once("error", reject);
+        gateway.listen(0, "127.0.0.1", resolve);
+      });
+      const gatewayAddress = gateway.address();
+      if (!gatewayAddress || typeof gatewayAddress === "string") {
+        throw new Error("gateway server did not bind a TCP port");
+      }
+
+      await expect(
+        runCompaction({
+          ...base,
+          gatewayBase: `http://127.0.0.1:${gatewayAddress.port}`,
+          authHeaders: {
+            authorization: "Bearer private-provider-credential",
+            "x-api-key": "private-provider-api-key",
+            "x-lore-gateway-token": "private-gateway-credential",
+          },
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(targetRequests).toBe(0);
+      expect(targetSawCredential).toBe(false);
+    } finally {
+      await Promise.all(
+        [gateway, target].map(
+          (server) =>
+            new Promise<void>((resolve, reject) => {
+              server.close((error) => (error ? reject(error) : resolve()));
+            }),
+        ),
+      );
+    }
   });
 
   test("relays { cancel: true } from the gateway as { cancel: true } (no summary fetch)", async () => {

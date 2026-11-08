@@ -12,6 +12,11 @@
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
 import {
+  GATEWAY_AUTH_HEADER,
+  isCredentialHeaderName,
+} from "./credential-headers";
+import { NATIVE_RECALL_TURN_HEADER } from "./recall-turn";
+import {
   CONTEXT_BOUNDARY_CAPABILITY_HEADER,
   CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   CONTEXT_BOUNDARY_HEADER,
@@ -35,9 +40,14 @@ export type FetchInterceptorConfig = {
    * Dynamic headers to inject on every intercepted request.
    * Called per-request so values can change (e.g., session ID).
    */
-  getHeaders: () => Record<string, string>;
+  getHeaders: (
+    requestHeaders?: Headers,
+    gatewayBase?: string,
+  ) => Record<string, string>;
   /** Observe LLM request headers in memory before gateway routing. */
-  onRequestHeaders?: (headers: Headers) => void;
+  onRequestHeaders?: (headers: Headers, gatewayBase?: string) => void;
+  /** Select a proven gateway for this request, or bypass Lore without internal headers. */
+  resolveGateway?: (url: URL, headers: Headers) => string | null;
 };
 
 /**
@@ -224,13 +234,62 @@ function upstreamRequestTarget(upstream: URL): string {
   return upstream.pathname + upstream.search;
 }
 
+// Dynamic selection may distinguish tenants by base path on the same origin.
+// Static interception retains its existing origin-root rewrite behavior.
+function gatewayRoutingBase(gateway: URL, preserveBasePath: boolean): string {
+  return (
+    gateway.origin +
+    (preserveBasePath ? gateway.pathname.replace(/\/+$/, "") : "")
+  );
+}
+
+/**
+ * Compact requests use a gateway management endpoint rather than a generation
+ * endpoint. Normalize every provider prefix to the registered compact route,
+ * while preserving the exact upstream request target for forwarding.
+ */
+function interceptCompactUrl(
+  upstream: URL,
+  gateway: URL,
+  preserveBasePath = false,
+): Rewrite | null {
+  const match = /(?:^|\/)(?:codex\/)?responses\/compact\/?$/.exec(
+    upstream.pathname,
+  );
+  if (!match) return null;
+
+  const versionedMatches = ["/v1/", "/v1beta/"]
+    .map((segment) => upstream.pathname.lastIndexOf(segment))
+    .filter((index) => index >= 0);
+  const versionedIdx = versionedMatches.length
+    ? Math.max(...versionedMatches)
+    : -1;
+  const upstreamBasePath =
+    versionedIdx >= 0
+      ? upstream.pathname.slice(0, versionedIdx)
+      : upstream.pathname.slice(0, match.index);
+
+  return {
+    gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}/v1/responses/compact${upstream.search}`,
+    upstreamBase: upstream.origin + upstreamBasePath,
+    upstreamPath: upstreamRequestTarget(upstream),
+  };
+}
+
 /**
  * Rewrite an intercepted URL to the gateway, handling both standard /v1/...
  * paths and non-standard paths (e.g. /codex/responses). Used by the
  * URL-pattern-matched path (Path 1). Returns null when the path can't be
  * mapped to a canonical gateway endpoint from the URL alone.
  */
-function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
+function interceptUrl(
+  upstream: URL,
+  gateway: URL,
+  preserveBasePath = false,
+): Rewrite | null {
+  const compact = interceptCompactUrl(upstream, gateway, preserveBasePath);
+  if (compact) return compact;
+
   // Preserve standard versioned paths. Gemini commonly uses /v1beta/ while
   // OpenAI and Anthropic use /v1/.
   const versionedMatches = ["/v1/", "/v1beta/"]
@@ -241,14 +300,14 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
     : -1;
   if (versionedIdx >= 0) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
+      gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
       upstreamBase: upstream.origin + upstream.pathname.slice(0, versionedIdx),
       upstreamPath: upstreamRequestTarget(upstream),
     };
   }
   if (GEMINI_GENERATE_CONTENT_PATH_RE.test(upstream.pathname)) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname}${upstream.search}`,
+      gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${upstream.pathname}${upstream.search}`,
       upstreamBase: upstream.origin,
       upstreamPath: upstreamRequestTarget(upstream),
     };
@@ -259,7 +318,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
   )) {
     if (upstream.pathname.endsWith(suffix)) {
       return {
-        gatewayUrl: `${gateway.origin}${canonical}${upstream.search}`,
+        gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${canonical}${upstream.search}`,
         upstreamBase:
           upstream.origin + upstream.pathname.slice(0, -suffix.length),
         upstreamPath: upstreamRequestTarget(upstream),
@@ -283,7 +342,11 @@ export function interceptUrlForProtocol(
   upstream: URL,
   gateway: URL,
   protocol: BodyProtocol,
+  preserveBasePath = false,
 ): Rewrite {
+  const compact = interceptCompactUrl(upstream, gateway, preserveBasePath);
+  if (compact) return compact;
+
   const gatewayPath = PROTOCOL_GATEWAY_PATHS[protocol];
   // Strip the recognized endpoint suffix from the path so X-Lore-Upstream-URL
   // points at the provider base (everything before the endpoint). If no known
@@ -297,7 +360,7 @@ export function interceptUrlForProtocol(
     }
   }
   return {
-    gatewayUrl: `${gateway.origin}${gatewayPath}${upstream.search}`,
+    gatewayUrl: `${gatewayRoutingBase(gateway, preserveBasePath)}${gatewayPath}${upstream.search}`,
     upstreamBase,
     upstreamPath: upstreamRequestTarget(upstream),
   };
@@ -371,6 +434,17 @@ function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
   return undefined;
 }
 
+function stripUntrustedContextBoundaryHeaders(headers: Headers): boolean {
+  // Only this interceptor may attach boundary claims after validating a full
+  // transcript; caller-supplied values never authorize replay.
+  const hadBoundaryClaim =
+    headers.has(CONTEXT_BOUNDARY_HEADER) ||
+    headers.has(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  headers.delete(CONTEXT_BOUNDARY_HEADER);
+  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  return hadBoundaryClaim;
+}
+
 type PreparedBoundaryRequest = {
   boundaryKey?: string;
   attached: boolean;
@@ -389,19 +463,26 @@ function prepareBoundaryRequest(
   init: RequestInit | undefined,
 ): PreparedBoundaryRequest {
   // Only process-local, gateway-issued boundaries participate in elision.
-  headers.delete(CONTEXT_BOUNDARY_HEADER);
-  // Do not let caller-provided capability claims opt auxiliary endpoints into
-  // the source-checkpoint namespace reserved for generation requests.
-  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  stripUntrustedContextBoundaryHeaders(headers);
   const endpoint = boundaryEndpoint(pathname);
-  if (!endpoint) return { attached: false, init: { ...init, headers } };
+  if (!endpoint) {
+    return {
+      attached: false,
+      init: prepareGatewayFetchInit(input, init, headers, true),
+    };
+  }
   const sessionID = headers.get("x-lore-session-id");
-  if (!sessionID) return { attached: false, init: { ...init, headers } };
+  if (!sessionID) {
+    return {
+      attached: false,
+      init: prepareGatewayFetchInit(input, init, headers, true),
+    };
+  }
   headers.set(
     CONTEXT_BOUNDARY_CAPABILITY_HEADER,
     CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   );
-  const fullInit: RequestInit = { ...init, headers };
+  const fullInit = prepareGatewayFetchInit(input, init, headers, true);
   pruneContextBoundaries();
   const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
   const cached = contextBoundaries.get(key);
@@ -439,12 +520,59 @@ function prepareBoundaryRequest(
     return {
       boundaryKey: key,
       attached: true,
-      init: { ...init, headers: elidedHeaders, body: JSON.stringify(body) },
+      init: {
+        ...prepareGatewayFetchInit(input, init, elidedHeaders, true),
+        body: JSON.stringify(body),
+      },
     };
   } catch {
     contextBoundaries.delete(key);
     return { boundaryKey: key, attached: false, init: fullInit };
   }
+}
+
+function prepareGatewayFetchInit(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  headers: Headers,
+  protectCredentialRedirects: boolean,
+): RequestInit {
+  const prepared: RequestInit = { ...init, headers };
+  const requestRedirect =
+    typeof Request !== "undefined" && input instanceof Request
+      ? input.redirect
+      : undefined;
+  const explicitRedirect = init?.redirect ?? requestRedirect;
+  if (protectCredentialRedirects && hasCredentialHeaders(headers)) {
+    // Fetch may forward non-standard auth headers across redirects. Protect
+    // credentials on gateway and LLM hops; unrelated authenticated fetches
+    // retain the caller's native redirect behavior.
+    prepared.redirect = explicitRedirect === "error" ? "error" : "manual";
+  }
+  return prepared;
+}
+
+function hasCredentialHeaders(headers: Headers): boolean {
+  for (const name of headers.keys()) {
+    if (isCredentialHeaderName(name)) return true;
+  }
+  return false;
+}
+
+function isDirectGatewayRequest(upstream: URL, gatewayBase: string): boolean {
+  let gateway: URL;
+  try {
+    gateway = new URL(gatewayBase);
+  } catch {
+    return false;
+  }
+  if (upstream.origin !== gateway.origin) return false;
+  const basePath = gateway.pathname.replace(/\/+$/, "");
+  return (
+    basePath === "" ||
+    upstream.pathname === basePath ||
+    upstream.pathname.startsWith(`${basePath}/`)
+  );
 }
 
 function updateContextBoundary(
@@ -585,23 +713,41 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
     const parsed = new URL(url);
     // Never intercept requests already going to the gateway
     if (url.startsWith(gatewayBase)) return false;
-    // Never intercept local requests (could be local LLM or gateway itself)
-    const host = parsed.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      // URL.hostname KEEPS brackets on IPv6 addresses (unlike the WHATWG
-      // URL spec we expected). Treat "[::1]" the same as "::1".
-      host === "::1" ||
-      host === "[::1]"
-    )
-      return false;
+    // Local endpoints include the full IPv4 loopback range and .localhost
+    // names; routing them can send local-provider credentials to the gateway.
+    if (isLocalInterceptionHost(parsed.hostname)) return false;
     // Intercept known LLM API paths only
     return matchesLLMApiPath(parsed.pathname);
   } catch {
     return false;
   }
+}
+
+function isLoopbackIPv4(host: string): boolean {
+  const octets = host.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+  );
+}
+
+function isLocalInterceptionHost(hostname: string): boolean {
+  // URL.hostname keeps brackets on IPv6 literals in the supported runtimes.
+  const host = hostname
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .toLowerCase()
+    .replace(/\.$/, "");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "127.0.0.1" ||
+    isLoopbackIPv4(host) ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host === "[::1]"
+  );
 }
 
 /**
@@ -700,7 +846,9 @@ function buildGatewayHeaders(
   // Inject dynamic context headers (session ID, project, git remote, etc.).
   // Only set if not already present — per-request hooks may have set them.
   try {
-    for (const [k, v] of Object.entries(config.getHeaders())) {
+    for (const [k, v] of Object.entries(
+      config.getHeaders(headers, config.gatewayBase),
+    )) {
       if (!headers.has(k)) headers.set(k, v);
     }
   } catch (e) {
@@ -716,7 +864,7 @@ function observeRequestHeaders(
 ): void {
   if (!config.onRequestHeaders) return;
   try {
-    config.onRequestHeaders(headers);
+    config.onRequestHeaders(headers, config.gatewayBase);
   } catch (e) {
     log.error("fetch-interceptor: onRequestHeaders() failed:", e);
   }
@@ -773,10 +921,10 @@ async function fetchWithContextBoundary(
     void response.body?.cancel().catch(() => {});
     const fullHeaders = new Headers(headers);
     fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
-    response = await originalFetch(requestInput, {
-      ...replayInit,
-      headers: fullHeaders,
-    });
+    response = await originalFetch(
+      requestInput,
+      prepareGatewayFetchInit(requestInput, replayInit, fullHeaders, true),
+    );
   }
   return updateContextBoundary(
     response,
@@ -802,9 +950,25 @@ export function installFetchInterceptor(
 
   // Pre-parse the gateway URL once — avoids constructing a new URL object on
   // every fetch call in the process (tool executions, file downloads, etc.).
-  const gateway = new URL(config.gatewayBase);
-  const gatewayBase = config.gatewayBase;
-  const gatewayPath = gateway.pathname.replace(/\/+$/, "");
+  const touchedGateways = new Set([config.gatewayBase]);
+
+  // Observe correlation in process, then remove it on every outbound path,
+  // including passthroughs and context-boundary retries. Never mutate SDK init.
+  const networkFetch: typeof fetch = Object.assign(
+    (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(
+        init?.headers ??
+          (typeof input !== "string" && !(input instanceof URL)
+            ? input.headers
+            : undefined),
+      );
+      if (!headers.has(NATIVE_RECALL_TURN_HEADER))
+        return originalFetch(input, init);
+      headers.delete(NATIVE_RECALL_TURN_HEADER);
+      return originalFetch(input, { ...init, headers });
+    },
+    originalFetch,
+  );
 
   const interceptor = async (
     input: RequestInfo | URL,
@@ -817,17 +981,30 @@ export function installFetchInterceptor(
           ? input.toString()
           : input.url;
 
-    // Fast exit: skip URL parsing entirely for requests that can't possibly
-    // be LLM API calls. Most fetch calls (tool execution, file downloads,
-    // health checks) don't contain any LLM endpoint suffix.
+    const couldBeLlmRequest =
+      url.includes("/messages") ||
+      url.includes("/completions") ||
+      url.includes("/responses") ||
+      url.includes("generateContent") ||
+      url.includes("streamGenerateContent");
+    const requestHeaders = new Headers(
+      init?.headers ??
+        (typeof input !== "string" && !(input instanceof URL)
+          ? input.headers
+          : undefined),
+    );
+    const strippedBoundaryClaims =
+      stripUntrustedContextBoundaryHeaders(requestHeaders);
+
+    // Credentialed direct gateway routes include management and compaction
+    // endpoints that are not LLM paths. Check those before the fast exit so a
+    // cross-origin redirect cannot forward gateway or provider credentials.
     if (
-      !url.includes("/messages") &&
-      !url.includes("/completions") &&
-      !url.includes("/responses") &&
-      !url.includes("generateContent") &&
-      !url.includes("streamGenerateContent")
+      !couldBeLlmRequest &&
+      !hasCredentialHeaders(requestHeaders) &&
+      !strippedBoundaryClaims
     ) {
-      return originalFetch(input, init);
+      return networkFetch(input, init);
     }
 
     // Parse the URL once and reuse across both intercept paths.
@@ -835,78 +1012,107 @@ export function installFetchInterceptor(
     try {
       upstream = new URL(url);
     } catch {
-      return originalFetch(input, init);
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, false),
+      );
     }
 
-    // Pi's registered providers already target this gateway. Keep their URL,
-    // routing and credentials, but negotiate the same continuation contract
-    // as rewritten calls. Match the origin and complete base path, not a URL
-    // string prefix that could include another host, port or sibling path.
-    if (
-      upstream.origin === gateway.origin &&
-      (upstream.pathname === gatewayPath ||
-        upstream.pathname.startsWith(`${gatewayPath}/`))
-    ) {
-      const directHeaders = new Headers(
-        init?.headers ??
-          (typeof input !== "string" && !(input instanceof URL)
-            ? input.headers
-            : undefined),
-      );
-      if (!boundaryEndpoint(upstream.pathname)) {
-        observeRequestHeaders(directHeaders, config);
-        return originalFetch(input, init);
+    const selectedGateway = config.resolveGateway
+      ? config.resolveGateway(upstream, requestHeaders)
+      : config.gatewayBase;
+    if (!selectedGateway) {
+      // Ownership is ambiguous. Keep provider credentials at their original
+      // destination, but never send gateway secrets or internal attribution.
+      const gatewayCredentialed = requestHeaders.has(GATEWAY_AUTH_HEADER);
+      for (const name of Array.from(requestHeaders.keys())) {
+        if (name.startsWith("x-lore-")) requestHeaders.delete(name);
       }
-      return fetchWithContextBoundary(
-        originalFetch,
-        // Header getters may execute caller code. Reuse the URL validated
-        // above, while keeping one-shot Request bodies on their original input.
-        typeof input === "string" || input instanceof URL ? url : input,
-        init,
-        directHeaders,
-        upstream.pathname,
-        config,
+      // Request-owned and streaming bodies cannot be inspected synchronously.
+      // Protect fallback LLM paths even when their protocol is unverified.
+      const llmHop = gatewayCredentialed || pathLooksLLMLike(upstream.pathname);
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, llmHop),
+      );
+    }
+    touchedGateways.add(selectedGateway);
+    const requestConfig = { ...config, gatewayBase: selectedGateway };
+    const gatewayBase = selectedGateway;
+    const gateway = new URL(selectedGateway);
+
+    // Never rewrite requests already targeting the gateway. Keep direct gateway
+    // routes on their original URL while negotiating context boundaries for
+    // supported generation endpoints.
+    if (isDirectGatewayRequest(upstream, gatewayBase)) {
+      if (boundaryEndpoint(upstream.pathname)) {
+        return fetchWithContextBoundary(
+          networkFetch,
+          typeof input === "string" || input instanceof URL ? url : input,
+          init,
+          requestHeaders,
+          upstream.pathname,
+          requestConfig,
+        );
+      }
+      observeRequestHeaders(requestHeaders, requestConfig);
+      // Preserve the caller's exact init for safe direct requests. Rebuild it
+      // only when credentials need redirect protection or boundary claims were
+      // removed above.
+      if (!hasCredentialHeaders(requestHeaders) && !strippedBoundaryClaims) {
+        return networkFetch(input, init);
+      }
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, true),
       );
     }
 
-    // Never intercept local requests (could be local LLM or gateway itself)
+    if (!couldBeLlmRequest) {
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, false),
+      );
+    }
+
+    // Never intercept local requests (could be local LLM or gateway itself).
     const host = upstream.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      host === "::1" ||
-      host === "[::1]"
-    ) {
-      return originalFetch(input, init);
+    if (isLocalInterceptionHost(host)) {
+      return networkFetch(
+        input,
+        prepareGatewayFetchInit(input, init, requestHeaders, true),
+      );
     }
 
     // ---- Path 1: URL matched a known LLM API pattern ----
     if (matchesLLMApiPath(upstream.pathname)) {
-      const rewrite = interceptUrl(upstream, gateway);
+      const rewrite = interceptUrl(upstream, gateway, !!config.resolveGateway);
       if (!rewrite) {
         // Should not happen — matchesLLMApiPath() being true means the path
         // matched a pattern, and interceptUrl handles all patterns. Pass
         // through as a safety fallback.
-        return originalFetch(input, init);
+        return networkFetch(
+          input,
+          prepareGatewayFetchInit(input, init, requestHeaders, true),
+        );
       }
       const headers = buildGatewayHeaders(
         input,
         init,
         rewrite.upstreamBase,
         rewrite.upstreamPath,
-        config,
+        requestConfig,
       );
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
       return fetchWithContextBoundary(
-        originalFetch,
+        networkFetch,
         rewrittenFetchInput(input, rewrite.gatewayUrl),
         init,
         headers,
         new URL(rewrite.gatewayUrl).pathname,
-        config,
+        requestConfig,
       );
     }
 
@@ -919,24 +1125,29 @@ export function installFetchInterceptor(
         // Body shape identified the protocol — route to the canonical
         // gateway endpoint for that protocol so the request goes through
         // Lore even though the URL path was non-standard.
-        const rewrite = interceptUrlForProtocol(upstream, gateway, detected);
+        const rewrite = interceptUrlForProtocol(
+          upstream,
+          gateway,
+          detected,
+          !!config.resolveGateway,
+        );
         const headers = buildGatewayHeaders(
           input,
           init,
           rewrite.upstreamBase,
           rewrite.upstreamPath,
-          config,
+          requestConfig,
         );
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
         return fetchWithContextBoundary(
-          originalFetch,
+          networkFetch,
           rewrittenFetchInput(input, rewrite.gatewayUrl),
           init,
           headers,
           new URL(rewrite.gatewayUrl).pathname,
-          config,
+          requestConfig,
         );
       }
 
@@ -951,7 +1162,10 @@ export function installFetchInterceptor(
       }
     }
 
-    return originalFetch(input, init);
+    return networkFetch(
+      input,
+      prepareGatewayFetchInit(input, init, requestHeaders, true),
+    );
   };
 
   // Preserve any extra properties on the original fetch (e.g. `preconnect`
@@ -964,7 +1178,8 @@ export function installFetchInterceptor(
     globalThis.fetch = originalFetch;
     writeOriginalFetchSlot(null);
     for (const key of contextBoundaries.keys()) {
-      if (key.startsWith(`${gatewayBase}\x1f`)) contextBoundaries.delete(key);
+      if ([...touchedGateways].some((base) => key.startsWith(`${base}\x1f`)))
+        contextBoundaries.delete(key);
     }
   };
 }

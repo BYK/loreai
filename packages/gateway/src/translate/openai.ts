@@ -964,6 +964,24 @@ export function buildOpenAIUpstreamRequest(
   upstreamBase: string,
   cache?: AnthropicCacheOptions,
 ): { url: string; headers: Record<string, string>; body: unknown } {
+  // Responses tool-search calls and outputs are top-level native items, not
+  // Chat Completions messages. Refuse cross-protocol conversion rather than
+  // silently dropping their provenance from the rebuilt history.
+  if (
+    req.protocol === "openai-responses" &&
+    req.messages.some((message) =>
+      message.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem === true &&
+          (block.raw.type === "tool_search_call" ||
+            block.raw.type === "tool_search_output"),
+      ),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+
   // Forward non-managed client headers first, then overlay gateway-managed.
   const headers: Record<string, string> = {
     ...forwardClientHeaders(req.rawHeaders),
@@ -977,6 +995,15 @@ export function buildOpenAIUpstreamRequest(
     headers.Authorization = `Bearer ${cred.value}`;
   }
 
+  // Client markers are kept verbatim; Lore fills only the slots they leave.
+  // Tools go first: stable across turns, so the most valuable to keep.
+  const budget: BreakpointBudget = {
+    left: MAX_CACHE_BREAKPOINTS - clientBreakpoints(req),
+  };
+  const markTools =
+    !!cache?.cacheTools && req.tools.length > 0 && budget.left > 0;
+  if (markTools) budget.left--;
+
   const body: Record<string, unknown> = {
     model: req.model,
     messages: buildOpenAIMessages(
@@ -987,6 +1014,7 @@ export function buildOpenAIUpstreamRequest(
       req.protocol === "openai"
         ? req.extras?.nativeChatInstructionPrefix
         : undefined,
+      budget,
     ),
     stream: req.stream,
   };
@@ -1009,7 +1037,7 @@ export function buildOpenAIUpstreamRequest(
         ...(t.strict !== undefined ? { strict: t.strict } : {}),
       },
     }));
-    if (cache?.cacheTools && tools.length > 0) {
+    if (markTools) {
       const lastTool = tools[tools.length - 1] as Record<string, unknown>;
       lastTool.cache_control = ephemeralCacheControl(cache.systemTTL);
     }
@@ -1081,6 +1109,50 @@ function ephemeralCacheControl(ttl?: "5m" | "1h" | false): {
     : { type: "ephemeral" };
 }
 
+/** Anthropic rejects a request carrying more than 4 `cache_control` blocks. */
+const MAX_CACHE_BREAKPOINTS = 4;
+
+/** Breakpoints Lore may still add once the client's own are counted. */
+type BreakpointBudget = { left: number };
+
+/** Blocks re-emitted for a message (native Chat text keeps its client `raw`). */
+function chatBlocks(
+  msg: GatewayMessage,
+  source: GatewayRequest["protocol"],
+): GatewayContentBlock[] {
+  return source === "openai" &&
+    msg.provenanceContent?.some((block) => block.type === "text" && block.raw)
+    ? msg.provenanceContent
+    : msg.content;
+}
+
+/**
+ * `cache_control` blocks the client set that are forwarded verbatim. Native
+ * Chat markers are preserved on purpose, so they count against the cap first.
+ */
+function clientBreakpoints(req: GatewayRequest): number {
+  const marked = (part: unknown): boolean =>
+    !!part &&
+    typeof part === "object" &&
+    (part as Record<string, unknown>).cache_control !== undefined;
+  let count = 0;
+  for (const item of req.extras?.nativeChatInstructionPrefix?.items ?? []) {
+    if (Array.isArray(item.content))
+      count += item.content.filter(marked).length;
+  }
+  if (req.protocol !== "openai") return count;
+  for (const msg of req.messages) {
+    for (const block of chatBlocks(msg, req.protocol)) {
+      if (
+        (block.type === "text" || block.type === "opaque") &&
+        marked(block.raw)
+      )
+        count++;
+    }
+  }
+  return count;
+}
+
 /**
  * Quantization step for the intermediate anchor's position. The anchor sits at a
  * multiple of this step, so it stays byte-identical for this many turns before
@@ -1109,6 +1181,7 @@ function buildOpenAIMessages(
   nativeInstructions?: NonNullable<
     GatewayRequest["extras"]
   >["nativeChatInstructionPrefix"],
+  budget: BreakpointBudget = { left: MAX_CACHE_BREAKPOINTS },
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
@@ -1150,10 +1223,14 @@ function buildOpenAIMessages(
             ? [{ type: "text", text: item.content }]
             : (item.content as Array<Record<string, unknown>>);
         if (parts.length > 0) {
-          if (parts[parts.length - 1].cache_control === undefined) {
+          if (
+            parts[parts.length - 1].cache_control === undefined &&
+            budget.left > 0
+          ) {
             parts[parts.length - 1].cache_control = ephemeralCacheControl(
               cache.systemTTL,
             );
+            budget.left--;
           }
           item.content = parts;
         }
@@ -1167,13 +1244,17 @@ function buildOpenAIMessages(
   // maximum compatibility and cache stability (byte-identical across turns).
   if (system && !nativeInstructions) {
     if (cache?.systemTTL) {
+      const marked = budget.left > 0;
+      if (marked) budget.left--;
       result.push({
         role: "system",
         content: [
           {
             type: "text",
             text: system,
-            cache_control: ephemeralCacheControl(cache.systemTTL),
+            ...(marked
+              ? { cache_control: ephemeralCacheControl(cache.systemTTL) }
+              : {}),
           },
         ],
       });
@@ -1203,11 +1284,7 @@ function buildOpenAIMessages(
     ) {
       throw new InvalidCrossProviderRequestError();
     }
-    const blocks =
-      source === "openai" &&
-      msg.provenanceContent?.some((block) => block.type === "text" && block.raw)
-        ? msg.provenanceContent
-        : msg.content;
+    const blocks = chatBlocks(msg, source);
     const role = msg.role;
 
     // Collect text, opaque (image/audio/…), and tool_use blocks.
@@ -1326,8 +1403,14 @@ function buildOpenAIMessages(
       ttl?: "5m" | "1h" | false,
     ) => {
       const parts = m.content as Array<Record<string, unknown>>;
-      if (parts[parts.length - 1].cache_control === undefined) {
-        parts[parts.length - 1].cache_control = ephemeralCacheControl(ttl);
+      const last = parts[parts.length - 1];
+      if (last.cache_control === undefined && budget.left > 0) {
+        // Replace, don't mutate: `last` may be the client's retained `raw`.
+        parts[parts.length - 1] = {
+          ...last,
+          cache_control: ephemeralCacheControl(ttl),
+        };
+        budget.left--;
       }
     };
 

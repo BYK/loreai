@@ -817,7 +817,7 @@ it("replays durable recall, distillations, and knowledge deltas identically afte
         anchorId,
         anchorContextId: recallAnchorContext(source, anchorIndex, []),
         toolUseId: "restored-recall-call",
-        input: { query: "source context", scope: "session" },
+        input: { query: "private source-window question", scope: "session" },
         result: "Recalled source context survives a process restart.",
         position: 0,
       },
@@ -826,6 +826,9 @@ it("replays durable recall, distillations, and knowledge deltas identically afte
   saveSessionTracking(sessionID, {
     recallStore: serializeRecallStore(recalls),
   });
+  const persistedRecallStore = loadSessionTracking(sessionID)?.recallStore;
+  expect(persistedRecallStore).toBeTruthy();
+  expect(persistedRecallStore).not.toContain("private source-window question");
   const projectID = ensureProject(projectPath);
   db()
     .query(`INSERT INTO distillations
@@ -851,11 +854,12 @@ it("replays durable recall, distillations, and knowledge deltas identically afte
       metadata: {},
       rawHeaders: {},
     };
-    const durable = loadSessionTracking(sessionID)?.recallStore;
-    expect(durable).toBeTruthy();
-    expect(expandRecallMarkers(request, deserializeRecallStore(durable!))).toBe(
-      true,
-    );
+    expect(
+      expandRecallMarkers(
+        request,
+        deserializeRecallStore(persistedRecallStore!),
+      ),
+    ).toBe(true);
     return request.messages;
   };
   const initial = (await prepare(expand(source))).prepared;
