@@ -41,7 +41,7 @@
   --shadow-soft: 0 4px 14px color-mix(in srgb, var(--palette-base-950) 6%, transparent);
   --shadow-lifted: 0 16px 48px color-mix(in srgb, var(--palette-base-950) 8%, transparent);
   --radius-control: 6px;
-  --radius-card: 14px;
+  --radius-card: 12px;
 }
 
 :root[data-theme="dark"] {

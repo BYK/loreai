@@ -1,3 +1,11 @@
+/* Shared action roles match the app; large enough for native pointer and keyboard use. */
+.button { display: inline-flex; align-items: center; justify-content: center; gap: .75rem; min-height: 44px; padding: .65rem 1rem; border: 1px solid transparent; border-radius: var(--radius-control); font: 500 .875rem/1.4 var(--sans,"DM Sans Variable",sans-serif); text-decoration: none; cursor: pointer; }
+.button-primary { background: var(--accent); color: var(--accent-contrast); }
+.button-primary:hover { background: var(--accent-hover); color: var(--accent-contrast); }
+.button-secondary { border-color: var(--line); background: var(--surface); color: var(--text); }
+.button-secondary:hover { background: var(--chrome); color: var(--heading); }
+.button:disabled { cursor: wait; opacity: .65; }
+
 /* Shared controls and navigation on public and documentation pages. */
 .theme-toggle { display:inline-flex;align-items:center;flex-shrink:0;padding:2px;border:1px solid var(--line);border-radius:999px;background:var(--chrome); }
 .theme-toggle button { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer; }

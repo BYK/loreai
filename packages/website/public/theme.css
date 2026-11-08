@@ -4,6 +4,7 @@
 @import url("./journal.css");
 @import url("./accordion.css");
 @import url("./page-field-guide.css");
+@import url("./patterns.css");
 
 :root {
   --sans: "DM Sans Variable", "DM Sans", sans-serif;
@@ -37,12 +38,6 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .eyebrow { color: var(--muted); font-size: .8125rem; font-weight: 500; margin-bottom: .75rem; }
 .muted { color: var(--muted); }
 .small { font-size: .8125rem; line-height: 1.6; }
-.button { display: inline-flex; align-items: center; justify-content: center; gap: .75rem; min-height: 44px; padding: .65rem 1rem; border: 1px solid transparent; border-radius: var(--radius-control); font: 500 .875rem/1.4 var(--sans); text-decoration: none; cursor: pointer; }
-.button-primary { background: var(--accent); color: var(--accent-contrast); }
-.button-primary:hover { background: var(--accent-hover); color: var(--accent-contrast); }
-.button-secondary { border-color: var(--line); background: var(--surface); color: var(--text); }
-.button-secondary:hover { background: var(--chrome); color: var(--heading); }
-.button:disabled { cursor: wait; opacity: .65; }
 .text-link { display: inline-flex; align-items: center; min-height: 44px; font-weight: 500; }
 .top-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 64px; padding: .5rem .75rem; background: var(--surface); border-bottom: 1px solid var(--line); }
 .header-actions { display: flex; align-items: center; gap: .75rem; }
@@ -151,7 +146,7 @@ th { font-weight: 500; }
 .product-tour:has(input[value="knowledge"]:checked) [data-tour-panel="knowledge"],
 .product-tour:has(input[value="usage"]:checked) [data-tour-panel="usage"] { display:block; }
 .tour-caption { max-width:72ch;margin-bottom:1.25rem; }
-.tour-caption h3 { font:500 1.25rem/1.4 var(--sans);margin-bottom:.5rem; }
+.tour-caption h2 { font:500 1.25rem/1.4 var(--sans);margin-bottom:.5rem; }
 .tour-caption p { color:var(--muted);margin-bottom:.5rem; }
 .tour-image-link { display:block;border:1px solid var(--line);border-radius:var(--radius-card);overflow:hidden;background:var(--surface); }
 .tour-image-link img { display:block;width:100%;height:auto; }
@@ -203,16 +198,16 @@ th { font-weight: 500; }
 
 /* Shared journal margins across the product tour and public pages. */
 
-.eyebrow.field-marker { color:var(--accent);font-size:.6875rem; }
-.tour-journal { display:grid;grid-template-columns:190px minmax(0,1fr); }
-.tour-journal .tour-picker { display:flex;flex-direction:column;gap:.375rem;margin:0;padding:1rem .75rem;background:var(--journal-margin);border-right:1px solid var(--line); }
-.tour-journal .tour-picker label { padding:.75rem .625rem;border-color:transparent;gap:.625rem;font-size:.8125rem; }
-.tour-journal .tour-picker label:has(:checked) { border-color:var(--line);border-inline-start-color:var(--accent);background:var(--journal-page);color:var(--text); }
-.tour-journal .tour-picker input { position:absolute;opacity:0;width:1px;height:1px; }
-.tour-journal .tour-pages { padding:1.5rem;min-width:0; }
-.tour-journal .tour-caption { margin-bottom:1rem; }
-.tour-journal .tour-caption p { font-size:.875rem;line-height:1.7; }
-.tour-journal .tour-caption h3 { font-size:1.125rem; }
+.eyebrow.field-marker { color:var(--accent);font-size:.75rem; }
+
+
+
+
+
+
+
+
+
 .home-workflow .workflow li { position:relative;border:1px solid var(--line);border-radius:var(--radius-card);padding:1.25rem;background:var(--journal-page); }
 .home-workflow .workflow .journal-art { float:right;margin:-.25rem -.25rem .5rem .75rem;width:84px;height:84px;transform:rotate(-5deg); }
 .home-workflow .workflow li > .field-marker { color:var(--accent);font-size:.625rem; }
@@ -222,11 +217,11 @@ th { font-weight: 500; }
 .page-intro.field-heading > div { max-width:800px; }
 .page-sections a { border-bottom:1px solid transparent; }
 .page-sections a:hover { border-bottom-color:var(--accent); }
-.home-start { background:var(--journal-page);border:1px solid var(--line);border-radius:var(--radius-card);padding:2rem;margin-block:1rem 3rem; }
-@media(hover:hover) and (pointer:fine) { .tour-journal .tour-picker label:hover { border-color:var(--line);background:var(--journal-card); }.button-primary:hover { box-shadow:0 3px 0 color-mix(in srgb,var(--accent) 45%,var(--bg)); } }
+.home-start { background:var(--journal-page);border:1px solid var(--line);border-radius:var(--radius-card);padding:1.5rem;margin-block:1rem 2rem; }
+
 @media(prefers-reduced-motion:no-preference) and (hover:hover) and (pointer:fine) { .button:active { transform:scale(.98); } }
-@media(max-width:850px) { .tour-journal { grid-template-columns:1fr; }.tour-journal .tour-picker { flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:.75rem; }.tour-journal .tour-picker label { flex:1; }.page-intro.field-heading .journal-art { width:80px;height:80px; } }
-@media(max-width:600px) { .tour-journal .tour-picker { display:grid;grid-template-columns:1fr;gap:.25rem; }.tour-journal .tour-picker label { padding:.5rem .75rem; }.tour-journal .tour-pages { padding:1rem; }.page-intro.field-heading { display:block;position:relative; }.page-intro.field-heading .eyebrow { padding-inline-end:70px; }.page-intro.field-heading > .journal-art { position:absolute;right:0;top:1.5rem;margin:0;width:56px;height:56px; }.home-workflow .workflow li { padding-top:.75rem; } }
+@media(max-width:850px) { .page-intro.field-heading .journal-art { width:80px;height:80px; } }
+@media(max-width:600px) { .page-intro.field-heading { display:block;position:relative; }.page-intro.field-heading .eyebrow { padding-inline-end:70px; }.page-intro.field-heading > .journal-art { position:absolute;right:0;top:1.5rem;margin:0;width:56px;height:56px; }.home-workflow .workflow li { padding-top:.75rem; } }
 
 /* Product evidence leads; the journal is a compact optional walkthrough. */
 .home-page .home-hero { padding-block:2.5rem; }

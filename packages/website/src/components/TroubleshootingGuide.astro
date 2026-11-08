@@ -1,4 +1,6 @@
 ---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
 const base = import.meta.env.BASE_URL;
 const cases = [
  {id:"session",label:"Missing session",observe:"The agent responds, but the conversation is not in Lore’s Sessions list.",check:"Open the printed Dashboard URL, select the project that launched your agent, and clear the session search filter. Send a fresh message through your client’s Lore connection path.",result:"A newly recorded message is the connection check. Knowledge does not have to appear yet.",href:"docs/first-session/#verify",action:"Verify the connection",reference:"missing-session"},
@@ -7,7 +9,7 @@ const cases = [
 ] as const;
 ---
 <section class="diagnostic-guide" id="diagnostic" aria-label="Find your next troubleshooting check">
- <p class="field-marker">Follow the observation</p><fieldset class="guide-segments"><legend>What can you observe?</legend>{cases.map((item,index)=><label><input type="radio" name="diagnostic-issue" value={item.id} checked={index===0} aria-label={item.label} aria-controls={`diagnostic-${item.id}`} /><span>{item.label}</span></label>)}</fieldset>
+ <p class="field-marker">Follow the observation</p><ChoiceGroup class="guide-segments" legend="What can you observe?">{cases.map((item,index)=><ChoiceItem name="diagnostic-issue" value={item.id} checked={index===0} label={item.label} controls={`diagnostic-${item.id}`} />)}</ChoiceGroup>
  {cases.map(item=><div class="diagnostic-panel" data-issue-panel={item.id} id={`diagnostic-${item.id}`}><ol class="diagnostic-checks"><li><span>01 / Observe</span><p>{item.observe}</p></li><li><span>02 / Check</span><p>{item.check}</p></li><li><span>03 / Expected result</span><p>{item.result}</p></li></ol><div class="diagnostic-next"><a href={`${base}${item.href}`}>{item.action} <span aria-hidden="true">→</span></a><a href={`${base}docs/troubleshooting/#${item.reference}`}>Full reference</a></div></div>)}
 </section>
 <script>

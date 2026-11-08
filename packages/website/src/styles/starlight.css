@@ -1,8 +1,10 @@
 @import "../../public/palette.css";
 @import "../../public/controls.css";
+@import "../../public/accordion.css";
 @import "../../public/navigation.css";
 @import "../../public/journal.css";
 @import "../../public/page-field-guide.css";
+@import "../../public/patterns.css";
 
 :root {
   --sl-font: "DM Sans Variable", "DM Sans", sans-serif;
@@ -114,8 +116,6 @@
 .sl-markdown-content h3 { font-size:1.125rem;line-height:1.4; }
 .sl-markdown-content { line-height:1.65; }
 .agent-setup .small { font-size:.8125rem;line-height:1.6;color:var(--muted); }
-.agent-setup .button { display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.65rem 1rem;border:1px solid var(--line);border-radius:var(--radius-control);font:500 .875rem/1.4 var(--sans);text-decoration:none;background:var(--surface);color:var(--text);cursor:pointer; }
-.agent-setup .button-primary { background:var(--accent);border-color:var(--accent);color:var(--accent-contrast); }
 .agent-setup .install-command { display:flex;align-items:center;gap:.75rem;flex-wrap:wrap; }
 .agent-setup .install-command code { min-width:0;overflow-wrap:anywhere; }
 .agent-setup .install-box { padding:1rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-control); }
@@ -132,7 +132,7 @@
 :root { --sl-color-bg-sidebar:var(--bg); }
 .docs-journal-title { align-items:flex-start; }
 .docs-journal-title h1 { margin-top:.5rem; }
-.docs-journal-title > .journal-art { width:104px;height:104px; }
+
 .docs-journal-title .field-marker { margin:0; }
 .sidebar-content a { border-inline-start:2px solid transparent; }
 .sidebar-content a[aria-current="page"] { border-inline-start-color:var(--accent);background:var(--journal-page); }
@@ -143,10 +143,9 @@
 @media(hover:hover) and (pointer:fine) { .sidebar-content summary:hover { background:var(--journal-page); } }
 .pagination-links a { box-shadow:none;border-color:var(--line);background:var(--journal-page); }
 .right-sidebar-panel a[aria-current="true"] { border-inline-start-color:var(--accent); }
-.agent-setup .setup-picker label:has(:checked) { box-shadow:inset 3px 0 var(--accent); }
-@media(hover:hover) and (pointer:fine) { .sidebar-content a:hover,.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); }.agent-setup .setup-picker label:hover { border-color:var(--accent);background:var(--journal-card); } }
+@media(hover:hover) and (pointer:fine) { .sidebar-content a:hover,.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); } }
 @media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
-.docs-journal-title > .journal-art { width:64px;height:64px; }.docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
+.docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
 .sl-markdown-content table { table-layout:auto; }.sl-markdown-content th,.sl-markdown-content td { overflow-wrap:normal;word-break:normal; }.sl-markdown-content :is(td,th) code { overflow-wrap:anywhere; }
 
 /* Leave room for the inset guide without moving Starlight's search/sidebar. */
@@ -157,3 +156,10 @@
   .page > header.header > .docs-site-header { padding-inline:8px 50px; }
   starlight-menu-button button { inset-inline-end:26px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text);box-shadow:none; }
 }
+
+/* The local contents control is a compact utility beneath the floating guide. */
+:root { --sl-mobile-toc-height:44px; }
+#starlight__on-this-page--mobile { height:44px;gap:8px;padding-block:0; }
+#starlight__on-this-page--mobile .toggle { border:0;background:transparent;border-radius:6px;padding:8px;min-height:44px; }
+.docs-journal-title { display:block; }
+.docs-journal-title .field-marker { font-size:.75rem; }

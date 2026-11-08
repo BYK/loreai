@@ -1,24 +1,24 @@
 ---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
 import { SETUP_AGENTS } from "../lib/agent-setup";
 import InstallCommand from "./InstallCommand.astro";
-import JournalArt from "./JournalArt.astro";
+import CommandBlock from "./ui/CommandBlock.astro";
 interface Props { id?: string; installed?: boolean; }
 const { id = "agent-setup", installed = false } = Astro.props;
 const base = import.meta.env.BASE_URL;
-const glyphs = ["CC", "CX", "CD", "OC", "Pi", "He"];
+
 ---
 <section class="agent-setup field-frame" aria-label="Set up Lore with your agent">
-  <div class="setup-field-heading"><JournalArt name="tools" size={48} /><div><p class="field-marker">Connect your agent</p><p>Choose your client, run its commands, then check for a recorded session.</p></div></div>
-  <ol class="setup-route" aria-label="Connection sequence"><li><b>01</b> Choose a client</li><li><b>02</b> Connect from your project</li><li><b>03</b> Verify a session</li></ol>
-  <fieldset class="setup-picker"><legend>Which agent do you use?</legend>
-    {SETUP_AGENTS.map((agent,index) => <label><input type="radio" name={`${id}-agent`} value={agent.id} checked={index===0} aria-label={agent.name} aria-controls={`${id}-${agent.id}`} /><span class="agent-glyph" aria-hidden="true">{glyphs[index]}</span><span>{agent.name}</span></label>)}
-  </fieldset>
-  {!installed && <div class="setup-install"><h3>Install Lore</h3><p>Run this in your terminal. It installs Lore; your coding agent should already be installed and signed in.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  <ChoiceGroup class="setup-picker" legend="Choose your coding agent">
+    {SETUP_AGENTS.map((agent,index) => <ChoiceItem name={`${id}-agent`} value={agent.id} checked={index===0} label={agent.name} controls={`${id}-${agent.id}`} />)}
+  </ChoiceGroup>
+  {!installed && <div class="setup-install"><h3><span class="setup-stage">1</span> Install Lore</h3><p>Run this in your terminal. It installs Lore; your coding agent should already be installed and signed in.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
   {id === "install-setup" && <span id="3-connect-from-your-project" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
-    <h3>Connect {agent.name}</h3><p>{agent.detail}</p>
-    <pre><code>{agent.command}</code></pre><button type="button" class="button button-secondary" data-copy-setup hidden aria-label={`Copy ${agent.name} connection command`}>Copy connection command</button><p class="setup-copy-status small muted" role="status"></p>
-    <div class="setup-observation"><p class="field-marker">Your connection check</p><p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p><label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p></div>
+    <h3><span class="setup-stage">{installed ? "1" : "2"}</span> Connect {agent.name}</h3><p>{agent.detail}</p>
+    <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />
+    <div class="setup-observation"><h3><span class="setup-stage">{installed ? "2" : "3"}</span> Verify a recorded session</h3><p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p><label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p></div>
     <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide →</a></div>
   </div>)}
   <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
@@ -26,17 +26,7 @@ const glyphs = ["CC", "CX", "CD", "OC", "Pi", "He"];
 <script>import "../scripts/agent-setup";</script>
 <style is:global>
 .agent-setup { min-width:0;padding:1.25rem; }
-.setup-field-heading { display:flex;align-items:center;gap:.75rem;margin:-1.25rem -1.25rem 1.25rem;padding:1rem 1.25rem;background:var(--journal-margin);border-bottom:1px solid var(--line); }
-.setup-field-heading p { margin:0;font-size:.8125rem;line-height:1.6;color:var(--muted); }
-.setup-field-heading .field-marker { font-size:.625rem;color:var(--accent);margin-bottom:.25rem; }
-.setup-step { display:inline-grid;place-items:center;width:24px;height:24px;margin-inline-end:.625rem;border:1px solid var(--line);border-radius:50%;font:.625rem/1 ui-monospace,monospace;color:var(--accent);vertical-align:middle; }
 [data-copy-setup][hidden] { display:none; }
-.setup-picker { display:flex;flex-wrap:wrap;gap:.5rem;border:0;padding:0;margin:0 0 1.5rem; }
-.setup-picker legend { font:500 1rem var(--sans,"DM Sans Variable",sans-serif);margin-bottom:.75rem;color:var(--heading); }
-.setup-picker label { position:relative;display:flex;min-width:0;align-items:center;gap:.5rem;min-height:44px;padding:.65rem .75rem;border:1px solid var(--line);border-radius:999px;color:var(--text);font-size:.8125rem;cursor:pointer; }
-.setup-picker label:has(:checked) { background:var(--journal-selected);border-color:var(--accent);color:var(--text); }
-.setup-picker input { position:absolute;inset:0;opacity:0;width:100%;height:100%;margin:0;cursor:pointer; }
-.setup-picker label:has(:focus-visible) { outline:2px solid var(--accent);outline-offset:2px; }
 .agent-setup h3 { font:500 1.1rem/1.4 var(--sans,"DM Sans Variable",sans-serif);margin:0 0 .5rem; }
 .setup-install { padding-block:0 1.5rem;border-bottom:1px solid var(--line); }
 .agent-setup .install-box { margin-block:.75rem; }
@@ -47,10 +37,7 @@ const glyphs = ["CC", "CX", "CD", "OC", "Pi", "He"];
 .agent-setup:has(input[value="opencode"]:checked) [data-setup-panel="opencode"],
 .agent-setup:has(input[value="pi"]:checked) [data-setup-panel="pi"],
 .agent-setup:has(input[value="hermes"]:checked) [data-setup-panel="hermes"] { display:block; }
-.setup-panel pre { overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-control);padding:1rem;margin-block:.75rem;white-space:pre-wrap;overflow-wrap:anywhere; }
-.setup-panel pre code { background:transparent;padding:0;color:var(--text);font-size:.875rem; }
 .setup-next { display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-block:1rem; }
 .setup-copy-status:empty { display:none; }
 .setup-disclosure { margin-top:1rem; }
-@media(max-width:600px) { .setup-picker label { flex:1 1 42%; } }
 </style>

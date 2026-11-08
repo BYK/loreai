@@ -1,0 +1,15 @@
+---
+import { buildReferenceDirectory } from "../lib/reference-directory";
+import AccordionItem from "./ui/AccordionItem.astro";
+const route = Astro.locals.starlightRoute;
+const environment = Astro.url.pathname.endsWith("/docs/environment/");
+const { categories,settings } = buildReferenceDirectory(route.entry.body ?? "",route.headings,environment ? "environment" : "configuration");
+---
+<section class="reference-finder" aria-label="Setting directory">
+  <div class="reference-search" data-finder-search hidden><label>Find a setting<input type="search" name="setting" maxlength="160" autocomplete="off" spellcheck="false" placeholder="Search names or categories…" aria-controls="setting-results" /></label><button type="button" class="button button-secondary" data-finder-clear hidden>Clear</button></div>
+  <p class="reference-hint">{environment ? "Variables link to their category. The complete reference stays below." : "Jump to a setting’s section. The complete reference stays below."}</p>
+  <p role="status" data-finder-status></p>
+  <ul class="reference-results" id="setting-results" data-finder-results hidden>{settings.map(entry=><li data-search={`${entry.label} ${entry.group}`} hidden><a href={`#${entry.slug}`}>{entry.label}</a>{entry.group && <small>{entry.group}</small>}</li>)}</ul>
+  <AccordionItem class="reference-directory" title="Browse setting categories" meta={`${categories.length} categories`}><ul class="reference-directory-list">{categories.map(entry=><li><a href={`#${entry.slug}`}>{entry.label}</a>{entry.group && <small>{entry.group}</small>}</li>)}</ul></AccordionItem>
+</section>
+<script>import "../scripts/reference-finder";</script>

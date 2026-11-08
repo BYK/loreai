@@ -311,3 +311,45 @@ links resolve.
 Separate adversarial correctness and security source reviews pass after the mixed-input
 fix. Independent static checks and 10 seeded controller-property runs pass; both reviews
 retain the wider repository before-merge gate rather than claiming merge approval.
+
+## App consistency refinement — 8 November 2026
+
+The floating field-guide navigation and interactive RPG journal remain. Shared
+native choice/command compositions now connect the public pages to the app's
+control shapes and action hierarchy. Paper and sage accents stay local to the
+journal; other surfaces use the app's neutral roles. Decorative title artwork is
+removed from setup/tour while meaningful journal, chapter and task art remains.
+
+| Before | After | Why |
+| --- | --- | --- |
+| Capsule clients, outlined tabs and separately styled pickers | Shared selection fill/edge, six-pixel controls and separate focus rings | Make equivalent interactions predictable |
+| Tall setup header/sequence and uneven client wraps | Stable client grid, numbered install/connect/verify sections and shared command blocks | Reduce nesting and make commands easier to find |
+| Two tour introductions before a miniature app screenshot | One intro, compact view switcher and a readable phone crop before the explanation | Reach useful product proof earlier |
+| Repeated rule explanations and fit prose | Hero outcome, actual-app proof and journal learning have distinct roles | Keep the story direct |
+| Artwork-dependent docs category labels and tiny metadata | Getting started / Using Lore / Guides / Reference / Contributing labels | Make navigation categories meaningful |
+| Dense reference TOC | Concise chapter outline, native category directory and local setting finder | Find a field or variable without losing the full reference |
+| Generic404 sentence and distant links | Nearby Home, Docs and existing-search recovery actions | Provide an obvious next step |
+
+![Shared tour and setup controls on phones](screenshots/consistency-phone-tour-setup.jpg)
+![Focused app tour in dark appearance](screenshots/consistency-tour-dark.jpg)
+![Setup with shared commands in light appearance](screenshots/consistency-setup-light.jpg)
+![Reference finder with concise contents](screenshots/consistency-reference-dark.jpg)
+![Preserved RPG journal on a phone](screenshots/consistency-journal-phone-light.jpg)
+![Recovery using the existing search dialog](screenshots/consistency-recovery-dark.jpg)
+
+Final website evidence: **552 browser passes / eight conditional skips** across
+five viewport/theme projects, **16 unit tests**, clean Astro diagnostics for 66 files,
+workspace typecheck/lint/format, generated-doc parity and social metadata for 37 pages.
+The prefixed build passes at 1280px / 320px including finder queries/targets, original
+page choices, journal history, Pagefind and assets, with no runtime/asset failures.
+All **1,141 internal fragment links** resolve. All 52 documented environment variables
+are indexed, including eight first cells that contain default metadata.
+
+Regression checks retain explicit clipboard denial/manual fallback, command-hook
+isolation, manual per-client confirmation, screenshot-point bounds, native controls,
+URL/history, focus, reduced motion and no-JavaScript paths. The new 404 readiness and
+outside-click regression uses the real framework dialog; metadata parser regressions
+include literal/default HTML and independent enumeration of the generated document.
+Separate correctness/security source reviews pass with seeded adversarial probes.
+The broader repository before-merge gate remains separate and unresolved; these
+results do not claim a full-root test pass or authorize merging the draft.

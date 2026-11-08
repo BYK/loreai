@@ -1,0 +1,5 @@
+---
+interface Props { legend: string; class?: string; hideLegend?: boolean; }
+const { legend, class: className, hideLegend = false } = Astro.props;
+---
+<fieldset class:list={["ui-choice-group",className]}><legend class:list={{"visually-hidden":hideLegend}}>{legend}</legend><slot /></fieldset>

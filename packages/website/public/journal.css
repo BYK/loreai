@@ -1,7 +1,8 @@
 /* One field journal, with readable ink and purpose-specific local artwork. */
-:root { --journal-page:color-mix(in srgb,var(--surface) 90%,#f4ead1);--journal-margin:color-mix(in srgb,var(--palette-base-200) 85%,#a9bd8c);--journal-card:var(--surface);--journal-selected:color-mix(in srgb,#a9bd8c 12%,var(--surface)); }
-:root[data-theme="dark"] { --journal-page:color-mix(in srgb,var(--surface) 92%,var(--palette-base-700));--journal-margin:var(--bg); }
-@media(prefers-color-scheme:dark) { :root:not([data-theme]) { --journal-page:color-mix(in srgb,var(--surface) 92%,var(--palette-base-700));--journal-margin:var(--bg); } }
+:root { --journal-page:var(--surface);--journal-margin:var(--chrome);--journal-card:var(--surface);--journal-selected:var(--chrome); }
+.quest-journal { --journal-page:color-mix(in srgb,var(--surface) 90%,#f4ead1);--journal-margin:color-mix(in srgb,var(--palette-base-200) 85%,#a9bd8c);--journal-selected:color-mix(in srgb,#a9bd8c 12%,var(--surface)); }
+:root[data-theme="dark"] .quest-journal { --journal-page:color-mix(in srgb,var(--surface) 92%,var(--palette-base-700));--journal-margin:var(--bg); }
+@media(prefers-color-scheme:dark) { :root:not([data-theme]) .quest-journal { --journal-page:color-mix(in srgb,var(--surface) 92%,var(--palette-base-700));--journal-margin:var(--bg); } }
 .journal-art { display:block;object-fit:contain;flex-shrink:0;pointer-events:none;filter:none; }
 .journal-art.art-for-dark { display:none; }
 :root[data-theme="dark"] .journal-art.art-for-light { display:none; }

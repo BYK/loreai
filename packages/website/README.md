@@ -195,3 +195,33 @@ metadata only; it never sets `open` or duplicates native expanded state. Keyboar
 interaction is immediate; pointer height/chevron motion is optional, honors reduced
 motion, and snaps where CSS intrinsic-size interpolation is unsupported. Native
 controls and links remain useful before scripts load and without JavaScript.
+
+## App-consistent public controls and reference lookup
+
+`ChoiceGroup.astro` / `ChoiceItem.astro` share native radio composition across the
+file viewer, preview, tour, setup, fit and diagnostics. Their original names,
+values, accessible labels and class hooks remain the controller boundary.
+`CommandBlock.astro` shares presentation; its explicit install/connection kind
+keeps the original clipboard hooks separate. Copying never checks a connection.
+Shared action roles live in `public/controls.css`; `public/patterns.css` owns the
+choice, command, tour and reference layouts. Journal paper colors are scoped to
+`.quest-journal`, while other components follow the app's neutral surface roles.
+
+The tour has one introduction and a compact view picker. Narrow screens show a
+focused crop before its explanation, with original captures still available.
+The capture is illustrative/read-only; view and inspection URL bindings remain
+separate. Docs titles use semantic sections, independent of decorative artwork.
+
+`ReferenceFinder.astro` renders a native category directory from actual heading
+IDs. `reference-directory.ts` indexes authored field/variable tables, including
+metadata-bearing first cells, without exposing defaults as executable markup.
+The progressive filter matches literal text, bounds restored input to 160 characters,
+and shares `setting` through replaceState while retaining unrelated query/hash
+and history.state. It filters only directory results; reference prose/anchors stay
+available. `starlight-route-data.ts` shortens only the configuration/environment
+TOCs; Starlight still owns both TOC controllers. Without scripts the directory
+links remain useful. No generated reference file is edited by this feature.
+
+`PageHero.astro` customizes the existing Starlight 404 with native recovery links.
+Its explicit search action mirrors the existing framework button's readiness and
+opens that same dialog; it neither duplicates Pagefind nor probes a gateway.

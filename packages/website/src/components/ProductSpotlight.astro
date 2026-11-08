@@ -1,8 +1,10 @@
 ---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
 import NavigationIcon from "./NavigationIcon.astro";
 const base = import.meta.env.BASE_URL;
 const views = [
-  { id: "rule", label: "Rule", title: "Keep handlers idempotent", description: "Check the event ID before applying a webhook. Reuse the existing duplicate-event guard.", note: "Correct the entry in Knowledge when conventions change.", action: "Inspect the rule" },
+  { id: "rule", label: "Rule", title: "Keep handlers idempotent", description: "Edit an outdated convention directly in Knowledge.", note: "Review the source and recorded revisions before relying on an entry.", action: "Inspect the rule" },
   { id: "source", label: "Source", title: "Follow the source session", note: "The source session is available; exact-message attribution is not recorded.", action: "Inspect the source" },
   { id: "history", label: "History", title: "See which version is current", note: "Two versions are recorded in this sample.", action: "Inspect the history" },
 ] as const;
@@ -10,7 +12,7 @@ const views = [
 <section class="section product-spotlight" id="product" aria-labelledby="product-title">
   <div class="spotlight-heading"><div><p class="eyebrow">Inside the local app</p><h2 id="product-title">Memory you can inspect.</h2></div><a class="text-link" href={`${base}tour/?view=knowledge#product`}>Explore the app <span aria-hidden="true">↗</span></a></div>
   <div class="spotlight-workbench">
-    <div class="workbench-bar"><span class="workbench-project"><NavigationIcon name="app" />webhook-service <span>/ Knowledge</span></span><fieldset class="guide-segments spotlight-choices"><legend class="visually-hidden">Explore project memory</legend>{views.map((view,index)=><label><input type="radio" name="product-preview" value={view.id} checked={index===0} aria-label={view.label} aria-controls={`preview-${view.id}`} /><span><small aria-hidden="true">0{index+1}</small>{view.label}</span></label>)}</fieldset></div>
+    <div class="workbench-bar"><span class="workbench-project"><NavigationIcon name="app" />webhook-service <span>/ Knowledge</span></span><ChoiceGroup class="guide-segments spotlight-choices" legend="Explore project memory" hideLegend>{views.map((view,index)=><ChoiceItem name="product-preview" value={view.id} checked={index===0} label={view.label} controls={`preview-${view.id}`} />)}</ChoiceGroup></div>
     <div class="workbench-body">
       <figure class="spotlight-image">{views.map(view=><a class="tour-image-link" data-preview-image={view.id} href={`${base}tour/?view=knowledge&inspect=${view.id}#product`} aria-label="Explore the Lore memory browser">{(["light","dark"] as const).map(theme=><picture class={`tour-shot-${theme}`}><img src={`${base}product-tour/knowledge-detail-${theme}.png`} width="734" height="858" loading="lazy" decoding="async" alt="Actual Lore app showing a sample saved project rule, its source session and recorded revisions" /></picture>)}</a>)}</figure>
       <div class="spotlight-explanations">{views.map((view,index)=><section data-preview-panel={view.id} id={`preview-${view.id}`} aria-labelledby={`preview-title-${view.id}`}><p class="field-marker">0{index+1} / {view.label}</p><h3 id={`preview-title-${view.id}`}>{view.title}</h3>{view.id === "rule" && <p>{view.description}</p>}{view.id === "source" && <dl class="preview-record"><div><dt>Source session</dt><dd>sample-session</dd></div></dl>}{view.id === "history" && <dl class="preview-record preview-versions"><div><dt>v2</dt><dd>Current</dd></div><div><dt>v1</dt><dd>Superseded</dd></div></dl>}<p class="preview-note">{view.note}</p><a class="text-link" href={`${base}tour/?view=knowledge&inspect=${view.id}#product`}>{view.action} in the full tour <span aria-hidden="true">→</span></a></section>)}</div>
@@ -23,12 +25,12 @@ import { bindUrlChoice } from "../scripts/url-choice";
 bindUrlChoice(".spotlight-choices", "preview", ["rule", "source", "history"]);
 </script>
 <style>
-  :global(.home-page) section.product-spotlight { display:block;padding:1rem 0 1.5rem;border:0;background:transparent; }
-  .spotlight-heading { display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px; }
+  :global(.home-page) section.product-spotlight { display:block;padding:1rem 0 1.25rem;border:0;background:transparent; }
+  .spotlight-heading { display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:16px; }
   .spotlight-heading .eyebrow { font-size:.75rem;margin-bottom:8px; }
   .spotlight-heading h2 { font-size:clamp(1.5rem,2.6vw,2rem);margin:0; }
   .spotlight-heading > a { font-size:.875rem;gap:10px;flex-shrink:0; }
-  .spotlight-workbench { overflow:hidden;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:var(--shadow-soft); }
+  .spotlight-workbench { overflow:hidden;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--surface); }
   .workbench-bar { display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line); }
   .workbench-project { display:inline-flex;align-items:center;gap:8px;font-size:.75rem;white-space:nowrap; }
   .workbench-project > span { color:var(--muted); }
@@ -50,7 +52,7 @@ bindUrlChoice(".spotlight-choices", "preview", ["rule", "source", "history"]);
   .product-spotlight:has(input[value="rule"]:checked) :is([data-preview-image="rule"],[data-preview-panel="rule"]),
   .product-spotlight:has(input[value="source"]:checked) :is([data-preview-image="source"],[data-preview-panel="source"]),
   .product-spotlight:has(input[value="history"]:checked) :is([data-preview-image="history"],[data-preview-panel="history"]) { display:block; }
-  .spotlight-explanations .field-marker { font-size:.625rem;margin-bottom:6px; }
+  .spotlight-explanations .field-marker { font-size:.75rem;margin-bottom:6px; }
   .spotlight-explanations h3 { font-size:1.125rem;line-height:1.4;letter-spacing:-.02em;margin-bottom:8px; }
   .spotlight-explanations section > p:not(.field-marker) { font-size:.875rem;line-height:1.7; }
   .spotlight-explanations .preview-note { color:var(--muted);font-size:.75rem!important;margin-top:8px; }

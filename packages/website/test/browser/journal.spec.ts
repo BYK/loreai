@@ -337,7 +337,7 @@ for (const path of [
   "/blog/",
   "/blog/the-agentic-memory-trap/",
 ]) {
-  test(`shared journal design stays readable with local artwork: ${path}`, async ({
+  test(`shared design stays contained and intentional artwork loads: ${path}`, async ({
     page,
   }) => {
     const failed: string[] = [];
@@ -348,7 +348,9 @@ for (const path of [
     await page.goto(path);
     if (path === "/") await openInventory(page);
     const art = page.locator("img.journal-art:visible");
-    expect(await art.count()).toBeGreaterThan(0);
+    if (["/tour/", "/docs/install/"].includes(path))
+      await expect(art).toHaveCount(0);
+    else expect(await art.count()).toBeGreaterThan(0);
     for (const image of await art.all()) {
       await image.scrollIntoViewIfNeeded();
       await expect

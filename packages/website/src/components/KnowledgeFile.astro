@@ -1,13 +1,15 @@
 ---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
 import JournalArt from "./JournalArt.astro";
 import { JOURNAL_ENTRIES } from "../lib/quest-journal";
 const rule = JOURNAL_ENTRIES[0];
 const markdown = `## Decisions\n\n* **${rule.title}**: ${rule.rule}`;
 ---
 <aside class="hero-proof knowledge-file" aria-label="Example project knowledge">
-  <div class="hero-proof-title"><div><p class="field-marker">Example project knowledge</p><strong>.lore.md</strong></div><JournalArt name="decision" size={56} eager /></div>
-  <fieldset class="guide-segments"><legend class="visually-hidden">View the example knowledge file</legend><label><input type="radio" name="file-format" value="rule" checked /><span>Readable rule</span></label><label><input type="radio" name="file-format" value="markdown" /><span>Markdown</span></label></fieldset>
-  <div class="file-reading" data-file-panel="rule"><p class="field-marker">Decision / Webhook service</p><h2>{rule.title}</h2><p><mark>Check the event ID before applying a webhook.</mark> Reuse the existing duplicate-event guard so repeated deliveries never apply the same change twice.</p></div>
+  <div class="hero-proof-title"><div><p class="field-marker">Example project knowledge</p><strong>.lore.md</strong></div><JournalArt name="decision" size={40} eager /></div>
+  <ChoiceGroup class="guide-segments" legend="View the example knowledge file" hideLegend><ChoiceItem name="file-format" value="rule" checked label="Readable rule" /><ChoiceItem name="file-format" value="markdown" label="Markdown" /></ChoiceGroup>
+  <div class="file-reading" data-file-panel="rule"><p class="field-marker">Decision / Webhook service</p><h2>{rule.title}</h2><p><mark>Check the event ID before applying a webhook.</mark> Reuse the duplicate-event guard.</p></div>
   <div class="file-reading" data-file-panel="markdown"><pre><code>{markdown}</code></pre></div>
   <p class="file-source">Example source · {rule.session}</p><a class="text-link" href="#journal" aria-label="Explore the quest journal">Follow this decision <span aria-hidden="true">↓</span></a>
 </aside>
