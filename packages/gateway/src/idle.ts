@@ -82,9 +82,8 @@ import {
   shouldWarm,
   isWarmingEnabled,
   executeWarmup,
-  loadGlobalHistograms,
   flushGlobalHistograms,
-  MIN_TURNS_FOR_WARMING,
+  expireWarmingObservations,
   MIN_INPUT_TOKENS_FOR_WARMING,
 } from "./cache-warmer";
 import * as Sentry from "@sentry/bun";
@@ -787,6 +786,8 @@ export function startIdleScheduler(
       maybeFetchQuota(sessionID, cred);
     }
 
+    expireWarmingObservations(now, sessions, isExternallyActive);
+
     evictIdleSessions(
       config,
       sessions,
@@ -812,7 +813,7 @@ export function startIdleScheduler(
 
     for (const [sessionID, state] of sessions) {
       if (!warmingGloballyEnabled) break;
-      if (state.amnesia) continue;
+      if (state.amnesia || isExternallyActive?.(sessionID)) continue;
       if (warmupInProgress.has(sessionID) || isWarmupInProgress(sessionID)) {
         continue;
       }
@@ -823,18 +824,9 @@ export function startIdleScheduler(
       // Skip sub-agent sessions — ephemeral, warming is wasted work
       if (state.isSubagent) continue;
 
-      // Skip sessions with too few turns — insufficient data for survival
-      // model and not worth the warmup cost ($0.30 per wasted warmup at
-      // 200K Opus tokens). Checked here to avoid expensive profile/histogram
-      // work before shouldWarm() rejects them anyway.
-      if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) continue;
-
       // Skip sessions with small context — absolute savings per hit
       // don't justify the risk of wasted warmups.
       if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) continue;
-
-      // Ensure global histograms are loaded from SQLite for this project
-      loadGlobalHistograms(state.projectPath);
 
       // Shared seam with the dashboard snapshot (computeWarmingSnapshot) so the
       // upstream routing + size-aware warmup margin never diverge. See
@@ -846,9 +838,16 @@ export function startIdleScheduler(
       // sessions/models keep warming. Auto-decays after CIRCUIT_BREAKER_DECAY_MS.
       if (isCircuitBreakerTripped(warmupBucketKey(state), now)) continue;
 
-      const blendedHist = blendedHistogramForSession(state);
-      if (!shouldWarm(state, profile, blendedHist, now, warmingGloballyEnabled))
+      try {
+        const blendedHist = blendedHistogramForSession(state);
+        if (
+          !shouldWarm(state, profile, blendedHist, now, warmingGloballyEnabled)
+        )
+          continue;
+      } catch (error) {
+        log.warn("cache-warmer: failed to evaluate session:", error);
         continue;
+      }
 
       if (!beginWarmup(sessionID)) continue;
       warmupInProgress.add(sessionID);

@@ -22,9 +22,10 @@ import { decodeRequestBody, HttpRequestBodyTooLargeError } from "./http-body";
 import { errorResponse, jsonResponse } from "./management-access";
 import {
   computeWarmingSnapshot,
-  createHistogram,
+  globalHistogramForWarmingSnapshot,
   getCircuitBreakerSummary,
   getGlobalHistogramsSnapshot,
+  getSegmentedWarmingHistogramsSnapshot,
   getWarmingEnabledOverride,
   isWarmingEnabled,
   HISTOGRAM_BINS,
@@ -155,7 +156,7 @@ type DashboardRow = {
 };
 
 function dashboardRows(
-  histogramSnapshot = getGlobalHistogramsSnapshot(),
+  histogramSnapshot = getSegmentedWarmingHistogramsSnapshot(),
 ): DashboardRow[] {
   const projects = data.listProjects();
   const projectByPath = new Map(
@@ -185,20 +186,13 @@ function dashboardRows(
     ReturnType<typeof computeWarmingSnapshot>
   >();
   for (const [id, state] of liveSessions) {
-    const project = projectForPath(state.projectPath);
-    const canonicalPid = project
-      ? canonicalProjectId(project.id, { committed: true })
-      : undefined;
-    const globalHistogram = canonicalPid
-      ? histogramSnapshot.get(canonicalPid)
-      : undefined;
     snapshots.set(
       id,
       computeWarmingSnapshot(
         state,
         now,
         warmingEnabled,
-        globalHistogram ?? createHistogram(),
+        globalHistogramForWarmingSnapshot(state, histogramSnapshot),
       ),
     );
   }
@@ -266,7 +260,7 @@ function dashboardRows(
 /** `GET /api/v1/warming` — global state, live session decisions and histograms. */
 export function handleGetWarming(configuredHostedMode = false): Response {
   const histogramSnapshot = getGlobalHistogramsSnapshot();
-  const rows = dashboardRows(histogramSnapshot);
+  const rows = dashboardRows();
   const activeRows = rows.filter((row) => row.warming !== null);
   const totalWarmups = activeRows.reduce(
     (sum, row) => sum + (row.warming?.total_warmups ?? 0),

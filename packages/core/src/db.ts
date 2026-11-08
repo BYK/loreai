@@ -2611,6 +2611,19 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- Existing root rows are unclassified, not evidence of an adapter lookup.
   ALTER TABLE session_state ADD COLUMN parent_session_primary INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 109: keep unresolved reply gaps across gateway restarts.
+  CREATE TABLE IF NOT EXISTS warmup_pending_observations (
+    session_id TEXT PRIMARY KEY REFERENCES session_state(session_id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    segment TEXT NOT NULL,
+    replied_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_warmup_pending_replied_at
+    ON warmup_pending_observations(replied_at);
+  CREATE INDEX IF NOT EXISTS idx_warmup_pending_project
+    ON warmup_pending_observations(project_id);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -5552,6 +5565,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "temporal_vec",
   "tool_calls",
   "warmup_histograms",
+  "warmup_pending_observations",
 ] as const);
 
 const SQLITE_MAX_INTEGER = "9223372036854775807";
@@ -5911,6 +5925,9 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     }
     d.query(
       "UPDATE warmup_histograms SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE warmup_pending_observations SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
     d.query(
       "UPDATE dedup_feedback SET project_id = ? WHERE project_id = ?",

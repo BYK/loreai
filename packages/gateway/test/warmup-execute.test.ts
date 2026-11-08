@@ -57,7 +57,6 @@ function makeState(): SessionState {
     projectPath: "/tmp/test-project",
     fingerprint: "abc123",
     lastRequestTime: Date.now() - 270_000,
-    lastUserTurnTime: Date.now() - 270_000,
     messageCount: 20,
     turnsSinceCuration: 2,
     consecutiveTextOnlyTurns: 0,

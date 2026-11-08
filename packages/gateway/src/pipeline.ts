@@ -442,9 +442,9 @@ import {
   type CacheBustCause,
 } from "./cache-analytics";
 import {
-  recordGap,
-  getSessionHistogram,
-  recordGlobalGap,
+  beginWarmingTurn,
+  finishWarmingTurn,
+  discardPendingWarmingObservation,
   resolveProfile as resolveWarmingProfile,
   clearWarmupAuthDisabled,
   creditWarmupHit,
@@ -6662,7 +6662,6 @@ function getOrCreateSession(
       ...(persisted
         ? { lastAcceptedProvenanceLayer: acceptedProvenanceLayer }
         : {}),
-      lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
       consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
@@ -17823,10 +17822,6 @@ function postResponseForTenant(
       sessionState.cacheAnalytics.lastRequestBody = null;
     }
 
-    // Capture previous stop reason before it's overwritten below (line ~1667).
-    // Used to detect tool-use continuation turns for gap recording filtering.
-    const prevStopReason = sessionState.lastStopReason;
-
     // --- Temporal storage & session-state updates ---
     // Use the original user result snapshot captured before gradient. No
     // historical conversion or tool resolution is needed after the response.
@@ -17884,28 +17879,11 @@ function postResponseForTenant(
             );
     }
 
-    // --- Cache warming: record inter-turn gap + track warmup hits ---
+    // --- Cache warming: track warmup hits ---
     const now = Date.now();
-
     sessionState.lastResponseTime = now;
 
-    // (A) Record inter-turn gap — only for genuine user-initiated turns.
-    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
-    // sub-second gaps that represent automated round-trips, not human think
-    // time. Recording these would skew the survival model toward very short
-    // return times.
-    const isToolUseContinuation = prevStopReason === "tool_use";
-    if (!isToolUseContinuation) {
-      if (sessionState.lastUserTurnTime > 0) {
-        const gap = now - sessionState.lastUserTurnTime;
-        recordGap(getSessionHistogram(sessionState), gap);
-        recordGlobalGap(sessionState.projectPath, gap);
-      }
-      // Update baseline for next gap measurement — only after recording.
-      sessionState.lastUserTurnTime = now;
-    }
-
-    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
+    // Track warmup hits and TTL savings — valid for ALL turn types.
     // A user returning after a warmup is a hit regardless of whether it's
     // a tool-use continuation.
     // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
@@ -17967,9 +17945,8 @@ function postResponseForTenant(
         }
       }
     }
-    // Reset the survival-model dead flag if the user returns. A separate
-    // userStopped flag survives this reset when Stop was explicitly selected.
-    // warmupCount is reset so the break-even cap starts from 0 on the next break.
+    // Clear legacy survival-model pauses. Explicit stops use userStopped.
+    // Reset the per-break count for the forced and tool-wait budgets.
     if (sessionState.warmup) {
       if (sessionState.warmup.disabled) {
         sessionState.warmup.disabled = false;
@@ -20828,10 +20805,12 @@ async function handleProvisionalConversationTurn(
   config: GatewayConfig,
   identified: IdentifiedSession,
   pathResult: ProjectPathResult,
+  requestStartedAt: number,
   requestOrder: number,
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
+  downstreamCompletedAt: () => number | undefined,
 ): Promise<Response> {
   if (requestSourcePrefix(req)) {
     throw new SourceDeltaUnavailableError(
@@ -20842,6 +20821,7 @@ async function handleProvisionalConversationTurn(
   // provisional identity is confirmed by a complete response and client EOF.
   const requestUpstream = prepareRequestUpstream(req, config);
   const abortScope = createForegroundAbortScope(req.signal);
+  const cacheRequestedAt = Date.now();
   let forwarded: UpstreamResult;
   try {
     forwarded = await forwardToUpstream(
@@ -20984,7 +20964,7 @@ async function handleProvisionalConversationTurn(
   );
   copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
 
-  const commit = async (): Promise<boolean> => {
+  const commit = async (repliedAt: number): Promise<boolean> => {
     if (
       requestGeneration !== streamingPostResponseGeneration ||
       req.signal?.aborted ||
@@ -21186,6 +21166,24 @@ async function handleProvisionalConversationTurn(
       state.fingerprint = identified.adoptionFingerprint;
     }
     if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
+    beginWarmingTurn(
+      state,
+      req.messages,
+      requestOrder,
+      requestStartedAt,
+      noStore,
+    );
+    if (state.warmingTurn?.order === requestOrder) {
+      state.lastResponseTime = repliedAt;
+      finishWarmingTurn(
+        state,
+        requestOrder,
+        cacheRequestedAt,
+        repliedAt,
+        accumulated.stopReason,
+        noStore,
+      );
+    }
     state.messageCount = requestSourceMessageCount(req);
     state._dirty = true;
     if (credential) {
@@ -21212,7 +21210,8 @@ async function handleProvisionalConversationTurn(
         await pause.pause;
       }
       if (requestGeneration !== streamingPostResponseGeneration) return;
-      if (downstreamWasCancelled()) {
+      const repliedAt = downstreamCompletedAt();
+      if (downstreamWasCancelled() || repliedAt === undefined) {
         accountUnsuccessfulResponse(
           accumulated,
           identified.sessionID,
@@ -21235,7 +21234,7 @@ async function handleProvisionalConversationTurn(
         );
         return;
       }
-      if (!(await commit())) return;
+      if (!(await commit(repliedAt))) return;
       accountConversationUsage(
         accumulated.usage ?? ZERO_USAGE,
         accumulated.model,
@@ -21538,11 +21537,12 @@ export function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
 async function handleConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestStartedAt: number,
   requestOrder: number,
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
-  downstreamCompleted: () => boolean,
+  downstreamCompletedAt: () => number | undefined,
   claimSession: (sessionID: string) => Promise<void>,
   onSessionIdentified?: (sessionID: string) => void,
 ): Promise<Response> {
@@ -21590,11 +21590,12 @@ async function handleConversationTurn(
     const response = await handleConversationTurnPrepared(
       { ...req, signal: preparation.signal },
       config,
+      requestStartedAt,
       requestOrder,
       requestGeneration,
       downstreamSettled,
       downstreamWasCancelled,
-      downstreamCompleted,
+      downstreamCompletedAt,
       claimSession,
       foregroundAbort,
       preparation,
@@ -21688,11 +21689,12 @@ async function handleConversationTurn(
 async function handleConversationTurnPrepared(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestStartedAt: number,
   requestOrder: number,
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
-  downstreamCompleted: () => boolean,
+  downstreamCompletedAt: () => number | undefined,
   claimSession: (sessionID: string) => Promise<void>,
   foregroundAbort: ReturnType<typeof createForegroundAbortScope>,
   preparation: ReturnType<typeof createMemoryPreparationScope>,
@@ -21789,10 +21791,12 @@ async function handleConversationTurnPrepared(
       config,
       identified,
       pathResult,
+      requestStartedAt,
       requestOrder,
       requestGeneration,
       downstreamSettled,
       downstreamWasCancelled,
+      downstreamCompletedAt,
     );
   }
   rollback.release = await acquireMemoryPreparation(
@@ -22063,6 +22067,15 @@ async function handleConversationTurnPrepared(
       }
     }
   }
+
+  beginWarmingTurn(
+    sessionState,
+    req.messages,
+    requestOrder,
+    requestStartedAt,
+    suppressTemporalStorage,
+    req.sourceInput?.sourcePrefix?.messageCount,
+  );
 
   // Harness-provided session title (x-lore-session-title): adapters send the
   // harness's own session name percent-encoded; persist it as the session's
@@ -24083,6 +24096,7 @@ async function handleConversationTurnPrepared(
   // Another turn may start after headers arrive, before this body finalizes.
   const knowledgeOnWire = acceptedKnowledgeCandidate(sessionID, projectPath);
 
+  const cacheRequestedAt = Date.now();
   let upstreamResult: UpstreamResult;
   try {
     preparationTiming.upstreamStart();
@@ -24317,6 +24331,14 @@ async function handleConversationTurnPrepared(
         if (persisted) {
           persistAcceptedProvenanceLayer();
           commitAcceptedProvenanceLayer();
+          finishWarmingTurn(
+            sessionState,
+            requestOrder,
+            cacheRequestedAt,
+            Date.now(),
+            response.stopReason,
+            suppressTemporalStorage,
+          );
         }
       }
     };
@@ -24826,7 +24848,8 @@ async function handleConversationTurnPrepared(
           dropStreamingFinalizer();
           return;
         }
-        if (downstreamWasCancelled() || !downstreamCompleted()) {
+        const repliedAt = downstreamCompletedAt();
+        if (downstreamWasCancelled() || repliedAt === undefined) {
           rollbackRecallPersistence();
           accountUnsuccessfulResponse(
             resp,
@@ -24873,6 +24896,14 @@ async function handleConversationTurnPrepared(
             // Record the in-memory accepted pin only once the writes commit.
             commitAcceptedProvenanceLayer();
             recallPersistenceTransaction = undefined;
+            finishWarmingTurn(
+              sessionState,
+              requestOrder,
+              cacheRequestedAt,
+              repliedAt,
+              resp.stopReason,
+              suppressTemporalStorage,
+            );
           } catch (error) {
             rollbackRecallPersistence();
             if (error !== postResponseFailed) throw error;
@@ -26164,6 +26195,7 @@ function handleAmnesiaSlashCommand(
 
   state.amnesia = isOn;
   saveSessionTracking(state.sessionID, { amnesia: isOn });
+  if (isOn) discardPendingWarmingObservation(state);
   log.info(
     `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
       `storage ${isOn ? "suppressed" : "resumed"}`,
@@ -26530,7 +26562,7 @@ async function handleRequestForTenant(
   streamingPostResponsesAccepting = true;
   let resolveDownstreamSettled: (() => void) | undefined;
   let downstreamCancelled = false;
-  let downstreamCompleted = false;
+  let downstreamCompletedAt: number | undefined;
   const downstreamSettled = new Promise<void>((resolve) => {
     resolveDownstreamSettled = resolve;
   });
@@ -26546,7 +26578,7 @@ async function handleRequestForTenant(
           requestGeneration,
           downstreamSettled,
           () => downstreamCancelled,
-          () => downstreamCompleted,
+          () => downstreamCompletedAt,
           trackOperation,
           claimSession,
         ),
@@ -26555,7 +26587,7 @@ async function handleRequestForTenant(
         downstreamCancelled = true;
       },
       () => {
-        downstreamCompleted = true;
+        downstreamCompletedAt = Date.now();
       },
       requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
     );
@@ -26563,7 +26595,7 @@ async function handleRequestForTenant(
       response,
       quotaLifecycle,
       downstreamSettled,
-      () => downstreamCompleted && !downstreamCancelled,
+      () => downstreamCompletedAt !== undefined && !downstreamCancelled,
     );
     return response;
   } catch (error) {
@@ -26578,7 +26610,7 @@ async function handleRequestInner(
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
-  downstreamCompleted: () => boolean,
+  downstreamCompletedAt: () => number | undefined,
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
@@ -26741,11 +26773,12 @@ async function handleRequestInner(
     return await handleConversationTurn(
       req,
       config,
+      requestStartMs,
       requestOrder,
       requestGeneration,
       downstreamSettled,
       downstreamWasCancelled,
-      downstreamCompleted,
+      downstreamCompletedAt,
       claimSession,
     );
   } catch (err) {

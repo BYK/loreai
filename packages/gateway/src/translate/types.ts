@@ -631,6 +631,9 @@ export function requestTargetsOpenRouter(
   }
 }
 
+export type WarmingSegment =
+  `return:${"human" | "system"}:${"1" | "2-3" | "4+"}`;
+
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
 export type SessionState = {
   sessionID: string;
@@ -669,10 +672,6 @@ export type SessionState = {
   /** Unix timestamp (ms) of the request before the current one — used by budget
    *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
   prevRequestTime?: number;
-  /** Unix timestamp (ms) of the last user-initiated turn — excludes tool-use
-   *  auto-continuations. Used exclusively for inter-turn gap histogram
-   *  recording (survival analysis). */
-  lastUserTurnTime: number;
   /** Last harness-provided title written to session_state.title; dedupes the
    *  DB write so a resend of the same title costs nothing per turn. */
   harnessTitle?: string;
@@ -772,8 +771,17 @@ export type SessionState = {
 
   /** Cache warming state for speculative keep-alive pings. */
   warmup?: WarmupState;
-  /** Per-session survival model (inter-turn gap histogram). */
-  survivalModel?: InterTurnHistogram;
+  /** Origin and human conversation depth of the latest request chain. */
+  warmingTurn?: {
+    order: number;
+    depth: number;
+    segment: WarmingSegment;
+    lastHumanIndex?: number;
+    noStore?: boolean;
+    accepted?: { requestedAt: number; repliedAt: number };
+  };
+  /** Observed reply gaps, isolated by the preceding turn's segment. */
+  warmingHistograms?: Map<WarmingSegment, InterTurnHistogram>;
   /** Routing snapshot from the most recent session request start.
    *  Used by cache warmer (targets the most-recent provider) and as
    *  a convenience accessor. For provider-specific lookups (workers,
@@ -860,7 +868,11 @@ export type WarmupState = {
   totalWarmups: number;
   /** Warmups followed by a user return within TTL (confirmed saves). */
   warmupHits: number;
-  /** Session marked as dead — survival dropped below threshold. Resets on real request. */
+  /** Optional counters separating idle-return forecasts from tool probe evidence. */
+  automaticWarmups?: number;
+  automaticWarmupHits?: number;
+  lastWarmupWasAutomatic?: boolean;
+  /** Legacy survival pause, cleared after an accepted turn. */
   disabled: boolean;
   /** Operator selected Stop; unlike `disabled`, this survives a user return. */
   userStopped?: boolean;

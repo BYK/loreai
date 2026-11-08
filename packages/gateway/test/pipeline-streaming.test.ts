@@ -2741,6 +2741,65 @@ describe("Pipeline — streaming responses", () => {
   afterEach(() => vi.mocked(getDegradationWarning).mockReset());
   afterEach(() => vi.mocked(Sentry.startInactiveSpan).mockReset());
 
+  it("settles a streamed reply gap on request arrival even when the next upstream turn fails", async () => {
+    const sessionHeaders = {
+      "x-lore-session-id": "warming-observes-arrival",
+      "x-lore-project": "/tmp/lore-warming-stream-arrival",
+    };
+    const first = makeResponsesRequest({ sessionHeaders });
+    const clock = vi.spyOn(Date, "now");
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("warming_idle_first", "Done"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    try {
+      const response = await handleRequest(first, loadLocalConfig());
+      expect(response.status).toBe(200);
+      await response.text();
+      const state = [...getActiveSessions().values()].find(
+        (item) => item.projectPath === sessionHeaders["x-lore-project"],
+      );
+      expect(state).toBeDefined();
+      if (!state) throw new Error("session was not created");
+      const pending = () =>
+        db()
+          .query(
+            "SELECT replied_at FROM warmup_pending_observations WHERE session_id = ?",
+          )
+          .get(state.sessionID);
+      await vi.waitFor(() => expect(pending()).not.toBeNull());
+
+      const replyTime = pending()?.replied_at;
+      if (typeof replyTime !== "number") throw new Error("missing reply time");
+      clock.mockReturnValue(replyTime + 60_000);
+      setUpstreamInterceptor(
+        async () => new Response("unavailable", { status: 502 }),
+      );
+      const second = makeResponsesRequest({
+        sessionHeaders,
+        messages: [
+          ...first.messages,
+          { role: "assistant", content: [{ type: "text", text: "Done" }] },
+          { role: "user", content: [{ type: "text", text: "next" }] },
+        ],
+      });
+      const failed = await handleRequest(second, loadLocalConfig());
+      expect(failed.status).toBe(502);
+      await failed.text();
+      expect(pending()).toBeNull();
+      const hist = state.warmingHistograms?.get("return:human:1");
+      expect(hist?.total).toBe(1);
+      expect(hist?.counts[5]).toBe(1);
+      expect(state.warmingTurn?.accepted).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("bounds a stalled stable-memory selection before upstream with one preparation deadline", async () => {
     const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
     process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
