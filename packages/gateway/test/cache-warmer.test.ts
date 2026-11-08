@@ -272,6 +272,35 @@ describe("conditionalReturnProbability", () => {
 // ---------------------------------------------------------------------------
 
 describe("blendHistograms", () => {
+  test("weights session and project shares independently of project size", () => {
+    const session = createHistogram();
+    for (let i = 0; i < 19; i++) recordGap(session, Infinity);
+    const smallProject = createHistogram();
+    recordGap(smallProject, 360_000);
+    const largeProject = createHistogram();
+    for (let i = 0; i < 2000; i++) recordGap(largeProject, 360_000);
+    for (const project of [smallProject, largeProject]) {
+      const blended = blendHistograms(session, project);
+      expect(
+        conditionalReturnProbability(blended, 240_000, 300_000, 60_000),
+      ).toBeCloseTo(0.05);
+    }
+  });
+
+  test("a window crossing the observation horizon cannot turn a no-reply into a return", () => {
+    const histogram = createHistogram();
+    recordGap(histogram, Infinity);
+    const horizon = HISTOGRAM_BINS[HISTOGRAM_BINS.length - 1];
+    expect(
+      conditionalReturnProbability(
+        histogram,
+        horizon - 60_000,
+        300_000,
+        30_000,
+      ),
+    ).toBe(0);
+  });
+
   test("empty session uses global entirely", () => {
     const session = createHistogram();
     const global = createHistogram();
@@ -1227,6 +1256,47 @@ describe("shouldWarm", () => {
     );
   });
 
+  test.each([false, true])(
+    "skips a cold cache after missing the first window (forced: %s)",
+    (forced) => {
+      const now = Date.now();
+      const state = makeSessionState({
+        lastRequestTime: now - 570_000,
+        lastStopReason: "tool_use",
+        cacheAnalytics: {
+          ...makeCacheAnalytics(),
+          lastRequestBody: compressBody('{"messages":[]}'),
+        },
+      });
+      if (forced) applyWarmingMode(state, "keep");
+      const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+      expect(shouldWarm(state, profile, createHistogram(), now, true)).toBe(
+        false,
+      );
+      expect(computeWarmingSnapshot(state, now, true).notWarmingReason).toBe(
+        "Cache already expired",
+      );
+    },
+  );
+
+  test("large uncached input cannot substitute for a large cached prefix", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      lastInputTokens: 100_000,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"messages":[]}'),
+        lastCacheRead: 2_000,
+        turnCount: 1,
+      },
+    });
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const histogram = createHistogram();
+    recordGap(histogram, 360_000);
+    expect(shouldWarm(state, profile, histogram, now, true)).toBe(false);
+  });
+
   test("returns false when cache is still fresh", () => {
     const state = makeSessionState({
       lastRequestTime: Date.now() - 60_000, // 1 min ago — cache still fresh
@@ -1611,7 +1681,7 @@ describe("shouldWarm", () => {
     const state = makeSessionState({
       lastRequestTime: now - 870_000, // 14.5 min ago — well past first 5m TTL
       warmup: {
-        lastWarmupAt: now - 310_000, // last warmup 5m10s ago — previous window
+        lastWarmupAt: now - 270_000, // the preceding refresh still has 30s left
         warmupCount: 2,
         totalWarmups: 2,
         warmupHits: 0,
@@ -1626,8 +1696,7 @@ describe("shouldWarm", () => {
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     const hist = createHistogram();
 
-    // 870s elapsed, ttl=300s → window index 2, into_window = 870%300 = 270s
-    // warmup margin = 45s → threshold = 255s → 270 > 255 → should warm
+    // A late cycle still warms when the last actual refresh is live.
     expect(shouldWarm(state, profile, hist, now)).toBe(true);
   });
 
@@ -1932,6 +2001,17 @@ describe("resolveProfile — Anthropic first-party host gate (cross-provider 401
     // against api.anthropic.com with whatever credential the session holds.
     const profile = resolveProfile("MiniMax-M3", "anthropic", "5m");
     expect(profile).toBeNull();
+  });
+
+  test("a proxied Anthropic route warms at the five-minute TTL sent upstream", () => {
+    const profile = resolveProfile(
+      "claude-sonnet-4-20250514",
+      "anthropic",
+      "1h",
+      "https://proxy.example.test",
+      "anthropic",
+    );
+    expect(profile?.ttlMs).toBe(300_000);
   });
 
   test("SKIPS non-anthropic protocols", () => {

@@ -445,7 +445,7 @@ import {
   beginWarmingTurn,
   finishWarmingTurn,
   discardPendingWarmingObservation,
-  resolveProfile as resolveWarmingProfile,
+  resolveProfileForSession,
   clearWarmupAuthDisabled,
   creditWarmupHit,
   resetCircuitBreaker,
@@ -17898,8 +17898,11 @@ function postResponseForTenant(
       // session paid for the warmup), and returns the pro-rata savings
       // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
       if (sessionState.warmup?.lastWarmupAt) {
-        const ttlMs =
-          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+        const ttl =
+          sessionState.warmup.lastWarmupTTL ??
+          sessionState.resolvedConversationTTL ??
+          "5m";
+        const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
         const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
         const outcome = creditWarmupHit(
           sessionState.warmup,
@@ -17911,18 +17914,13 @@ function postResponseForTenant(
           warmupHitThisTurn = true;
           emitWarmupHitMetric(
             sessionState.lastUpstream?.model ?? req.model,
-            sessionState.resolvedConversationTTL ?? "5m",
+            ttl,
           );
           // Record counterfactual savings = the pro-rata credit
           // min(returning-turn cache read, prefix the warmup refreshed) —
           // without warming these reads would have been a full cache write.
           if (outcome.creditedTokens > 0) {
-            recordWarmupHit(
-              sessionID,
-              req.model,
-              outcome.creditedTokens,
-              sessionState.resolvedConversationTTL ?? "5m",
-            );
+            recordWarmupHit(sessionID, req.model, outcome.creditedTokens, ttl);
           }
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
@@ -21174,6 +21172,15 @@ async function handleProvisionalConversationTurn(
       noStore,
     );
     if (state.warmingTurn?.order === requestOrder) {
+      // This passthrough never records the dispatched body. Do not attach its
+      // new cache clock to a replay body or refresh from the preceding turn.
+      state.cacheAnalytics.lastRequestBody = null;
+      if (state.warmup) {
+        state.warmup.lastWarmupAt = 0;
+        state.warmup.lastWarmupRefreshTokens = 0;
+        delete state.warmup.lastWarmupWasAutomatic;
+        delete state.warmup.lastWarmupTTL;
+      }
       state.lastResponseTime = repliedAt;
       finishWarmingTurn(
         state,
@@ -21268,22 +21275,11 @@ function isCacheWarm(state: SessionState): boolean {
   // This also gates the forceKeepWarm early-return below.
   if (!warmup?.lastWarmupAt) return false;
 
-  const profile = resolveWarmingProfile(
-    state.lastUpstream?.model,
-    state.lastUpstream?.protocol,
-    state.resolvedConversationTTL,
-  );
+  const profile = resolveProfileForSession(state);
   if (!profile) return false;
 
-  // /lore:warm:keep sessions: consider warm if the last warmup was within
-  // 2 TTL windows. The warmer fires once per TTL window, so 2× provides a
-  // safety margin while still expiring if the warmer has stopped
-  // (e.g. circuit breaker tripped, process-level failure).
-  if (warmup.forceKeepWarm) {
-    return Date.now() - warmup.lastWarmupAt < profile.ttlMs * 2;
-  }
-
-  return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
+  const ttlMs = warmup.lastWarmupTTL === "5m" ? 300_000 : profile.ttlMs;
+  return Date.now() - warmup.lastWarmupAt < ttlMs;
 }
 
 /**

@@ -23,6 +23,10 @@ vi.mock("../src/fetch", () => ({
 
 import {
   executeWarmup,
+  beginWarmingTurn,
+  finishWarmingTurn,
+  isWarmupAuthDisabled,
+  clearWarmupAuthDisabled,
   buildAnthropicProfile,
   isCircuitBreakerTripped,
   warmupBucketKey,
@@ -91,6 +95,7 @@ let originalFetch: typeof globalThis.fetch;
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   _resetAuthForTest();
+  clearWarmupAuthDisabled(SESSION_ID);
   clearAllCosts();
   setSessionAuth(SESSION_ID, { scheme: "bearer", value: "test-token" });
 });
@@ -101,6 +106,93 @@ afterEach(() => {
 });
 
 describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
+  test.each([200, 401])(
+    "a late warmup (%s) cannot modify the next turn or its credential",
+    async (status) => {
+      const state = makeState();
+      const original = state.lastRequestTime;
+      beginWarmingTurn(state, [], 1, original, false);
+      finishWarmingTurn(state, 1, original, original + 1, "end_turn", false);
+      let complete: (response: Response) => void = () => {};
+      const fetchMock = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            complete = resolve;
+          }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const warmup = executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+      expect(fetchMock).toHaveBeenCalledOnce();
+
+      const current = Date.now();
+      beginWarmingTurn(state, [], 2, current, false);
+      state.lastRequestTime = current;
+      finishWarmingTurn(state, 2, current, current + 1, "end_turn", false);
+      setSessionAuth(SESSION_ID, { scheme: "bearer", value: "fresh-token" });
+
+      complete(
+        new Response(
+          JSON.stringify({ usage: { cache_read_input_tokens: 100_000 } }),
+          { status },
+        ),
+      );
+      await warmup;
+      expect(state.warmup).toBeUndefined();
+      expect(isWarmupAuthDisabled(SESSION_ID)).toBe(false);
+    },
+  );
+
+  test("manual thinking is skipped before dispatch", async () => {
+    const fetchMock = fetchReturningUsage({ cache_read_input_tokens: 100_000 });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const state = makeState();
+    state.cacheAnalytics.lastRequestBody = compressBody(
+      JSON.stringify({
+        thinking: { type: "enabled", budget_tokens: 10_000 },
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    );
+    expect(
+      (await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"))).ok,
+    ).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("an under-sized read stops warming the current reply", async () => {
+    const fetchMock = fetchReturningUsage({ cache_read_input_tokens: 2_000 });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const state = makeState();
+    const requestedAt = state.lastRequestTime;
+    beginWarmingTurn(state, [], 1, requestedAt, false);
+    finishWarmingTurn(
+      state,
+      1,
+      requestedAt,
+      requestedAt + 1,
+      "end_turn",
+      false,
+    );
+
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(state.warmingTurn?.warmupMissed).toBe(true);
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  test("a slow successful warmup measures expiry from dispatch", async () => {
+    const state = makeState();
+    state.resolvedConversationTTL = "1h";
+    const sentAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(sentAt);
+    globalThis.fetch = vi.fn(async () => {
+      clock.mockReturnValue(sentAt + 60_000);
+      return Response.json({ usage: { cache_read_input_tokens: 100_000 } });
+    }) as unknown as typeof fetch;
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(state.warmup?.lastWarmupAt).toBe(sentAt);
+    expect(state.warmup?.lastWarmupTTL).toBe("5m");
+  });
+
   test("a full refresh persists the warmup's cache_read tokens", async () => {
     globalThis.fetch = fetchReturningUsage({
       input_tokens: 5,

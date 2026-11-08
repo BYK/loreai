@@ -779,6 +779,7 @@ export type SessionState = {
     lastHumanIndex?: number;
     noStore?: boolean;
     accepted?: { requestedAt: number; repliedAt: number };
+    warmupMissed?: boolean;
   };
   /** Observed reply gaps, isolated by the preceding turn's segment. */
   warmingHistograms?: Map<WarmingSegment, InterTurnHistogram>;
@@ -862,6 +863,8 @@ export type InterTurnHistogram = {
 export type WarmupState = {
   /** Timestamp (ms) of the last warmup ping sent. Cleared when consumed (user returns). */
   lastWarmupAt: number;
+  /** Actual TTL of the paid refresh, which may differ from the requested TTL. */
+  lastWarmupTTL?: "5m" | "1h";
   /** Warmup pings sent in the CURRENT break period (reset on user return). Used for break-even cap. */
   warmupCount: number;
   /** Lifetime total warmup pings sent across all break periods in this session. */

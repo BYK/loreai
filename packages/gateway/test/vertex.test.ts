@@ -413,7 +413,7 @@ describe("resolveProfile — vertex warming", () => {
     );
     expect(flat?.warmupMarginMs).toBe(45_000);
     expect(scaled?.warmupMarginMs).toBeCloseTo(89_497.89, 2);
-    // 1h vertex stays flat regardless of prefix size.
+    // Foreground Vertex requests always send five-minute cache breakpoints.
     const oneHour = resolveProfile(
       "claude-opus-4-8",
       "vertex",
@@ -422,7 +422,8 @@ describe("resolveProfile — vertex warming", () => {
       "google-vertex",
       1_000_000,
     );
-    expect(oneHour?.warmupMarginMs).toBe(300_000);
+    expect(oneHour?.ttlMs).toBe(300_000);
+    expect(oneHour?.warmupMarginMs).toBe(135_000);
   });
 });
 

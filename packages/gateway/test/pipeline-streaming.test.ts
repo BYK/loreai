@@ -7482,6 +7482,8 @@ describe("Pipeline — streaming responses", () => {
         )!;
         expect(state.projectPath).toBe(projectA);
         expect(state.projectPathProvisional).toBe(true);
+        const originalReplayBody = state.cacheAnalytics.lastRequestBody;
+        expect(originalReplayBody).not.toBeNull();
         expect(JSON.stringify([...state.recallStore.values()])).toContain(
           secret,
         );
@@ -7554,6 +7556,9 @@ describe("Pipeline — streaming responses", () => {
         expect(state.projectPath).toBe(rolledBack ? projectA : projectB);
         expect(loadSessionTracking(state.sessionID)?.projectPath).toBe(
           rolledBack ? projectA : projectB,
+        );
+        expect(state.cacheAnalytics.lastRequestBody).toBe(
+          rolledBack ? originalReplayBody : null,
         );
         if (rolledBack) expect(state.recallStore.size).toBe(1);
         expect(getActiveSessions().get(state.sessionID)).toBe(state);

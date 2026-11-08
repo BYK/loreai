@@ -657,6 +657,9 @@ export function survivalFunction(
   if (histogram.total === 0) return 1.0;
 
   const idx = binIndex(tMs);
+  // The overflow bin includes censored no-replies. It contributes no return
+  // probability in any finite window, including one crossing the last edge.
+  if (idx === BIN_COUNT - 1) return histogram.counts[idx] / histogram.total;
   // Sum counts in bins > idx (gaps strictly larger than tMs)
   let surviving = 0;
   for (let i = idx + 1; i < BIN_COUNT; i++) {
@@ -665,12 +668,9 @@ export function survivalFunction(
   // Include a fraction of the current bin proportionally
   // (linear interpolation within the bin)
   const binStart = idx > 0 ? HISTOGRAM_BINS[idx - 1] : 0;
-  const binEnd = idx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[idx] : Infinity;
-  const binWidth = binEnd - binStart;
-  if (binWidth > 0 && Number.isFinite(binWidth)) {
-    const fractionPast = Math.min(1, Math.max(0, (tMs - binStart) / binWidth));
-    surviving += histogram.counts[idx] * (1 - fractionPast);
-  }
+  const binWidth = HISTOGRAM_BINS[idx] - binStart;
+  const fractionPast = Math.min(1, Math.max(0, (tMs - binStart) / binWidth));
+  surviving += histogram.counts[idx] * (1 - fractionPast);
 
   return surviving / histogram.total;
 }
@@ -716,23 +716,24 @@ function sessionHistogramForWarming(state: SessionState): InterTurnHistogram {
  * When the session has few observations, lean on the global prior.
  * As the session accumulates data, its own distribution dominates.
  *
- * effective_count[i] = session_weight × session[i] + global_weight × global[i]
- * where session_weight = min(session.total / PSEUDOCOUNT, 1.0)
+ * Blend normalized shares so the absolute size of the project history
+ * cannot silently override the session weight.
  */
 export function blendHistograms(
   session: InterTurnHistogram,
   global: InterTurnHistogram,
 ): InterTurnHistogram {
-  const sessionWeight = Math.min(session.total / BLEND_PSEUDOCOUNT, 1.0);
-  const globalWeight = 1.0 - sessionWeight;
-
-  const blended = createHistogram();
-  for (let i = 0; i < BIN_COUNT; i++) {
-    blended.counts[i] =
-      sessionWeight * session.counts[i] + globalWeight * global.counts[i];
-  }
-  blended.total = sessionWeight * session.total + globalWeight * global.total;
-  return blended;
+  if (session.total === 0) return global;
+  if (global.total === 0) return session;
+  const weight = Math.min(session.total / BLEND_PSEUDOCOUNT, 1);
+  return {
+    counts: session.counts.map(
+      (count, i) =>
+        (weight * count) / session.total +
+        ((1 - weight) * global.counts[i]) / global.total,
+    ),
+    total: 1,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -765,7 +766,7 @@ export function blendedHistogramForSession(
 ): InterTurnHistogram {
   const session = sessionHistogramForWarming(state);
   const global = globalHistogramForWarmingSnapshot(state);
-  return global.total > 0 ? blendHistograms(session, global) : session;
+  return blendHistograms(session, global);
 }
 
 /** The last finite histogram boundary. A non-return goes in the overflow
@@ -1306,9 +1307,8 @@ export function buildAnthropicProfile(
  * stored `upstreamUrl` is the region base — executeWarmup rebuilds the
  * per-model `:rawPredict` URL and attaches the OAuth2 bearer.
  */
-export function buildVertexProfile(
+function buildVertexProfile(
   model: string,
-  ttl: "5m" | "1h",
   upstreamBase: string,
   prefixTokens = 0,
 ): CacheWarmingProfile {
@@ -1316,7 +1316,7 @@ export function buildVertexProfile(
   // Vertex Claude uses Anthropic prompt caching, so it is exposed to the same
   // large-prefix TTL-race partial — thread prefixTokens so the 5m margin scales
   // (computeWarmupMargin), matching the first-party/proxied/bedrock paths.
-  const base = buildAnthropicProfile(model, ttl, undefined, prefixTokens);
+  const base = buildAnthropicProfile(model, "5m", undefined, prefixTokens);
   return {
     ...base,
     upstreamUrl: `https://${vertexHost(region)}`,
@@ -1384,7 +1384,7 @@ export function resolveProfile(
     const vRoute = resolveUpstreamRoute(model);
     const vHost = upstreamBase || vRoute?.url;
     if (!vHost || !isVertexHost(vHost)) return null;
-    return buildVertexProfile(model, ttl ?? "5m", vHost, prefixTokens);
+    return buildVertexProfile(model, vHost, prefixTokens);
   }
 
   // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
@@ -1425,7 +1425,7 @@ export function resolveProfile(
   if (isBedrockMantle) {
     return buildAnthropicProfile(
       model,
-      ttl ?? "5m",
+      "5m",
       upstreamBase,
       prefixTokens,
       providerID,
@@ -1439,7 +1439,7 @@ export function resolveProfile(
 
   return buildAnthropicProfile(
     model,
-    ttl ?? "5m",
+    warmupHost === "https://api.anthropic.com" ? (ttl ?? "5m") : "5m",
     upstreamBase,
     prefixTokens,
     providerID,
@@ -1487,6 +1487,23 @@ function toolWarmupHistory(warmup: WarmupState | undefined): {
   const total = (warmup?.totalWarmups ?? 0) - (warmup?.automaticWarmups ?? 0);
   const hits = (warmup?.warmupHits ?? 0) - (warmup?.automaticWarmupHits ?? 0);
   return { total, hits, hitRate: total > 0 ? hits / total : 0 };
+}
+
+// A request sent right at the expiry can arrive upstream as a cold write.
+const WARMUP_DISPATCH_HEADROOM_MS = 10_000;
+
+function lastWarmingCacheTouch(state: SessionState): number {
+  return Math.max(
+    state.warmingTurn?.accepted?.requestedAt ?? state.lastRequestTime,
+    state.warmup?.lastWarmupAt ?? 0,
+  );
+}
+
+function warmingPrefixTokens(state: SessionState): number {
+  const analytics = state.cacheAnalytics;
+  return analytics.turnCount > 0
+    ? analytics.lastCacheRead + analytics.lastCacheCreation
+    : (state.lastInputTokens ?? 0);
 }
 
 /**
@@ -1569,26 +1586,22 @@ export function shouldWarm(
     return false;
   }
 
-  const elapsed = now - state.lastRequestTime;
+  const elapsed =
+    now - (state.warmingTurn?.accepted?.requestedAt ?? state.lastRequestTime);
   const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } =
     profile;
   const forced = state.warmup?.forceKeepWarm === true;
   const toolCallActive = state.lastStopReason === "tool_use";
+  const cacheAgeMs = now - lastWarmingCacheTouch(state);
+  if (cacheAgeMs >= ttlMs - WARMUP_DISPATCH_HEADROOM_MS) return false;
+  const inWarmupMargin = cacheAgeMs >= ttlMs - warmupMarginMs;
 
-  // Already warmed recently — prevent double-warming.
-  // Cooldown = ttlMs - warmupMarginMs so the next warmup fires while the
-  // previous cache is still alive. Using the full ttlMs as cooldown causes
-  // each continuation warmup to arrive right as the cache expires, turning
-  // every warmup into a cold write (~$1.25 for Opus 200K) instead of a
-  // cheap refresh (~$0.10). This was the dominant cost driver: 65 warmups
-  // at cold-write pricing = ~$65 vs ~$6.50 with correct timing.
-  const cooldownMs = Math.max(ttlMs - warmupMarginMs, 0);
+  // A failed or interrupted request cannot refresh the previous cached body.
   if (
-    state.warmup?.lastWarmupAt &&
-    now - state.warmup.lastWarmupAt < cooldownMs
-  ) {
+    state.warmingTurn &&
+    (!state.warmingTurn.accepted || state.warmingTurn.warmupMissed)
+  )
     return false;
-  }
 
   if (forced) {
     // /lore:warm:keep mode: skip survival/signal analysis but still respect
@@ -1601,15 +1614,11 @@ export function shouldWarm(
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     if (cyclesSpent >= maxCycles) return false;
 
-    // Check we're in the warmup margin of *some* TTL window.
-    const intoWindow = elapsed % ttlMs;
-    if (intoWindow < ttlMs - warmupMarginMs) return false;
-    return true;
+    return inWarmupMargin;
   }
 
-  // A failed or interrupted request cannot refresh the previous cached body.
-  if (state.warmingTurn && !state.warmingTurn.accepted) return false;
   if (state.warmup?.disabled) return false;
+  if (warmingPrefixTokens(state) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
 
   // --- Tool-call fast path ---
   // When lastStopReason is "tool_use", the agent is executing a tool and
@@ -1658,28 +1667,15 @@ export function shouldWarm(
     // Still require some history to have a stored body worth warming
     if (state.messageCount < MIN_TURNS_FOR_TOOL_WARMING * 2) return false;
 
-    // Context too small — absolute savings per hit don't justify risk
-    if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING)
-      return false;
-
-    // Only warm in the margin window of the current TTL cycle
-    const intoWindow = elapsed % ttlMs;
-    if (intoWindow < ttlMs - warmupMarginMs) return false;
-
-    return true;
+    return inWarmupMargin;
   }
 
-  if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
-
-  // User-wait warming only refreshes a live cache. If a poll misses the
-  // window, the next request would pay write pricing, not read pricing.
-  const { cacheAgeMs, pReturn, threshold } = automaticWarmingInputs(
+  const { pReturn, threshold } = automaticWarmingInputs(
     state,
     profile,
     blendedHist,
     now,
   );
-  if (cacheAgeMs >= ttlMs) return false;
 
   // Price exactly one refresh. Past warmups are sunk and future refreshes
   // will each be evaluated again if the user is still idle.
@@ -1710,7 +1706,6 @@ export function shouldWarm(
     now,
     { updateState: !readOnly },
   );
-  const inWarmupMargin = cacheAgeMs >= ttlMs - warmupMarginMs;
   if (decisionDetails) {
     decisionDetails.strategy = strategy?.strategy ?? null;
     decisionDetails.confident = strategy?.confident === true;
@@ -1739,11 +1734,7 @@ function automaticWarmingInputs(
   now: number,
 ): { cacheAgeMs: number; pReturn: number; threshold: number } {
   const { ttlMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
-  const lastRefresh = Math.max(
-    state.warmingTurn?.accepted?.requestedAt ?? state.lastRequestTime,
-    state.warmup?.lastWarmupAt ?? 0,
-  );
-  const cacheAgeMs = now - lastRefresh;
+  const cacheAgeMs = now - lastWarmingCacheTouch(state);
   const idleMs = Math.max(
     0,
     now -
@@ -1829,10 +1820,7 @@ export function computeWarmingSnapshot(
   const sessionHist = sessionHistogramForWarming(state);
   const globalHist =
     suppliedGlobalHistogram ?? globalHistogramForWarmingSnapshot(state);
-  const blendedHist =
-    globalHist.total > 0
-      ? blendHistograms(sessionHist, globalHist)
-      : sessionHist;
+  const blendedHist = blendHistograms(sessionHist, globalHist);
   const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
   const survivalAtIdle = survivalFunction(
     blendedHist,
@@ -1864,7 +1852,7 @@ export function computeWarmingSnapshot(
     state.lastStopReason === "tool_use" &&
     state.messageCount < MIN_TURNS_FOR_TOOL_WARMING * 2;
   const contextTooSmall =
-    (state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING;
+    warmingPrefixTokens(state) < MIN_INPUT_TOKENS_FOR_WARMING;
   const warmNow =
     idleSkipReason === null &&
     !contextTooSmall &&
@@ -1905,8 +1893,16 @@ export function computeWarmingSnapshot(
     } else if (tooFewToolTurns) {
       notWarmingReason = "Too few messages for tool-wait warming";
     } else if (contextTooSmall) {
-      const tokK = Math.floor((state.lastInputTokens ?? 0) / 1000);
+      const tokK = Math.floor(warmingPrefixTokens(state) / 1000);
       notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
+    } else if (cacheAgeMs >= ttlMs) {
+      notWarmingReason = "Cache already expired";
+    } else if (cacheAgeMs >= ttlMs - WARMUP_DISPATCH_HEADROOM_MS) {
+      notWarmingReason = "Cache too close to expiry";
+    } else if (state.warmingTurn && !state.warmingTurn.accepted) {
+      notWarmingReason = "Latest request has no completed response";
+    } else if (state.warmingTurn?.warmupMissed) {
+      notWarmingReason = "Last warmup missed the cache";
     } else if (state.warmup?.forceKeepWarm) {
       const maxCyc = maxProfitableCycles(
         profile.cacheReadCostPerMTok,
@@ -1915,8 +1911,7 @@ export function computeWarmingSnapshot(
       if (cyclesSpent >= maxCyc) {
         notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
       } else {
-        const intoWindow = idleMs % ttlMs;
-        if (intoWindow < ttlMs - warmupMarginMs) {
+        if (cacheAgeMs < ttlMs - warmupMarginMs) {
           notWarmingReason = "Force-keep: not in warmup window yet";
         } else {
           notWarmingReason = "Force-keep: cooldown active";
@@ -1924,8 +1919,6 @@ export function computeWarmingSnapshot(
       }
     } else if (state.warmup?.disabled) {
       notWarmingReason = "Session paused by survival analysis";
-    } else if (state.warmingTurn && !state.warmingTurn.accepted) {
-      notWarmingReason = "Latest request has no completed response";
     } else if (state.lastStopReason === "tool_use") {
       const { total, hits, hitRate } = toolWarmupHistory(state.warmup);
       if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
@@ -1950,21 +1943,12 @@ export function computeWarmingSnapshot(
         if ((state.warmup?.warmupCount ?? 0) >= effectiveMax) {
           notWarmingReason = `Tool call: cycle cap reached (${state.warmup?.warmupCount ?? 0} >= ${effectiveMax})`;
         } else {
-          const intoWindow = idleMs % ttlMs;
           notWarmingReason =
-            intoWindow < ttlMs - warmupMarginMs
+            cacheAgeMs < ttlMs - warmupMarginMs
               ? "Tool call: not in warmup window yet"
               : "Tool call: cooldown active";
         }
       }
-    } else if (
-      state.warmup?.lastWarmupAt &&
-      now - state.warmup.lastWarmupAt <
-        cooldownFor(state, ttlMs, warmupMarginMs)
-    ) {
-      notWarmingReason = "Already warmed in this TTL window";
-    } else if (cacheAgeMs >= ttlMs) {
-      notWarmingReason = "Cache already expired";
     } else if (cacheAgeMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
     } else if (pReturn <= threshold) {
@@ -1991,7 +1975,11 @@ export function computeWarmingSnapshot(
     messageCount: state.messageCount,
     idleMs,
     consecutiveTextOnlyTurns: state.consecutiveTextOnlyTurns ?? 0,
-    ttl: state.resolvedConversationTTL,
+    ttl: profile
+      ? ttlMs === 3_600_000
+        ? "1h"
+        : "5m"
+      : state.resolvedConversationTTL,
     warmupCount: cyclesSpent,
     totalWarmups: state.warmup?.totalWarmups ?? 0,
     warmupHits: state.warmup?.warmupHits ?? 0,
@@ -2019,15 +2007,6 @@ export function computeWarmingSnapshot(
     notWarmingReason,
     circuitBreaker,
   };
-}
-
-/** Cooldown between warmups — must match shouldWarm() logic. */
-function cooldownFor(
-  _state: SessionState,
-  ttlMs: number,
-  warmupMarginMs: number,
-): number {
-  return Math.max(ttlMs - warmupMarginMs, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2090,23 +2069,31 @@ export async function executeWarmup(
   const { lastRequestBody } = state.cacheAnalytics;
   if (!lastRequestBody) return noResult;
 
-  // Circuit-breaker bucket + cache-liveness, captured BEFORE the warmup state
-  // mutation below overwrites lastWarmupAt. cacheRead=0 only indicates a
-  // body/prefix mismatch when the cached entry should still be alive; if the
-  // last cache write (real turn or prior warmup) is older than the breakpoint
-  // TTL, the entry expired and a fresh write is the warmer re-priming a cold
-  // cache — expected, not a fault. checkCircuitBreaker ignores those.
   const breakerBucket = warmupBucketKey(state);
   const turn = state.warmingTurn;
+  const cachedPrefixTokens = warmingPrefixTokens(state);
+  if (cachedPrefixTokens < MIN_INPUT_TOKENS_FOR_WARMING) return noResult;
+  const lastRequestTime = state.lastRequestTime;
+  const upstream = state.lastUpstream;
+  const resolvedTTL = state.resolvedConversationTTL;
+  const credential = resolveAuth(state.sessionID, upstream?.providerID);
   const auto =
     !state.warmup?.forceKeepWarm && state.lastStopReason !== "tool_use";
-  const lastCacheTouch = Math.max(
-    turn?.accepted?.requestedAt ?? state.lastRequestTime,
-    state.warmup?.lastWarmupAt ?? 0,
-  );
+  const lastCacheTouch = lastWarmingCacheTouch(state);
+  const isCurrent = () =>
+    state.warmingTurn === turn &&
+    state.lastRequestTime === lastRequestTime &&
+    state.lastUpstream === upstream &&
+    state.resolvedConversationTTL === resolvedTTL &&
+    state.cacheAnalytics.lastRequestBody === lastRequestBody &&
+    !state.amnesia &&
+    !state.warmup?.userStopped;
 
   // Decompress the stored body
   const storedBody = decompressBody(lastRequestBody);
+  // A one-token replay is invalid for manual extended thinking, and allowing
+  // the original thinking budget could cost far more than a cache read.
+  if (JSON.parse(storedBody).thinking?.type === "enabled") return noResult;
 
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
@@ -2124,7 +2111,7 @@ export async function executeWarmup(
   let signedBody: string;
 
   if (profile.authMode === "vertex") {
-    const model = state.lastUpstream?.model;
+    const model = upstream?.model;
     if (!model) return noResult;
     const region = vertexRegionFromUrl(profile.upstreamUrl) ?? "global";
     try {
@@ -2138,7 +2125,8 @@ export async function executeWarmup(
         log.warn(
           `cache-warmer: no GCP project for vertex session=${state.sessionID.slice(0, 16)}, skipping`,
         );
-        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+        if (isCurrent())
+          recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
         return noResult;
       }
       const token = await getVertexAccessToken();
@@ -2155,7 +2143,8 @@ export async function executeWarmup(
       log.warn(
         `cache-warmer: vertex auth failed for session=${state.sessionID.slice(0, 16)}`,
       );
-      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      if (isCurrent())
+        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
       return noResult;
     }
     // No cch re-sign for Vertex (no billing header) — send the warmup as-is.
@@ -2163,20 +2152,20 @@ export async function executeWarmup(
   } else {
     // Resolve auth for this session — use the provider from lastUpstream
     // to avoid cross-contamination when the session uses multiple providers.
-    const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
-    if (!cred) {
+    if (!credential) {
       log.warn(
         `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
       );
-      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      if (isCurrent())
+        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
       return noResult;
     }
     headers["anthropic-version"] = "2023-06-01";
-    Object.assign(headers, authHeaders(cred));
+    Object.assign(headers, authHeaders(credential));
 
     // Forward anthropic-beta from the last real request so beta-gated body
     // fields (e.g. context_management) are accepted by the upstream API.
-    const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
+    const betaHeader = upstream?.headers["anthropic-beta"];
     if (betaHeader) {
       headers["anthropic-beta"] = betaHeader;
     }
@@ -2197,14 +2186,19 @@ export async function executeWarmup(
     extraHeadersForUpstream(config, requestUrl),
   );
 
-  const cacheLikelyAlive =
-    lastCacheTouch > 0 && Date.now() - lastCacheTouch < profile.ttlMs;
-  if (auto && turn && (!cacheLikelyAlive || state.warmingTurn !== turn))
+  const sentAt = Date.now();
+  if (
+    !isCurrent() ||
+    (turn && (!turn.accepted || turn.warmupMissed)) ||
+    !isWarmingEnabled() ||
+    isCircuitBreakerTripped(breakerBucket, sentAt) ||
+    sentAt - lastCacheTouch >= profile.ttlMs - WARMUP_DISPATCH_HEADROOM_MS
+  )
     return noResult;
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +
-      `model=${state.lastUpstream?.model} ttl=${profile.ttlMs / 1000}s`,
+      `model=${upstream?.model} ttl=${profile.ttlMs / 1000}s`,
   );
 
   try {
@@ -2221,9 +2215,13 @@ export async function executeWarmup(
       );
       // On auth error, disable future warmups for this session until
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
-      if (response.status === 401 || response.status === 403) {
+      if (
+        (response.status === 401 || response.status === 403) &&
+        isCurrent() &&
+        resolveAuth(state.sessionID, upstream?.providerID) === credential
+      ) {
         disableWarmupForAuth(state.sessionID);
-        markAuthStale(state.sessionID, state.lastUpstream?.providerID);
+        markAuthStale(state.sessionID, upstream?.providerID);
         recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
           `cache-warmer: auth error ${response.status} — disabling warmup for ` +
@@ -2309,7 +2307,7 @@ export async function executeWarmup(
     //
     // Wrapped in try/catch: this is a diagnostic and must never break the warmup
     // path (a throw here would run before cost/circuit-breaker accounting below).
-    if (isWarmupProbeEnabled()) {
+    if (isCurrent() && isWarmupProbeEnabled()) {
       try {
         const ca = state.cacheAnalytics;
         const dg = cacheSegmentDigest(warmupBody);
@@ -2320,7 +2318,7 @@ export async function executeWarmup(
             hasBaseline: ca.probeHeadSha != null,
             headMatch: dg.headSha === ca.probeHeadSha,
             cacheReadTokens,
-            cacheLikelyAlive,
+            cacheLikelyAlive: true,
           });
           log.info(
             `warmup-probe: WARMUP session=${sid} ` +
@@ -2342,56 +2340,15 @@ export async function executeWarmup(
         `cache-warmer: ✓ refresh session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
       );
-    } else if (cacheReadTokens > 0 && cacheCreationTokens > 0) {
-      // Partial — read the stable prefix but rewrote the rest. On an idle replay
-      // of the stored body this should NOT happen: a healthy warmup is 100%
-      // read. A partial while the cache should still be alive is a body-divergence
-      // DEFECT (here, almost always the distilled prefix churning) — NOT "fine".
-      // checkCircuitBreaker (below) treats it as a failure when cacheLikelyAlive.
-      const ageSec =
-        lastCacheTouch > 0
-          ? Math.round((Date.now() - lastCacheTouch) / 1000)
-          : -1;
-      const logFn = cacheLikelyAlive ? log.warn : log.info;
-      logFn(
-        `cache-warmer: ~ partial session=${sid} ` +
+    } else {
+      const outcome = cacheReadTokens > 0 ? "partial" : "UNCACHED";
+      const ageSec = Math.round((sentAt - lastCacheTouch) / 1000);
+      log.warn(
+        `cache-warmer: ${outcome} session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
           `hit=${hitRate} breakpoints=${breakpoints} cost=${costStr} ` +
-          `cacheLikelyAlive=${cacheLikelyAlive} ageSinceCacheTouch=${ageSec}s` +
-          (cacheLikelyAlive
-            ? " — DIVERGENCE: cache should have been live but warmup only partially " +
-              "matched (warmup body ≠ cached prefix; usually distilled-prefix churn)"
-            : " — partial expired-cache re-prime (some breakpoints aged out)"),
-      );
-    } else {
-      // cacheRead=0: the warmup wrote a fresh cache instead of refreshing an
-      // existing one. `cacheLikelyAlive` (captured before the lastWarmupAt
-      // mutation above) is the diagnostic discriminator:
-      //   - false → the cached prefix had simply expired; this is a benign cold
-      //             re-prime (and is excluded from the circuit breaker).
-      //   - true  → the cache SHOULD still have been live, so the warmup body
-      //             diverged from what the real turn cached. THIS is the genuine
-      //             "divergence" signal worth investigating (issue: warmup body
-      //             ≠ cached prefix). If this never fires in practice, every
-      //             UNCACHED warmup is pure expiry and there is no body bug.
-      const ageSec =
-        lastCacheTouch > 0
-          ? Math.round((Date.now() - lastCacheTouch) / 1000)
-          : -1;
-      log.warn(
-        `cache-warmer: ✗ UNCACHED session=${sid} ` +
-          `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-          `cost=${costStr} cacheLikelyAlive=${cacheLikelyAlive} ` +
           `ageSinceCacheTouch=${ageSec}s ttl=${Math.round(profile.ttlMs / 1000)}s ` +
-          // Buffer.byteLength gives the UTF-8 byte size actually sent over the
-          // wire; signedBody.length would count UTF-16 code units and underreport
-          // for multi-byte content (prose/code-heavy bodies — exactly the ones
-          // this diagnostic targets).
-          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")} breakpoints=${breakpoints}` +
-          (cacheLikelyAlive
-            ? " — DIVERGENCE: cache should have been live but warmup missed " +
-              "(warmup body ≠ cached prefix)"
-            : " — expired-cache re-prime (expected)"),
+          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")}`,
       );
     }
 
@@ -2399,21 +2356,27 @@ export async function executeWarmup(
     const ttl: "5m" | "1h" = profile.ttlMs >= 3_600_000 ? "1h" : "5m";
     recordWarmupCost(
       state.sessionID,
-      state.lastUpstream?.model ?? "unknown",
+      upstream?.model ?? "unknown",
       cacheReadTokens,
       cacheCreationTokens,
       ttl,
       resolveCostAttribution({
         sessionID: state.sessionID,
-        providerID: state.lastUpstream?.providerID,
-        upstreamURL: state.lastUpstream?.url,
-        credential: resolveAuth(
-          state.sessionID,
-          state.lastUpstream?.providerID,
-        ),
+        providerID: upstream?.providerID,
+        upstreamURL: upstream?.url,
+        credential,
         requestHeaders: headers,
       }),
     );
+
+    // A previous wait can finish while a newer turn is already in flight.
+    // Keep its cost, but never publish refresh or auth state into that turn.
+    if (!isCurrent()) return result;
+    if (
+      turn &&
+      (cacheReadTokens < cachedPrefixTokens * 0.9 || cacheCreationTokens > 0)
+    )
+      turn.warmupMissed = true;
 
     // Update session warmup state
     if (!state.warmup) {
@@ -2425,7 +2388,8 @@ export async function executeWarmup(
         disabled: false,
       };
     }
-    state.warmup.lastWarmupAt = Date.now();
+    state.warmup.lastWarmupAt = cacheReadTokens > 0 ? sentAt : 0;
+    state.warmup.lastWarmupTTL = ttl;
     state.warmup.warmupCount++;
     state.warmup.totalWarmups = (state.warmup.totalWarmups ?? 0) + 1;
     state.warmup.lastWarmupWasAutomatic = auto;
@@ -2446,7 +2410,7 @@ export async function executeWarmup(
     // partial OR uncached write while the cache should have been alive is a
     // divergence DEFECT (all-or-nothing): it trips the breaker after
     // CIRCUIT_BREAKER_MAX_FAILURES, and only a clean 100% refresh clears it.
-    checkCircuitBreaker(result, breakerBucket, cacheLikelyAlive);
+    checkCircuitBreaker(result, breakerBucket, true);
 
     // Clear worker-health failure state on successful warmup.
     recordWorkerSuccess(state.sessionID, "cache-warmer");
@@ -2536,6 +2500,7 @@ export function creditWarmupHit(
   warmup.lastWarmupAt = 0;
   warmup.lastWarmupRefreshTokens = 0;
   delete warmup.lastWarmupWasAutomatic;
+  delete warmup.lastWarmupTTL;
 
   // Stale/inherited lastWarmupAt without proof of payment: scrubbed above,
   // record NO hit (prevents phantom savings).
