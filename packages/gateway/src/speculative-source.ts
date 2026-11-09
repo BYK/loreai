@@ -5,6 +5,7 @@ import {
   db,
   projectId,
   type LoreMessageWithParts,
+  type EncodingName,
 } from "@loreai/core";
 import { deterministicID, visibleContentForMessage } from "./temporal-adapter";
 import type { GatewayMessage } from "./translate/types";
@@ -18,6 +19,7 @@ export type SpeculativeSource = {
   projectPath: string;
   projectID: string;
   protocol: string;
+  encoding?: EncodingName;
   sourceCount: number;
   sourceDigest: string;
   /** Checkpoint state when this raw snapshot was produced. */
@@ -64,6 +66,7 @@ export function findSpeculativeSource(input: {
   sessionID: string;
   projectPath: string;
   protocol: string;
+  encoding?: EncodingName;
   messages: GatewayMessage[];
 }): SpeculativeSource | undefined {
   const entry = speculative.get(key(input.sessionID));
@@ -75,6 +78,7 @@ export function findSpeculativeSource(input: {
   if (
     entry.projectPath !== input.projectPath ||
     entry.protocol !== input.protocol ||
+    entry.encoding !== input.encoding ||
     entry.sourceCount > input.messages.length
   )
     return;

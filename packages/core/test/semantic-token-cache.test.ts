@@ -246,6 +246,28 @@ describe("exact visible-content counts", () => {
     expect(next.visibleStats.hits).toBe(3);
   });
 
+  it("keeps hidden counts separate across encodings and reopen", () => {
+    const visible = JSON.stringify([{ type: "text", text: "Summary" }]);
+    const provenance = JSON.stringify([
+      { type: "text", text: "機械学習と自然言語処理".repeat(50) },
+    ]);
+    const cache = new SemanticTokenCache(scope);
+    const defaultCount = cache.count(visible, provenance);
+    const o200kCount = cache.count(visible, provenance, "o200k_base");
+    expect(o200kCount).not.toBe(defaultCount);
+    expect(o200kCount).toBe(
+      tokenize.estimateTokens(provenance, { encoding: "o200k_base" }) -
+        tokenize.estimateTokens(visible, { encoding: "o200k_base" }),
+    );
+    cache.persist();
+    close();
+
+    const reopened = new SemanticTokenCache(scope);
+    expect(reopened.count(visible, provenance, "o200k_base")).toBe(o200kCount);
+    expect(reopened.count(visible, provenance)).toBe(defaultCount);
+    expect(reopened.stats.hits).toBe(2);
+  });
+
   it("keys the entire original string, including tails and lone surrogates", () => {
     const cache = new SemanticTokenCache(scope);
     const values = [

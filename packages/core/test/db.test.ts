@@ -4557,6 +4557,7 @@ describe("db", () => {
       amnesia: true,
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
+      lastKnownInputModelReceipt: "test-provider/test-model",
       lastAcceptedProvenanceLayer: 1,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
       parentSessionId: "parent-session",
@@ -4582,6 +4583,7 @@ describe("db", () => {
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
+    expect(loaded?.lastKnownInputModelReceipt).toBe("test-provider/test-model");
     expect(loaded?.lastAcceptedProvenanceLayer).toBe(1);
     expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
     expect(loaded?.parentSessionId).toBe("parent-session");
