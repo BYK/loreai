@@ -78,6 +78,7 @@ import {
   endWarmup,
   clearWarmupAuthDisabled,
   resolveProfileForSession,
+  invalidateOpenAIWarmup,
   blendedHistogramForSession,
   shouldWarm,
   isWarmingEnabled,
@@ -353,8 +354,14 @@ export function invalidateWarmupBodyAfterIdleDistill(
   layer: number,
 ): boolean {
   const stale =
-    prefixMutated && layer >= 1 && state.cacheAnalytics.lastRequestBody != null;
-  if (stale) state.cacheAnalytics.lastRequestBody = null;
+    prefixMutated &&
+    layer >= 1 &&
+    (state.cacheAnalytics.lastRequestBody != null ||
+      state.warmingTurn?.openAIReplay != null);
+  if (stale) {
+    state.cacheAnalytics.lastRequestBody = null;
+    invalidateOpenAIWarmup(state);
+  }
   return stale;
 }
 
@@ -1031,6 +1038,7 @@ export function evictIdleSessions(
     // old state reference. Recall and prompt state remain persisted for resume.
     state.cacheAnalytics.lastRequestBody = null;
     state.cacheAnalytics.lastNormalizedBody = null;
+    if (state.warmingTurn) delete state.warmingTurn.openAIReplay;
     state.cacheAnalytics.lastRequestBodyLength = 0;
     state.lastUpstream = undefined;
     state.upstreamByProvider.clear();

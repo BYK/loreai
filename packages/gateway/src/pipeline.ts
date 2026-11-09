@@ -187,6 +187,7 @@ import type {
 } from "./translate/types";
 import {
   applyUpstreamExtraHeaders,
+  forwardClientHeaders,
   buildUpstreamSnapshotHeaders,
   blocksToText,
   isEmptyCompletion,
@@ -443,6 +444,9 @@ import {
 } from "./cache-analytics";
 import {
   beginWarmingTurn,
+  isWarmingEnabled,
+  MIN_INPUT_TOKENS_FOR_WARMING,
+  invalidateOpenAIWarmup,
   finishWarmingTurn,
   discardPendingWarmingObservation,
   resolveProfileForSession,
@@ -452,6 +456,14 @@ import {
   setWarmingEnabled,
   applyWarmingMode,
 } from "./cache-warmer";
+import {
+  OPENAI_CACHE_TTL_MS,
+  OPENAI_RESPONSES_URL,
+  openAIWarmupScope,
+  openAIWarmupHeadersAllowed,
+  prepareOpenAIWarmupReplay,
+  type OpenAIWarmupRoute,
+} from "./openai-cache-warming";
 import {
   setSentryRequestContext,
   setSentryCacheContext,
@@ -6555,7 +6567,10 @@ function captureRequestUpstream(
     requestOrder,
     config,
   );
-  if (resetCache) state.cacheAnalytics.lastRequestBody = null;
+  if (resetCache) {
+    state.cacheAnalytics.lastRequestBody = null;
+    invalidateOpenAIWarmup(state);
+  }
 
   if (changed) {
     saveSessionTracking(state.sessionID, {
@@ -8459,6 +8474,7 @@ type UpstreamResult = {
     | "gemini";
   /** Credential and trusted account identity for the request actually sent. */
   credential: AuthCredential | null;
+  openAIWarmupRoute?: OpenAIWarmupRoute;
   costAttribution?: CostAttribution;
   /** Settles after response EOF (direct Hono) or HTTP finish (Node bridge). */
   quotaCaptureCompletion?: Promise<boolean>;
@@ -9002,6 +9018,25 @@ async function forwardToUpstream(
     serializedBody,
     effectiveProtocol,
     credential: upstreamAuth,
+    openAIWarmupRoute:
+      effectiveProtocol === "openai-responses" &&
+      !req.codex &&
+      url === OPENAI_RESPONSES_URL &&
+      !response.redirected &&
+      (!response.url || response.url === OPENAI_RESPONSES_URL) &&
+      (quotaObservationTimes.has(response) ||
+        (response.body !== null &&
+          quotaObservationBodyTimes.has(response.body))) &&
+      openAIWarmupHeadersAllowed(extraHeadersForUpstream(config, url)) &&
+      isPlainRecord(body)
+        ? openAIWarmupScope(
+            headers,
+            req.model,
+            typeof body.prompt_cache_key === "string"
+              ? body.prompt_cache_key
+              : undefined,
+          )
+        : undefined,
     get costAttribution() {
       return responseCostAttribution;
     },
@@ -17531,7 +17566,9 @@ export function recordCacheTurnUsage(
       (message) => message.responsesSourceRange !== undefined,
     ) ||
     request?.tools.some((tool) => tool.responsesNative !== undefined) ||
-    request?.extras?.nativeInstructionPrefix?.itemPositions !== undefined;
+    request?.extras?.nativeInstructionPrefix?.itemPositions !== undefined ||
+    request?.extras?.prompt_cache_key !== undefined ||
+    request?.extras?.prompt_cache_options !== undefined;
   if (nativeRequest) {
     sessionState.cacheAnalytics.lastRequestBody = null;
     sessionState.cacheAnalytics.lastNormalizedBody = null;
@@ -17635,6 +17672,7 @@ type CostAttributionUpstream = {
   credential?: AuthCredential | null;
   /** Trusted attribution captured from the exact response to this turn. */
   attribution?: CostAttribution;
+  openAIWarmupReturn?: { scope: string; requestedAt: number };
   /** Response lifecycle that fences non-urgent curation against stale quota. */
   quotaCaptureCompletion?: Promise<boolean>;
   /**
@@ -17677,8 +17715,12 @@ function routeAttributionUpstream(
   route: ResolvedRequestUpstreamRoute,
   upstream?: Pick<
     UpstreamResult,
-    "credential" | "costAttribution" | "quotaCaptureCompletion"
+    | "credential"
+    | "costAttribution"
+    | "quotaCaptureCompletion"
+    | "openAIWarmupRoute"
   >,
+  openAIRequestedAt?: number,
 ): CostAttributionUpstream {
   return {
     providerID: route.providerID,
@@ -17688,6 +17730,13 @@ function routeAttributionUpstream(
       ? {
           credential: upstream.credential,
           attribution: upstream.costAttribution,
+          openAIWarmupReturn:
+            openAIRequestedAt !== undefined && upstream.openAIWarmupRoute
+              ? {
+                  scope: upstream.openAIWarmupRoute.scope,
+                  requestedAt: openAIRequestedAt,
+                }
+              : undefined,
           quotaCaptureCompletion: upstream.quotaCaptureCompletion,
         }
       : {}),
@@ -17902,13 +17951,30 @@ function postResponseForTenant(
           sessionState.warmup.lastWarmupTTL ??
           sessionState.resolvedConversationTTL ??
           "5m";
-        const ttlMs = ttl === "1h" ? 3_600_000 : 300_000;
-        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
+        const ttlMs =
+          ttl === "30m"
+            ? OPENAI_CACHE_TTL_MS
+            : ttl === "1h"
+              ? 3_600_000
+              : 300_000;
+        const openAIRefresh = sessionState.warmup.openAIRefresh;
+        const requestedAt = upstream?.openAIWarmupReturn?.requestedAt ?? 0;
+        const sinceWarmup =
+          (ttl === "30m" ? requestedAt : now) -
+          sessionState.warmup.lastWarmupAt;
+        const readTokens =
+          ttl !== "30m" ||
+          (openAIRefresh &&
+            openAIRefresh.scope === upstream?.openAIWarmupReturn?.scope &&
+            requestedAt >= openAIRefresh.previousExpiry &&
+            !suppressTemporalStorage)
+            ? (usage.cacheReadInputTokens ?? 0)
+            : 0;
         const outcome = creditWarmupHit(
           sessionState.warmup,
           sinceWarmup,
           ttlMs,
-          usage.cacheReadInputTokens ?? 0,
+          readTokens,
         );
         if (outcome.hit) {
           warmupHitThisTurn = true;
@@ -17920,7 +17986,13 @@ function postResponseForTenant(
           // min(returning-turn cache read, prefix the warmup refreshed) —
           // without warming these reads would have been a full cache write.
           if (outcome.creditedTokens > 0) {
-            recordWarmupHit(sessionID, req.model, outcome.creditedTokens, ttl);
+            recordWarmupHit(
+              sessionID,
+              req.model,
+              outcome.creditedTokens,
+              ttl,
+              openAIRefresh?.savingsPerMTok,
+            );
           }
           log.info(
             `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
@@ -18719,6 +18791,7 @@ async function handleCompactionInner(
   // Post-compaction the client sends an entirely different message set, so the
   // cached pre-compaction warmup body is stale regardless of how this resolves.
   sessionState.cacheAnalytics.lastRequestBody = null;
+  invalidateOpenAIWarmup(sessionState);
 
   // Kick off summary generation: at most one LLM call (urgent distillation
   // of the undistilled remainder, if any), then deterministic assembly from
@@ -19272,6 +19345,7 @@ async function handleCompactEndpointInner(
     const sessionState = sessions.get(sessionID);
     if (sessionState) {
       sessionState.cacheAnalytics.lastRequestBody = null;
+      invalidateOpenAIWarmup(sessionState);
     }
 
     return new Response(JSON.stringify({ summary }), {
@@ -19639,6 +19713,7 @@ async function handleResponsesCompactEndpointInner(
 
     if (summary != null) {
       state.cacheAnalytics.lastRequestBody = null;
+      invalidateOpenAIWarmup(state);
 
       // Return in Codex's expected format: { output: ResponseItem[] }
       // Must include id, status, and annotations to match the
@@ -19672,6 +19747,8 @@ async function handleResponsesCompactEndpointInner(
     );
   }
 
+  // Compaction can replace the history even if Lore defers to the provider.
+  invalidateOpenAIWarmup(state);
   // Fallback only to the destination previously authenticated by a normal turn.
   return await passthroughResponsesCompact(
     bodyText,
@@ -21180,6 +21257,7 @@ async function handleProvisionalConversationTurn(
         state.warmup.lastWarmupRefreshTokens = 0;
         delete state.warmup.lastWarmupWasAutomatic;
         delete state.warmup.lastWarmupTTL;
+        delete state.warmup.openAIRefresh;
       }
       state.lastResponseTime = repliedAt;
       finishWarmingTurn(
@@ -21269,11 +21347,45 @@ async function handleProvisionalConversationTurn(
  * the full (uncompacted) request body, so compacting now would produce
  * different bytes and bust the cache the warmer just paid to preserve.
  */
-function isCacheWarm(state: SessionState): boolean {
+function isCacheWarm(
+  state: SessionState,
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+  config: GatewayConfig,
+): boolean {
   const warmup = state.warmup;
-  // Require at least one successful warmup before claiming warm.
-  // This also gates the forceKeepWarm early-return below.
   if (!warmup?.lastWarmupAt) return false;
+
+  if (warmup.lastWarmupTTL === "30m") {
+    if (
+      !warmup.openAIRefresh ||
+      req.codex ||
+      route.effectiveProtocol !== "openai-responses" ||
+      Date.now() - warmup.lastWarmupAt >= OPENAI_CACHE_TTL_MS
+    )
+      return false;
+    const url = verbatimUpstreamUrl({
+      reconstructedUrl: buildOpenAIResponsesUrl(route.effectiveUpstreamBase),
+      effectiveUpstreamBase: route.effectiveUpstreamBase,
+      headerUpstream: route.headerUpstream,
+      upstreamPath: route.headerUpstreamPath,
+      effectiveProtocol: route.effectiveProtocol,
+      ingressProtocol: req.protocol,
+    });
+    if (url !== OPENAI_RESPONSES_URL) return false;
+    const extraHeaders = extraHeadersForUpstream(config, url);
+    if (!openAIWarmupHeadersAllowed(extraHeaders)) return false;
+    const headers = forwardClientHeaders(req.rawHeaders);
+    const credential = extractAuth(req.rawHeaders);
+    if (credential) headers.Authorization = `Bearer ${credential.value}`;
+    applyUpstreamExtraHeaders(headers, extraHeaders);
+    const scope = openAIWarmupScope(
+      headers,
+      req.model,
+      req.extras?.prompt_cache_key,
+    );
+    return scope?.scope === warmup.openAIRefresh.scope;
+  }
 
   const profile = resolveProfileForSession(state);
   if (!profile) return false;
@@ -22500,7 +22612,10 @@ async function handleConversationTurnPrepared(
   // with an expired cache must NOT skip compaction (the cache is cold, compaction
   // is free and beneficial). Falls back to isCacheWarm when non-confident.
   const econ = getCacheStrategy(sessionID);
-  const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
+  const cacheWarm = decideSkipCompact(
+    econ,
+    isCacheWarm(sessionState, req, requestUpstreamRoute, config),
+  );
   // `cacheWarm` also tells onIdleResume to PRESERVE the byte-identity caches
   // (distilled prefix + raw-window pin) so the warm prefix survives the resume.
   // A false-positive here (isCacheWarm true but the warmed bytes actually
@@ -24143,6 +24258,53 @@ async function handleConversationTurnPrepared(
   };
   const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
   const { pinResponseId } = upstreamResult;
+  let usedRecallContinuation = false;
+  const captureAcceptedOpenAIReplay = (resp: GatewayResponse): void => {
+    const turn = sessionState.warmingTurn;
+    const replayRoute = upstreamResult.openAIWarmupRoute;
+    if (
+      !replayRoute ||
+      !turn ||
+      turn.order !== requestOrder ||
+      sessionState._upstreamRequestOrder !== requestOrder ||
+      turn.noStore ||
+      suppressTemporalStorage ||
+      sessionState.amnesia ||
+      sessionState.isSubagent ||
+      sessionState.warmup?.userStopped ||
+      usedRecallContinuation ||
+      resp.stopReason === "tool_use" ||
+      !resp.usageComplete ||
+      !resp.usage
+    )
+      return;
+    try {
+      if (!isWarmingEnabled()) return;
+      turn.openAIReplay = prepareOpenAIWarmupReplay(
+        requestBody,
+        replayRoute,
+        resp.usage,
+        MIN_INPUT_TOKENS_FOR_WARMING,
+      );
+    } catch {
+      // A replay candidate is optional and must not affect the foreground turn.
+    }
+  };
+
+  const finishAcceptedWarmingTurn = (
+    resp: GatewayResponse,
+    repliedAt: number,
+  ): void => {
+    finishWarmingTurn(
+      sessionState,
+      requestOrder,
+      cacheRequestedAt,
+      repliedAt,
+      resp.stopReason,
+      suppressTemporalStorage,
+    );
+    captureAcceptedOpenAIReplay(resp);
+  };
 
   if (!upstreamResponse.ok) {
     rollback.preparation?.();
@@ -24322,7 +24484,11 @@ async function handleConversationTurnPrepared(
           genAiSpan,
           suppressTemporalStorage,
           endGenAiSpan,
-          routeAttributionUpstream(requestUpstreamRoute, upstreamResult),
+          routeAttributionUpstream(
+            requestUpstreamRoute,
+            upstreamResult,
+            usedRecallContinuation ? undefined : cacheRequestedAt,
+          ),
         );
         if (persisted) {
           persistAcceptedProvenanceLayer();
@@ -24335,6 +24501,17 @@ async function handleConversationTurnPrepared(
             response.stopReason,
             suppressTemporalStorage,
           );
+          if (upstreamResult.openAIWarmupRoute) {
+            void downstreamSettled.then(() => {
+              if (
+                requestGeneration === streamingPostResponseGeneration &&
+                !sessionSignal.aborted &&
+                !downstreamWasCancelled() &&
+                downstreamCompletedAt() !== undefined
+              )
+                captureAcceptedOpenAIReplay(response);
+            });
+          }
         }
       }
     };
@@ -24389,6 +24566,7 @@ async function handleConversationTurnPrepared(
         return failRecall("depth_exhausted");
       }
       recallDepth++;
+      usedRecallContinuation = true;
       recallPersistenceTransaction ??= bufferedRecallTransaction;
       const recallExecution = await promiseAgainstAbort(
         () =>
@@ -24881,6 +25059,7 @@ async function handleConversationTurnPrepared(
                   routeAttributionUpstream(
                     requestUpstreamRoute,
                     upstreamResult,
+                    usedRecallContinuation ? undefined : cacheRequestedAt,
                   ),
                 );
                 if (!persisted) throw postResponseFailed;
@@ -24892,14 +25071,7 @@ async function handleConversationTurnPrepared(
             // Record the in-memory accepted pin only once the writes commit.
             commitAcceptedProvenanceLayer();
             recallPersistenceTransaction = undefined;
-            finishWarmingTurn(
-              sessionState,
-              requestOrder,
-              cacheRequestedAt,
-              repliedAt,
-              resp.stopReason,
-              suppressTemporalStorage,
-            );
+            finishAcceptedWarmingTurn(resp, repliedAt);
           } catch (error) {
             rollbackRecallPersistence();
             if (error !== postResponseFailed) throw error;
@@ -24999,6 +25171,7 @@ async function handleConversationTurnPrepared(
                 else finishUnsuccessfulStreaming(response);
               },
               onTransactionReady: (transaction) => {
+                usedRecallContinuation = true;
                 rollbackRecallPersistence();
                 recallPersistenceTransaction = transaction;
               },
@@ -25155,6 +25328,7 @@ async function handleConversationTurnPrepared(
                 contentPosition,
                 signal,
               }) => {
+                usedRecallContinuation = true;
                 // Reconstruct the recall tool_use block for the follow-up request.
                 const recallBlock = acc.content[contentPosition];
                 if (
@@ -26191,7 +26365,10 @@ function handleAmnesiaSlashCommand(
 
   state.amnesia = isOn;
   saveSessionTracking(state.sessionID, { amnesia: isOn });
-  if (isOn) discardPendingWarmingObservation(state);
+  if (isOn) {
+    discardPendingWarmingObservation(state);
+    invalidateOpenAIWarmup(state);
+  }
   log.info(
     `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
       `storage ${isOn ? "suppressed" : "resumed"}`,

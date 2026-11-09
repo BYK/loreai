@@ -1,3 +1,4 @@
+import type { OpenAIWarmupReplay } from "../openai-cache-warming";
 /**
  * Internal representation types for the Lore gateway.
  *
@@ -336,6 +337,7 @@ export type GatewayRequest = {
      */
     include?: unknown;
     prompt_cache_key?: string;
+    prompt_cache_options?: unknown;
     text?: unknown;
     tool_choice?: unknown;
     parallel_tool_calls?: boolean;
@@ -780,6 +782,7 @@ export type SessionState = {
     noStore?: boolean;
     accepted?: { requestedAt: number; repliedAt: number };
     warmupMissed?: boolean;
+    openAIReplay?: OpenAIWarmupReplay;
   };
   /** Observed reply gaps, isolated by the preceding turn's segment. */
   warmingHistograms?: Map<WarmingSegment, InterTurnHistogram>;
@@ -859,12 +862,20 @@ export type InterTurnHistogram = {
   total: number;
 };
 
+export type WarmupTTL = "5m" | "30m" | "1h";
+
 /** Per-session cache warming state. */
 export type WarmupState = {
   /** Timestamp (ms) of the last warmup ping sent. Cleared when consumed (user returns). */
   lastWarmupAt: number;
   /** Actual TTL of the paid refresh, which may differ from the requested TTL. */
-  lastWarmupTTL?: "5m" | "1h";
+  lastWarmupTTL?: WarmupTTL;
+  /** Account and cache key the OpenAI warmup refreshed. */
+  openAIRefresh?: {
+    scope: string;
+    previousExpiry: number;
+    savingsPerMTok: number;
+  };
   /** Warmup pings sent in the CURRENT break period (reset on user return). Used for break-even cap. */
   warmupCount: number;
   /** Lifetime total warmup pings sent across all break periods in this session. */
@@ -906,6 +917,9 @@ export type WarmupResult = {
   cacheReadTokens: number;
   /** Cache creation tokens (non-zero means warmup caused a fresh write — bad). */
   cacheCreationTokens: number;
+  ttl?: WarmupTTL;
+  verifiedRefresh?: boolean;
+  costUSD?: number;
 };
 
 // ---------------------------------------------------------------------------

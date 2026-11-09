@@ -343,16 +343,17 @@ export function emitWarmupMetric(
   if (!Sentry.isInitialized()) return;
 
   const model = state.lastUpstream?.model ?? "unknown";
-  const ttl = state.resolvedConversationTTL ?? "5m";
+  const ttl = result.ttl ?? state.resolvedConversationTTL ?? "5m";
   const attrs = { ttl };
 
   // Count every warmup sent
   Sentry.metrics.count("lore.cache_warmup.sent", 1, { attributes: attrs });
 
   if (
-    result.ok &&
-    result.cacheReadTokens > 0 &&
-    result.cacheCreationTokens === 0
+    result.verifiedRefresh ??
+    (result.ok &&
+      result.cacheReadTokens > 0 &&
+      result.cacheCreationTokens === 0)
   ) {
     // Pure cache refresh — ideal outcome
     Sentry.metrics.count("lore.cache_warmup.refresh", 1, { attributes: attrs });
@@ -368,7 +369,12 @@ export function emitWarmupMetric(
   }
 
   // Emit warmup cost as a distribution (fire-and-forget)
-  if (result.ok) {
+  if (result.costUSD !== undefined) {
+    Sentry.metrics.distribution("lore.cache_warmup.cost_usd", result.costUSD, {
+      attributes: attrs,
+      unit: "dollar",
+    });
+  } else if (result.ok) {
     getPricing(model)
       .then((pricing) => {
         const readCost =

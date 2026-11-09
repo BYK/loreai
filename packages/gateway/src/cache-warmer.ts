@@ -1,6 +1,5 @@
 /**
- * Speculative cache warming — sends keepalive requests to refresh
- * Anthropic's prompt cache before it expires.
+ * Speculative cache warming refreshes a provider prompt cache before expiry.
  *
  * Uses survival analysis on inter-turn gaps to predict whether the user
  * will return before the cache TTL expires. If the expected value of
@@ -55,6 +54,7 @@ import {
   type WarmupResult,
   type SessionState,
   type WarmupState,
+  type WarmupTTL,
 } from "./translate/types";
 import {
   cacheSegmentDigest,
@@ -62,7 +62,7 @@ import {
   decompressBody,
   isWarmupProbeEnabled,
 } from "./cache-analytics";
-import { resolveAuth, authHeaders, markAuthStale } from "./auth";
+import { resolveAuth, authHeaders, extractAuth, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import {
@@ -90,6 +90,14 @@ import { recordWarmupCost } from "./cost-tracker";
 import { resolveCostAttribution } from "./cost-attribution";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
+import {
+  OPENAI_CACHE_TTL_MS,
+  OPENAI_RESPONSES_URL,
+  openAIWarmupScope,
+  parseOpenAIWarmupUsage,
+  openAIWarmupHeadersAllowed,
+  type OpenAIWarmupReplay,
+} from "./openai-cache-warming";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1135,6 +1143,7 @@ export type CacheWarmingProfile = {
   /** Auth/transport mode. Default (undefined) = Anthropic: session credential +
    *  cch re-sign. "vertex" = GCP OAuth2 bearer (ADC), no cch, rawPredict URL. */
   authMode?: "vertex";
+  openAIReplay?: OpenAIWarmupReplay;
 };
 
 /**
@@ -1387,8 +1396,7 @@ export function resolveProfile(
     return buildVertexProfile(model, vHost, prefixTokens);
   }
 
-  // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
-  // no explicit warming API. (Bedrock rides the anthropic protocol via mantle.)
+  // Bedrock rides the Anthropic protocol via mantle.
   if (protocol !== "anthropic") return null;
 
   // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
@@ -1456,6 +1464,26 @@ export function resolveProfile(
 export function resolveProfileForSession(
   state: SessionState,
 ): CacheWarmingProfile | null {
+  const replay = state.warmingTurn?.openAIReplay;
+  if (
+    replay &&
+    state.lastUpstream?.protocol === "openai-responses" &&
+    state.lastUpstream.model === replay.model &&
+    state._upstreamRequestOrder === state.warmingTurn?.order
+  ) {
+    return {
+      ttlMs: OPENAI_CACHE_TTL_MS,
+      cacheReadCostPerMTok: replay.pricing.cache_read,
+      cacheMissCostPerMTok: replay.pricing.cache_write,
+      warmupMarginMs: computeWarmupMargin(
+        OPENAI_CACHE_TTL_MS,
+        replay.prefixTokens,
+      ),
+      prepareWarmupBody: (body) => body,
+      upstreamUrl: OPENAI_RESPONSES_URL,
+      openAIReplay: replay,
+    };
+  }
   return resolveProfile(
     state.lastUpstream?.model,
     state.lastUpstream?.protocol,
@@ -1500,6 +1528,8 @@ function lastWarmingCacheTouch(state: SessionState): number {
 }
 
 function warmingPrefixTokens(state: SessionState): number {
+  const replay = state.warmingTurn?.openAIReplay;
+  if (replay) return replay.prefixTokens;
   const analytics = state.cacheAnalytics;
   return analytics.turnCount > 0
     ? analytics.lastCacheRead + analytics.lastCacheCreation
@@ -1541,7 +1571,15 @@ export function shouldWarm(
   if (!warmingEnabled) return false;
 
   // No stored body to replay — nothing to warm
-  if (!state.cacheAnalytics.lastRequestBody) return false;
+  if (profile.openAIReplay) {
+    if (
+      state.amnesia ||
+      state.warmingTurn?.openAIReplay !== profile.openAIReplay
+    )
+      return false;
+  } else if (!state.cacheAnalytics.lastRequestBody) {
+    return false;
+  }
 
   // Explicit operator stops survive the response path's reset of the
   // survival-model `disabled` flag when a user returns to the session.
@@ -1607,9 +1645,10 @@ export function shouldWarm(
     // /lore:warm:keep mode: skip survival/signal analysis but still respect
     // the break-even cap — warming beyond maxCycles is always unprofitable,
     // even when the user explicitly asked for /lore:warm:keep.
+    const suffixCost = warmupSuffixCostPerMTok(profile);
     const maxCycles = maxProfitableCycles(
-      cacheReadCostPerMTok,
-      cacheMissCostPerMTok,
+      cacheReadCostPerMTok + suffixCost,
+      cacheMissCostPerMTok + suffixCost,
     );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     if (cyclesSpent >= maxCycles) return false;
@@ -1727,6 +1766,13 @@ export function shouldWarm(
   );
 }
 
+function warmupSuffixCostPerMTok(profile: CacheWarmingProfile): number {
+  const replay = profile.openAIReplay;
+  return replay
+    ? (replay.uncachedTokens / replay.prefixTokens) * replay.pricing.input
+    : 0;
+}
+
 function automaticWarmingInputs(
   state: SessionState,
   profile: CacheWarmingProfile,
@@ -1734,6 +1780,7 @@ function automaticWarmingInputs(
   now: number,
 ): { cacheAgeMs: number; pReturn: number; threshold: number } {
   const { ttlMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
+  const extraCostPerMTok = warmupSuffixCostPerMTok(profile);
   const cacheAgeMs = now - lastWarmingCacheTouch(state);
   const idleMs = Math.max(
     0,
@@ -1753,7 +1800,10 @@ function automaticWarmingInputs(
       remainingCacheMs,
     ),
     threshold: Math.max(
-      costThreshold(cacheReadCostPerMTok, cacheMissCostPerMTok),
+      costThreshold(
+        cacheReadCostPerMTok + extraCostPerMTok,
+        cacheMissCostPerMTok + extraCostPerMTok,
+      ),
       loreConfig().cache.warming.minReturnProbability ?? 0,
     ),
   };
@@ -1771,7 +1821,7 @@ export type WarmingSnapshot = {
   messageCount: number;
   idleMs: number;
   consecutiveTextOnlyTurns: number;
-  ttl: "5m" | "1h" | undefined;
+  ttl: WarmupTTL | undefined;
   // Warmup state
   warmupCount: number;
   totalWarmups: number;
@@ -1877,7 +1927,10 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Sub-agent session (ephemeral)";
     } else if (!warmingEnabled) {
       notWarmingReason = "Warming disabled (config/override)";
-    } else if (!state.cacheAnalytics.lastRequestBody) {
+    } else if (
+      !profile?.openAIReplay &&
+      !state.cacheAnalytics.lastRequestBody
+    ) {
       notWarmingReason = "No stored request body";
     } else if (state.warmup?.userStopped) {
       notWarmingReason = "Warming stopped by user";
@@ -1889,7 +1942,7 @@ export function computeWarmingSnapshot(
     ) {
       notWarmingReason = `Emergency compaction (layer=${getLastTransformLayer(state.sessionID)} >= ${EMERGENCY_COMPACTION_LAYER}) — prefix re-renders every turn, warmups would land as partials`;
     } else if (!profile) {
-      notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
+      notWarmingReason = "No warming profile for this route or model";
     } else if (tooFewToolTurns) {
       notWarmingReason = "Too few messages for tool-wait warming";
     } else if (contextTooSmall) {
@@ -1904,9 +1957,10 @@ export function computeWarmingSnapshot(
     } else if (state.warmingTurn?.warmupMissed) {
       notWarmingReason = "Last warmup missed the cache";
     } else if (state.warmup?.forceKeepWarm) {
+      const suffixCost = warmupSuffixCostPerMTok(profile);
       const maxCyc = maxProfitableCycles(
-        profile.cacheReadCostPerMTok,
-        profile.cacheMissCostPerMTok,
+        profile.cacheReadCostPerMTok + suffixCost,
+        profile.cacheMissCostPerMTok + suffixCost,
       );
       if (cyclesSpent >= maxCyc) {
         notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
@@ -1975,11 +2029,7 @@ export function computeWarmingSnapshot(
     messageCount: state.messageCount,
     idleMs,
     consecutiveTextOnlyTurns: state.consecutiveTextOnlyTurns ?? 0,
-    ttl: profile
-      ? ttlMs === 3_600_000
-        ? "1h"
-        : "5m"
-      : state.resolvedConversationTTL,
+    ttl: profile ? warmupTTLForProfile(profile) : state.resolvedConversationTTL,
     warmupCount: cyclesSpent,
     totalWarmups: state.warmup?.totalWarmups ?? 0,
     warmupHits: state.warmup?.warmupHits ?? 0,
@@ -2055,19 +2105,33 @@ function responseTokenCount(value: unknown): number {
  *
  * Returns the result for circuit breaker checking and metrics.
  */
+export function invalidateOpenAIWarmup(state: SessionState): void {
+  if (state.warmingTurn) delete state.warmingTurn.openAIReplay;
+  if (state.warmup?.lastWarmupTTL === "30m")
+    creditWarmupHit(state.warmup, 0, OPENAI_CACHE_TTL_MS, 0);
+}
+
+function warmupTTLForProfile(profile: CacheWarmingProfile): WarmupTTL {
+  if (profile.openAIReplay) return "30m";
+  return profile.ttlMs >= 3_600_000 ? "1h" : "5m";
+}
+
 export async function executeWarmup(
   state: SessionState,
   profile: CacheWarmingProfile,
   config: GatewayConfig = loadConfig(),
 ): Promise<WarmupResult> {
+  const replay = profile.openAIReplay;
   const noResult: WarmupResult = {
     ok: false,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    ...(replay ? { ttl: "30m" as const } : {}),
   };
-
   const { lastRequestBody } = state.cacheAnalytics;
-  if (!lastRequestBody) return noResult;
+  const replayBody = replay?.body ?? lastRequestBody;
+  if (!replayBody || (replay && state.warmingTurn?.openAIReplay !== replay))
+    return noResult;
 
   const breakerBucket = warmupBucketKey(state);
   const turn = state.warmingTurn;
@@ -2085,15 +2149,18 @@ export async function executeWarmup(
     state.lastRequestTime === lastRequestTime &&
     state.lastUpstream === upstream &&
     state.resolvedConversationTTL === resolvedTTL &&
-    state.cacheAnalytics.lastRequestBody === lastRequestBody &&
+    (replay
+      ? turn?.openAIReplay === replay
+      : state.cacheAnalytics.lastRequestBody === lastRequestBody) &&
     !state.amnesia &&
     !state.warmup?.userStopped;
 
   // Decompress the stored body
-  const storedBody = decompressBody(lastRequestBody);
+  const storedBody = decompressBody(replayBody);
   // A one-token replay is invalid for manual extended thinking, and allowing
   // the original thinking budget could cost far more than a cache read.
-  if (JSON.parse(storedBody).thinking?.type === "enabled") return noResult;
+  if (!replay && JSON.parse(storedBody).thinking?.type === "enabled")
+    return noResult;
 
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
@@ -2110,7 +2177,13 @@ export async function executeWarmup(
   let requestUrl: string;
   let signedBody: string;
 
-  if (profile.authMode === "vertex") {
+  if (replay) {
+    if (!credential) return noResult;
+    headers.Authorization = `Bearer ${credential.value}`;
+    Object.assign(headers, replay.headers);
+    requestUrl = OPENAI_RESPONSES_URL;
+    signedBody = warmupBody;
+  } else if (profile.authMode === "vertex") {
     const model = upstream?.model;
     if (!model) return noResult;
     const region = vertexRegionFromUrl(profile.upstreamUrl) ?? "global";
@@ -2181,11 +2254,18 @@ export async function executeWarmup(
   // Apply gateway-admin headers only after the final warmup URL is known. This
   // keeps cache warming under the same exact configured-base policy as normal
   // foreground and compact dispatches.
-  applyUpstreamExtraHeaders(
-    headers,
-    extraHeadersForUpstream(config, requestUrl),
-  );
+  const extraHeaders = extraHeadersForUpstream(config, requestUrl);
+  if (replay && !openAIWarmupHeadersAllowed(extraHeaders)) return noResult;
+  applyUpstreamExtraHeaders(headers, extraHeaders);
 
+  if (
+    replay &&
+    openAIWarmupScope(headers, replay.model, replay.cacheKey)?.scope !==
+      replay.scope
+  )
+    return noResult;
+
+  const sentCredential = replay ? extractAuth(headers) : credential;
   const sentAt = Date.now();
   if (
     !isCurrent() ||
@@ -2206,9 +2286,16 @@ export async function executeWarmup(
       method: "POST",
       headers,
       body: signedBody,
+      ...(replay
+        ? { redirect: "error" as const, signal: AbortSignal.timeout(30_000) }
+        : {}),
     });
 
     if (!response.ok) {
+      if (replay) {
+        if (turn && isCurrent()) turn.warmupMissed = true;
+        void response.body?.cancel().catch(() => {});
+      }
       log.error(
         `cache-warmer: upstream error ${response.status} for ` +
           `session=${state.sessionID.slice(0, 16)}`,
@@ -2218,6 +2305,7 @@ export async function executeWarmup(
       if (
         (response.status === 401 || response.status === 403) &&
         isCurrent() &&
+        (!replay || sentCredential?.value === credential?.value) &&
         resolveAuth(state.sessionID, upstream?.providerID) === credential
       ) {
         disableWarmupForAuth(state.sessionID);
@@ -2228,11 +2316,11 @@ export async function executeWarmup(
             `session=${state.sessionID.slice(0, 16)} until fresh credential`,
         );
       }
-      return { ok: false, cacheReadTokens: 0, cacheCreationTokens: 0 };
+      return noResult;
     }
 
     // Parse the response to extract usage
-    let resp: {
+    let resp: null | {
       usage?: {
         cache_read_input_tokens?: unknown;
         cache_creation_input_tokens?: unknown;
@@ -2247,22 +2335,40 @@ export async function executeWarmup(
         `cache-warmer: upstream returned malformed JSON with status ${response.status} for ` +
           `session=${state.sessionID.slice(0, 16)}`,
       );
+      if (replay && turn && isCurrent()) turn.warmupMissed = true;
       return noResult;
     }
 
-    const inputTokens = responseTokenCount(resp.usage?.input_tokens);
-    const cacheReadTokens = responseTokenCount(
-      resp.usage?.cache_read_input_tokens,
-    );
-    const cacheCreationTokens = responseTokenCount(
-      resp.usage?.cache_creation_input_tokens,
-    );
+    const openAIUsage = replay ? parseOpenAIWarmupUsage(resp) : undefined;
+    if (replay && !openAIUsage) {
+      if (turn && isCurrent()) turn.warmupMissed = true;
+      return noResult;
+    }
+    const inputTokens =
+      openAIUsage?.inputTokens ?? responseTokenCount(resp?.usage?.input_tokens);
+    const cacheReadTokens =
+      openAIUsage?.cacheReadTokens ??
+      responseTokenCount(resp?.usage?.cache_read_input_tokens);
+    const cacheCreationTokens =
+      openAIUsage?.cacheCreationTokens ??
+      responseTokenCount(resp?.usage?.cache_creation_input_tokens);
+    const verifiedOpenAIRefresh =
+      !!replay &&
+      !!openAIUsage &&
+      openAIUsage.completed &&
+      openAIUsage.outputTokens === 0 &&
+      cacheReadTokens >= cachedPrefixTokens &&
+      inputTokens <= replay.uncachedTokens &&
+      cacheCreationTokens === 0;
     const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
 
     const result: WarmupResult = {
       ok: true,
       cacheReadTokens,
       cacheCreationTokens,
+      ...(replay
+        ? { ttl: "30m" as const, verifiedRefresh: verifiedOpenAIRefresh }
+        : {}),
     };
 
     // Compute cost estimate for this warmup
@@ -2270,7 +2376,15 @@ export async function executeWarmup(
       (cacheReadTokens / 1_000_000) * profile.cacheReadCostPerMTok;
     const writeCost =
       (cacheCreationTokens / 1_000_000) * profile.cacheMissCostPerMTok;
-    const warmupCost = readCost + writeCost;
+    const warmupCost =
+      readCost +
+      writeCost +
+      (replay && openAIUsage
+        ? (inputTokens * replay.pricing.input +
+            openAIUsage.outputTokens * replay.pricing.output) /
+          1_000_000
+        : 0);
+    if (replay) result.costUSD = warmupCost;
     const costStr = `$${warmupCost.toFixed(4)}`;
 
     // Log the outcome with full cache statistics
@@ -2284,7 +2398,9 @@ export async function executeWarmup(
     // that collapsed to a single end-of-body breakpoint is the body-divergence
     // bug. Correlating this with the outcome confirms the breakpoint-preserving
     // fix (raw stored body) is working: UNCACHED with breakpoints=1 was the bug.
-    const breakpoints = (signedBody.match(/"cache_control"/g) ?? []).length;
+    const breakpoints = replay
+      ? 0
+      : (signedBody.match(/"cache_control"/g) ?? []).length;
 
     // --- Warmup cache-divergence probe (env-gated) ---
     // The decisive tiebreaker between EVICTION and body DIVERGENCE. Hash the
@@ -2307,7 +2423,7 @@ export async function executeWarmup(
     //
     // Wrapped in try/catch: this is a diagnostic and must never break the warmup
     // path (a throw here would run before cost/circuit-breaker accounting below).
-    if (isCurrent() && isWarmupProbeEnabled()) {
+    if (!replay && isCurrent() && isWarmupProbeEnabled()) {
       try {
         const ca = state.cacheAnalytics;
         const dg = cacheSegmentDigest(warmupBody);
@@ -2335,7 +2451,11 @@ export async function executeWarmup(
       }
     }
 
-    if (cacheReadTokens > 0 && cacheCreationTokens === 0) {
+    if (
+      replay
+        ? verifiedOpenAIRefresh
+        : cacheReadTokens > 0 && cacheCreationTokens === 0
+    ) {
       log.info(
         `cache-warmer: ✓ refresh session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
@@ -2353,7 +2473,7 @@ export async function executeWarmup(
     }
 
     // Accumulate warmup cost for the session
-    const ttl: "5m" | "1h" = profile.ttlMs >= 3_600_000 ? "1h" : "5m";
+    const ttl = warmupTTLForProfile(profile);
     recordWarmupCost(
       state.sessionID,
       upstream?.model ?? "unknown",
@@ -2362,11 +2482,18 @@ export async function executeWarmup(
       ttl,
       resolveCostAttribution({
         sessionID: state.sessionID,
-        providerID: upstream?.providerID,
-        upstreamURL: upstream?.url,
-        credential,
+        providerID: replay ? "openai" : upstream?.providerID,
+        upstreamURL: replay ? OPENAI_RESPONSES_URL : upstream?.url,
+        credential: sentCredential,
         requestHeaders: headers,
       }),
+      replay && openAIUsage
+        ? {
+            pricing: replay.pricing,
+            inputTokens,
+            outputTokens: openAIUsage.outputTokens,
+          }
+        : undefined,
     );
 
     // A previous wait can finish while a newer turn is already in flight.
@@ -2374,7 +2501,9 @@ export async function executeWarmup(
     if (!isCurrent()) return result;
     if (
       turn &&
-      (cacheReadTokens < cachedPrefixTokens * 0.9 || cacheCreationTokens > 0)
+      (replay
+        ? !verifiedOpenAIRefresh
+        : cacheReadTokens < cachedPrefixTokens * 0.9 || cacheCreationTokens > 0)
     )
       turn.warmupMissed = true;
 
@@ -2388,35 +2517,39 @@ export async function executeWarmup(
         disabled: false,
       };
     }
-    state.warmup.lastWarmupAt = cacheReadTokens > 0 ? sentAt : 0;
-    state.warmup.lastWarmupTTL = ttl;
+    if (!replay || verifiedOpenAIRefresh) {
+      state.warmup.lastWarmupAt = cacheReadTokens > 0 ? sentAt : 0;
+      state.warmup.lastWarmupTTL = ttl;
+      state.warmup.lastWarmupWasAutomatic = auto;
+      // Credit at most the prefix this session paid to refresh, even if a
+      // returning turn reads more. Anthropic can retain a partially read prefix.
+      state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
+      state.warmup.openAIRefresh = replay
+        ? {
+            scope: replay.scope,
+            previousExpiry: lastCacheTouch + profile.ttlMs,
+            savingsPerMTok:
+              replay.pricing.cache_write - replay.pricing.cache_read,
+          }
+        : undefined;
+    }
     state.warmup.warmupCount++;
     state.warmup.totalWarmups = (state.warmup.totalWarmups ?? 0) + 1;
-    state.warmup.lastWarmupWasAutomatic = auto;
     if (auto)
       state.warmup.automaticWarmups = (state.warmup.automaticWarmups ?? 0) + 1;
-    // 🔴 Record the cache prefix this warmup actually refreshed. Savings on
-    // the returning turn MUST be credited against THIS count (the tokens the
-    // warmup kept alive), NEVER the returning turn's cacheReadInputTokens —
-    // tool-use continuations / breakpoint shifts report a far smaller read,
-    // undercounting savings ~10×. The read portion is the kept-alive prefix
-    // even on a partial warmup (the written portion was a cost, not a save,
-    // already booked via recordWarmupCost). A non-zero value also marks THIS
-    // session as the warmup's payer (see WarmupState invariant), gating hit
-    // attribution to prevent phantom savings.
-    state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
-
     // Check circuit breaker for this (session, model, upstream) bucket. A
     // partial OR uncached write while the cache should have been alive is a
     // divergence DEFECT (all-or-nothing): it trips the breaker after
     // CIRCUIT_BREAKER_MAX_FAILURES, and only a clean 100% refresh clears it.
-    checkCircuitBreaker(result, breakerBucket, true);
+    if (!replay || verifiedOpenAIRefresh || cacheCreationTokens > 0)
+      checkCircuitBreaker(result, breakerBucket, true);
 
     // Clear worker-health failure state on successful warmup.
     recordWorkerSuccess(state.sessionID, "cache-warmer");
 
     return result;
   } catch {
+    if (replay && turn && isCurrent()) turn.warmupMissed = true;
     // Network errors can include credential-bearing request URLs. Keep the
     // session diagnostic, but never the thrown details.
     log.error(
@@ -2501,6 +2634,7 @@ export function creditWarmupHit(
   warmup.lastWarmupRefreshTokens = 0;
   delete warmup.lastWarmupWasAutomatic;
   delete warmup.lastWarmupTTL;
+  delete warmup.openAIRefresh;
 
   // Stale/inherited lastWarmupAt without proof of payment: scrubbed above,
   // record NO hit (prevents phantom savings).
