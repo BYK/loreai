@@ -25,7 +25,7 @@ describe("tokenize / encodingForModel", () => {
         providerID: "anthropic",
         modelID: "claude-sonnet-4.5",
       }),
-    ).toBe("claude");
+    ).toBe("claude-v3-estimate");
     // Provider wins even when model looks OpenAI-ish.
     expect(
       encodingForModel({ providerID: "anthropic", modelID: "gpt-4o" }),
@@ -66,7 +66,19 @@ describe("tokenize / encodingForModel", () => {
         providerID: "github-copilot",
         modelID: "claude-3.5-sonnet",
       }),
-    ).toBe("cl100k_base");
+    ).toBe("claude-v3-estimate");
+  });
+
+  it.each([
+    ["claude-opus-4-6", "claude-v3-estimate"],
+    ["us.anthropic.claude-opus-4-7-v1:0", "claude-v4.7-estimate"],
+    ["anthropic/claude-opus-4.8", "claude-v4.7-estimate"],
+    ["claude-sonnet-5", "claude-v4.7-estimate"],
+    ["claude-opus-5.5", "claude-v4.7-estimate"],
+    ["gpt-4.1", "o200k_base"],
+    ["openai/gpt-6.1-sol", "o200k_base"],
+  ])("selects a policy for %s", (modelID, expected) => {
+    expect(encodingForModel({ modelID })).toBe(expected);
   });
 
   it("does not match gpt-4o-style substring inside unrelated model ids", () => {

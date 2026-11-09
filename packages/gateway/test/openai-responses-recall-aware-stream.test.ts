@@ -8152,6 +8152,7 @@ describe("streamResponsesRecallAware", () => {
     expect(output).toContain("response.completed");
     expect(output).not.toContain(PUBLIC_RECALL_ERROR);
     expect(completedResponses).toHaveLength(1);
+    expect(completedResponses[0]?.principalInputTokens).toBe(240_000);
     expect(completedResponses[0]?.usage).toMatchObject({
       inputTokens: 81_000,
       outputTokens: 40,

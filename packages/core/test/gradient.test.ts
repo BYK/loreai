@@ -11,6 +11,7 @@ import {
   ensureProject,
   loadForceMinLayer,
   saveForceMinLayer,
+  saveSessionTracking,
 } from "../src/db";
 import {
   transform,
@@ -61,11 +62,11 @@ import {
   getOverhead,
   getLastTransformEstimate,
   effectiveDistilledBudget,
-  BODY_TOKEN_RATIO,
   type ModelBudget,
 } from "../src/gradient";
 import type { LoreMessage, LorePart, LoreMessageWithParts } from "../src/types";
 import { isToolPart, isTextPart } from "../src/types";
+import { estimateTokens } from "../src/tokenize";
 
 const PROJECT = "/test/gradient/project";
 
@@ -457,7 +458,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     // 1.5 → 5082 > maxInput 3500 → gradient fires (Layer 1). The huge C(2000)
     // current turn ≈ 687 chars/3 fits within rawBudget 833, so it stays at Layer
     // 1 (does not escalate on the current-turn guard). Sized post the
-    // chars/3→real scale fix (budgets divide by BODY_TOKEN_RATIO).
+    // Local token estimates use the same units as the budgets.
     setModelLimits({ context: 4_000, output: 500 });
     calibrate(0);
 
@@ -2304,11 +2305,8 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       // Seed transform estimates so calibrate() has a baseline to subtract.
       transform({ messages: msgsA, projectPath: PROJECT, sessionID: A });
       transform({ messages: msgsB, projectPath: PROJECT, sessionID: B });
-      // A: small overhead (10K). B: huge overhead (500K). actualInput is REAL
-      // tokens, so the body term is the REAL body (chars/3 estimate × ratio);
-      // calibrate inflates the estimate the same way, leaving overhead = +N.
-      const realBody = (sid: string) =>
-        Math.round(getLastTransformEstimate(sid) * BODY_TOKEN_RATIO);
+      // A: small overhead (10K). B: huge overhead (500K).
+      const realBody = getLastTransformEstimate;
       calibrate(realBody(A) + 10_000, A, msgsA.length);
       calibrate(realBody(B) + 500_000, B, msgsB.length);
       expect(getOverhead(A)).toBe(10_000);
@@ -2375,14 +2373,8 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       setLtmTokens(20_000, SID);
       transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
       const est = getLastTransformEstimate(SID);
-      // Real input = body(REAL = est×ratio) + host/tools(50K) + injected
-      // LTM(20K). calibrate inflates the chars/3 estimate by the same ratio, so
-      // overhead nets out to host/tools (50K) only.
-      calibrate(
-        Math.round(est * BODY_TOKEN_RATIO) + 50_000 + 20_000,
-        SID,
-        msgs.length,
-      );
+      // Input includes the body estimate, host/tools (50K), and LTM (20K).
+      calibrate(est + 50_000 + 20_000, SID, msgs.length);
       // Overhead must be host/tools ONLY — LTM is NOT part of "overhead"
       // (the comment at the `usable` computation says LTM is subtracted
       // separately).
@@ -2489,15 +2481,219 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Overhead/body scale decoupling — the usable-collapse root cause
-// ---------------------------------------------------------------------------
-// `calibrate` computes overhead = actualInput(REAL) − messageEstimate(chars/3) ×
-// BODY_TOKEN_RATIO − ltm. Before the scale fix it subtracted the UN-inflated
-// chars/3 estimate, so ~0.40·body_real leaked into `overhead`. For a large body
-// that ballooned overhead, collapsed `usable`, and forced the session to Layer 4
-// where the distilled prefix re-renders every turn (the messages[1] every-turn
-// cache bust). These guard that overhead is TRUE system+tools and stays stable
-// as the body grows, so usable does NOT collapse.
+describe("gradient — model-aware body estimates", () => {
+  const SID = "model-token-estimates";
+  const budget = {
+    contextLimit: 200_000,
+    outputReserved: 32_000,
+    maxLayer0Tokens: 0,
+    cacheWriteCostPerToken: 0,
+    cacheReadCostPerToken: 0,
+  };
+  const text = "機械学習と自然言語処理 — Merhaba dünya! ".repeat(1000);
+
+  test("calibrates successive passthrough turns from body tokens alone", () => {
+    resetCalibration();
+    setLtmTokens(2_000, SID);
+    const messages = [makeMsg("body", "user", text, SID)];
+    const body = estimateTokens(text) + 20;
+    for (let turn = 0; turn < 3; turn++) {
+      const result = transform({ messages, projectPath: PROJECT, budget });
+      expect(result.layer).toBe(0);
+      expect(getLastTransformEstimate(SID)).toBe(body);
+      calibrate(body + 5_000 + 2_000, SID, messages.length);
+      expect(getOverhead(SID)).toBe(5_000);
+    }
+  });
+
+  test("calibrates from the sent window after dropping an assistant prefill", () => {
+    resetCalibration();
+    const user = makeMsg("input", "user", "what did you find?", SID);
+    const prefill = makeMsg("prefill", "assistant", text, SID);
+    const result = transform({
+      messages: [user, prefill],
+      projectPath: PROJECT,
+      budget,
+      dropTrailingAssistantPrefill: true,
+    });
+    expect(result.layer).toBe(0);
+    expect(result.messages).toEqual([user]);
+    expect(getLastTransformEstimate(SID)).toBe(estimateMessages([user]));
+    calibrate(estimateMessages([user]) + 5_000, SID, 1, result.calibrationKey);
+    expect(getOverhead(SID)).toBe(5_000);
+  });
+
+  test("calibrates from stripped tool output in a rebuilt window", () => {
+    resetCalibration();
+    const tool = makeMsg("tool", "assistant", "", SID);
+    const oldOutput = text.slice(0, 8000);
+    tool.parts = [
+      {
+        type: "tool",
+        id: "tool",
+        sessionID: SID,
+        messageID: "tool",
+        callID: "old",
+        tool: "read",
+        state: {
+          status: "completed",
+          input: {},
+          output: oldOutput,
+          title: "Read",
+          metadata: {},
+          time: { start: 0, end: 1 },
+        },
+      },
+    ];
+    const messages = [
+      makeMsg("initial", "user", "read it", SID),
+      tool,
+      ...Array.from({ length: 7 }, (_, i) =>
+        makeMsg(
+          `recent-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "continue",
+          SID,
+        ),
+      ),
+    ];
+    setForceMinLayer(2, SID);
+    const result = transform({ messages, projectPath: PROJECT, budget });
+    expect(result.layer).toBe(2);
+    const sentTool = result.messages.find(
+      (message) => message.info.id === "tool",
+    );
+    expect(sentTool).toBeDefined();
+    expect(toolStateOf(sentTool?.parts[0]).output).not.toBe(oldOutput);
+    expect(getLastTransformEstimate(SID)).toBe(
+      estimateMessages(result.messages),
+    );
+  });
+
+  test("ignores usage from a superseded transform", () => {
+    resetCalibration();
+    const modelBudget: ModelBudget = {
+      ...budget,
+      encoding: "o200k_base",
+      modelKey: "gpt-5",
+    };
+    const first = transform({
+      messages: [makeMsg("first", "user", text, SID)],
+      projectPath: PROJECT,
+      budget: modelBudget,
+    });
+    const second = transform({
+      messages: [makeMsg("second", "user", "A different request", SID)],
+      projectPath: PROJECT,
+      budget: modelBudget,
+    });
+    expect(first.calibrationKey).toBeDefined();
+    expect(second.calibrationKey).not.toBe(first.calibrationKey);
+    calibrate(second.totalTokens + 5_000, SID, 1, second.calibrationKey);
+    calibrate(first.totalTokens + 25_000, SID, 1, first.calibrationKey);
+    expect(getOverhead(SID, modelBudget.modelKey)).toBe(5_000);
+  });
+
+  test("a failed transform does not remove unbilled messages from the next delta", () => {
+    resetCalibration();
+    const modelBudget = {
+      ...budget,
+      contextLimit: 31_000,
+      outputReserved: 1_000,
+    };
+    const base = [makeMsg("accepted", "user", "initial", SID)];
+    const added = naturalText(42_000);
+    transform({ messages: base, projectPath: PROJECT, budget: modelBudget });
+    calibrate(5_000, SID, base.length);
+    const attempted = [...base, makeMsg("unbilled", "assistant", added, SID)];
+    expect(
+      transform({
+        messages: attempted,
+        projectPath: PROJECT,
+        budget: modelBudget,
+      }).layer,
+    ).toBe(0);
+
+    const retry = [...attempted, makeMsg("new", "user", added, SID)];
+    expect(
+      transform({
+        messages: retry,
+        projectPath: PROJECT,
+        budget: modelBudget,
+      }).layer,
+    ).toBeGreaterThan(0);
+  });
+
+  test("keeps the previous overhead on warm passthrough without source counts", () => {
+    resetCalibration();
+    const messages = [makeMsg("initial", "user", text, SID)];
+    const options = {
+      projectPath: PROJECT,
+      budget,
+      skipUncachedBodyRecount: true,
+    };
+    const initial = transform({ ...options, messages });
+    calibrate(initial.totalTokens + 5_000, SID, 1, initial.calibrationKey);
+    const warm = transform({
+      ...options,
+      messages: [...messages, makeMsg("next", "user", "continue", SID)],
+    });
+    expect(warm.layer).toBe(0);
+    expect(getLastTransformEstimate(SID)).toBe(0);
+    calibrate(initial.totalTokens + 7_000, SID, 2, warm.calibrationKey);
+    expect(getOverhead(SID)).toBe(5_000);
+  });
+
+  test("restores usage only for the model that produced it", () => {
+    resetCalibration();
+    const modelBudget: ModelBudget = {
+      ...budget,
+      encoding: "cl100k_base",
+      modelKey: "gpt-4",
+    };
+    const messages = [makeMsg("body", "user", text, SID)];
+    transform({ messages, projectPath: PROJECT, budget: modelBudget });
+    calibrate(50_000, SID, messages.length);
+    saveGradientState(SID);
+    evictSession(SID);
+    // A cap below the cold estimate distinguishes the restored usage path.
+    const coldBudget = { ...modelBudget, maxLayer0Tokens: 5_000 };
+    expect(isLargeColdStart({ messages, budget: coldBudget })).toBe(false);
+    expect(
+      isLargeColdStart({
+        messages,
+        budget: { ...coldBudget, modelKey: "gpt-4-other" },
+      }),
+    ).toBe(true);
+    // Simulate an old process updating usage without updating the receipt.
+    saveSessionTracking(SID, { lastKnownInput: 51_000 });
+    evictSession(SID);
+    expect(isLargeColdStart({ messages, budget: coldBudget })).toBe(true);
+  });
+
+  test("recounts a session under the active encoding and drops the previous model's usage", () => {
+    resetCalibration();
+    const messages = [makeMsg("body", "user", text, SID)];
+    const legacy = transform({
+      messages,
+      projectPath: PROJECT,
+      budget: { ...budget, encoding: "cl100k_base", modelKey: "gpt-4" },
+    });
+    calibrate(195_000, SID, messages.length);
+    const modern = transform({
+      messages,
+      projectPath: PROJECT,
+      budget: { ...budget, encoding: "o200k_base", modelKey: "gpt-5" },
+    });
+    expect(legacy.totalTokens).toBe(estimateTokens(text) + 20);
+    expect(modern.layer).toBe(0);
+    expect(modern.totalTokens).toBe(
+      estimateTokens(text, { modelID: "gpt-5" }) + 20,
+    );
+    expect(modern.totalTokens).toBeLessThan(legacy.totalTokens);
+  });
+});
+
 describe("gradient — overhead/body scale decoupling (usable-collapse fix)", () => {
   const SID = "overhead-scale-sess";
 
@@ -2505,7 +2701,7 @@ describe("gradient — overhead/body scale decoupling (usable-collapse fix)", ()
     setModelLimits({ context: 200_000, output: 32_000 }); // maxInput = 168K
     resetCalibration(SID);
     const TRUE_OVERHEAD = 48_000;
-    // A large conversation whose chars/3 estimate undercounts the real body.
+    // A large conversation where an erroneous body multiplier would swamp overhead.
     const msgs = Array.from({ length: 40 }, (_, i) =>
       makeMsg(
         `os-${i}`,
@@ -2520,13 +2716,7 @@ describe("gradient — overhead/body scale decoupling (usable-collapse fix)", ()
     for (let t = 0; t < 6; t++) {
       transform({ messages: msgs, projectPath: PROJECT, sessionID: SID });
       est = getLastTransformEstimate(SID);
-      // actualInput is REAL: the model saw the real body (est × ratio) plus the
-      // true 48K system+tools. calibrate must inflate the estimate the same way.
-      calibrate(
-        Math.round(est * BODY_TOKEN_RATIO) + TRUE_OVERHEAD,
-        SID,
-        msgs.length,
-      );
+      calibrate(est + TRUE_OVERHEAD, SID, msgs.length);
     }
     // Sanity: the body estimate is large enough that a pre-fix leak (~0.4×body)
     // would be a big fraction of usable — i.e. this scenario actually exercises
@@ -2535,9 +2725,7 @@ describe("gradient — overhead/body scale decoupling (usable-collapse fix)", ()
 
     // Overhead settled at ~true system+tools, NOT inflated by the body.
     expect(getOverhead(SID)).toBe(TRUE_OVERHEAD);
-    // usable stays near the real available context (168K − 48K = 120K), NOT
-    // collapsed to ~25K. (Reverting the calibrate inflation drives overhead to
-    // ~TRUE_OVERHEAD + 0.4·body and usable well below 100K → this fails.)
+    // Usable stays near the available context (168K − 48K = 120K).
     const r = transform({
       messages: msgs,
       projectPath: PROJECT,
@@ -4799,7 +4987,7 @@ describe("tier-based context management", () => {
 
         // Bypassed compression → layer 0, but genuinely over the cap (tier >= 1).
         expect(result.layer).toBe(0);
-        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        expect(result.capFit).toBe(false);
         // Past-grace spiral → onSpiral MUST fire (unlike the cap-fit passthrough,
         // which never fires the hook).
         expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
@@ -4904,11 +5092,8 @@ describe("tier-based context management", () => {
       expect(result.usable).toBeGreaterThan(900_000);
       // Base budgets scale off the full usable — NOT the 40K cap (which would
       // give rawBudget = 40K*0.4 = 16K). They are on the chars/3 body scale
-      // (bodyUsable = usable / BODY_TOKEN_RATIO) so they compare apples-to-apples
-      // with the chars/3 message estimates.
-      const bodyUsable = Math.floor(result.usable / BODY_TOKEN_RATIO);
-      expect(result.rawBudget).toBe(Math.floor(bodyUsable * 0.4));
-      expect(result.distilledBudget).toBe(Math.floor(bodyUsable * 0.25));
+      expect(result.rawBudget).toBe(Math.floor(result.usable * 0.4));
+      expect(result.distilledBudget).toBe(Math.floor(result.usable * 0.25));
       expect(result.rawBudget).toBeGreaterThan(40_000);
     });
 
@@ -5024,16 +5209,8 @@ describe("tier-based context management", () => {
     });
 
     test("scale-correct budgets prevent an over-ceiling window: the SHIPPED window fits the REAL ceiling", () => {
-      // Cost cap disabled on a 200K model so budgetUsable === usable === maxInput
-      // (168K). A forced layer-2 window is sized as fractions of `usable` REAL
-      // tokens: prefix 0.25 + raw 0.5 = 0.75 × usable REAL. Pre-scale-fix the
-      // budgets were chars/3 fractions of usable, so the window's REAL size
-      // (×1.68) was 0.75×168K×1.68 = 212K > 168K and overflowed ("prompt is too
-      // long"; the old `fitsWithSafetyMargin` free-passed calibrated sessions).
-      // Post-fix the BODY budgets divide by BODY_TOKEN_RATIO, so the window's
-      // REAL size is at most 0.75×usable = 126K < 168K — the overflow is
-      // prevented at the budget level, and `fitsWithSafetyMargin` (now real-scale
-      // with overhead+ltm) remains a backstop for un-evictable oversized turns.
+      // With the cost cap disabled, a forced layer-2 window uses the
+      // available context after reserving output.
       setModelLimits({ context: 200_000, output: 32_000 }); // maxInput = 168K
       setMaxLayer0Tokens(0); // disabled → budgetUsable === usable === 168K
       calibrate(0);
@@ -5063,21 +5240,8 @@ describe("tier-based context management", () => {
       });
 
       const maxInput = 200_000 - 32_000; // 168K
-      // 🔴 Ships at EXACTLY the forced layer 2 — NO escalation. This is the
-      // discriminating assertion: the budget fix keeps the layer-2 window under
-      // the real ceiling, so fitsWithSafetyMargin accepts it and the loop does
-      // NOT escalate. Reverting the budget /RATIO makes the layer-2 window
-      // overflow → fitsWithSafetyMargin rejects → the loop escalates all the way
-      // to the Layer-4 emergency tail (a tiny window). `toBe(2)` fails on that
-      // revert; `toBeGreaterThanOrEqual(2)` would NOT (Layer 4 satisfies it),
-      // making the test vacuous.
       expect(result.layer).toBe(2);
-      // The SHIPPED window also fits the REAL ceiling — assert in REAL tokens
-      // (chars/3 × BODY_TOKEN_RATIO + overhead 0 + ltm 0), the quantity the API
-      // counts. Strictly stronger than the old chars/3-only check.
-      expect(result.totalTokens * BODY_TOKEN_RATIO).toBeLessThanOrEqual(
-        maxInput,
-      );
+      expect(result.totalTokens).toBeLessThanOrEqual(maxInput * 0.95);
     });
   });
 
@@ -5437,7 +5601,7 @@ describe("tier-based context management", () => {
           sessionID: SID,
         });
         expect(result.layer).toBe(0);
-        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        expect(result.capFit).toBe(false);
         expect(inspectSessionState(SID)?.transformCount).toBe(1);
         // The bust spiral IS detected (cold-start episode) → info breadcrumb.
         // The high-severity alert does NOT fire (we're still in grace).
@@ -5471,7 +5635,7 @@ describe("tier-based context management", () => {
           sessionID: SID,
         });
         expect(result.layer).toBe(0);
-        expect(getTier(result.totalTokens)).toBeGreaterThanOrEqual(1);
+        expect(result.capFit).toBe(false);
         // Past grace → the alert fires (no cold-start breadcrumb — we're past it).
         expect(calls.map((c) => c.kind)).toEqual(["spiral"]);
         expect(inspectSessionState(SID)?.bustSpiralAlerted).toBe(true);

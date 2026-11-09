@@ -2,12 +2,9 @@
  * Token estimation using `coder/ai-tokenizer` — real BPE encodings instead of
  * the legacy `Math.ceil(text.length / 3)` heuristic.
  *
- * Encoding selection is per-provider so the count tracks what the upstream
- * model would actually charge (and what its context window actually fits):
- *   - `anthropic` → `claude` encoding
- *   - `gpt-4o`/`gpt-5*`/`gpt-5.*` → `o200k_base`
- *   - everything else → `cl100k_base` (covers GPT-4/3.5, Claude-on-OpenAI
- *     routers, Copilot, OpenRouter, Gemini, etc.)
+ * Use model-specific counts when a matching encoding is available. Modern
+ * Claude counts are approximated with the bundled Claude BPE and a family
+ * correction measured against Anthropic's count_tokens API.
  *
  * Encoding data (~13 MB uncompressed, ~4 MB gzipped) is inlined into the CJS
  * bundle / SEA binary by esbuild — there's no runtime dependency on
@@ -26,7 +23,11 @@ import * as cl100k_base_encoding from "ai-tokenizer/encoding/cl100k_base";
 import * as o200k_base_encoding from "ai-tokenizer/encoding/o200k_base";
 import * as claude_encoding from "ai-tokenizer/encoding/claude";
 
-export type EncodingName = "cl100k_base" | "o200k_base" | "claude";
+type BundledEncoding = "cl100k_base" | "o200k_base" | "claude";
+export type EncodingName =
+  | BundledEncoding
+  | "claude-v3-estimate"
+  | "claude-v4.7-estimate";
 
 interface TokenCountCache {
   countTokens(
@@ -48,10 +49,10 @@ export function withTokenCountCache<T>(cache: TokenCountCache, fn: () => T): T {
 export const TOKEN_ESTIMATE_CACHE_VERSION =
   "ai-tokenizer@1.0.6:cl100k_base:ordinary-v2";
 
-const cache = new Map<EncodingName, Tokenizer>();
+const cache = new Map<BundledEncoding, Tokenizer>();
 cache.set("cl100k_base", new Tokenizer(cl100k_base_encoding));
 
-function getTokenizer(name: EncodingName): Tokenizer {
+function getTokenizer(name: BundledEncoding): Tokenizer {
   const existing = cache.get(name);
   if (existing) return existing;
   const enc =
@@ -65,17 +66,31 @@ function getTokenizer(name: EncodingName): Tokenizer {
   return tk;
 }
 
-/**
- * Pick the encoding for a given provider/model. Falls back to `cl100k_base`
- * when nothing matches (covers OpenAI-compatible routers, Copilot, etc.).
- */
+/** Select the counting policy from the model name, including routed aliases. */
 export function encodingForModel(opts: {
   providerID?: string;
   modelID?: string;
 }): EncodingName {
-  if (opts.providerID === "anthropic") return "claude";
   const modelID = opts.modelID ?? "";
-  if (/\b(gpt-4o|gpt-5|gpt-5\.\d)\b/i.test(modelID)) return "o200k_base";
+  if (
+    /\bclaude-(?:(?:opus|sonnet|haiku|fable|mythos)-)?(?:4[.-][7-9]|[5-9])\b/i.test(
+      modelID,
+    )
+  )
+    return "claude-v4.7-estimate";
+  if (/\bclaude-(?:(?:opus|sonnet|haiku)-)?[34]\b/i.test(modelID))
+    return "claude-v3-estimate";
+  if (opts.providerID === "anthropic" || /\bclaude-/i.test(modelID))
+    return "claude";
+
+  // GPT-6 uses o200k as a proxy. Published API measurements matched GPT-5
+  // across 31 texts, and the upstream tiktoken map has no GPT-6 entry.
+  if (
+    /\b(?:gpt-(?:4o|4[.]1|4[.]5|[56]|oss)|o1|o3|o4-mini|codex-mini)\b/i.test(
+      modelID,
+    )
+  )
+    return "o200k_base";
   return "cl100k_base";
 }
 
@@ -88,12 +103,21 @@ export function encodingForModel(opts: {
  */
 export function estimateTokens(
   text: string,
-  opts: { providerID?: string; modelID?: string } = {},
+  opts: { providerID?: string; modelID?: string; encoding?: EncodingName } = {},
 ): number {
   if (!text) return 0;
   try {
-    const encoding = encodingForModel(opts);
-    const compute = () => getTokenizer(encoding).count(text);
+    const encoding = opts.encoding ?? encodingForModel(opts);
+    const compute = () => {
+      // Fit the ratio of provider content tokens to bundled BPE counts on
+      // short samples (>=10 provider tokens) from coder/ai-tokenizer's
+      // Claude count_tokens fixture at 6dec619. Keep the API framing separate.
+      if (encoding === "claude-v3-estimate")
+        return Math.round(getTokenizer("claude").count(text) * 1.09);
+      if (encoding === "claude-v4.7-estimate")
+        return Math.round(getTokenizer("claude").count(text) * 1.34);
+      return getTokenizer(encoding).count(text);
+    };
     const active = countCache.getStore();
     return active ? active.countTokens(text, encoding, compute) : compute();
   } catch {

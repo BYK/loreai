@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   db,
+  type EncodingName,
   data,
   estimateMessages,
   temporal,
@@ -214,11 +215,73 @@ it("resolves a new tool result across the speculative jump", async () => {
     full.prepared.temporalInput.latestUser,
   );
 });
+it("recounts a checkpoint under a different model policy and resumes in the new policy", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const prefix: GatewayMessage[] = messages.slice(0, 80).map((message) => ({
+    ...message,
+    content: [
+      { type: "text", text: "機械学習と自然言語処理 — Merhaba dünya!" },
+    ],
+  }));
+  const protocol = "openai-responses";
+  const checkpointProtocol = sourceCheckpointProtocol(protocol);
+  const old = (await prepare(prefix, false, checkpointProtocol, true)).prepared;
+  const oldTotal = old.checkpoint?.resolvedTokenTotal;
+  expect(oldTotal).toBe(estimateMessages(old.loreMessages));
+  accept(old);
+
+  const encoding = "o200k_base";
+  const suffix: GatewayMessage[] = [
+    { role: "user", content: [{ type: "text", text: "continue" }] },
+  ];
+  const delta = () =>
+    prepareSemanticMessages({
+      ...storage,
+      messages: suffix,
+      protocol,
+      checkpointProtocol,
+      checkpointBoundarySafe: true,
+      encoding,
+      sourcePrefix: {
+        sourceCount: prefix.length,
+        sourceDigest: digestChain(prefix),
+      },
+      timing: new PreparationTiming({ protocol, stream: true }),
+    });
+  await expect(delta()).rejects.toThrow("retained Lore context");
+
+  const replay = await prepare(
+    prefix,
+    false,
+    checkpointProtocol,
+    true,
+    encoding,
+  );
+  const prepared = replay.prepared;
+  expect(replay.timing.observations.source_checkpoint_hit).toBe(0);
+  expect(replay.timing.observations.source_estimated_messages).toBe(
+    prefix.length,
+  );
+  expect(prepared.checkpoint?.resolvedTokenTotal).toBe(
+    estimateMessages(prepared.loreMessages, encoding),
+  );
+  expect(prepared.checkpoint?.resolvedTokenTotal).not.toBe(oldTotal);
+  accept(prepared);
+
+  const resumed = await delta();
+  expect(resumed.checkpoint?.reason).toBe("hit");
+  expect(resumed.checkpoint?.resolvedTokenTotal).toBe(
+    estimateMessages(resumed.loreMessages, encoding),
+  );
+});
+
 async function prepare(
   source: GatewayMessage[],
   forceFull = false,
   checkpointProtocol?: string,
   checkpointBoundarySafe?: boolean,
+  encoding?: EncodingName,
 ) {
   const timing = new PreparationTiming({
     protocol: "openai-responses",
@@ -232,6 +295,7 @@ async function prepare(
       sessionID,
       noStore: false,
       protocol: "openai-responses",
+      encoding,
       ...(checkpointProtocol ? { checkpointProtocol } : {}),
       ...(checkpointBoundarySafe !== undefined
         ? { checkpointBoundarySafe }
