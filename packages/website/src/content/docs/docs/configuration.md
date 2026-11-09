@@ -48,7 +48,7 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 - [`curator`](#curator) — Curator scheduling and consolidation thresholds.
 - [`pruning`](#pruning) — Storage retention and emergency-pruning thresholds.
 - [`search`](#search) — Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.
-- [`cache`](#cache) — Anthropic prompt cache TTL and speculative warming.
+- [`cache`](#cache) — Anthropic prompt cache TTL and speculative warming, including eligible 30-minute OpenAI Responses caches.
 - [`workspaces`](#workspaces) — Workspace sub-project paths or globs (relative to `.lore.json`). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. "packages/*").
 - [`crossProject`](#crossProject) — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.
 - [`agentsFile`](#agentsFile) — AGENTS.md/CLAUDE.md export/import configuration.
@@ -230,7 +230,7 @@ Recall output formatting and result-count limits.
 
 ## `cache`
 
-Anthropic prompt cache TTL and speculative warming.
+Anthropic prompt cache TTL and speculative warming, including eligible 30-minute OpenAI Responses caches.
 
 | Field | Type | Default | Constraints | Description |
 |---|---|---|---|---|

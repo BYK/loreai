@@ -49,7 +49,7 @@ import {
   InvalidCrossProviderRequestError,
   requireTextOnlyToolResult,
 } from "./errors";
-import { safeTokenSum } from "../usage-validation";
+import { isRecord, safeTokenSum } from "../usage-validation";
 import {
   buildOpenAICodexResponsesUrl,
   buildOpenAIResponsesUrl,
@@ -239,6 +239,12 @@ function parseOpenAIResponsesRequestInternal(
     extras.parallel_tool_calls = raw.parallel_tool_calls;
   }
   // Responses API-specific extras
+  if (typeof raw.prompt_cache_key === "string") {
+    extras.prompt_cache_key = raw.prompt_cache_key;
+  }
+  if (raw.prompt_cache_options !== undefined) {
+    extras.prompt_cache_options = raw.prompt_cache_options;
+  }
   if (raw.previous_response_id !== undefined) {
     extras.previous_response_id = raw.previous_response_id as string;
   }
@@ -298,13 +304,11 @@ const RESPONSES_TOP_LEVEL_KEYS = new Set([
   "reasoning",
   "text",
   "truncation",
+  "prompt_cache_key",
+  "prompt_cache_options",
 ]);
 
-const CODEX_TOP_LEVEL_KEYS = new Set([
-  "include",
-  "prompt_cache_key",
-  "service_tier",
-]);
+const CODEX_TOP_LEVEL_KEYS = new Set(["include", "service_tier"]);
 
 function addCodexControls(
   req: GatewayRequest,
@@ -316,9 +320,6 @@ function addCodexControls(
   // `store` is intentionally absent: the upstream builder always forces it to
   // false for Codex, so retaining the client value would be dead state.
   if (raw.include !== undefined) extras.include = raw.include;
-  if (typeof raw.prompt_cache_key === "string") {
-    extras.prompt_cache_key = raw.prompt_cache_key;
-  }
   if (typeof raw.service_tier === "string") {
     extras.service_tier = raw.service_tier;
   }
@@ -1349,6 +1350,21 @@ export function buildOpenAIResponsesUpstreamRequest(
     ) {
       body.tool_choice = req.extras.tool_choice;
     }
+  }
+
+  if (
+    req.protocol === "openai-responses" &&
+    !req.codex &&
+    buildOpenAIResponsesUrl(upstreamBase) ===
+      "https://api.openai.com/v1/responses"
+  ) {
+    if (req.extras?.prompt_cache_key !== undefined)
+      body.prompt_cache_key = req.extras.prompt_cache_key;
+    const options = req.extras?.prompt_cache_options;
+    if (isRecord(options) && options.prewarm === true) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    if (options !== undefined) body.prompt_cache_options = options;
   }
 
   const providerRouting = providerRoutingValue(req);

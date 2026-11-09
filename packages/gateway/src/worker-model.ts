@@ -531,6 +531,13 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
   return matchModelEntry(cachedModelData, modelID) ?? fallbackEntry(modelID);
 }
 
+export function getExactModelEntrySyncForProvider(
+  providerID: string,
+  modelID: string,
+): ModelsDevEntry | undefined {
+  return cachedModelDataByProvider?.get(`${providerID}/${modelID}`);
+}
+
 /**
  * Provider-aware synchronous model entry lookup. Prefers the provider-qualified
  * entry (`${providerID}/${modelID}`) so a bare id published by multiple
@@ -548,7 +555,7 @@ export function getModelEntrySyncForProvider(
   modelID: string,
 ): ModelsDevEntry {
   if (providerID && cachedModelDataByProvider) {
-    const qualified = cachedModelDataByProvider.get(`${providerID}/${modelID}`);
+    const qualified = getExactModelEntrySyncForProvider(providerID, modelID);
     if (qualified) return qualified;
   }
   return getModelEntrySync(modelID);

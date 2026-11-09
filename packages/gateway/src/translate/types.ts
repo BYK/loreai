@@ -1,3 +1,4 @@
+import type { OpenAIWarmupReplay } from "../openai-cache-warming";
 /**
  * Internal representation types for the Lore gateway.
  *
@@ -336,6 +337,7 @@ export type GatewayRequest = {
      */
     include?: unknown;
     prompt_cache_key?: string;
+    prompt_cache_options?: unknown;
     text?: unknown;
     tool_choice?: unknown;
     parallel_tool_calls?: boolean;
@@ -631,6 +633,9 @@ export function requestTargetsOpenRouter(
   }
 }
 
+export type WarmingSegment =
+  `return:${"human" | "system"}:${"1" | "2-3" | "4+"}`;
+
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
 export type SessionState = {
   sessionID: string;
@@ -669,10 +674,6 @@ export type SessionState = {
   /** Unix timestamp (ms) of the request before the current one — used by budget
    *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
   prevRequestTime?: number;
-  /** Unix timestamp (ms) of the last user-initiated turn — excludes tool-use
-   *  auto-continuations. Used exclusively for inter-turn gap histogram
-   *  recording (survival analysis). */
-  lastUserTurnTime: number;
   /** Last harness-provided title written to session_state.title; dedupes the
    *  DB write so a resend of the same title costs nothing per turn. */
   harnessTitle?: string;
@@ -772,8 +773,19 @@ export type SessionState = {
 
   /** Cache warming state for speculative keep-alive pings. */
   warmup?: WarmupState;
-  /** Per-session survival model (inter-turn gap histogram). */
-  survivalModel?: InterTurnHistogram;
+  /** Origin and human conversation depth of the latest request chain. */
+  warmingTurn?: {
+    order: number;
+    depth: number;
+    segment: WarmingSegment;
+    lastHumanIndex?: number;
+    noStore?: boolean;
+    accepted?: { requestedAt: number; repliedAt: number };
+    warmupMissed?: boolean;
+    openAIReplay?: OpenAIWarmupReplay;
+  };
+  /** Observed reply gaps, isolated by the preceding turn's segment. */
+  warmingHistograms?: Map<WarmingSegment, InterTurnHistogram>;
   /** Routing snapshot from the most recent session request start.
    *  Used by cache warmer (targets the most-recent provider) and as
    *  a convenience accessor. For provider-specific lookups (workers,
@@ -850,17 +862,31 @@ export type InterTurnHistogram = {
   total: number;
 };
 
+export type WarmupTTL = "5m" | "30m" | "1h";
+
 /** Per-session cache warming state. */
 export type WarmupState = {
   /** Timestamp (ms) of the last warmup ping sent. Cleared when consumed (user returns). */
   lastWarmupAt: number;
+  /** Actual TTL of the paid refresh, which may differ from the requested TTL. */
+  lastWarmupTTL?: WarmupTTL;
+  /** Account and cache key the OpenAI warmup refreshed. */
+  openAIRefresh?: {
+    scope: string;
+    previousExpiry: number;
+    savingsPerMTok: number;
+  };
   /** Warmup pings sent in the CURRENT break period (reset on user return). Used for break-even cap. */
   warmupCount: number;
   /** Lifetime total warmup pings sent across all break periods in this session. */
   totalWarmups: number;
   /** Warmups followed by a user return within TTL (confirmed saves). */
   warmupHits: number;
-  /** Session marked as dead — survival dropped below threshold. Resets on real request. */
+  /** Optional counters separating idle-return forecasts from tool probe evidence. */
+  automaticWarmups?: number;
+  automaticWarmupHits?: number;
+  lastWarmupWasAutomatic?: boolean;
+  /** Legacy survival pause, cleared after an accepted turn. */
   disabled: boolean;
   /** Operator selected Stop; unlike `disabled`, this survives a user return. */
   userStopped?: boolean;
@@ -891,6 +917,9 @@ export type WarmupResult = {
   cacheReadTokens: number;
   /** Cache creation tokens (non-zero means warmup caused a fresh write — bad). */
   cacheCreationTokens: number;
+  ttl?: WarmupTTL;
+  verifiedRefresh?: boolean;
+  costUSD?: number;
 };
 
 // ---------------------------------------------------------------------------

@@ -766,6 +766,14 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(pid);
+    database
+      .query("DELETE FROM warmup_pending_observations WHERE project_id = ?")
+      .run(pid);
+    database
+      .query(
+        "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot LIKE 'return:%'",
+      )
+      .run(pid);
     // Match confirmed ownership before deleting the source rows. A different
     // project may have messages with the same globally keyed session ID, while
     // the owning project may have a state before its first temporal message.
@@ -1282,6 +1290,11 @@ export function deleteSession(
     database
       .query(
         "DELETE FROM distillations WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query(
+        "DELETE FROM warmup_pending_observations WHERE project_id = ? AND session_id = ?",
       )
       .run(pid, sessionId);
     // Session state is keyed globally, so the requested project and the

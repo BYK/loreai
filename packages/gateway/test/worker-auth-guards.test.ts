@@ -30,7 +30,6 @@ function state(sessionID: string): SessionState {
     projectPath: `/tmp/${sessionID}`,
     fingerprint: "fingerprint",
     lastRequestTime: 0,
-    lastUserTurnTime: 0,
     messageCount: 1,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,

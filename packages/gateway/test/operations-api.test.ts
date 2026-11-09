@@ -115,61 +115,92 @@ describe("GET /api/v1/warming", () => {
     delete process.env.LORE_WARMING_ENABLED;
   });
 
-  it("returns persisted project histograms after restart without live sessions", async () => {
-    const core = await import("@loreai/core");
-    const warmer = await import("../src/cache-warmer");
-    const previousBreaker = core.getKV("warmup_circuit_breaker");
-    const path = `/tmp/operations-histogram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const projectId = core.ensureProject(path, "Retained History Project");
-    const counts = Array(warmer.HISTOGRAM_BINS.length + 1).fill(0);
-    counts[0] = 2;
-    counts[counts.length - 1] = 3;
-    core
-      .db()
-      .query(
-        `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
-         VALUES (?, 'all', ?, ?, ?)`,
-      )
-      .run(projectId, JSON.stringify(counts), 5, Date.now());
-    // Simulate a fresh gateway process: its in-memory histogram cache is empty.
-    warmer._resetForTest();
-
-    try {
-      const snapshot = await body<{
-        sessions: unknown[];
-        histograms: Array<{
-          project_id: string;
-          project_name: string | null;
-          total: number;
-          counts: number[];
-        }>;
-      }>("/api/v1/warming");
-      expect(snapshot.sessions).toEqual([]);
-      expect(snapshot.histograms).toContainEqual(
-        expect.objectContaining({
-          project_id: projectId,
-          project_name: "Retained History Project",
-          total: 5,
-          counts,
-        }),
-      );
-    } finally {
+  it.each([false, true])(
+    "returns persisted project histograms after restart (segmented: %s)",
+    async (segmented) => {
+      const core = await import("@loreai/core");
+      const warmer = await import("../src/cache-warmer");
+      const previousBreaker = core.getKV("warmup_circuit_breaker");
+      const path = `/tmp/operations-histogram-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const projectId = core.ensureProject(path, "Retained History Project");
+      const counts = Array(warmer.HISTOGRAM_BINS.length + 1).fill(0);
+      counts[0] = 2;
+      counts[counts.length - 1] = 3;
       core
         .db()
-        .query("DELETE FROM warmup_histograms WHERE project_id = ?")
-        .run(projectId);
-      core.data.deleteProject(projectId);
+        .query(
+          `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
+         VALUES (?, 'all', ?, ?, ?)`,
+        )
+        .run(projectId, JSON.stringify(counts), 5, Date.now());
+      const currentCounts = Array<number>(counts.length).fill(0);
+      currentCounts[3] = 4;
+      currentCounts[currentCounts.length - 1] = 5;
+      if (segmented) {
+        const insert = core
+          .db()
+          .query(
+            "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
+          );
+        const human = [...currentCounts];
+        human[human.length - 1] = 0;
+        const system = [...currentCounts];
+        system[3] = 0;
+        insert.run(
+          projectId,
+          "return:human:1",
+          JSON.stringify(human),
+          4,
+          Date.now(),
+        );
+        insert.run(
+          projectId,
+          "return:system:1",
+          JSON.stringify(system),
+          5,
+          Date.now(),
+        );
+      }
+      // Simulate a fresh gateway process: its in-memory histogram cache is empty.
       warmer._resetForTest();
-      if (previousBreaker === null) {
+
+      try {
+        const snapshot = await body<{
+          sessions: unknown[];
+          histograms: Array<{
+            project_id: string;
+            project_name: string | null;
+            total: number;
+            counts: number[];
+          }>;
+        }>("/api/v1/warming");
+        expect(snapshot.sessions).toEqual([]);
+        expect(snapshot.histograms).toContainEqual(
+          expect.objectContaining({
+            project_id: projectId,
+            project_name: "Retained History Project",
+            total: segmented ? 9 : 5,
+            counts: segmented ? currentCounts : counts,
+          }),
+        );
+      } finally {
         core
           .db()
-          .query("DELETE FROM kv_meta WHERE key = ?")
-          .run("warmup_circuit_breaker");
-      } else {
-        core.setKV("warmup_circuit_breaker", previousBreaker);
+          .query("DELETE FROM warmup_histograms WHERE project_id = ?")
+          .run(projectId);
+        core.data.deleteProject(projectId);
+        warmer._resetForTest();
+        if (previousBreaker === null) {
+          core
+            .db()
+            .query("DELETE FROM kv_meta WHERE key = ?")
+            .run("warmup_circuit_breaker");
+        } else {
+          core.setKV("warmup_circuit_breaker", previousBreaker);
+        }
       }
-    }
-  });
+    },
+  );
 
   it("distinguishes tripped routes while hiding upstream URL paths and credentials", async () => {
     const core = await import("@loreai/core");
@@ -240,12 +271,12 @@ describe("read-only operations snapshots", () => {
       projectPath: "/tmp/operations-read-only-project",
       fingerprint: "operations-read-only",
       lastRequestTime: Date.now() - 275_000,
-      lastUserTurnTime: Date.now() - 275_000,
       messageCount: 20,
       turnsSinceCuration: 2,
       consecutiveTextOnlyTurns: 0,
       recallStore: new Map(),
-      survivalModel,
+      warmingTurn: { order: 1, depth: 1, segment: "return:human:1" },
+      warmingHistograms: new Map([["return:human:1", survivalModel]]),
       cacheAnalytics: {
         lastRequestBody: new Uint8Array([1]),
         lastRequestBodyLength: 1,
@@ -311,7 +342,6 @@ describe("read-only operations snapshots", () => {
       projectPath: `/tmp/${sessionId}`,
       fingerprint: sessionId,
       lastRequestTime: Date.now() - 270_000,
-      lastUserTurnTime: Date.now() - 270_000,
       messageCount: 20,
       turnsSinceCuration: 2,
       consecutiveTextOnlyTurns: 0,
@@ -698,12 +728,10 @@ describe("operations rows for project path aliases", () => {
       projectPath: aliasPath,
       fingerprint: "operations-alias",
       lastRequestTime: Date.now(),
-      lastUserTurnTime: Date.now(),
       messageCount: 2,
       turnsSinceCuration: 1,
       consecutiveTextOnlyTurns: 0,
       recallStore: new Map(),
-      survivalModel: (await import("../src/cache-warmer")).createHistogram(),
       cacheAnalytics: {
         lastRequestBody: new Uint8Array([1]),
         lastRequestBodyLength: 1,

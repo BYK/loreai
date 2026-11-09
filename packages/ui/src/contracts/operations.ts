@@ -26,7 +26,7 @@ const sessionWarming = type({
   should_warm: "boolean",
   phase: "'initial' | 'continuation' | 'none'",
   reason: "string | null",
-  ttl: "'5m' | '1h' | null",
+  ttl: "'5m' | '30m' | '1h' | null",
   idle_ms: "number",
   p_returns: "number",
   total_warmups: nonNegInt,
