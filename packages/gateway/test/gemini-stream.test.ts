@@ -852,30 +852,33 @@ describe("accumulateGeminiSSEStream", () => {
     expect(resp.usage).toEqual({ inputTokens: 10, outputTokens: 42 });
   });
 
-  test("rejects totalTokenCount contradictory to prompt, candidates, thoughts, and tool tokens", async () => {
-    await expect(
-      accumulateGeminiSSEStream(
-        sse([
-          {
-            candidates: [
-              {
-                content: { role: "model", parts: [{ text: "done" }] },
-                finishReason: "STOP",
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 2,
-              candidatesTokenCount: 3,
-              thoughtsTokenCount: 4,
-              toolUsePromptTokenCount: 5,
-              cachedContentTokenCount: 1,
-              totalTokenCount: 15,
+  test("accepts totalTokenCount that differs from prompt, candidates, thoughts, and tool tokens", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "done" }] },
+              finishReason: "STOP",
             },
+          ],
+          usageMetadata: {
+            promptTokenCount: 2,
+            candidatesTokenCount: 3,
+            thoughtsTokenCount: 4,
+            toolUsePromptTokenCount: 5,
+            cachedContentTokenCount: 1,
+            totalTokenCount: 15,
           },
-        ]),
-        { strict: true, stopAtTerminal: true },
-      ),
-    ).rejects.toThrow("malformed Gemini stream event");
+        },
+      ]),
+      { strict: true, stopAtTerminal: true },
+    );
+    expect(result.usage).toMatchObject({
+      inputTokens: 6,
+      cacheReadInputTokens: 1,
+      outputTokens: 7,
+    });
   });
 
   test("accepts exact Gemini totals without double-counting cached prompt tokens", async () => {
