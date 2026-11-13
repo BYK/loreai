@@ -92,7 +92,7 @@
 
 /* Quiet app-like navigation and a comfortable, bounded reading column. */
 .sidebar-content a { border-radius: var(--radius-control); }
-.sidebar-content a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-soft-text); }
+.sidebar-content a[aria-current="page"] { background:color-mix(in srgb,var(--heading) 8%,var(--bg));color:var(--heading);font-weight:600; }
 .sl-markdown-content { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }
 .sl-markdown-content :is(h1, h2, h3, h4) { color: var(--heading); }
 .pagination-links a { border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-soft); }
@@ -134,8 +134,6 @@
 .docs-journal-title h1 { margin-top:.5rem; }
 
 .docs-journal-title .field-marker { margin:0; }
-.sidebar-content a { border-inline-start:2px solid transparent; }
-.sidebar-content a[aria-current="page"] { border-inline-start-color:var(--accent);background:var(--journal-page); }
 .sidebar-content summary { min-height:44px;font-weight:500;gap:.75rem;border-radius:6px; }
 .sidebar-content summary:focus-visible { outline:2px solid var(--accent);outline-offset:3px; }
 .sidebar-content summary .caret, #starlight__mobile-toc .caret { transition:none; }
@@ -143,7 +141,7 @@
 @media(hover:hover) and (pointer:fine) { .sidebar-content summary:hover { background:var(--journal-page); } }
 .pagination-links a { box-shadow:none;border-color:var(--line);background:var(--journal-page); }
 .right-sidebar-panel a[aria-current="true"] { border-inline-start-color:var(--accent); }
-@media(hover:hover) and (pointer:fine) { .sidebar-content a:hover,.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); } }
+@media(hover:hover) and (pointer:fine) { .sidebar-content a:not([aria-current="page"]):hover { background:color-mix(in srgb,var(--heading) 4%,var(--bg));color:var(--heading); }.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); } }
 @media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
 .docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
 .sl-markdown-content table { table-layout:auto; }.sl-markdown-content th,.sl-markdown-content td { overflow-wrap:normal;word-break:normal; }.sl-markdown-content :is(td,th) code { overflow-wrap:anywhere; }
