@@ -1075,11 +1075,11 @@ function getSessionState(sessionID: string): SessionState {
       // a turn until the next compressed turn re-latches the ratchet.
       if (state.lastLayer >= 1 && state.lastLayer <= 3) {
         state.maxSustainedLayer = state.lastLayer;
-        state.priorPrefixShipped = true;
       } else if (state.lastLayer === 4) {
         state.maxSustainedLayer = 1;
-        state.priorPrefixShipped = true;
       }
+      state.priorPrefixShipped =
+        state.lastLayer >= 1 && persisted.bustRateEMA !== 0;
       state.lastKnownInput = persisted.lastKnownInput;
       // v43: restore the last-sent message count so the calibrated-delta
       // estimate identifies only genuinely-new messages on the resume turn
@@ -2080,6 +2080,7 @@ export function saveGradientState(sessionID: string): void {
     // Repurpose the dead dynamicContextCap column (v24, always 0 now)
     // to persist consecutiveBusts — avoids a new DB migration.
     dynamicContextCap: state.consecutiveBusts,
+    bustRateEMA: state.priorPrefixShipped ? 1 : 0,
   });
 }
 
@@ -3726,14 +3727,16 @@ function transformInner(input: {
   // out of Layer 0 via maxSustainedLayer for no cold-write savings.
   if (postIdleCompact) {
     const postIdleRawBudget = Math.floor(bodyUsable * 0.2);
-    const approxRawBodyTokens = Math.max(
-      0,
-      expectedInput - overhead - sessLtmTokens,
+    // Measure raw body on the same chars/3 scale as postIdleRawBudget
+    // (expectedInput on calibrated turns is on the API token scale ~1.68x higher).
+    const rawBodyTokens = input.messages.reduce(
+      (s, m) => s + estimateMessage(m),
+      input.sourceWindow?.omittedTokens ?? 0,
     );
     const needsPostIdleCompact =
       effectiveMinLayer >= 1 ||
       !layer0Passes(layer0Input, layer0Ceiling, maxInput) ||
-      approxRawBodyTokens > postIdleRawBudget;
+      rawBodyTokens > postIdleRawBudget;
     if (needsPostIdleCompact) {
       effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
       rawBudget = postIdleRawBudget;
