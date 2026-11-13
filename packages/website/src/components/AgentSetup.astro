@@ -13,14 +13,17 @@ const base = import.meta.env.BASE_URL;
   <ChoiceGroup class="setup-picker" legend="Choose your coding agent">
     {SETUP_AGENTS.map((agent,index) => <ChoiceItem name={`${id}-agent`} value={agent.id} checked={index===0} label={agent.name} controls={`${id}-${agent.id}`} />)}
   </ChoiceGroup>
-  {!installed && <div class="setup-install"><h3><span class="setup-stage">1</span> Install Lore</h3><p>Run this in your terminal. It installs Lore; your coding agent should already be installed and signed in.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  {!installed && <div class="setup-install"><h3><span class="setup-stage">1</span> Install Lore</h3><p>Run once in your terminal, then connect from your project.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
   {id === "install-setup" && <span id="3-connect-from-your-project" class="legacy-setup-anchor" aria-hidden="true"></span>}
+  {id === "install-setup" && <span id="4-verify-the-connection" class="legacy-setup-anchor" aria-hidden="true"></span>}
+  {id === "install-setup" && <span id="verify-recording" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
     <h3><span class="setup-stage">{installed ? "1" : "2"}</span> Connect {agent.name}</h3><p>{agent.detail}</p>
     <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />
     <div class="setup-observation"><h3><span class="setup-stage">{installed ? "2" : "3"}</span> Verify a recorded session</h3><p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p><label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p></div>
     <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide →</a></div>
   </div>)}
+  {id === "install-setup" && <span id="operational-telemetry" class="legacy-setup-anchor" aria-hidden="true"></span>}
   <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
 </section>
 <script>import "../scripts/agent-setup";</script>

@@ -192,6 +192,10 @@ test("docs navigation retains framework disclosure state and real destinations",
     .click();
   await expect(page).toHaveURL(/\/docs\/first-session\/$/);
   if (isMobile) {
+    // Test the enhanced close behavior after the framework element is ready.
+    await page.evaluate(() =>
+      customElements.whenDefined("mobile-starlight-toc"),
+    );
     const toc = page.locator("#starlight__mobile-toc");
     await toc.locator("summary").click();
     await expect(toc).toHaveAttribute("open", "");

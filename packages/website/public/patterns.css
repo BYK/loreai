@@ -91,3 +91,41 @@
 .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item { position:absolute;right:12px; }
 .agent-setup .setup-observation label { margin:0; }
 @media(max-width:1000px) { .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item { position:relative;inset:auto;flex:1; } }
+
+/* Short proof tabs have intrinsic width; words are never split to fit a capsule. */
+.spotlight-workbench .spotlight-choices { flex:0 0 auto; }
+.spotlight-workbench .spotlight-choices .ui-choice-item { flex:0 0 auto; }
+.spotlight-workbench .spotlight-choices .ui-choice-label { white-space:nowrap;overflow-wrap:normal; }
+/* Copy is a utility beside the command, including at the smallest phone width. */
+.ui-command .ui-command-row { flex-wrap:nowrap;align-items:flex-start;gap:8px; }
+.ui-command .ui-command-row > pre { flex:1 1 0; }
+.ui-command .ui-command-row > button { width:44px;height:44px;min-width:44px;padding:0; }
+.reference-finder .reference-results { max-height:none;overflow:visible;gap:0 20px;padding:0; }
+.reference-finder .reference-results li { padding:12px 0;border-bottom:1px solid var(--line); }
+.reference-finder .reference-results a { min-height:32px;font-family:ui-monospace,monospace;font-size:.8125rem; }
+.reference-finder .reference-description { margin:3px 0 6px;font-size:.8125rem;line-height:1.6;color:var(--text); }
+.reference-finder .reference-results small { font-size:.75rem;color:var(--muted); }
+.reference-more { margin-top:16px; }
+@media(max-width:640px) {
+  .spotlight-workbench .spotlight-choices { flex:1; }
+  .spotlight-workbench .spotlight-choices .ui-choice-item { flex:1; }
+  .spotlight-image img { min-width:0;width:100%;max-width:100%;height:auto;transform:none; }
+  .spotlight-image { display:grid;align-items:center;height:220px;padding:0; }
+  .spotlight-image > a { inset:0;display:none;align-content:center; }
+  .tour-panel > .tour-image-link { height:auto;max-height:none; }
+  .tour-panel > .tour-image-link img { width:100%;min-width:0;max-width:100%;height:auto;transform:none; }
+}
+/* Content, raised utilities and journal pages share the app palette but distinct roles. */
+.hero-proof .field-marker,.docs-journal-title .field-marker,.blog-hero .field-marker,
+.article-field-label .field-marker,.journal-intro .field-marker,.spotlight-explanations .field-marker { color:var(--muted); }
+.product-spotlight .spotlight-workbench .spotlight-explanations { background:var(--bg); }
+.spotlight-workbench .workbench-caption { background:var(--bg); }
+.journal-book .journal-result { background:var(--surface);border:1px solid var(--line);border-inline-start:3px solid var(--accent);border-radius:6px; }
+.journal-tasks { margin-top:20px; }
+.journal-transient { margin-top:16px;border-top:1px solid var(--line); }
+.journal-transient .ui-accordion-trigger { font-size:.8125rem;color:var(--muted); }
+.journal-transient .ui-accordion-content { font-size:.875rem; }
+.journal-transient .journal-note { margin-bottom:0; }
+
+.agent-setup .legacy-setup-anchor { display:block;width:1px;height:1px;scroll-margin-top:110px; }
+.product-spotlight .workbench-bar { background:var(--bg); }

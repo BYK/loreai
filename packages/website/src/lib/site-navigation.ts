@@ -55,7 +55,7 @@ export function navigationGroups(base: string) {
           icon: "docs",
         },
         {
-          label: "Field notes",
+          label: "Blog",
           href: `${base}blog/`,
           section: `${base}blog/`,
           description: "Product ideas and engineering from Lore.",

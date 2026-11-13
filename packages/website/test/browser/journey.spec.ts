@@ -117,8 +117,7 @@ test("installation guides lead through connection and verification before refere
   ).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "Verify recording",
-      exact: true,
+      name: /Verify a recorded session/,
     }),
   ).toBeVisible();
   await expect(
@@ -126,9 +125,9 @@ test("installation guides lead through connection and verification before refere
       .getByRole("link", { name: /installer and uninstall reference/i })
       .first(),
   ).toHaveAttribute("href", /installation-reference/);
-  const headings = await page.locator("main h2").allTextContents();
+  const headings = await page.locator("main h2, main h3").allTextContents();
   expect(
-    headings.findIndex((text) => text.includes("Verify recording")),
+    headings.findIndex((text) => text.includes("Verify a recorded session")),
   ).toBeLessThan(headings.findIndex((text) => text.includes("Reference")));
   await expect(
     page
@@ -150,7 +149,7 @@ test("shared navigation identifies the current section and blog metadata is not 
       .click();
   const active = page
     .getByRole("navigation", { name: "Primary navigation" })
-    .getByRole("link", { name: /^Field notes/ });
+    .getByRole("link", { name: /^Blog/ });
   await expect(active).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".blog-card")).toHaveCount(0);
   await expect(page.locator(".post-row").first()).toBeVisible();

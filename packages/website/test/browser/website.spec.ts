@@ -164,7 +164,7 @@ test("mobile menu closes on Escape and after an in-page link", async ({
   await toggle.click();
   await page
     .locator(".nav-mobile-panel")
-    .getByRole("link", { name: "How it works", exact: true })
+    .getByRole("link", { name: "Day-to-day workflow", exact: true })
     .click();
   await expect(page.locator(".nav-mobile")).not.toHaveAttribute("open");
   await expect(page).toHaveURL(/#how$/);

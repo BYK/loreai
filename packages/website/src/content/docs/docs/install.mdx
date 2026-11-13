@@ -13,28 +13,14 @@ you begin; the hosted installer installs **Lore**, not your coding agent.
 
 <AgentSetup id="install-setup" />
 
-<span id="4-verify-the-connection" class="legacy-setup-anchor" aria-hidden="true"></span>
-
-## Verify recording
-
 <span id="2-install-and-check-the-executable" class="legacy-setup-anchor" aria-hidden="true"></span>
 
-After installation, `lore --version` should print a version. If the command is
-missing, open a new terminal and check the installer's printed directory.
-[Installation troubleshooting](/docs/troubleshooting/#lore-command-not-found).
+If `lore` is missing after installation, open a new terminal and run
+`lore --version`. [Check the installation](/docs/troubleshooting/#lore-command-not-found)
+if it still cannot be found. Knowledge curation happens later; a recorded session
+is enough to verify your connection.
 
-Run the selected connection command from your project, then send a normal message.
-Open the **Dashboard URL printed by Lore**, select your project, and open
-**Sessions**. A recorded conversation confirms that activity reached Lore.
-
-[See verification steps](/docs/first-session/#verify) for the expected result.
-Knowledge curation happens later in the background; you do not need a `.lore.md`
-entry to verify the connection.
-
-For Codex Desktop, keep the local gateway running, fully quit the Desktop app,
-then open it again. Persistent setup saves a backup;
-[setup undo](/docs/setup/#undoing-setup) restores settings Lore changed.
-For remote gateways or custom providers, see the [setup reference](/docs/setup/)
+For remote gateways or custom providers, use the [setup reference](/docs/setup/)
 and [custom upstream guide](/docs/guides/custom-upstreams/).
 
 ## Next steps
@@ -47,11 +33,6 @@ and [custom upstream guide](/docs/guides/custom-upstreams/).
 
 The [installer and uninstall reference](/docs/installation-reference/) lists paths,
 configuration effects, runtime options, and cleanup behavior.
-
-### Operational telemetry
-
-Production telemetry is enabled by default. Set `SENTRY_ENABLED=0` before starting
-Lore to opt out. [Data, providers, telemetry, and costs](/docs/data-and-costs/).
 
 ### What the installer writes
 

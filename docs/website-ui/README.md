@@ -353,3 +353,53 @@ include literal/default HTML and independent enumeration of the generated docume
 Separate correctness/security source reviews pass with seeded adversarial probes.
 The broader repository before-merge gate remains separate and unresolved; these
 results do not claim a full-root test pass or authorize merging the draft.
+
+### Mobile and dark-mode QA polish (13 November)
+
+The floating field guide and RPG journal remain the page’s visual anchors.
+Desktop proof tabs now have enough intrinsic width for Source and History.
+Phone proof uses focused, reproducible app-image crops rather than oversize
+screenshots clipped at the right edge. Full-size originals remain available.
+
+Setup presents one installation, connection and verification path, keeps the
+provider/telemetry disclosure and legacy public fragments, and uses compact copy
+icons beside commands. The journal collapses temporary troubleshooting details
+and shows the supplied rule before alternate task choices. Ordinary metadata is
+quieter; proof content and utility surfaces have distinct roles in dark mode.
+
+The setting finder adds descriptions from actual reference prose and prioritizes
+field names over incidental description matches. Six results appear initially,
+with an explicit Show all action; expansion uses normal page scrolling. Global
+search omits redundant directory inventories and duplicate document headings.
+The menu uses Blog consistently and distinguishes Day-to-day workflow from
+How memory works.
+
+
+![Phone proof and compact journal](screenshots/polish-phone-proof-journal.jpg)
+
+![Desktop selector and distinct surfaces](screenshots/polish-proof-desktop-dark.jpg)
+
+![Contextual setting results](screenshots/polish-finder-dark.jpg)
+
+![Compact copy control in light mode](screenshots/polish-setup-light.jpg)
+
+Independent delta reviews passed: 19 website units, 1,000 parser cases and
+10,000 finder actions per reviewer; the ranking mutation was caught and all ten
+derived images matched their original source pixels. These scoped reviews do
+not imply full repository merge approval.
+
+The local full repository attempt (`env -u LORE_WORKER_MODEL pnpm test`) was
+interrupted after repeated CLI subprocess timeouts and failures in unmodified
+paths, including `setup-io.test.ts`, `cli-signal-lifecycle.test.ts` and
+`side-channel.test.ts`. It is not a full-root pass or a baseline attribution.
+The PR remains draft; exact-head hosted CI and the broader review gate are
+separate from these website checks.
+
+
+Final website validation: **582 browser passes / 8 conditional skips**, **19 unit
+tests**, clean Astro diagnostics for **66 files**, configured workspace types,
+lint and formatting, generated-reference parity, and a **37-page** prefixed
+build. All **1,133** checked fragment targets and **12** themed picture sources
+resolve. Native no-JavaScript, keyboard, reduced motion, choice/history, clipboard
+denial and manual verification contracts remain covered. The framework TOC test
+waits for its custom element before asserting JavaScript dismissal behavior.

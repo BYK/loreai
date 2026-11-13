@@ -6,5 +6,5 @@ const page = path.split("/docs/")[1] ?? "";
 const reference = ["configuration/","environment/"].includes(page);
 const section = page.startsWith("guides/") ? "Guides" : ["","install/","first-session/","troubleshooting/"].includes(page) ? "Getting started" : ["configuration/","environment/","architecture/","installation-reference/","setup/","benchmark/"].includes(page) ? "Reference" : page === "review/" ? "Contributing" : "Using Lore";
 ---
-<div class="docs-journal-title"><p class="field-marker">Lore / {section}</p><PageTitle {...Astro.props} /></div>
+<div class="docs-journal-title"><p class="field-marker">Lore / {section}</p><div data-pagefind-ignore><PageTitle {...Astro.props} /></div></div>
 {reference && <ReferenceFinder />}

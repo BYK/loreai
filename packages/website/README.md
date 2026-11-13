@@ -225,3 +225,24 @@ links remain useful. No generated reference file is edited by this feature.
 `PageHero.astro` customizes the existing Starlight 404 with native recovery links.
 Its explicit search action mirrors the existing framework button's readiness and
 opens that same dialog; it neither duplicates Pagefind nor probes a gateway.
+
+### Mobile evidence and reference search
+
+Phone proof panels use documentary crops of the original synthetic-data app
+captures. Reproduce the ten derived PNGs with
+`node packages/website/scripts/crop-product-proof.mjs`; no UI is redrawn, and the
+full-size originals remain linked. The activity crop includes the chart, while
+rule/source/history crops show the detail named by the adjacent readable notes.
+
+Reference lookup ranks setting names ahead of description matches. Descriptions
+come from the existing category prose/table cells and render as escaped text.
+Six results appear initially; Show all expands into the ordinary document flow.
+Queries, reset and browser history retain the complete reference and its anchors.
+The search-index transform excludes redundant reference navigation/table headers,
+and document-title presentation is excluded to avoid duplicate search headings.
+
+Installation has one install/connect/verify path, compact icon copy utilities,
+and retained legacy verification/telemetry anchors. Verification stays a manual
+observation; copy success does not certify a connection. The journal keeps its
+three native stages, with temporary test details available in a disclosure and
+the next-session outcome before the task choices.

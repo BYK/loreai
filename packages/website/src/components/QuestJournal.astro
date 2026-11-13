@@ -16,10 +16,9 @@ const base = import.meta.env.BASE_URL;
       <div class="journal-progress" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="journal-pages">
         <section class="journal-chapter" id="journal-conversation" data-journal-chapter="conversation">
-          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">One decision from a coding session, carried into the next task.</p>
-          <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> The provider can deliver the same event twice. Reuse the event-id check that’s already there.”</p></div>
-          <div class="journal-message journal-transient"><span>Temporary troubleshooting</span><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p></div>
-          <p class="journal-note">The duplicate-event rule matters beyond this session. A temporary test port does not.</p>
+          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">Keep the convention. Leave the test details behind.</p>
+          <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> Reuse the event-id check when the provider delivers an event twice.”</p></div>
+          <AccordionItem class="journal-transient" title="What stays out of project knowledge"><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p><p class="journal-note">A temporary test port is not a project convention.</p></AccordionItem>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>See saved knowledge <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-knowledge" data-journal-chapter="knowledge">
@@ -32,9 +31,9 @@ const base = import.meta.env.BASE_URL;
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Try a later session <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-recall" data-journal-chapter="recall">
-          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">Choose a task to see the relevant rule supplied. Other knowledge stays stored.</p>
-          <fieldset class="journal-tasks"><legend>What are you working on?</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
+          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">The rule supplied for your task. Choose a different task below to compare.</p>
           {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Included for this task</p><h4>{entry.title}</h4><blockquote>“<mark>{entry.response.slice(0, entry.response.indexOf(".") + 1)}</mark>{entry.response.slice(entry.response.indexOf(".") + 1)}”</blockquote><p class="journal-reason"><strong>Why this rule:</strong> {entry.reason}</p><p class="journal-source">Source · {entry.session}</p></div>)}
+          <fieldset class="journal-tasks"><legend>What are you working on?</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
           <p class="journal-note">Other entries remain available. The temporary test port stays out of this task’s project knowledge.</p>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-inspect hidden>Inspect the supplied rule <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">03 / 03</span></div>
         </section>

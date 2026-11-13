@@ -98,9 +98,9 @@ test("native field guide navigation works without JavaScript on desktop and phon
           "The quest journal",
           "Why Lore",
           "Documentation",
-          "Field notes",
+          "Blog",
           "GitHub",
-          "How it works",
+          "Day-to-day workflow",
           "Get help",
         ])
           await expect(

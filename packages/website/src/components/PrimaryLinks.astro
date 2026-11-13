@@ -11,7 +11,7 @@ const groups = navigationGroups(base);
       {group.id === "product" ? <>
         <li><a href={`${base}#journal`}>The quest journal</a></li>
         <li><a href={`${base}different/`} aria-current={currentSection(Astro.url.pathname, `${base}different/`)}>Why Lore</a></li>
-        <li><a href={`${base}#how`}>How it works</a></li>
+        <li><a href={`${base}#how`}>Day-to-day workflow</a></li>
       </> : <>
         <li><a href={`${base}docs/troubleshooting/`}>Get help</a></li>
         <li><a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub<span aria-hidden="true"> ↗</span></a></li>

@@ -69,7 +69,10 @@ test("the mobile tour reaches legible product proof after one introduction", asy
   );
   expect((await link.boundingBox())!.y).toBeLessThan(520);
   const image = link.locator("img");
-  expect((await image.boundingBox())!.width).toBeGreaterThanOrEqual(640);
+  expect((await image.boundingBox())!.width).toBeLessThanOrEqual(390);
+  expect(
+    await image.evaluate((el: HTMLImageElement) => el.currentSrc),
+  ).toContain("sessions-mobile-");
   await expect(link).toHaveAttribute("href", /sessions-(light|dark)\.png$/);
 });
 

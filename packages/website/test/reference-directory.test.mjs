@@ -109,3 +109,38 @@ await test("environment metadata in the first table cell does not hide a variabl
     ],
   );
 });
+
+await test("reference descriptions are plain text from real table cells and category prose", () => {
+  const body =
+    "## Field reference\n## `knowledge`\nLong-term knowledge controls.\n| Field | Type | Default | Constraints | Description |\n|---|---|---|---|---|\n| `enabled` | boolean | true | | Enable **curated** [knowledge](/docs/memory/) and <em>recall</em>. |\n";
+  const headings = [
+    { depth: 2, text: "Field reference", slug: "field-reference" },
+    { depth: 2, text: "knowledge", slug: "knowledge" },
+  ];
+  const { settings } = buildReferenceDirectory(body, headings, "configuration");
+  assert.equal(
+    settings.find((e) => e.label === "knowledge").description,
+    "Long-term knowledge controls.",
+  );
+  assert.equal(
+    settings.find((e) => e.label === "knowledge.enabled").description,
+    "Enable curated knowledge and recall.",
+  );
+});
+
+await test("description formatting keeps code identifiers and escaped pipes intact", () => {
+  const body =
+    "## Setting reference\n## Startup\n| Variable | Description |\n| `LORE_TEST` | Keep `SQLITE_BUSY` and A\\|B visible. |\n";
+  const { settings } = buildReferenceDirectory(
+    body,
+    [
+      { depth: 2, text: "Setting reference", slug: "setting-reference" },
+      { depth: 2, text: "Startup", slug: "startup" },
+    ],
+    "environment",
+  );
+  assert.equal(
+    settings.find((e) => e.label === "LORE_TEST").description,
+    "Keep SQLITE_BUSY and A|B visible.",
+  );
+});

@@ -6,6 +6,7 @@ import {
   generateAssetsEagerly,
 } from "./integrations/favicon-assets";
 import prefixBaseLinks from "./integrations/prefix-base-links.mjs";
+import referenceSearch from "./integrations/reference-search.mjs";
 import mermaidRenderer from "./integrations/mermaid-renderer.mjs";
 import { publicationUri } from "./src/lib/standard-site";
 
@@ -40,6 +41,7 @@ export default defineConfig({
   // `prefers-color-scheme: dark` media query block so the code block
   // adapts to the active theme.
   markdown: {
+    rehypePlugins: [referenceSearch],
     syntaxHighlight: "shiki",
     shikiConfig: {
       themes: {
