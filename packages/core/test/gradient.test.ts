@@ -3680,6 +3680,38 @@ describe("onIdleResume", () => {
       sessionID: SID,
     });
     expect(r2.layer).toBe(0);
+
+    // Post-idle resume on a CALIBRATED Layer-0 session whose real API token
+    // count is ~1.68x higher than chars/3: when raw messages still fit
+    // postIdleRawBudget on the chars/3 scale, it must NOT be latched into
+    // Layer 1 by a scale mismatch between expectedInput and postIdleRawBudget.
+    // Set context=10_000, output=2_000 -> usable=8_000, bodyUsable=4_761,
+    // postIdleRawBudget=952 (chars/3). Give ~600 chars/3 tokens of messages,
+    // but calibrate with 1_200 real API tokens (> 952).
+    setModelLimits({ context: 10_000, output: 2_000 });
+    const calibratedMsgs = [
+      makeMsg("cal-u1", "user", "a".repeat(900), SID),
+      makeMsg("cal-a1", "assistant", "b".repeat(900), SID),
+    ];
+    const rCal0 = transform({
+      messages: calibratedMsgs,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(rCal0.layer).toBe(0);
+    calibrate(1_200, SID, calibratedMsgs.length); // 1,200 real API tokens > 952 postIdleRawBudget
+
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    onIdleResume(SID, 5 * 60_000);
+    const rCalIdle = transform({
+      messages: [
+        ...calibratedMsgs,
+        makeMsg("cal-u2", "user", "short follow-up", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(rCalIdle.layer).toBe(0);
   });
 
   test("forced Layer 1 omits redundant distilled prefix when tryFit evicts 0 raw messages (cutoff === 0)", () => {
@@ -3746,6 +3778,29 @@ describe("onIdleResume", () => {
       r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
     ).toBe(false);
     expect(r2.messages.length).toBe(5);
+
+    // Restart after a zero-eviction Layer-1 turn: persisted bustRateEMA === 0
+    // records that the prefix was NOT shipped, so restoring lastLayer = 1 does
+    // not flip priorPrefixShipped to true and duplicate the prefix on resume.
+    calibrate(500, SID, 5);
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    const r2Restart = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2Restart.layer).toBe(1);
+    expect(r2Restart.distilledTokens).toBe(0);
+    expect(
+      r2Restart.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
 
     // Host front-trimming: if the host drops older messages so the input array
     // shrinks below maxSeenMessageCount (even without setting sourceWindow.offset
