@@ -3766,6 +3766,32 @@ describe("onIdleResume", () => {
       r3.messages.some((m) => m.info.id.startsWith("lore-distilled")),
     ).toBe(true);
 
+    // Post-restart host front-trimming: if the process restarts (evictSession)
+    // and the host sends a front-trimmed slice whose length (4) is ABOVE the
+    // persisted compressed count (lastKnownMessageCount = 2) yet fits rawBudget
+    // (cutoff === 0), the restored compressed state still preserves the
+    // distilled prefix on the first post-restart turn.
+    calibrate(1_000, SID, 2); // persisted compressed count = 2
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    const r4 = transform({
+      messages: [
+        makeMsg("ne-u2", "user", "What next?", SID),
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+        makeMsg("ne-a3", "assistant", "Done", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r4.layer).toBe(1);
+    expect(r4.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r4.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
+
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 });
