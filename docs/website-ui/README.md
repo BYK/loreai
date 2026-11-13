@@ -3,10 +3,10 @@
 The website uses the local memory browser’s olive foundation, amber accents and
 self-hosted DM Sans. Serif lettering is reserved for the brand mark. The approved
 quest journal replaces the 3D camp; its local Quiver illustrations, quiet margins,
-numbered choices, and explicit selection marks now connect the homepage, actual-app
+icon-and-label choices, and explicit selection marks now connect the homepage, actual-app
 tour, client setup, Starlight docs, Why Lore and blog.
 
-The homepage starts with a concrete explanation and a readable `.lore.md` artifact.
+The homepage starts with a concrete explanation and a conversation-to-knowledge preview.
 An actual-app preview comes before the journal. Conversation is the default chapter;
 one durable project decision becomes reviewable knowledge, then relevant context for
 a later task. An optional inventory keeps secondary choices out of the main reading
@@ -441,3 +441,27 @@ names, native hover titles and 44px link targets. The release/version link stays
 textual. Checked at desktop and 320px phone widths in dark/light appearances.
 
 ![Footer social icons](screenshots/footer-social-icons.png)
+
+## Icon hierarchy and compact choices
+
+Agent marks identify the hero compatibility list and all six setup routes. Local
+artwork, upstream source digests and license notices are in
+[the agent artwork directory](../../packages/website/public/agents/README.md).
+Simple line icons supplement labels in journal chapters, the app proof/tour,
+setup stages, diagnostic checks, workflow choices and the five docs groups.
+Repeated journal kickers/subtitles are removed; the original chapter headings,
+source disclosures and selection controllers remain.
+
+The tour uses Sessions / Knowledge / Activity and Rule / Source / History, with
+matching visible and accessible labels. Icons are decorative. Mobile selectors
+keep readable words, 44px targets and native keyboard/no-JavaScript behavior.
+The docs wrapper decorates the default Starlight sidebar rather than replacing
+its disclosure, persistence or current-page implementation.
+
+These direct development-server captures show 390px phones and 1280px desktops;
+the phone image places three unaltered viewports side by side. Automated production
+browser coverage also includes 320px phone widths in both themes.
+
+![Journal, setup and app tour on phones](screenshots/icon-hierarchy-phone.jpg)
+![Desktop compatibility marks and proof controls](screenshots/icon-home-desktop-dark.jpg)
+![Docs group and setup icons in light mode](screenshots/icon-docs-desktop-light.jpg)

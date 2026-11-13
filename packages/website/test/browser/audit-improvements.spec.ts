@@ -45,9 +45,7 @@ test("Knowledge preview opens the matching tour and tour choices survive history
   await page.waitForLoadState("load");
   const tour = page.locator(".product-tour");
   await expect(tour.locator('[data-tour-panel="knowledge"]')).toBeVisible();
-  await tour
-    .getByRole("radio", { name: "Inspect activity", exact: true })
-    .check();
+  await tour.getByRole("radio", { name: "Activity", exact: true }).check();
   await expect(page).toHaveURL(/view=usage/);
   await page.reload();
   await expect(tour.locator('[data-tour-panel="usage"]')).toBeVisible();
@@ -132,7 +130,7 @@ test("loading enhancements preserves an early native choice without an explicit 
       "codex-desktop",
       "agent",
     ],
-    ["/tour/", ".product-tour", "Review knowledge", "knowledge", "view"],
+    ["/tour/", ".product-tour", "Knowledge", "knowledge", "view"],
   ]) {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {

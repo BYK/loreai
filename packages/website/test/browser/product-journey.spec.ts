@@ -86,9 +86,7 @@ test("product tour shows the actual app and an accessible next step", async ({
   );
   const tour = page.locator(".product-tour");
   await expect(tour).toContainText("Sample data");
-  await tour
-    .getByRole("radio", { name: "Review knowledge", exact: true })
-    .check();
+  await tour.getByRole("radio", { name: "Knowledge", exact: true }).check();
   const panel = tour.locator("[data-tour-panel=knowledge]");
   await expect(panel.locator(":scope > figcaption:last-child")).toHaveCount(1);
   await expect(panel).toBeVisible();

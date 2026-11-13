@@ -129,3 +129,28 @@
 
 .agent-setup .legacy-setup-anchor { display:block;width:1px;height:1px;scroll-margin-top:110px; }
 .product-spotlight .workbench-bar { background:var(--bg); }
+
+/* Recognizable symbols supplement readable labels, never replace them. */
+.ui-choice-label > :is(svg,.agent-mark) { flex-shrink:0; }
+.ui-choice-label > span:last-child { min-width:0; }
+.agent-setup h3 { display:flex;align-items:center;gap:8px; }
+.agent-setup .setup-stage { display:inline-flex;align-items:center;color:var(--muted);margin:0; }
+.compatibility { display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px; }
+.compatibility ul { display:flex;flex-wrap:wrap;gap:10px 16px;list-style:none;padding:0;margin:0; }
+.compatibility li { display:inline-flex;align-items:center;gap:6px; }
+.compatibility .agent-mark { width:16px;height:16px;flex-basis:16px; }
+.journal-chapters label { align-items:center;gap:10px; }
+.journal-chapters .journal-step { display:grid;width:28px;height:28px;flex-basis:28px;border:0;border-radius:6px;background:transparent;color:var(--muted); }
+.journal-chapters label:has(:checked) .journal-step { background:var(--accent-soft);color:var(--accent-soft-text); }
+.journal-chapter > h3:first-child { margin-top:0; }
+.diagnostic-checks li > span { display:flex;align-items:center;gap:8px;color:var(--heading);font-weight:500; }
+.diagnostic-checks li > span svg { flex-shrink:0;color:var(--muted); }
+@media(max-width:640px) {
+  .journal-chapters label { flex-direction:column;gap:4px;padding:8px 4px; }
+  .journal-chapters .journal-step { width:22px;height:22px;flex-basis:22px; }
+  .journal-chapters strong { font-size:.75rem; }
+  .journal-chapters label > span:last-child { font-size:.75rem;min-height:2.8em;display:grid;place-items:center; }
+  .tour-journal > .tour-picker > .ui-choice-item > .ui-choice-label,
+  .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item > .ui-choice-label { flex-direction:column;gap:5px;padding:8px 4px;white-space:nowrap;overflow-wrap:normal;font-size:.75rem; }
+  .spotlight-workbench .spotlight-choices .ui-choice-label { padding:9px 8px;gap:5px; }
+}

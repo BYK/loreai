@@ -8,7 +8,7 @@ import KnowledgeInspector from "./KnowledgeInspector.astro";
 ---
 <section class="section product-tour" id="product" aria-labelledby="tour-title">
 
- <div class="tour-journal field-frame"><ChoiceGroup class="tour-picker" legend="Explore the local app" hideLegend>{screens.map((screen,index)=><ChoiceItem name="product-tour" value={screen.id} checked={index===0} label={screen.choice} controls={`tour-${screen.id}`} />)}</ChoiceGroup><div class="tour-pages">
+ <div class="tour-journal field-frame"><ChoiceGroup class="tour-picker" legend="Explore the local app" hideLegend>{screens.map((screen,index)=><ChoiceItem name="product-tour" value={screen.id} checked={index===0} label={screen.id === "sessions" ? "Sessions" : screen.id === "knowledge" ? "Knowledge" : "Activity"} icon={screen.id === "sessions" ? "chat" : screen.id === "knowledge" ? "bookmark" : "activity"} controls={`tour-${screen.id}`} />)}</ChoiceGroup><div class="tour-pages">
  {screens.map(screen=><figure class="tour-panel" data-tour-panel={screen.id} id={`tour-${screen.id}`}>
   <div class="tour-caption"><h2>{screen.title}</h2><p>{screen.description}</p><a href={`${base}docs/${screen.link}`} class="icon-link"><span class="link-label">{screen.action}</span> <span aria-hidden="true">→</span></a></div>
   {screen.id === "knowledge" ? <KnowledgeInspector /> : <>

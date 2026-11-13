@@ -1,28 +1,30 @@
 ---
+import NavigationIcon from "./NavigationIcon.astro";
 import AccordionItem from "./ui/AccordionItem.astro";
 import JournalArt from "./JournalArt.astro";
 import { JOURNAL_CHAPTERS as chapters, JOURNAL_ENTRIES as entries } from "../lib/quest-journal";
+const chapterIcons = { conversation:"chat",knowledge:"bookmark",recall:"compass" } as const;
 const base = import.meta.env.BASE_URL;
 ---
 <section class="quest-journal" id="journal" aria-label="The quest journal">
-  <div class="journal-intro"><div><p class="eyebrow field-marker">The quest journal · Interactive example</p><h2>One decision. Remembered next session.</h2></div><p>A fictional project, with a rule you can follow from conversation to reuse.</p></div>
+  <div class="journal-intro"><div><p class="eyebrow field-marker">The quest journal</p><h2>One decision. Remembered next session.</h2></div><p>A fictional project, with a rule you can follow from conversation to reuse.</p></div>
   <div class="journal-frame">
     <aside class="journal-spine">
-      <fieldset class="journal-chapters"><legend>Follow a project decision</legend>{chapters.map(chapter => <label><input type="radio" name="journal-chapter" data-journal-choice="chapter" value={chapter.id} checked={chapter.id === "conversation"} aria-label={chapter.name} aria-controls={`journal-${chapter.id}`} /><span class="journal-step" aria-hidden="true">{chapter.number}</span><span><strong>{chapter.name}</strong><small>{chapter.title}</small></span></label>)}</fieldset>
-      <div class="journal-spine-note"><JournalArt size={100} /><p>Knowledge you can inspect and carry forward.</p></div>
+      <fieldset class="journal-chapters"><legend>Follow a project decision</legend>{chapters.map(chapter => <label><input type="radio" name="journal-chapter" data-journal-choice="chapter" value={chapter.id} checked={chapter.id === "conversation"} aria-label={chapter.name} aria-controls={`journal-${chapter.id}`} /><span class="journal-step" aria-hidden="true"><NavigationIcon name={chapterIcons[chapter.id]} /></span><span><strong>{chapter.name}</strong></span></label>)}</fieldset>
+      <div class="journal-spine-note"><JournalArt size={100} /><p>Your project’s field guide.</p></div>
     </aside>
     <div class="journal-book">
       <header class="journal-book-header"><span>Webhook service <span class="muted">/ project journal</span></span><span class="journal-folio" aria-hidden="true">VOL. 001</span></header>
       <div class="journal-progress" aria-hidden="true"><span></span><span></span><span></span></div>
       <div class="journal-pages">
         <section class="journal-chapter" id="journal-conversation" data-journal-chapter="conversation">
-          <p class="journal-kicker">01 / Conversation</p><h3 tabindex="-1">You explain a project decision.</h3><p class="journal-lead">Keep the convention. Leave the test details behind.</p>
+          <h3 tabindex="-1">You explain a project decision.</h3>
           <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> Reuse the event-id check when the provider delivers an event twice.”</p></div>
           <AccordionItem class="journal-transient" title="What stays out of project knowledge"><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p><p class="journal-note">A temporary test port is not a project convention.</p></AccordionItem>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>See saved knowledge <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-knowledge" data-journal-chapter="knowledge">
-          <p class="journal-kicker">02 / Saved knowledge</p><h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Lore curates a reviewable rule in the background. Open its source or Markdown to check it.</p>
+          <h3 tabindex="-1">Lore keeps the useful project rule.</h3><p class="journal-lead">Curated in the background. Review the source or Markdown below.</p>
           {entries.map(entry => <div class="journal-entry" data-journal-entry={entry.id} id={`journal-entry-${entry.id}`}>
             <div class="journal-entry-heading"><div><p class="journal-category">{entry.category}</p><h4>{entry.title}</h4></div><JournalArt name={entry.art} size={64} /></div>
             <p class="journal-carried-rule"><mark>{entry.rule.slice(0, entry.rule.indexOf(".") + 1)}</mark>{entry.rule.slice(entry.rule.indexOf(".") + 1)}</p><AccordionItem class="journal-file" title="Review the .lore.md excerpt"><pre><code>{`### ${entry.category}\n* **${entry.title}**: ${entry.rule}`}</code></pre></AccordionItem>
@@ -31,7 +33,7 @@ const base = import.meta.env.BASE_URL;
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="recall" hidden>Try a later session <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">02 / 03</span></div>
         </section>
         <section class="journal-chapter" id="journal-recall" data-journal-chapter="recall">
-          <p class="journal-kicker">03 / Next session</p><h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">The rule supplied for your task. Choose a different task below to compare.</p>
+          <h3 tabindex="-1">The next task gets relevant knowledge.</h3><p class="journal-lead">Change the task below to see which rule is relevant.</p>
           {entries.map(entry => <div class="journal-result" data-journal-result={entry.id} id={`journal-result-${entry.id}`}><p class="journal-category">Included for this task</p><h4>{entry.title}</h4><blockquote>“<mark>{entry.response.slice(0, entry.response.indexOf(".") + 1)}</mark>{entry.response.slice(entry.response.indexOf(".") + 1)}”</blockquote><p class="journal-reason"><strong>Why this rule:</strong> {entry.reason}</p><p class="journal-source">Source · {entry.session}</p></div>)}
           <fieldset class="journal-tasks"><legend>What are you working on?</legend>{entries.map((entry,index) => <label><input type="radio" name="journal-task" data-journal-choice="task" value={entry.id} checked={index === 0} aria-label={entry.task} aria-controls={`journal-result-${entry.id}`} /><span>{entry.task}</span></label>)}</fieldset>
           <p class="journal-note">Other entries remain available. The temporary test port stays out of this task’s project knowledge.</p>

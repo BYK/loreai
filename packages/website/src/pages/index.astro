@@ -1,4 +1,5 @@
 ---
+import AgentIcon from "../components/AgentIcon.astro";
 import PublicLayout from "../layouts/PublicLayout.astro";
 import ProductSpotlight from "../components/ProductSpotlight.astro";
 import ConversationPreview from "../components/ConversationPreview.astro";
@@ -12,7 +13,7 @@ const base = import.meta.env.BASE_URL;
   <section class="home-hero section" id="problem">
     <div class="hero-copy"><div class="hero-overview"><div class="hero-heading"><p class="eyebrow">Memory for coding agents</p><h1>Keep project decisions <em>across coding sessions.</em></h1></div><div class="hero-details"><p class="hero-desc">Connect Lore to the coding agent you already use. Keep searchable conversations and reviewable project rules, so you can pick up where you left off.</p>
       <div class="hero-actions"><a class="button button-primary" href={`${base}docs/install/`}>Install Lore <span aria-hidden="true">→</span></a><a class="text-link icon-link" href="#product"><span class="link-label">See the app</span> <span aria-hidden="true">↓</span></a></div>
-      <p class="compatibility">Works with Claude Code, Codex, OpenCode, Pi, and Hermes.</p>
+      <div class="compatibility"><span>Works with</span><ul role="list">{([{id:"claude-code",name:"Claude Code"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"pi",name:"Pi"},{id:"hermes",name:"Hermes"}] as const).map(agent=><li><AgentIcon agent={agent.id} />{agent.name}</li>)}</ul></div>
     </div></div><ConversationPreview /></div>
   </section>
   <ProductSpotlight />

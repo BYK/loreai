@@ -1,0 +1,17 @@
+---
+import Sidebar from "@astrojs/starlight/components/Sidebar.astro";
+import { UI_ICONS } from "../lib/ui-icons";
+// Keep Starlight's native disclosures, current-page state and persistence.
+const masks = Object.fromEntries((["compass","bookmark","connect","settings","people"] as const).map(name => [name, `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="${UI_ICONS[name]}"/></svg>`)}")`]));
+---
+<div class="docs-group-icons" style={Object.entries(masks).map(([name,mask])=>`--group-${name}:${mask}`).join(";")}><Sidebar {...Astro.props} /></div>
+<style is:global>
+  .docs-group-icons .top-level > li > details > summary .group-label { display:flex;align-items:center;gap:8px; }
+  .docs-group-icons .top-level > li > details > summary .group-label::before { content:"";display:block;width:18px;height:18px;flex:0 0 18px;background:var(--muted);mask:var(--group-icon) center / contain no-repeat; }
+  /* Match a stable destination in each group, including preview base prefixes. */
+  .docs-group-icons .top-level > li:has(a[href$="/docs/install/"]) { --group-icon:var(--group-compass); }
+  .docs-group-icons .top-level > li:has(a[href$="/docs/using-lore/"]) { --group-icon:var(--group-bookmark); }
+  .docs-group-icons .top-level > li:has(a[href$="/docs/guides/with-claude-code/"]) { --group-icon:var(--group-connect); }
+  .docs-group-icons .top-level > li:has(a[href$="/docs/configuration/"]) { --group-icon:var(--group-settings); }
+  .docs-group-icons .top-level > li:has(a[href$="/docs/review/"]) { --group-icon:var(--group-people); }
+</style>

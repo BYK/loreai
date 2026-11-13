@@ -1,5 +1,7 @@
 ---
-interface Props { name: string; value: string; label: string; checked?: boolean; controls?: string; prefix?: string; class?: string; }
-const { name,value,label,checked = false,controls,prefix,class: className } = Astro.props;
+import NavigationIcon from "../NavigationIcon.astro";
+import type { UiIconName } from "../../lib/ui-icons";
+interface Props { name: string; value: string; label: string; icon?: UiIconName; checked?: boolean; controls?: string; prefix?: string; class?: string; }
+const { name,value,label,icon,checked = false,controls,prefix,class: className } = Astro.props;
 ---
-<label class:list={["ui-choice-item",className]}><input type="radio" name={name} value={value} checked={checked} aria-label={label} aria-controls={controls} /><span class="ui-choice-label">{prefix && <small aria-hidden="true">{prefix}</small>}{label}</span></label>
+<label class:list={["ui-choice-item",className]}><input type="radio" name={name} value={value} checked={checked} aria-label={label} aria-controls={controls} /><span class="ui-choice-label"><slot name="icon" />{icon && <NavigationIcon name={icon} />}{prefix && <small aria-hidden="true">{prefix}</small>}<span>{label}</span></span></label>

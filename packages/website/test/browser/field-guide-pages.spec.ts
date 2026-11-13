@@ -43,15 +43,11 @@ test("tour inspection explains sample source and revisions without leaving the p
   await expect(inspector.locator('[data-inspect-panel="rule"]')).toContainText(
     "Keep handlers idempotent",
   );
-  await inspector
-    .getByRole("radio", { name: "Its source", exact: true })
-    .check();
+  await inspector.getByRole("radio", { name: "Source", exact: true }).check();
   await expect(
     inspector.locator('[data-inspect-panel="source"]'),
   ).toContainText("exact-message");
-  await inspector
-    .getByRole("radio", { name: "What changed", exact: true })
-    .check();
+  await inspector.getByRole("radio", { name: "History", exact: true }).check();
   await expect(
     inspector.locator('[data-inspect-panel="history"]'),
   ).toContainText("Illustrative revision");
@@ -162,12 +158,10 @@ test("native field guide controls stay useful without JavaScript", async ({
       page.locator(".conversation-preview blockquote mark"),
     ).toHaveCount(2);
     await page.goto(baseURL + "/tour/");
-    await page
-      .getByRole("radio", { name: "Review knowledge", exact: true })
-      .check();
+    await page.getByRole("radio", { name: "Knowledge", exact: true }).check();
     await page
       .locator(".tour-inspector")
-      .getByRole("radio", { name: "Its source", exact: true })
+      .getByRole("radio", { name: "Source", exact: true })
       .check();
     await expect(page.locator('[data-inspect-panel="source"]')).toBeVisible();
     await page.goto(baseURL + "/different/");
@@ -216,7 +210,7 @@ for (const [path, selector, parameter, choice, label] of [
     ".inspection-picker",
     "inspect",
     "source",
-    "Its source",
+    "Source",
   ],
   ["/different/", ".fit-guide", "fit", "rules", "Keep a few stable rules"],
   [
@@ -244,7 +238,7 @@ for (const [path, selector, parameter, choice, label] of [
       if (parameter === "inspect")
         await page
           .locator(".tour-picker")
-          .getByRole("radio", { name: "Review knowledge", exact: true })
+          .getByRole("radio", { name: "Knowledge", exact: true })
           .check();
       await page
         .locator(selector)
@@ -309,7 +303,7 @@ test("inspection points stay inside the screenshot when a longer note is selecte
   for (const width of [1001, 1040, 1100, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/tour/?view=knowledge&inspect=source#product");
-    for (const name of ["Its source", "What changed"]) {
+    for (const name of ["Source", "History"]) {
       await page
         .locator(".tour-inspector")
         .getByRole("radio", { name, exact: true })

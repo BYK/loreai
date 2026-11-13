@@ -7,7 +7,7 @@ test("proof selectors keep short words on one line at desktop widths", async ({
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     for (const label of await page
-      .locator(".spotlight-choices .ui-choice-label")
+      .locator(".spotlight-choices .ui-choice-label > span:last-child")
       .all()) {
       expect(
         await label.evaluate((el) => {

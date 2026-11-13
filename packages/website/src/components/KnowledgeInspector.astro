@@ -3,16 +3,16 @@ import ChoiceGroup from "./ui/ChoiceGroup.astro";
 import ChoiceItem from "./ui/ChoiceItem.astro";
 const base = import.meta.env.BASE_URL;
 const choices = [
- { id:"rule", name:"The rule", heading:"A rule you can correct", text:"Check the event ID before applying a webhook. Reuse the existing duplicate-event guard so repeated deliveries never apply the same change twice." },
- { id:"source", name:"Its source", heading:"Follow the evidence", text:"The source link opens the recorded session. In this sample, a source session is available, but exact-message attribution was not recorded. Inspect the conversation before relying on the rule." },
- { id:"history", name:"What changed", heading:"Review a revision", text:"Illustrative revision: the earlier rule asked for an event ID check; the current version also names the existing duplicate-event guard. In the app, expand Source & history to inspect the recorded versions." },
+ { id:"rule", name:"Rule", heading:"A rule you can correct", text:"Check the event ID before applying a webhook. Reuse the existing duplicate-event guard so repeated deliveries never apply the same change twice." },
+ { id:"source", name:"Source", heading:"Follow the evidence", text:"The source link opens the recorded session. In this sample, a source session is available, but exact-message attribution was not recorded. Inspect the conversation before relying on the rule." },
+ { id:"history", name:"History", heading:"Review a revision", text:"Illustrative revision: the earlier rule asked for an event ID check; the current version also names the existing duplicate-event guard. In the app, expand Source & history to inspect the recorded versions." },
 ];
 ---
 <div class="tour-inspector">
  <div class="inspection-stage"><div class="inspection-capture">
   {(["light","dark"] as const).map(theme => <picture class={`tour-shot-${theme}`}><source media="(max-width:600px)" srcset={`${base}product-tour/knowledge-mobile-${theme}.png`} width="390" height="700" /><img src={`${base}product-tour/knowledge-${theme}.png`} width="1120" height="760" loading="lazy" decoding="async" alt="Actual Lore app showing a sample webhook decision, its content, and source history" /></picture>)}
  </div>
- <ChoiceGroup class="inspection-picker guide-segments" legend="Inspect the sample record">{choices.map((choice,index)=><ChoiceItem class={`inspection-point point-${choice.id}`} name="knowledge-inspection" value={choice.id} checked={index===0} label={choice.name} controls={`inspection-${choice.id}`} />)}</ChoiceGroup>
+ <ChoiceGroup class="inspection-picker guide-segments" legend="Inspect the sample record">{choices.map((choice,index)=><ChoiceItem class={`inspection-point point-${choice.id}`} name="knowledge-inspection" value={choice.id} checked={index===0} label={choice.name} icon={choice.id === "rule" ? "bookmark" : choice.id === "source" ? "chat" : "history"} controls={`inspection-${choice.id}`} />)}</ChoiceGroup>
  </div><div class="inspection-notes">{choices.map((choice,index)=><section data-inspect-panel={choice.id} id={`inspection-${choice.id}`}><p class="field-marker">0{index+1} / {choice.name}</p><h3>{choice.heading}</h3>{choice.id === "rule" && <strong class="inspection-rule">Keep handlers idempotent</strong>}<p>{choice.text}</p>{choice.id === "history" && <dl class="revision-example"><div><dt>Earlier</dt><dd>Check the event ID.</dd></div><div><dt>Current</dt><dd><mark>Reuse the duplicate-event guard.</mark></dd></div></dl>}<a href={`${base}docs/using-lore/#review-knowledge`} class="icon-link"><span class="link-label">Review knowledge in your project</span> <span aria-hidden="true">→</span></a></section>)}<p class="inspection-disclaimer">Illustrative notes beside an actual app capture. This is a guided example, not a running gateway.</p></div>
 </div>
 <script>
