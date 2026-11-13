@@ -428,3 +428,10 @@ no-JavaScript rendering, responsive containment and light/dark contrast. Obsolet
 format-switcher cases were removed with the feature; independent source
 correctness/security reviews found no actionable issue. No core/gateway behavior
 changed, and the broader repository validation limitation above remains.
+
+Text links now underline only their label, with decorative arrows kept separate
+and hidden from accessible names. The shared CSS applies to 21 link patterns on
+public pages, the journal, tour and documentation. Destinations and native focus
+behavior remain intact.
+
+![Text-only underline](screenshots/link-label-only-underline.png)

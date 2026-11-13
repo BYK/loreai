@@ -39,7 +39,7 @@ const base = import.meta.env.BASE_URL;
         </section>
       </div>
       <AccordionItem class="journal-inventory" title="Explore saved knowledge" meta="3 example entries"><fieldset><legend class="visually-hidden">Knowledge inventory</legend><p class="journal-inventory-hint">Choose an entry to inspect its rule and source.</p><div class="journal-cards">{entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><JournalArt name={entry.art} size={52} /><span class="journal-card-copy"><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Included for this task</small><small class="journal-stored">Kept for another task</small></span></label>)}</div></fieldset></AccordionItem>
-      <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`}>Try the sample workflow <span aria-hidden="true">→</span></a></footer>
+      <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`} class="icon-link"><span class="link-label">Try the sample workflow</span> <span aria-hidden="true">→</span></a></footer>
     </div>
   </div>
   <p class="visually-hidden" data-journal-status role="status"></p>

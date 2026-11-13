@@ -10,7 +10,7 @@ const cases = [
 ---
 <section class="diagnostic-guide" id="diagnostic" aria-label="Find your next troubleshooting check">
  <p class="field-marker">Follow the observation</p><ChoiceGroup class="guide-segments" legend="What can you observe?">{cases.map((item,index)=><ChoiceItem name="diagnostic-issue" value={item.id} checked={index===0} label={item.label} controls={`diagnostic-${item.id}`} />)}</ChoiceGroup>
- {cases.map(item=><div class="diagnostic-panel" data-issue-panel={item.id} id={`diagnostic-${item.id}`}><ol class="diagnostic-checks"><li><span>01 / Observe</span><p>{item.observe}</p></li><li><span>02 / Check</span><p>{item.check}</p></li><li><span>03 / Expected result</span><p>{item.result}</p></li></ol><div class="diagnostic-next"><a href={`${base}${item.href}`}>{item.action} <span aria-hidden="true">→</span></a><a href={`${base}docs/troubleshooting/#${item.reference}`}>Full reference</a></div></div>)}
+ {cases.map(item=><div class="diagnostic-panel" data-issue-panel={item.id} id={`diagnostic-${item.id}`}><ol class="diagnostic-checks"><li><span>01 / Observe</span><p>{item.observe}</p></li><li><span>02 / Check</span><p>{item.check}</p></li><li><span>03 / Expected result</span><p>{item.result}</p></li></ol><div class="diagnostic-next"><a href={`${base}${item.href}`} class="icon-link"><span class="link-label">{item.action}</span> <span aria-hidden="true">→</span></a><a href={`${base}docs/troubleshooting/#${item.reference}`}>Full reference</a></div></div>)}
 </section>
 <script>
 import { bindUrlChoice } from "../scripts/url-choice";

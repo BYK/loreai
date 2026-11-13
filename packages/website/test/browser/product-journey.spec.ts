@@ -107,7 +107,7 @@ test("product tour shows the actual app and an accessible next step", async ({
     panel.getByRole("link", { name: /Learn to review knowledge/ }),
   ).toHaveAttribute("href", /using-lore/);
   const details = panel.getByRole("link", {
-    name: "Inspect source and revision details ↗",
+    name: "Inspect source and revision details",
     exact: true,
   });
   await expect(details).toHaveAttribute(

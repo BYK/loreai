@@ -39,6 +39,6 @@ const showOutline = (post.body?.split(/\s+/).length ?? 0) >= 800 && outline.leng
     <div class="blog-prose">
       <Content />
     </div>
-    <nav class="article-next" aria-label="Put this into practice"><JournalArt name={post.data.kind === "Engineering" ? "decision" : "tools"} size={56} /><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`}>{post.data.nextStep?.label ?? "Connect and verify your first Lore session"} →</a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
+    <nav class="article-next" aria-label="Put this into practice"><JournalArt name={post.data.kind === "Engineering" ? "decision" : "tools"} size={56} /><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href={`${import.meta.env.BASE_URL}${(post.data.nextStep?.href ?? "/docs/first-session/").replace(/^\//, "")}`} class="icon-link"><span class="link-label">{post.data.nextStep?.label ?? "Connect and verify your first Lore session"}</span> <span aria-hidden="true">→</span></a><a href={`${import.meta.env.BASE_URL}docs/troubleshooting/`}>Get help with your setup</a></nav>
   </article>
 </BlogLayout>

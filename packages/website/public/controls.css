@@ -45,3 +45,9 @@
 .primary-nav-mobile a { width:100%; }
 .primary-nav-mobile a.nav-start { margin-top:.5rem; }
 @media(max-width:50rem) { .header-github,.header-start { display:none; } }
+
+/* Underline the readable label, never its separate decorative icon. */
+a.icon-link, a.icon-link:hover, a.icon-link:focus-visible { text-decoration:none; }
+a.icon-link > .link-label { min-width:0;text-decoration:underline;text-underline-offset:.2em; }
+a.icon-link > [aria-hidden="true"] { text-decoration:none; }
+.text-link.icon-link { column-gap:.35em; }
