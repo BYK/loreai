@@ -836,6 +836,8 @@ type SessionState = {
   lastKnownLtm: number;
   /** Total messages sent to the model in the last turn (compressed count on layers 1-4) */
   lastKnownMessageCount: number;
+  /** High-water raw message count ever observed for this session — detects host front-trimming */
+  maxSeenMessageCount: number;
   /** Number of messages in the most recent transform() output */
   lastTransformedCount: number;
   /** Layer used by the most recent transform() call — sticky-layer guard */
@@ -999,6 +1001,7 @@ function makeSessionState(): SessionState {
     lastKnownInput: 0,
     lastKnownLtm: 0,
     lastKnownMessageCount: 0,
+    maxSeenMessageCount: 0,
     lastTransformedCount: 0,
     lastLayer: 0,
     maxSustainedLayer: 0,
@@ -1077,6 +1080,7 @@ function getSessionState(sessionID: string): SessionState {
       // estimate identifies only genuinely-new messages on the resume turn
       // (without it, the whole conversation looks new → over-escalation). (#796)
       state.lastKnownMessageCount = persisted.lastKnownMessageCount;
+      state.maxSeenMessageCount = persisted.lastKnownMessageCount;
       state.lastTurnAt = persisted.lastTurnAt;
       // Don't restore consecutiveBusts from DB — it's a short-term rolling
       // signal that must rebuild from live API responses in the current process.
@@ -3185,11 +3189,17 @@ function tryFitStable(input: {
         const parts = cleanParts(msg.parts);
         return parts !== msg.parts ? { info: msg.info, parts } : msg;
       });
-      // When the pinned window retains every raw message (nothing evicted and
-      // no host sourceWindow offset), omit the distilled prefix so summary and
-      // raw turns are not duplicated in context.
+      // When the pinned window retains every raw message (nothing evicted, no
+      // host sourceWindow offset, no prior prefix shipped, and no host-side
+      // front-trimming), omit the distilled prefix so summary and raw turns
+      // are not duplicated in context.
+      const totalRawSeen =
+        input.messages.length + (input.sourceWindow?.offset ?? 0);
       const evictedAny =
-        adjustedPinnedIdx > 0 || (input.sourceWindow?.offset ?? 0) > 0;
+        adjustedPinnedIdx > 0 ||
+        (input.sourceWindow?.offset ?? 0) > 0 ||
+        input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+        totalRawSeen < input.sessState.maxSeenMessageCount;
       const effectivePrefix = evictedAny ? input.prefix : [];
       const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
       const total = effectivePrefixTokens + pinnedTokens;
@@ -3221,6 +3231,11 @@ function tryFitStable(input: {
   // large can still march. That's an extreme regime (the old full-budget rescan
   // also degraded, just at the 100% boundary); higher layers (tool stripping)
   // take over when even the current turn doesn't fit the full rawBudget.
+  const totalRawSeen =
+    input.messages.length + (input.sourceWindow?.offset ?? 0);
+  const priorEvicted =
+    input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+    totalRawSeen < input.sessState.maxSeenMessageCount;
   const result = tryFit({
     sourceWindow: input.sourceWindow,
     messages: input.messages,
@@ -3230,6 +3245,7 @@ function tryFitStable(input: {
     rawBudget: input.rawBudget,
     rawFillBudget: Math.floor(input.rawBudget * RAW_WINDOW_EVICT_TARGET),
     strip: "none",
+    priorEvicted,
   });
 
   if (result) {
@@ -4043,6 +4059,11 @@ function transformInner(input: {
       // stages), so the high-water never relaxes an escalated stage's clamp.
       sessState.rawWindowCache = null;
       sessState.distilledBudgetHighWater = 0;
+      const totalRawSeen =
+        dedupMessages.length + (input.sourceWindow?.offset ?? 0);
+      const priorEvicted =
+        sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+        totalRawSeen < sessState.maxSeenMessageCount;
       result = tryFit({
         sourceWindow: input.sourceWindow,
         messages: dedupMessages,
@@ -4052,6 +4073,7 @@ function transformInner(input: {
         rawBudget: stageRawBudget,
         strip: stage.strip,
         protectedTurns: stage.protectedTurns,
+        priorEvicted,
       });
     }
 
@@ -4293,6 +4315,10 @@ function transformWithCounts(input: {
     state.lastTransformedCount = result.messages.length;
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
+    state.maxSeenMessageCount = Math.max(
+      state.maxSeenMessageCount,
+      input.messages.length + (input.sourceWindow?.offset ?? 0),
+    );
     // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
     // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
     // the session at emergency — after recovery it settles back to this floor.
@@ -4434,6 +4460,12 @@ function tryFit(input: {
    * overflow again next turn).
    */
   rawFillBudget?: number;
+  /**
+   * True when the session previously shipped the distilled prefix or observed
+   * a larger raw history (host-side front-trimming). Preserves the prefix even
+   * when `cutoff === 0` on the remaining raw array.
+   */
+  priorEvicted?: boolean;
 }): Omit<
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
@@ -4493,11 +4525,11 @@ function tryFit(input: {
   // If the cutoff produces a raw window starting with assistant(s), advance it
   // past them — otherwise loreMessagesToGateway produces back-to-back assistants
   // and the API rejects with "tool_use ids found without tool_result" (#424).
-  // Skip when cutoff === 0 (and no sourceWindow offset) because the distilled
-  // prefix is omitted when 0 raw messages are evicted.
+  // Skip when cutoff === 0 (and no sourceWindow offset or prior eviction)
+  // because the distilled prefix is omitted when 0 raw messages are evicted.
   if (
     input.prefix.length > 0 &&
-    (cutoff > 0 || (input.sourceWindow?.offset ?? 0) > 0)
+    (cutoff > 0 || (input.sourceWindow?.offset ?? 0) > 0 || input.priorEvicted)
   ) {
     while (
       cutoff < olderMessages.length &&
@@ -4561,10 +4593,13 @@ function tryFit(input: {
     return changed ? { info: msg.info, parts } : msg;
   });
 
-  // When tryFit retained every raw message (cutoff === 0 and no host
-  // sourceWindow offset), omit the distilled prefix so summary and raw turns
-  // are not duplicated in context.
-  const evictedAny = cutoff > 0 || (input.sourceWindow?.offset ?? 0) > 0;
+  // When tryFit retained every raw message (cutoff === 0, no host sourceWindow
+  // offset, and no prior eviction / host front-trimming), omit the distilled
+  // prefix so summary and raw turns are not duplicated in context.
+  const evictedAny =
+    cutoff > 0 ||
+    (input.sourceWindow?.offset ?? 0) > 0 ||
+    Boolean(input.priorEvicted);
   const effectivePrefix = evictedAny ? input.prefix : [];
   const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
   const total = effectivePrefixTokens + rawTokens;
