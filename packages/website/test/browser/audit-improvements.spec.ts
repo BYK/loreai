@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { themeButton } from "../helpers/theme";
 
 test("each primary navigation identifies one current section", async ({
   page,
@@ -61,8 +62,9 @@ test("the selected theme ring has non-text contrast against its surrounding pill
   page,
 }) => {
   await page.goto("/");
+  await themeButton(page, "System");
   const ratio = await page
-    .locator('.theme-toggle [aria-pressed="true"]')
+    .locator('.theme-toggle:visible [aria-pressed="true"]')
     .evaluate((button) => {
       const canvas = new OffscreenCanvas(1, 1),
         ctx = canvas.getContext("2d")!;

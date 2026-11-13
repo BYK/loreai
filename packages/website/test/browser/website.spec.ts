@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { themeButton } from "../helpers/theme";
 
 const surfaces = [
   { name: "home", path: "/", heading: "Keep project decisions" },
@@ -19,12 +20,6 @@ const surfaces = [
     heading: "The Agentic Memory Trap",
   },
 ];
-
-async function themeButton(page: Page, choice: string) {
-  const value = choice === "System" ? "auto" : choice.toLowerCase();
-  const control = page.locator(`button[data-theme-choice="${value}"]`).first();
-  return control;
-}
 
 test.beforeEach(async ({ page }) => {
   await page.route(
@@ -208,7 +203,7 @@ test("content and native navigation remain available without JavaScript", async 
   await page.goto(`${baseURL}/`);
   await expect(page.locator("h1")).toBeVisible();
   await expect(page.locator(".hero-desc")).toBeVisible();
-  await expect(page.locator(".theme-toggle")).toBeHidden();
+  await expect(page.locator(".theme-toggle:visible")).toHaveCount(0);
   if (isMobile) {
     await page.getByLabel("Toggle navigation menu", { exact: true }).click();
     await expect(

@@ -17,4 +17,6 @@ const shouldRenderSearch = config.pagefind || config.components.Search !== "@ast
   @media (max-width:70rem) { .docs-site-header :global(button[data-open-modal] > kbd) { display:none; } }
   @media (max-width:58rem) { .docs-site-header :global(button[data-open-modal]) { flex:0 0 44px;width:44px;max-width:44px;padding:0;justify-content:center; } .docs-site-header :global(button[data-open-modal] > span) { display:none; } }
   @media (max-width:50rem) { .docs-primary { display:none; } .docs-site-header { gap:.375rem; } .docs-controls { gap:.375rem; } }
+  @media (max-width:50rem) { .docs-site-header :global(button[data-open-modal]) { margin-inline-start:auto; }.docs-controls { margin-inline-start:0; } }
+  @media (min-width:50rem) { .docs-site-header :global(button[data-open-modal]) { margin-inline-start:0; }.docs-controls { margin-inline-start:auto; } }
 </style>

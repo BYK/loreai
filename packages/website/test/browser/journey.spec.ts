@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { themeButton } from "../helpers/theme";
 
 const command = "curl -fsSL https://withlore.ai/install | bash";
 
@@ -166,6 +167,7 @@ test("short screens keep the theme pill and navigation usable", async ({
   ]) {
     await page.setViewportSize(viewport);
     await page.goto("/");
+    await themeButton(page, "System");
     const pill = page.getByRole("group", { name: "Colour theme", exact: true });
     const box = await pill.boundingBox();
     expect(box?.x).toBeGreaterThanOrEqual(0);
@@ -190,7 +192,7 @@ test("short screens keep the theme pill and navigation usable", async ({
       await expect(button).toBeFocused();
       await expect(pill.locator('[aria-pressed="true"]')).toHaveCount(1);
     }
-    await page.getByLabel("Toggle navigation menu", { exact: true }).click();
+    await expect(page.locator(".nav-mobile")).toHaveAttribute("open", "");
     const panel = page.locator(".nav-mobile-panel");
     const panelBox = await panel.boundingBox();
     expect(panelBox?.x).toBeGreaterThanOrEqual(0);

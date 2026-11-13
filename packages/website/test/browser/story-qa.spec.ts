@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { themeButton } from "../helpers/theme";
 
 test("the story begins with the conversation and shows product proof first", async ({
   page,
@@ -65,11 +66,11 @@ test("light artwork uses its own ink palette and survives explicit theme changes
   page,
 }) => {
   await page.goto("/");
-  await page.getByLabel("Light theme", { exact: true }).first().click();
+  await (await themeButton(page, "Light")).click();
   const art = page.locator("img.journal-art:visible").first();
   await expect(art).toHaveAttribute("src", /-light\.svg$/);
   await expect(art).toHaveCSS("filter", "none");
-  await page.getByLabel("Dark theme", { exact: true }).first().click();
+  await (await themeButton(page, "Dark")).click();
   await expect(
     page.locator("img.journal-art:visible").first(),
   ).not.toHaveAttribute("src", /-light\.svg$/);

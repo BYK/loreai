@@ -1,9 +1,11 @@
 ---
+import MobileThemePreferences from "./MobileThemePreferences.astro";
 import PrimaryLinks from "./PrimaryLinks.astro";
 ---
 <details class="nav-mobile" data-menu>
   <summary class="nav-burger" aria-label="Toggle navigation menu"><span aria-hidden="true">☰</span><span class="visually-hidden">Navigation</span></summary>
   <div class="nav-mobile-panel">
+    <MobileThemePreferences />
     <PrimaryLinks mobile />
   </div>
 </details>

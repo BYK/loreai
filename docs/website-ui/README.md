@@ -471,3 +471,19 @@ browser coverage also includes 320px phone widths in both themes.
 The [sitewide visual QA](sitewide-qa-2026-11-13.md) covers all 36 content routes,
 including all 26 docs pages and six articles, plus production recovery. It records
 mobile/desktop findings, the resulting changes and the final browser/static checks.
+
+## Mobile appearance controls
+
+The Light / System / Dark pill lives in an Appearance row at the top of the
+public mobile menu and the documentation sidebar menu. Desktop keeps the header
+control. The existing theme controller synchronizes the two rendered instances;
+only the appropriate control is visible. Pages without a sidebar menu retain
+their header control. No-JavaScript pages hide the entire inactive preferences row.
+
+The sticky row uses 44px buttons and focus clearance on the actual menu scrollers.
+The keyboard regression in `theme-menu.spec.ts` navigates links with Tab and
+Shift+Tab, preventing focus from passing behind Appearance on short screens.
+Final verification: 792 browser passes / 8 conditional skips, 19 website units,
+75 clean Astro files, lint/format checks and separate source reviews.
+
+![Mobile public and docs appearance menus](screenshots/mobile-theme-menus.jpg)

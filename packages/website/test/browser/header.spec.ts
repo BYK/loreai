@@ -41,7 +41,10 @@ test("field guide menus show real destinations and dismiss predictably", async (
     await expect(
       resources.getByRole("link", { name: /Follow the setup guide/ }),
     ).toHaveAttribute("href", "/docs/first-session/");
-    await header.getByLabel("System theme", { exact: true }).click();
+    await header
+      .locator(".header-utilities")
+      .getByLabel("System theme", { exact: true })
+      .click();
     await expect(resources).not.toHaveAttribute("open", "");
     const start = header.getByRole("link", {
       name: "Get started",
