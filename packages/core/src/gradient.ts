@@ -838,6 +838,8 @@ type SessionState = {
   lastKnownMessageCount: number;
   /** High-water raw message count ever observed for this session — detects host front-trimming */
   maxSeenMessageCount: number;
+  /** True once a compressed turn shipped the distilled prefix or restored from persisted Layer >= 1 */
+  priorPrefixShipped: boolean;
   /** Number of messages in the most recent transform() output */
   lastTransformedCount: number;
   /** Layer used by the most recent transform() call — sticky-layer guard */
@@ -1002,6 +1004,7 @@ function makeSessionState(): SessionState {
     lastKnownLtm: 0,
     lastKnownMessageCount: 0,
     maxSeenMessageCount: 0,
+    priorPrefixShipped: false,
     lastTransformedCount: 0,
     lastLayer: 0,
     maxSustainedLayer: 0,
@@ -1072,8 +1075,10 @@ function getSessionState(sessionID: string): SessionState {
       // a turn until the next compressed turn re-latches the ratchet.
       if (state.lastLayer >= 1 && state.lastLayer <= 3) {
         state.maxSustainedLayer = state.lastLayer;
+        state.priorPrefixShipped = true;
       } else if (state.lastLayer === 4) {
         state.maxSustainedLayer = 1;
+        state.priorPrefixShipped = true;
       }
       state.lastKnownInput = persisted.lastKnownInput;
       // v43: restore the last-sent message count so the calibrated-delta
@@ -3198,6 +3203,7 @@ function tryFitStable(input: {
       const evictedAny =
         adjustedPinnedIdx > 0 ||
         (input.sourceWindow?.offset ?? 0) > 0 ||
+        input.sessState.priorPrefixShipped ||
         input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
         totalRawSeen < input.sessState.maxSeenMessageCount;
       const effectivePrefix = evictedAny ? input.prefix : [];
@@ -3234,6 +3240,7 @@ function tryFitStable(input: {
   const totalRawSeen =
     input.messages.length + (input.sourceWindow?.offset ?? 0);
   const priorEvicted =
+    input.sessState.priorPrefixShipped ||
     input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
     totalRawSeen < input.sessState.maxSeenMessageCount;
   const result = tryFit({
@@ -4062,6 +4069,7 @@ function transformInner(input: {
       const totalRawSeen =
         dedupMessages.length + (input.sourceWindow?.offset ?? 0);
       const priorEvicted =
+        sessState.priorPrefixShipped ||
         sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
         totalRawSeen < sessState.maxSeenMessageCount;
       result = tryFit({
@@ -4319,6 +4327,9 @@ function transformWithCounts(input: {
       state.maxSeenMessageCount,
       input.messages.length + (input.sourceWindow?.offset ?? 0),
     );
+    if (result.distilledTokens > 0) {
+      state.priorPrefixShipped = true;
+    }
     // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
     // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
     // the session at emergency — after recovery it settles back to this floor.
