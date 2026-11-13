@@ -435,3 +435,9 @@ public pages, the journal, tour and documentation. Destinations and native focus
 behavior remain intact.
 
 ![Text-only underline](screenshots/link-label-only-underline.png)
+
+The shared public footer now uses GitHub, X and RSS SVG icons with accessible
+names, native hover titles and 44px link targets. The release/version link stays
+textual. Checked at desktop and 320px phone widths in dark/light appearances.
+
+![Footer social icons](screenshots/footer-social-icons.png)

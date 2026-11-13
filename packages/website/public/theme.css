@@ -102,6 +102,11 @@ th { font-weight: 500; }
 .footer-brand { font:600 1.25rem/1 var(--sans);letter-spacing:-.04em; color: var(--heading); text-decoration: none; }
 .footer-links { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
 .footer-links a { display: inline-flex; align-items: center; min-height: 44px; }
+.footer-community { gap:8px;align-items:center; }
+.footer-community .social-icon { width:44px;justify-content:center;border-radius:6px;color:var(--muted);text-decoration:none; }
+.footer-community .social-icon:hover { color:var(--heading);background:var(--chrome); }
+.footer-community .social-icon svg { display:block;flex-shrink:0; }
+.footer-community .release-link { margin-inline-start:8px; }
 .site-footer > small { width: 100%; }
 .page-intro { max-width: 960px; padding-block: 4rem; }
 .page-intro .button { margin-top: 1.5rem; }
