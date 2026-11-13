@@ -32,7 +32,7 @@
   :root:not([data-theme]) .logo-img-light { display: none; }
   :root:not([data-theme]) .logo-img-dark { display: block; }
 }
-@media (max-width: 380px) { .logo .logo-text { display: none; } }
+@media (max-width: 640px) { .logo { min-width:44px;min-height:44px;justify-content:center; }.logo .logo-text { display: none; } }
 @media (forced-colors: active) { .theme-toggle button[aria-pressed="true"] { outline: 2px solid Highlight; } }
 
 /* Navigation is separate from utilities and the single installation action. */
