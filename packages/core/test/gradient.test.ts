@@ -2275,6 +2275,10 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
       sessionID: SID,
     });
     expect(r2.layer).toBeGreaterThanOrEqual(1);
+    expect(r2.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
   });
 });
 
@@ -3742,6 +3746,25 @@ describe("onIdleResume", () => {
       r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
     ).toBe(false);
     expect(r2.messages.length).toBe(5);
+
+    // Host front-trimming: if the host drops older messages so the input array
+    // shrinks below maxSeenMessageCount (even without setting sourceWindow.offset
+    // and with cutoff === 0 on the remaining slice), the distilled prefix IS
+    // injected so the summarized history is not lost.
+    const r3 = transform({
+      messages: [
+        makeMsg("ne-u2", "user", "What next?", SID),
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r3.layer).toBe(1);
+    expect(r3.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r3.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
 
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
