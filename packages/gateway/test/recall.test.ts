@@ -5204,3 +5204,105 @@ test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(
     ).toBe(false);
   },
 );
+
+test("OpenAI Chat Completions mixed-tool round-trip preserves and expands before-companions placed after marker text", () => {
+  const anchorId = "3dcd05dc-ae0e-476a-a5d8-80c502248762";
+  const userMsg = {
+    role: "user" as const,
+    content: [
+      { type: "text" as const, text: "Can I point to a different branch?" },
+    ],
+  };
+  const globBlock: GatewayContentBlock = {
+    type: "tool_use",
+    id: "call_glob_1",
+    name: "glob",
+    input: { pattern: "**/Jenkinsfile" },
+  };
+  const recallBlock: GatewayContentBlock = {
+    type: "tool_use",
+    id: "call_recall_1",
+    name: RECALL_TOOL_NAME,
+    input: { query: "terraformGitRepo branch", scope: "all" },
+  };
+  const originalResp = makeResponse([globBlock, recallBlock]);
+  const anchorContextId = responsesAnchorContext(
+    [userMsg],
+    [],
+    originalResp,
+    "call_recall_1",
+  );
+
+  const store: RecallStore = new Map([
+    [
+      `anchor:${anchorId}`,
+      makeStoredRecall({
+        toolUseId: "call_recall_1",
+        anchorId,
+        anchorContextId,
+        input: { query: "terraformGitRepo branch", scope: "all" },
+        position: 1,
+        result: "Found branch config",
+        companionToolUses: [
+          {
+            id: "call_glob_1",
+            name: "glob",
+            input: { pattern: "**/Jenkinsfile" },
+            side: "before",
+          },
+        ],
+      }),
+    ],
+  ]);
+
+  // OpenAI Chat Completions parses `content` (marker text) at index 0 and
+  // `tool_calls` (`glob`) after it in the same assistant message.
+  const markerText = `${buildRecallMarker("terraformGitRepo branch", "all")}\n${buildRecallAnchor(anchorId)}`;
+  const req = makeRequest([
+    userMsg,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: markerText }, globBlock],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: "call_glob_1",
+          content: [{ type: "text", text: "Jenkinsfile" }],
+        },
+      ],
+    },
+  ]);
+
+  expect(cleanupRecallStore(req, store, { gatewayRecallEnabled: true })).toBe(
+    false,
+  );
+  expect(store.size).toBe(1);
+  expect(expandRecallMarkers(req, store, { gatewayRecallEnabled: true })).toBe(
+    true,
+  );
+  expect(req.messages[1].content).toEqual([
+    globBlock,
+    {
+      type: "tool_use",
+      id: "call_recall_1",
+      name: RECALL_TOOL_NAME,
+      input: { query: "terraformGitRepo branch", scope: "all" },
+    },
+  ]);
+  expect(req.messages[2].content).toEqual([
+    {
+      type: "tool_result",
+      toolUseId: "call_glob_1",
+      content: [{ type: "text", text: "Jenkinsfile" }],
+    },
+    {
+      type: "tool_result",
+      toolUseId: "call_recall_1",
+      toolName: RECALL_TOOL_NAME,
+      content: [{ type: "text", text: "Found branch config" }],
+    },
+  ]);
+});

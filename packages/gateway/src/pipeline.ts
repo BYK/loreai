@@ -7985,6 +7985,12 @@ function safeUpstreamErrorCategory(errorBody: string): string | undefined {
   return undefined;
 }
 
+function formatRecallUpstreamErrorDetail(errorBody: string): string {
+  const category = safeUpstreamErrorCategory(errorBody);
+  const diagnostic = upstreamRejectionDiagnostic(errorBody);
+  return category ? `category=${category} ${diagnostic}` : diagnostic;
+}
+
 function safeUpstreamRequestId(headers: Headers): string | undefined {
   for (const name of [
     "x-request-id",
@@ -9868,12 +9874,12 @@ export function buildStreamingResponse(
                 )
                   throw new RecallContinuationFailure("follow_up_failed");
                 reportRecallDiagnostic(
-                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(streamingFollowUp.detail)})`,
                   "error",
                 );
                 captureToolPairing400({
                   status: streamingFollowUp.status ?? 0,
-                  errorBody: "",
+                  errorBody: streamingFollowUp.detail,
                   messages: currentModifiedReq.messages,
                   // Layer is not in scope on the streaming recall continuation;
                   // -1 signals "unknown" while still tagging the error class.
@@ -24542,7 +24548,13 @@ async function handleConversationTurnPrepared(
             followUpRequiresStream,
             foregroundAbort.signal,
           );
-          if (!recovery.ok) return failRecall(category, false);
+          if (!recovery.ok) {
+            reportRecallDiagnostic(
+              `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail)})`,
+              "error",
+            );
+            return failRecall(category, false);
+          }
           Object.assign(
             cumulativeUsage,
             mergeRecallUsage(
@@ -24674,12 +24686,12 @@ async function handleConversationTurnPrepared(
       if (!jsonFollowUp.ok) {
         recallBudget.recordContinuationUsage(undefined, undefined, false);
         reportRecallDiagnostic(
-          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
+          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(jsonFollowUp.detail)})`,
           "error",
         );
         captureToolPairing400({
           status: jsonFollowUp.status ?? 0,
-          errorBody: "",
+          errorBody: jsonFollowUp.detail,
           messages: currentModifiedReq.messages,
           // `result` here is the recall string (shadowed); the transform layer
           // is not in scope on the recall continuation. -1 signals "unknown".
@@ -24729,6 +24741,15 @@ async function handleConversationTurnPrepared(
         continuationResp.codexRateLimits = cumulativeCodexRateLimits;
       }
       currentResp = continuationResp;
+      if (
+        gatewayRecallEnabled &&
+        currentResp.content.filter(
+          (block) =>
+            block.type === "tool_use" && block.name === RECALL_TOOL_NAME,
+        ).length > 1
+      ) {
+        return recoverRecallContinuation("parallel_recall");
+      }
       if (
         !(gatewayRecallEnabled && hasRecallToolUse(currentResp)) &&
         !isUsableRecallContinuation(currentResp)
@@ -25170,6 +25191,10 @@ async function handleConversationTurnPrepared(
                   finalRecallRound,
                 );
                 if (!follow.ok) {
+                  reportRecallDiagnostic(
+                    `recall follow-up upstream error: ${follow.status ?? "?"} (${formatRecallUpstreamErrorDetail(follow.detail)})`,
+                    "error",
+                  );
                   throw new Error(
                     `recall follow-up upstream error: ${follow.status ?? "?"}`,
                   );
@@ -25237,6 +25262,10 @@ async function handleConversationTurnPrepared(
                   signal,
                 );
                 if (!recovery.ok) {
+                  reportRecallDiagnostic(
+                    `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail)})`,
+                    "error",
+                  );
                   throw new Error("recall recovery upstream failed");
                 }
                 return recovery.continuation;

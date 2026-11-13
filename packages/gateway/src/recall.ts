@@ -294,6 +294,62 @@ function recallMessagePrefix(
   return message.provenanceContent.slice(0, end);
 }
 
+/**
+ * OpenAI Chat Completions serializes assistant `content` and `tool_calls` as
+ * separate fields, so `parseAssistantContent` places the text marker at index 0
+ * and all `tool_use` blocks after it — even when the original response had
+ * companion `tool_use` blocks before the recall block. Match those in-message
+ * `before` companions by fingerprint so anchor validation and marker expansion
+ * reconstruct the original prefix and tool_use order.
+ */
+function trailingBeforeCompanionsInMessage(
+  message: GatewayMessage,
+  markerIndex: number,
+  stored: StoredRecall,
+): GatewayToolUseBlock[] {
+  if (
+    message.content
+      .slice(0, markerIndex)
+      .some((block) => block.type === "tool_use")
+  ) {
+    return [];
+  }
+  const beforeFingerprints = companionFingerprintsFor(stored)?.filter(
+    (item) => item.side === "before",
+  );
+  if (!beforeFingerprints || beforeFingerprints.length === 0) return [];
+  const trailingToolUses = message.content
+    .slice(markerIndex + 1)
+    .filter((block): block is GatewayToolUseBlock => block.type === "tool_use");
+  if (trailingToolUses.length < beforeFingerprints.length) return [];
+  const candidate = trailingToolUses.slice(0, beforeFingerprints.length);
+  for (let i = 0; i < beforeFingerprints.length; i++) {
+    if (
+      companionFingerprint(stored.anchorId, {
+        ...candidate[i],
+        side: "before",
+      }) !== beforeFingerprints[i].hash
+    ) {
+      return [];
+    }
+  }
+  return candidate;
+}
+
+function recallMessagePrefixForStored(
+  message: GatewayMessage,
+  visibleBlocks: number,
+  stored: StoredRecall,
+): GatewayContentBlock[] {
+  const prefix = recallMessagePrefix(message, visibleBlocks);
+  const trailingBefore = trailingBeforeCompanionsInMessage(
+    message,
+    visibleBlocks,
+    stored,
+  );
+  return trailingBefore.length > 0 ? [...prefix, ...trailingBefore] : prefix;
+}
+
 function replaceVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
@@ -1022,14 +1078,14 @@ export function expandRecallMarkers(
           recallAnchorContext(
             incomingMessages,
             i,
-            recallMessagePrefix(message, j),
+            recallMessagePrefixForStored(message, j, candidate.stored),
           )
         : candidate.stored.anchorContextId === undefined ||
           candidate.stored.anchorContextId ===
             recallAnchorContext(
               incomingMessages,
               i,
-              recallMessagePrefix(message, j),
+              recallMessagePrefixForStored(message, j, candidate.stored),
             );
       const occurrences = anchorValidity.get(candidate.key) ?? [];
       const previous = incomingMessages[i - 1];
@@ -1255,6 +1311,29 @@ export function expandRecallMarkers(
       }
     }
 
+    const trailingBefore = trailingBeforeCompanionsInMessage(
+      msg,
+      markerIdx,
+      stored,
+    );
+    if (trailingBefore.length > 0) {
+      const moved: GatewayContentBlock[] = [];
+      let remaining = trailingBefore.length;
+      for (
+        let index = markerIdx + 1;
+        index < msg.content.length && remaining > 0;
+        index++
+      ) {
+        if (msg.content[index].type === "tool_use") {
+          moved.push(removeVisibleContentBlock(msg, index));
+          index--;
+          remaining--;
+        }
+      }
+      insertVisibleContentBlocks(msg, markerIdx, moved);
+      markerIdx += moved.length;
+    }
+
     // Replace marker with tool_use
     replaceVisibleContentBlock(msg, markerIdx, {
       type: "tool_use",
@@ -1414,7 +1493,11 @@ export function cleanupRecallStore(
             recallAnchorContext(
               req.messages,
               req.messages.indexOf(msg),
-              recallMessagePrefix(msg, msg.content.indexOf(block)),
+              recallMessagePrefixForStored(
+                msg,
+                msg.content.indexOf(block),
+                match.stored,
+              ),
             ))
       ) {
         activeKeys.add(match.key);

@@ -422,4 +422,24 @@ describe("buildOpenAIUpstreamRequest — stream_options forwarding (#1475)", () 
     expect(body.temperature).toBe(0.5);
     expect(body.stream).toBe(true);
   });
+
+  test("omits stream_options when stream is false (e.g. non-stream recall follow-up)", () => {
+    const req = parseOpenAIRequest(
+      {
+        model: "gemini-4-argon",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+        stream_options: { include_usage: true },
+      },
+      headers,
+    );
+    const nonStreamFollowUp = { ...req, stream: false };
+    const result = buildOpenAIUpstreamRequest(
+      nonStreamFollowUp,
+      "https://api.githubcopilot.com",
+    );
+    const body = result.body as Record<string, unknown>;
+    expect(body.stream).toBe(false);
+    expect(body.stream_options).toBeUndefined();
+  });
 });
