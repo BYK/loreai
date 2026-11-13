@@ -4,6 +4,8 @@ description: Set up Lore as an OpenCode plugin and route every LLM call through 
 sidebar:
   order: 1
 ---
+import GuideNextSteps from '../../../../components/GuideNextSteps.astro';
+
 
 OpenCode is a terminal-based AI coding agent. The `@loreai/opencode` plugin runs inside OpenCode and routes every LLM call through the Lore gateway transparently.
 
@@ -62,8 +64,7 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 
 ## Next steps
 
-- [Verify a recorded session](/docs/first-session/?agent=opencode#verify).
-- [Use Lore day to day](/docs/using-lore/).
+<GuideNextSteps agent="opencode" />
 
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](/docs/configuration/) — full reference for `.lore.json`.

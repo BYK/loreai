@@ -154,3 +154,11 @@
   .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item > .ui-choice-label { flex-direction:column;gap:5px;padding:8px 4px;white-space:nowrap;overflow-wrap:normal;font-size:.75rem; }
   .spotlight-workbench .spotlight-choices .ui-choice-label { padding:9px 8px;gap:5px; }
 }
+
+/* Shared orientation and meaningful process icons across public pages. */
+.page-sections a { display:inline-flex;align-items:center;gap:8px; }
+.page-sections svg { flex-shrink:0;color:var(--muted); }
+.capabilities dt { display:flex;align-items:flex-start;gap:8px; }
+.capabilities dt svg { flex:0 0 18px;color:var(--muted);margin-top:3px; }
+.reference-label { display:flex;align-items:center;gap:8px; }
+.reference-label svg { color:var(--muted);flex-shrink:0; }

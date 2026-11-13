@@ -17,6 +17,11 @@ export const UI_ICONS = {
   code: "m8 6-6 6 6 6 m8-12 6 6-6 6 m-3-15-2 18",
   workflow: "M3 3h6v6H3V3 M15 15h6v6h-6v-6 M15 3h6v6h-6V3 M9 6h6 M6 9v9h9",
   settings: "M4 7h16 M4 17h16 M8 4v6 M16 14v6",
+  calendar: "M4 5h16v16H4V5 M8 2v6 M16 2v6 M4 11h16",
+  rss: "M4 4a16 16 0 0 1 16 16 M4 11a9 9 0 0 1 9 9 M4 20h.01",
+  back: "M20 12H4 m7-7-7 7 7 7",
+  branch:
+    "M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M6 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M18 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4 M6 7v10 M18 7v3a4 4 0 0 1-4 4H6",
   people:
     "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M17 3a4 4 0 0 1 0 8 M18 15a4 4 0 0 1 4 4v2",
 } as const;

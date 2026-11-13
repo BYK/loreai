@@ -1,10 +1,17 @@
 ---
+import NavigationIcon from "./NavigationIcon.astro";
+import AgentIcon from "./AgentIcon.astro";
+import { SETUP_AGENTS } from "../lib/agent-setup";
+import { docChapter } from "../lib/doc-chapter";
 import PageTitle from "@astrojs/starlight/components/PageTitle.astro";
 import ReferenceFinder from "./ReferenceFinder.astro";
 const path = Astro.url.pathname;
 const page = path.split("/docs/")[1] ?? "";
 const reference = ["configuration/","environment/"].includes(page);
-const section = page.startsWith("guides/") ? "Guides" : ["","install/","first-session/","troubleshooting/"].includes(page) ? "Getting started" : ["configuration/","environment/","architecture/","installation-reference/","setup/","benchmark/"].includes(page) ? "Reference" : page === "review/" ? "Contributing" : "Using Lore";
+const chapter = docChapter(page);
+const agent = SETUP_AGENTS.find(agent => page === `guides/${agent.guide}/`);
 ---
-<div class="docs-journal-title"><p class="field-marker">Lore / {section}</p><div data-pagefind-ignore><PageTitle {...Astro.props} /></div></div>
+<div class="docs-journal-title"><p class="field-marker">{agent ? <AgentIcon agent={agent.id} /> : <NavigationIcon name={chapter.icon} />}{chapter.label}</p><div data-pagefind-ignore><PageTitle {...Astro.props} /></div></div>
 {reference && <ReferenceFinder />}
+
+<style>.docs-journal-title .field-marker { display:flex;align-items:center;gap:8px; }.docs-journal-title .field-marker :global(svg) { flex-shrink:0; }</style>

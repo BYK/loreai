@@ -4,6 +4,8 @@ description: Set up OpenAI Codex to route through the Lore memory gateway, inclu
 sidebar:
   order: 4
 ---
+import GuideNextSteps from '../../../../components/GuideNextSteps.astro';
+
 
 [Codex](https://github.com/openai/codex) is OpenAI's terminal-based AI coding agent. Lore's gateway is the recommended way to run Codex with persistent memory and gradient context management. For CLI users, `lore run` is the simplest path. For the Codex Desktop app — which can't accept `-c` CLI overrides — see [Setup command](/docs/setup/).
 
@@ -64,8 +66,7 @@ The `lore_http` provider name is reserved for Lore's HTTP configuration. If you 
 
 ## Next steps
 
-- [Verify a recorded session](/docs/first-session/?agent=codex#verify).
-- [Use Lore day to day](/docs/using-lore/).
+<GuideNextSteps agent="codex" />
 
 - [Setup command](/docs/setup/) — `lore setup codex` for manual/Desktop configuration and remote gateways.
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.

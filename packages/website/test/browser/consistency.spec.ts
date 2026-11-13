@@ -126,7 +126,7 @@ test("reference directories work without JavaScript and do not alter ordinary do
     await expect(page.locator(".reference-finder details")).toBeVisible();
     await page.goto(baseURL + "/docs/install/");
     await expect(page.locator(".docs-journal-title")).toContainText(
-      "Getting started",
+      "Get started",
     );
     await expect(page.locator(".reference-finder")).toHaveCount(0);
   } finally {
@@ -141,7 +141,9 @@ test("reference contents are concise while setting anchors remain available", as
   expect(await page.locator("starlight-toc a").count()).toBeLessThanOrEqual(8);
   await expect(page.locator("#knowledge")).toBeAttached();
   await page.goto("/docs/guides/with-codex/");
-  await expect(page.locator(".docs-journal-title")).toContainText("Guides");
+  await expect(page.locator(".docs-journal-title")).toContainText(
+    "Integrations",
+  );
   await expect(
     page.locator('starlight-toc a[href="#install-cli"]'),
   ).toHaveCount(1);

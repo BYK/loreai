@@ -2,10 +2,10 @@
 import JournalArt from "./JournalArt.astro";
 const base = import.meta.env.BASE_URL;
 const tasks = [
- { title:"Connect an agent", text:"Choose your client and check your first recorded session.", href:"docs/install/", art:"tools", label:"Start here" },
- { title:"Find earlier work", text:"Look up the decision or detail you need to continue.", href:"docs/using-lore/#find-an-earlier-decision", art:"chest", label:"Resume a task" },
- { title:"Review knowledge", text:"Inspect the source and correct a saved project rule.", href:"docs/using-lore/#review-knowledge", art:"decision", label:"Check what stayed" },
- { title:"Share through Git", text:"Review a .lore.md diff before carrying knowledge to a teammate.", href:"docs/team-memory/", art:"satchel", label:"Bring it along" },
+ { title:"Connect an agent", text:"Choose your client and check your first recorded session.", href:"docs/install/", art:"tools" },
+ { title:"Find earlier work", text:"Look up the decision or detail you need to continue.", href:"docs/using-lore/#find-an-earlier-decision", art:"chest" },
+ { title:"Review knowledge", text:"Inspect the source and correct a saved project rule.", href:"docs/using-lore/#review-knowledge", art:"decision" },
+ { title:"Share through Git", text:"Review a .lore.md diff before carrying knowledge to a teammate.", href:"docs/team-memory/", art:"satchel" },
 ] as const;
 ---
-<nav class="docs-tasks" aria-label="Choose a task in the field guide">{tasks.map(task=><a href={`${base}${task.href}`}><JournalArt name={task.art} size={52} /><span class="docs-task-copy"><small class="field-marker">{task.label}</small><strong>{task.title}</strong><span>{task.text}</span></span><span class="task-arrow" aria-hidden="true">↗</span></a>)}</nav>
+<nav class="docs-tasks" aria-label="Choose a task in the field guide">{tasks.map(task=><a href={`${base}${task.href}`}><JournalArt name={task.art} size={52} /><span class="docs-task-copy"><strong>{task.title}</strong><span>{task.text}</span></span><span class="task-arrow" aria-hidden="true">↗</span></a>)}</nav>

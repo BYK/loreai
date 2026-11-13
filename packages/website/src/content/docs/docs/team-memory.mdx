@@ -4,25 +4,33 @@ description: Share project knowledge with your team as version-controlled .lore.
 sidebar:
   order: 3
 ---
+import KnowledgeSharing from '../../../components/KnowledgeSharing.astro';
 
-Lore's long-term knowledge is local-first: every decision, pattern, preference, and gotcha lives in a local SQLite database. But project knowledge is most valuable when the whole team shares it. Lore makes that sharing a **git artifact you review like code**, not a hidden database.
+
+Share reviewed project conventions through `.lore.md`. Your team can inspect the
+same Git diff as your code; complete conversations remain in each local database.
 
 ## `.lore.md` — memory that moves with the code
 
 When the curator records a durable fact, Lore exports it to a `.lore.md` file at your project root. The file is plain Markdown, committed to your repository, and designed to be reviewed in pull requests.
 
-- **Human-readable.** Each entry is a Markdown bullet under its category — decision, pattern, preference, architecture, or gotcha.
-- **Diffable.** Entries are sorted alphabetically by title within each category, so the file has a stable, deterministic order. A new or changed fact shows up as a minimal, readable diff — not a reshuffle.
-- **Merge-friendly.** That deterministic ordering keeps conflicts rare and legible. Each entry carries a stable `<!-- lore:UUID -->` marker, so edits map to the right entry regardless of position.
-- **Reviewable.** Because it lives in the repo, knowledge changes ride through the same PR review your code does. Your team approves what the agent learned the same way it approves a code change.
+- **Readable diffs.** Entries sit under their category — decision, pattern, preference,
+  architecture or gotcha — sorted alphabetically by title for a stable diff.
+- **Stable identity.** Each entry carries a `<!-- lore:UUID -->` marker, so an edit maps
+  to the same entry even when its position changes. Review knowledge changes in the
+  same pull request as your code.
 
 ### How it round-trips
 
-- **Export.** After curation, Lore writes `.lore.md` — skipping the write entirely when nothing changed, so it never churns your working tree.
-- **Import.** On the next session, Lore reads `.lore.md` back. A teammate's merged entry — or a hand-written one — is imported into the local database and injected into the agent's context. A known marker with changed content updates that entry; an unknown marker creates a new one.
-- **Hand edits are first-class.** Correct an entry's wording or add a convention in `.lore.md`, keeping its identity markers intact. Present entries are imported on the next run. Removing text from the file alone does not remove the existing database entry; use **Delete** in the local Knowledge view to retire active knowledge, then inspect the exported diff.
+<KnowledgeSharing />
 
-This is the team-memory path that works **today**, with nothing but your existing git workflow.
+Lore skips unchanged exports. On import, a known marker with changed content updates
+that entry; an unknown marker creates a new one. Hand edits are supported: keep
+`<!-- lore:UUID -->` identity markers intact.
+
+Removing text from the file alone does not remove an existing database entry. Use
+**Delete** in the local Knowledge view to retire active knowledge, then inspect the
+exported diff.
 
 ## Reviewing memory changes
 

@@ -8,6 +8,11 @@ const directory = fileURLToPath(
 for (const theme of ["light", "dark"]) {
   const crops = [
     {
+      source: "session-detail",
+      name: "session-detail-mobile",
+      region: { left: 386, top: 48, width: 394, height: 500 },
+    },
+    {
       source: "knowledge-mobile",
       name: "proof-rule-mobile",
       region: { left: 0, top: 300, width: 390, height: 185 },

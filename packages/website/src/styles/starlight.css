@@ -163,3 +163,9 @@
 #starlight__on-this-page--mobile .toggle { border:0;background:transparent;border-radius:6px;padding:8px;min-height:44px; }
 .docs-journal-title { display:block; }
 .docs-journal-title .field-marker { font-size:.75rem; }
+
+/* Adjacent pages are quiet navigation rows, not oversized calls to action. */
+.pagination-links { gap:12px; }
+.pagination-links a { min-height:64px;padding:12px 16px;gap:12px;font-size:.75rem;line-height:1.5;border-radius:8px; }
+.pagination-links .link-title { font-size:1rem;line-height:1.5;font-weight:500; }
+.pagination-links svg { width:18px;height:18px; }

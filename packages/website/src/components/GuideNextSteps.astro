@@ -1,0 +1,11 @@
+---
+import ActionLinks from "./ActionLinks.astro";
+import type { SETUP_AGENTS } from "../lib/agent-setup";
+interface Props { agent: (typeof SETUP_AGENTS)[number]["id"]; }
+const {agent}=Astro.props;
+---
+<ActionLinks label="Use your connected agent" items={[
+ {title:"Verify a recorded session",href:`/docs/first-session/?agent=${agent}#verify`,icon:"check"},
+ {title:"Use Lore day to day",href:"/docs/using-lore/",icon:"compass"},
+ {title:"Troubleshoot a missing session",href:"/docs/troubleshooting/?issue=session#diagnostic",icon:"help"},
+]} />

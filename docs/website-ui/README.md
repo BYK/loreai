@@ -465,3 +465,9 @@ browser coverage also includes 320px phone widths in both themes.
 ![Journal, setup and app tour on phones](screenshots/icon-hierarchy-phone.jpg)
 ![Desktop compatibility marks and proof controls](screenshots/icon-home-desktop-dark.jpg)
 ![Docs group and setup icons in light mode](screenshots/icon-docs-desktop-light.jpg)
+
+## Sitewide follow-through
+
+The [sitewide visual QA](sitewide-qa-2026-11-13.md) covers all 36 content routes,
+including all 26 docs pages and six articles, plus production recovery. It records
+mobile/desktop findings, the resulting changes and the final browser/static checks.

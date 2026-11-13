@@ -4,6 +4,8 @@ description: Route Claude Code through the Lore memory gateway with the hosted i
 sidebar:
   order: 3
 ---
+import GuideNextSteps from '../../../../components/GuideNextSteps.astro';
+
 
 Claude Code is Anthropic's terminal-based AI coding agent. Lore's gateway is the recommended way to run Claude Code with persistent memory and gradient context management.
 
@@ -55,8 +57,7 @@ Your project knowledge (`.lore.md`, `AGENTS.md`, the SQLite database at `~/.loca
 
 ## Next steps
 
-- [Verify a recorded session](/docs/first-session/?agent=claude-code#verify).
-- [Use Lore day to day](/docs/using-lore/).
+<GuideNextSteps agent="claude-code" />
 
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](/docs/configuration/) — full reference for `.lore.json`.

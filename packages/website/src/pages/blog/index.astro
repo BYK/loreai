@@ -1,12 +1,14 @@
 ---
 import { getCollection } from "astro:content";
 import BlogLayout from "../../layouts/BlogLayout.astro";
+import NavigationIcon from "../../components/NavigationIcon.astro";
+import { BLOG_KIND_ICONS } from "../../lib/blog-kind";
 import JournalArt from "../../components/JournalArt.astro";
 const posts = (await getCollection("blog")).filter(post => !post.data.draft).sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
 const featured=posts.find(post=>post.id === "how-lore-remembers-and-forgets");
 ---
 <BlogLayout title="Blog" description="Product notes, practical guides, and engineering from Lore.">
-  <section class="blog-hero field-heading"><div><p class="eyebrow field-marker">From the Lore team / Field notes</p><h1>Blog</h1><p>Product notes, practical guides, and engineering.</p><a class="text-link icon-link" href={`${import.meta.env.BASE_URL}rss.xml`}><span class="link-label">Subscribe with RSS</span> <span aria-hidden="true">→</span></a></div></section>
+  <section class="blog-hero field-heading"><div><p class="eyebrow field-marker">From the Lore team / Field notes</p><h1>Blog</h1><p>Product notes, practical guides, and engineering.</p><a class="text-link icon-link" href={`${import.meta.env.BASE_URL}rss.xml`}><NavigationIcon name="rss" /><span class="link-label">Subscribe with RSS</span></a></div></section>
   {featured && <aside class="featured-note"><div class="featured-story"><p class="field-marker">Start here</p><h2><a href={`${import.meta.env.BASE_URL}blog/${featured.id}/`}>{featured.data.title}</a></h2><p>Understand what Lore records, what it keeps as knowledge, and what reaches your next request.</p><a class="text-link icon-link" href={`${import.meta.env.BASE_URL}blog/${featured.id}/`}><span class="link-label">Read how memory works</span> <span aria-hidden="true">→</span></a></div><div class="featured-art"><JournalArt name="journal" size={180} eager /><span class="field-marker">A rule worth keeping</span><p>Stored history.<br />Reviewable knowledge.<br />Relevant context.</p></div></aside>}
-  <section class="blog-list" aria-label="Blog posts">{posts.filter(post=>post.id!==featured?.id).map(post => <article class="post-row"><time datetime={post.data.pubDate.toISOString()}>{post.data.pubDate.toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}</time><div><p class="post-kind"><span class="post-marker" aria-hidden="true"></span>{post.data.kind}</p><h2><a href={`${import.meta.env.BASE_URL}blog/${post.id}/`}>{post.data.title}</a></h2><p>{post.data.description}</p>{post.data.tags.length > 0 && <p class="post-tags"><span class="visually-hidden">Topics: </span>{post.data.tags.join(" · ")}</p>}</div></article>)}</section>
+  <section class="blog-list" aria-label="Blog posts">{posts.filter(post=>post.id!==featured?.id).map(post => <article class="post-row"><time datetime={post.data.pubDate.toISOString()}>{post.data.pubDate.toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}</time><div><p class="post-kind"><NavigationIcon name={BLOG_KIND_ICONS[post.data.kind]} />{post.data.kind}</p><h2><a href={`${import.meta.env.BASE_URL}blog/${post.id}/`}>{post.data.title}</a></h2><p>{post.data.description}</p></div></article>)}</section>
 </BlogLayout>

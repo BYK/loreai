@@ -4,6 +4,8 @@ description: Set up Lore as a Pi extension and route every LLM call through the 
 sidebar:
   order: 2
 ---
+import GuideNextSteps from '../../../../components/GuideNextSteps.astro';
+
 
 [Pi](https://github.com/badlogic/pi-mono) is a terminal-based AI coding agent. The `@loreai/pi` extension loads inside Pi and routes every LLM call through the Lore gateway.
 
@@ -66,8 +68,7 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 
 ## Next steps
 
-- [Verify a recorded session](/docs/first-session/?agent=pi#verify).
-- [Use Lore day to day](/docs/using-lore/).
+<GuideNextSteps agent="pi" />
 
 - [Architecture](/docs/architecture/) — how temporal storage, distillation, and the gradient context manager fit together.
 - [Configuration](/docs/configuration/) — full reference for `.lore.json`.
