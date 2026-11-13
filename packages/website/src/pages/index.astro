@@ -1,7 +1,7 @@
 ---
 import PublicLayout from "../layouts/PublicLayout.astro";
 import ProductSpotlight from "../components/ProductSpotlight.astro";
-import KnowledgeFile from "../components/KnowledgeFile.astro";
+import ConversationPreview from "../components/ConversationPreview.astro";
 import QuestJournal from "../components/QuestJournal.astro";
 import Accordion from "../components/ui/Accordion.astro";
 import AccordionItem from "../components/ui/AccordionItem.astro";
@@ -13,7 +13,7 @@ const base = import.meta.env.BASE_URL;
     <div class="hero-copy"><div class="hero-overview"><div class="hero-heading"><p class="eyebrow">Memory for coding agents</p><h1>Keep project decisions <em>across coding sessions.</em></h1></div><div class="hero-details"><p class="hero-desc">Connect Lore to the coding agent you already use. Keep searchable conversations and reviewable project rules, so you can pick up where you left off.</p>
       <div class="hero-actions"><a class="button button-primary" href={`${base}docs/install/`}>Install Lore <span aria-hidden="true">→</span></a><a class="text-link" href="#product">See the app ↓</a></div>
       <p class="compatibility">Works with Claude Code, Codex, OpenCode, Pi, and Hermes.</p>
-    </div></div><KnowledgeFile /></div>
+    </div></div><ConversationPreview /></div>
   </section>
   <ProductSpotlight />
   <section class="section home-journal"><QuestJournal /></section>

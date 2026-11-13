@@ -226,10 +226,6 @@ th { font-weight: 500; }
 /* Product evidence leads; the journal is a compact optional walkthrough. */
 .home-page .home-hero { padding-block:2.5rem; }
 .hero-proof { min-width:0;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--journal-page);padding:1.25rem; }
-.hero-proof-title { display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:.75rem; }
-.hero-proof-title .field-marker { font-size:.75rem;margin-bottom:.375rem; }.hero-proof-title > div > strong { font:500 .875rem ui-monospace,monospace; }
-.hero-proof pre { white-space:pre-wrap;overflow-wrap:anywhere;font-size:.9375rem;line-height:1.7;padding-block:.75rem;border-block:1px solid var(--line);margin:0; }.hero-proof code { font-size:inherit; }
-.hero-proof > p { font-size:.8125rem;color:var(--muted);margin-top:.875rem; }.hero-proof > .text-link { font-size:.8125rem; }
 .home-journal { padding-block:3rem; }
 .home-workflow .workflow li { border:0;border-inline-start:2px solid var(--line);border-radius:0;padding:0 0 0 1rem;background:transparent; }
 @media(max-width:600px) { .home-page .hero-copy { gap:1.5rem; }.hero-proof { padding:1rem; }.home-page .home-hero { padding-block:2rem; }.home-workflow .workflow .journal-art { width:64px;height:64px; } }

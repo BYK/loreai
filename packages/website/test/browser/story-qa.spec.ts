@@ -12,7 +12,9 @@ test("the story begins with the conversation and shows product proof first", asy
     journal: document.querySelector("#journal")!.getBoundingClientRect().top,
   }));
   expect(positions.product).toBeLessThan(positions.journal);
-  await expect(page.locator(".hero-copy")).toContainText(".lore.md");
+  await expect(page.locator(".hero-copy")).toContainText(
+    "What your next session remembers",
+  );
 });
 
 test("the inventory is optional and its active text remains legible", async ({

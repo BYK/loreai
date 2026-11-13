@@ -403,3 +403,28 @@ build. All **1,133** checked fragment targets and **12** themed picture sources
 resolve. Native no-JavaScript, keyboard, reduced motion, choice/history, clipboard
 denial and manual verification contracts remain covered. The framework TOC test
 waits for its custom element before asserting JavaScript dismissal behavior.
+
+
+### Conversation-to-knowledge hero preview
+
+The hero now shows “What you said → What your next session remembers”. Two
+highlighted phrases in a short example conversation become the same two plain
+project rules below. The unhighlighted temporary port remains in conversation
+history, explicitly distinguished from retained project knowledge. The file name,
+Markdown switcher and source metadata now belong to the full journal/tour rather
+than the first explanation. The hero stays a static, accessible Astro preview
+with the existing journal artwork, palette, floating nav and native journal link.
+Legacy `format` query values remain harmless and are preserved by other controls.
+
+![Simplified hero preview](screenshots/conversation-preview-desktop-dark.jpg)
+
+![Phone preview in both themes](screenshots/conversation-preview-phone-themes.jpg)
+
+
+Hero replacement validation: **577 browser passes / 8 conditional skips** and
+**19 unit tests**, including matching highlights/remembered bullets, a temporary
+detail excluded from project rules, native query-preserving journal navigation,
+no-JavaScript rendering, responsive containment and light/dark contrast. Obsolete
+format-switcher cases were removed with the feature; independent source
+correctness/security reviews found no actionable issue. No core/gateway behavior
+changed, and the broader repository validation limitation above remains.

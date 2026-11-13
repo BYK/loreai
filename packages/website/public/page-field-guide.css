@@ -1,13 +1,6 @@
 /* Purpose-specific pages share the field guide's surfaces and native controls. */
 .page-guide-panel { padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--journal-page); }
-.knowledge-file .file-reading { display:none;min-height:180px;padding:20px 0 14px; }
-.knowledge-file:has(input[value="rule"]:checked) [data-file-panel="rule"],.knowledge-file:has(input[value="markdown"]:checked) [data-file-panel="markdown"] { display:block; }
-.knowledge-file .file-reading .field-marker { font-size:.75rem;margin-bottom:10px; }
-.knowledge-file .file-reading h2 { font-size:1.25rem;margin:0 0 12px; }
-.knowledge-file .file-reading > p:not(.field-marker) { font-size:.9375rem;line-height:1.7; }
-.knowledge-file .file-reading pre { border:0;padding:0;font-size:.8125rem; }
-.knowledge-file mark,.journal-carried-rule mark,.journal-result mark,.revision-example mark { background:var(--accent-soft);color:var(--text);box-decoration-break:clone;-webkit-box-decoration-break:clone; }
-.knowledge-file .file-source { border-top:1px solid var(--line);padding-top:12px;color:var(--muted);font-size:.75rem; }
+.journal-carried-rule mark,.journal-result mark,.revision-example mark { background:var(--accent-soft);color:var(--text);box-decoration-break:clone;-webkit-box-decoration-break:clone; }
 .home-page .workflow-links { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px; }
 .workflow-links a { display:flex;align-items:flex-start;gap:12px;color:var(--text);text-decoration:none;padding:16px 0;border-block:1px solid var(--line); }
 .workflow-links strong,.workflow-links small { display:block; }
@@ -31,7 +24,7 @@
 .revision-example { margin:12px 0;font-size:.8125rem; }.revision-example > div { border-inline-start:2px solid var(--line);padding-left:10px;margin-block:8px; }.revision-example dt { font-size:.75rem;color:var(--muted); }.revision-example dd { margin:0; }
 .capture-links { display:flex;flex-wrap:wrap;gap:8px 20px; }.capture-links a { min-height:44px;align-content:center; }
 @media(max-width:1000px) { .tour-inspector { grid-template-columns:1fr;grid-template-areas:"capture" "notes"; }.inspection-stage { display:flex;flex-direction:column;gap:12px; }.inspection-picker { position:static;order:-1;box-shadow:none;pointer-events:auto; }.inspection-picker label { position:relative;inset:auto;flex:1;box-shadow:none; }.inspection-picker legend { position:static;width:auto;height:auto;clip-path:none;padding:0 0 6px; }.inspection-notes { min-height:0; } }
-@media(max-width:640px) { .home-page .workflow-links { grid-template-columns:1fr;gap:0; }.workflow-links a + a { border-top:0; }.knowledge-file .file-reading { min-height:0; }.inspection-picker label { flex:auto; }.inspection-picker label > span { padding:8px; }.inspection-notes { padding:16px; } }
+@media(max-width:640px) { .home-page .workflow-links { grid-template-columns:1fr;gap:0; }.workflow-links a + a { border-top:0; }.inspection-picker label { flex:auto; }.inspection-picker label > span { padding:8px; }.inspection-notes { padding:16px; } }
 
 
 

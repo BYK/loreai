@@ -27,9 +27,8 @@ test("product detail choices keep independent history and open the matching tour
   await expect(
     spotlight.getByRole("radio", { name: "Source", exact: true }),
   ).toBeChecked();
-  await expect(
-    page.locator('.knowledge-file input[value="markdown"]'),
-  ).toBeChecked();
+  expect(new URL(page.url()).searchParams.get("format")).toBe("markdown");
+  await expect(page.locator(".conversation-preview")).toBeVisible();
   await expect(
     page.locator('[data-journal-choice="chapter"][value="knowledge"]'),
   ).toBeChecked();

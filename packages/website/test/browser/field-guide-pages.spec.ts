@@ -1,24 +1,38 @@
 import { expect, test } from "@playwright/test";
 
-test("knowledge file choices retain independent URL state and native focus", async ({
+test("hero highlights only retained knowledge and points to the full journal", async ({
   page,
 }) => {
-  await page.goto("/?chapter=knowledge&from=guide#problem");
-  const file = page.locator(".knowledge-file");
-  await expect(file.locator('[data-file-panel="rule"]')).toBeVisible();
-  await file.getByRole("radio", { name: "Markdown", exact: true }).check();
-  await expect(page).toHaveURL(
-    /chapter=knowledge&from=guide&format=markdown#problem$/,
-  );
+  await page.goto("/?format=markdown&from=preview#problem");
+  const preview = page.getByRole("complementary", {
+    name: "Example: from conversation to project knowledge",
+    exact: true,
+  });
   await expect(
-    file.getByRole("radio", { name: "Markdown", exact: true }),
-  ).toBeFocused();
-  await page.reload();
-  await expect(file.locator('[data-file-panel="markdown"]')).toBeVisible();
-  await page.goBack();
-  await expect(file.locator('[data-file-panel="rule"]')).toBeVisible();
-  await page.goto("/?format=%22%5D%3Cscript%3E");
-  await expect(file.locator('[data-file-panel="rule"]')).toBeVisible();
+    preview.getByRole("heading", { name: "What you said", exact: true }),
+  ).toBeVisible();
+  await expect(
+    preview.getByRole("heading", {
+      name: "What your next session remembers",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const kept = (await preview.locator("blockquote mark").allTextContents()).map(
+    (t) => t.trim().toLowerCase(),
+  );
+  const remembered = (
+    await preview.locator(".preview-kept li").allTextContents()
+  ).map((t) => t.trim().replace(/\.$/, "").toLowerCase());
+  expect(kept).toHaveLength(2);
+  expect(remembered).toEqual(kept);
+  await expect(preview.locator("blockquote")).toContainText("port 4330");
+  await expect(preview.locator(".preview-kept")).not.toContainText("4330");
+  await expect(preview.getByRole("radio")).toHaveCount(0);
+  await expect(preview).not.toContainText(".lore.md");
+  await preview
+    .getByRole("link", { name: "Follow the full example", exact: true })
+    .click();
+  await expect(page).toHaveURL(/format=markdown&from=preview#journal$/);
 });
 
 test("tour inspection explains sample source and revisions without leaving the page", async ({
@@ -141,11 +155,12 @@ test("native field guide controls stay useful without JavaScript", async ({
   try {
     const page = await context.newPage();
     await page.goto(baseURL + "/");
-    await page
-      .locator(".knowledge-file")
-      .getByRole("radio", { name: "Markdown", exact: true })
-      .check();
-    await expect(page.locator('[data-file-panel="markdown"]')).toBeVisible();
+    await expect(
+      page.locator(".conversation-preview .preview-kept li"),
+    ).toHaveCount(2);
+    await expect(
+      page.locator(".conversation-preview blockquote mark"),
+    ).toHaveCount(2);
     await page.goto(baseURL + "/tour/");
     await page
       .getByRole("radio", { name: "Review knowledge", exact: true })
@@ -196,7 +211,6 @@ test("field-note diagrams and next steps stay tied to their article", async ({
 });
 
 for (const [path, selector, parameter, choice, label] of [
-  ["/", ".knowledge-file", "format", "markdown", "Markdown"],
   [
     "/tour/?view=knowledge",
     ".inspection-picker",
@@ -321,7 +335,7 @@ test("field guide selection borders have non-text contrast", async ({
   page,
 }) => {
   for (const [path, selector] of [
-    ["/", ".knowledge-file"],
+    ["/", ".product-spotlight"],
     ["/tour/?view=knowledge", ".tour-inspector"],
     ["/different/", ".fit-guide"],
     ["/docs/troubleshooting/", ".diagnostic-guide"],

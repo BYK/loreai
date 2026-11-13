@@ -5,7 +5,7 @@ test("equivalent choice controls share shape and selection styling", async ({
 }) => {
   const styles = [];
   for (const [path, selector] of [
-    ["/", ".knowledge-file"],
+    ["/", ".spotlight-choices"],
     ["/docs/install/", ".setup-picker"],
     ["/docs/troubleshooting/", ".diagnostic-guide"],
   ]) {

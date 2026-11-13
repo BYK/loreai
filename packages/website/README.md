@@ -146,7 +146,7 @@ specific to the relevant article rather than repeated on every post.
 
 ## Field-guide page interactions
 
-`KnowledgeFile.astro` presents the hero rule in readable form or Markdown (`format`).
+`ConversationPreview.astro` shows a short example conversation and highlights only the two project rules carried into a later session. The matching plain-language list works without JavaScript; Markdown/source inspection stays in the full journal and app tour. Legacy `format` query values are harmless and remain untouched by other controls.
 `KnowledgeInspector.astro` places native inspection points over the actual Knowledge
 capture and shows illustrative rule/source/revision notes beside it (`inspect`). The
 outer tour binds `view` only to `.tour-picker`; it must not collect inspector radios.
