@@ -2443,10 +2443,11 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       setModelLimits({ context: 100_000, output: 4_000 });
       calibrate(0);
       // ~15K-token prefix: fits turn-1 budget (distilledBudget 24K) but exceeds
-      // the dipped turn-2 budget (10K). Small raw so the pin leaves headroom.
+      // the dipped turn-2 budget (10K). Enough raw messages so post-idle
+      // compaction is needed and the raw window pins with headroom.
       seed(10, 4_500);
       const conv = [
-        ...Array.from({ length: 20 }, (_, i) =>
+        ...Array.from({ length: 48 }, (_, i) =>
           makeMsg(
             `h-${i}`,
             i % 2 === 0 ? "user" : "assistant",
@@ -3642,6 +3643,108 @@ describe("onIdleResume", () => {
     expect(state?.postIdleCompact).toBe(true);
     expect(state?.cameOutOfIdle).toBe(true);
   });
+
+  test("postIdleCompact does NOT latch a small Layer-0 session into Layer 1 when raw body fits post-idle budget", () => {
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    const messages = [
+      makeMsg("small-u1", "user", "First question", SID),
+      makeMsg("small-a1", "assistant", "First answer", SID),
+      makeMsg("small-u2", "user", "Follow-up after 10 min break", SID),
+    ];
+
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    const idle = onIdleResume(SID, 5 * 60_000);
+    expect(idle.triggered).toBe(true);
+    expect(inspectSessionState(SID)?.postIdleCompact).toBe(true);
+
+    const r1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r1.layer).toBe(0);
+    expect(r1.distilledTokens).toBe(0);
+    expect(r1.messages).toBe(messages);
+    expect(inspectSessionState(SID)?.postIdleCompact).toBe(false);
+
+    // Subsequent turn also stays at Layer 0 (maxSustainedLayer was not ratcheted).
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("small-a2", "assistant", "Second answer", SID),
+        makeMsg("small-u3", "user", "Third question", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(0);
+  });
+
+  test("forced Layer 1 omits redundant distilled prefix when tryFit evicts 0 raw messages (cutoff === 0)", () => {
+    const pid = ensureProject("/test/no-evict-prefix-suppression");
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Redundant summary of raw messages still in window",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    const messages = [
+      makeMsg("ne-u1", "user", "Hello", SID),
+      makeMsg("ne-a1", "assistant", "Hi there", SID),
+      makeMsg("ne-u2", "user", "What next?", SID),
+    ];
+
+    setForceMinLayer(1, SID);
+    const r1 = transform({
+      messages,
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual([
+      "ne-u1",
+      "ne-a1",
+      "ne-u2",
+    ]);
+
+    // Pinned-window hit on the next turn also omits the prefix while 0 messages
+    // are evicted and keeps pinnedRawCount equal to the raw message count.
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(1);
+    expect(r2.distilledTokens).toBe(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2.messages.length).toBe(5);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
 });
 
 describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
@@ -3751,9 +3854,10 @@ describe("gradient — distillation snapshot caching", () => {
 
   beforeAll(() => {
     projectId = ensureProject(`/test/${PID_KEY}`);
-    // Wide enough to avoid emergency Layer 4; tests explicitly force Layer 1
-    // where the warm distilled-prefix cache is used.
-    setModelLimits({ context: 50_000, output: 1_000 });
+    // Wide enough to avoid emergency Layer 4 while 16 × ~350-token messages
+    // (~5,600 raw tokens) exceed the Layer-1 rawFillBudget so tryFit evicts
+    // older messages and includes the distilled prefix.
+    setModelLimits({ context: 20_000, output: 1_000 });
     calibrate(0);
   });
 
