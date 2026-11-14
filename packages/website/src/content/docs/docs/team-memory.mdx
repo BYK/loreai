@@ -1,0 +1,62 @@
+---
+title: Team memory & review
+description: Share project knowledge with your team as version-controlled .lore.md, reviewed in pull requests — and how that relates to Folk Lore.
+sidebar:
+  order: 3
+---
+import KnowledgeSharing from '../../../components/KnowledgeSharing.astro';
+
+
+Share reviewed project conventions through `.lore.md`. Your team can inspect the
+same Git diff as your code; complete conversations remain in each local database.
+
+## `.lore.md` — memory that moves with the code
+
+When the curator records a durable fact, Lore exports it to a `.lore.md` file at your project root. The file is plain Markdown, committed to your repository, and designed to be reviewed in pull requests.
+
+- **Readable diffs.** Entries sit under their category — decision, pattern, preference,
+  architecture or gotcha — sorted alphabetically by title for a stable diff.
+- **Stable identity.** Each entry carries a `<!-- lore:UUID -->` marker, so an edit maps
+  to the same entry even when its position changes. Review knowledge changes in the
+  same pull request as your code.
+
+### How it round-trips
+
+<KnowledgeSharing />
+
+Lore skips unchanged exports. On import, a known marker with changed content updates
+that entry; an unknown marker creates a new one. Hand edits are supported: keep
+`<!-- lore:UUID -->` identity markers intact.
+
+Removing text from the file alone does not remove an existing database entry. Use
+**Delete** in the local Knowledge view to retire active knowledge, then inspect the
+exported diff.
+
+## Reviewing memory changes
+
+Because `.lore.md` is just a tracked file:
+
+- `git diff` shows exactly what the agent learned this session.
+- A reviewer can reject a wrong or premature fact in a PR before it becomes shared truth.
+- Knowledge history is your git history — `git blame` and `git log` work on individual facts.
+
+## Configuration
+
+`.lore.md` export/import is on by default. See [`loreFile`](/docs/configuration/#lorefile) to disable it — knowledge then stays in the local database and is still injected into context — and [`crossProject`](/docs/configuration/#crossproject) for how knowledge that recurs across projects is promoted.
+
+To keep shared knowledge inside an existing `AGENTS.md` instead of a standalone file, pair `loreFile.enabled=false` with `agentsFile.enabled=true`.
+
+## Folk Lore — live team sync (early access)
+
+`.lore.md` shares knowledge through git: reviewable and durable, but it converges at the speed of commits and merges. **Folk Lore** is the upcoming hosted layer for teams that want **live** shared memory — knowledge that converges across every teammate's machine continuously, with promotion workflows for deciding what becomes shared truth, and integration with your existing team structure (GitHub Teams, repo collaborators).
+
+The two are complementary:
+
+| | `.lore.md` (today) | Folk Lore (early access) |
+|---|---|---|
+| Transport | Git (commit + PR) | Live hosted sync |
+| Review | Pull request | Promotion workflow |
+| Convergence | At merge time | Continuous |
+| Where it lives | Your repo | Your repo + hosted team store |
+
+You don't have to choose: git-native `.lore.md` is the reviewable record; Folk Lore adds live convergence on top. [Folk Lore early access &rarr;](/different/#waitlist)

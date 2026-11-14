@@ -1,0 +1,6 @@
+---
+import NavigationIcon from "./NavigationIcon.astro";
+interface Props { context?: boolean; }
+const { context = false } = Astro.props;
+---
+<figure class="article-diagram" aria-label="Memory stages explained"><figcaption class="field-marker">{context ? "Storage and context serve different jobs" : "Three different things to inspect"}</figcaption><ol><li><NavigationIcon name="chat" /><strong>Stored history</strong><span>Original conversations you can search.</span></li><li><NavigationIcon name="bookmark" /><strong>Curated knowledge</strong><span>Reviewable rules with their own lifecycle.</span></li><li><NavigationIcon name="compass" /><strong>Current request</strong><span>Eligible material selected within scope and budget.</span></li></ol><p>Recording a conversation does not mean sending all of it on every request.</p></figure>

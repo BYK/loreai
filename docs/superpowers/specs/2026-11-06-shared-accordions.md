@@ -1,0 +1,11 @@
+# Shared website accordions
+
+The user asked to improve the pictured FAQ using a proper shadcn-style component and check equivalent controls across the website. Apply the official shadcn accordion trigger/content pattern as shared Astro components using native details/summary, preserving the website's no-JavaScript behavior and existing framework. This is an adaptation of the published component pattern, not the React/Radix implementation. Retain source/license attribution. No new runtime or package is needed.
+
+Use full-width triggers, right-aligned stroke chevrons, subtle row separators, clear focus rings, 44px minimum targets, comfortable answer text and controlled spacing. Remove browser triangle markers. FAQ is a named, single-open, collapsible group, initially closed. Journal source and Markdown disclosures remain independently openable, and inventory stays an independent collapsible with its count retained. Article outlines use the same component and preserve every anchor link. Keep all copy, URL/state behavior and journal focus rules.
+
+Audit docs sidebar and mobile table-of-contents separately: these are framework navigation controls, not FAQ items. Preserve their existing state persistence and menu hooks; align trigger sizing/focus/spacing without replacing that machinery. Header dropdowns/mobile menu already have purpose-specific controls and remain separate.
+
+Native expansion works before enhancement and without JavaScript. Optional progressive CSS height/chevron motion is only enabled for pointer interactions without reduced motion; keyboard toggles are immediate. Unsupported CSS falls back to immediate native behavior. Avoid fixed content heights and prevent clipping links/focus rings in expanded content. No custom expanded-state mirror, focus trap, roving keyboard model or fake buttons nested in summary.
+
+Validate native keyboard activation, named-group exclusion, independent journal disclosures, link focus, responsive containment, chevron alignment, both themes/no-JS, early native input and motion interruption/reduced motion. Capture actual results; update same draft PR2115 with gh and leave unmerged. Full repository validation remains a separate before-merge gate.

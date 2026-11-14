@@ -1,0 +1,16 @@
+---
+import NavigationIcon from "./NavigationIcon.astro";
+import type { UiIconName } from "../lib/ui-icons";
+interface Props { label: string; items: readonly { title: string; href: string; icon: UiIconName }[]; }
+const {label,items}=Astro.props;
+const base=import.meta.env.BASE_URL;
+---
+<nav class="action-links" aria-label={label}><ul>{items.map(item=><li><a class="icon-link" href={`${base}${item.href.replace(/^\//, "")}`}><NavigationIcon name={item.icon} /><span class="link-label">{item.title}</span></a></li>)}</ul></nav>
+<style>
+.action-links ul { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 20px;list-style:none;padding:0;margin:12px 0; }
+.action-links li { margin:0;padding:0;min-width:0; }
+.action-links a { display:flex;align-items:center;gap:10px;min-height:44px;padding-block:8px;color:var(--text);font-size:.875rem;border-bottom:1px solid var(--line); }
+.action-links a :global(svg) { flex:0 0 18px;color:var(--muted); }
+@media(hover:hover) { .action-links a:hover { color:var(--accent); }.action-links a:hover :global(svg) { color:var(--accent); } }
+@media(max-width:640px) { .action-links ul { grid-template-columns:1fr; } }
+</style>

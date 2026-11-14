@@ -1,0 +1,8 @@
+---
+import { JOURNAL_ART } from "../lib/quest-journal";
+interface Props { name?: keyof typeof JOURNAL_ART; size?: number; class?: string; eager?: boolean; }
+const { name = "journal", size = 64, class: className = "", eager = false } = Astro.props;
+const path = `${import.meta.env.BASE_URL}journal-art/${JOURNAL_ART[name]}`;
+---
+<img class:list={["journal-art", "art-for-dark", className]} src={path} width={size} height={size} loading={eager ? "eager" : "lazy"} decoding="async" alt="" aria-hidden="true" />
+<img class:list={["journal-art", "art-for-light", className]} src={path.replace(/\.svg$/, "-light.svg")} width={size} height={size} loading={eager ? "eager" : "lazy"} decoding="async" alt="" aria-hidden="true" />

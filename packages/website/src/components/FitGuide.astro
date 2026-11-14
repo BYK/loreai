@@ -1,0 +1,17 @@
+---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
+const choices = [
+ {id:"coding",icon:"app",label:"Use an existing coding agent",title:"Add memory to your existing agent.",text:"Check your client’s connection path, then verify a recorded session."},
+ {id:"rules",icon:"notes",label:"Keep a few stable rules",title:"A concise instruction file may be enough.",text:"Keep the instructions accurate as your project changes."},
+ {id:"application",icon:"code",label:"Build an application",title:"Evaluate memory as part of your application.",text:"Check SDK/API fit, deployment, data boundaries and retrieval behavior."},
+ {id:"framework",icon:"workflow",label:"Build an agent workflow",title:"Build around the agent you own.",text:"Compare memory, tools and workflow orchestration together."},
+] as const;
+---
+<div class="fit-guide"><ChoiceGroup class="guide-segments" legend="What are you trying to do?">{choices.map((choice,index)=><ChoiceItem name="workflow-fit" value={choice.id} checked={index===0} label={choice.label} icon={choice.icon} controls={`fit-${choice.id}`} />)}</ChoiceGroup>
+ {choices.map(choice=><div class="fit-explanation" data-fit-panel={choice.id} id={`fit-${choice.id}`}><h3>{choice.title}</h3><p>{choice.text}</p></div>)}<p class="fit-table-hint">Compare the highlighted option below.</p>
+</div>
+<script>
+import { bindUrlChoice } from "../scripts/url-choice";
+bindUrlChoice(".fit-guide", "fit", ["coding", "rules", "application", "framework"]);
+</script>

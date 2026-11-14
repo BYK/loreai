@@ -1,0 +1,22 @@
+---
+import { currentSection, navigationGroups } from "../lib/site-navigation";
+interface Props { mobile?: boolean; }
+const base = import.meta.env.BASE_URL;
+const groups = navigationGroups(base);
+---
+<nav aria-label="Primary navigation" class="primary-nav primary-nav-mobile">
+  {groups.map(group => <div class="mobile-nav-group">
+    <p class="guide-label">{group.label}</p>
+    <ul>{group.links.filter(link => link.label !== "Connect your coding agent" && link.label !== "Troubleshooting").map(link => <li><a href={link.href} aria-current={currentSection(Astro.url.pathname, "section" in link ? link.section : undefined)}>{link.label}</a></li>)}
+      {group.id === "product" ? <>
+        <li><a href={`${base}#journal`}>The quest journal</a></li>
+        <li><a href={`${base}different/`} aria-current={currentSection(Astro.url.pathname, `${base}different/`)}>Why Lore</a></li>
+        <li><a href={`${base}#how`}>Day-to-day workflow</a></li>
+      </> : <>
+        <li><a href={`${base}docs/troubleshooting/`}>Get help</a></li>
+        <li><a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub<span aria-hidden="true"> ↗</span></a></li>
+      </>}
+    </ul>
+  </div>)}
+  <a class="nav-start" href={`${base}docs/install/`}>Get started <span aria-hidden="true">↗</span></a>
+</nav>

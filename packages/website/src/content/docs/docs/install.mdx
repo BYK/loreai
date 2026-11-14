@@ -1,0 +1,65 @@
+---
+title: Install Lore
+description: Choose your coding agent, install Lore, connect a session, and verify that it is recorded.
+---
+import AgentSetup from '../../../components/AgentSetup.astro';
+
+Connect the coding agent you already use. Have it installed and signed in before
+you begin; the hosted installer installs **Lore**, not your coding agent.
+
+<span id="1-choose-your-agent" class="legacy-setup-anchor" aria-hidden="true"></span>
+
+## Connect your agent
+
+<AgentSetup id="install-setup" />
+
+<span id="2-install-and-check-the-executable" class="legacy-setup-anchor" aria-hidden="true"></span>
+
+If `lore` is missing after installation, open a new terminal and run
+`lore --version`. [Check the installation](/docs/troubleshooting/#lore-command-not-found)
+if it still cannot be found. Knowledge curation happens later; a recorded session
+is enough to verify your connection.
+
+For remote gateways or custom providers, use the [setup reference](/docs/setup/)
+and [custom upstream guide](/docs/guides/custom-upstreams/).
+
+## Next steps
+
+- [Connect and verify a first session](/docs/first-session/).
+- [Use Lore day to day](/docs/using-lore/).
+- [Import existing conversations](/docs/import/) or [share knowledge through Git](/docs/team-memory/).
+
+## Reference
+
+The [installer and uninstall reference](/docs/installation-reference/) lists paths,
+configuration effects, runtime options, and cleanup behavior.
+
+### What the installer writes
+
+The installer downloads the executable and may update your shell's `PATH`.
+[See the full path reference](/docs/installation-reference/#what-the-installer-writes).
+
+### Uninstall
+
+Preview the plan with `lore uninstall --dry-run`.
+[Read preservation and cleanup details](/docs/installation-reference/#uninstall).
+
+### Other installation options
+
+With a supported Node.js runtime, run Lore through npm:
+
+```bash
+npx @loreai/gateway
+```
+
+Node.js 22.16+ in the 22.x line, or Node.js 24+, is required; Node.js 23 is excluded.
+This uses Lore's default launch flow. Follow your agent's connection instructions.
+
+### Slimmer installs (remote embeddings)
+
+[Read about optional local runtimes and remote embeddings](/docs/installation-reference/#slimmer-installs-remote-embeddings).
+
+### Existing Conversations
+
+Use `lore import --dry-run` to inspect available sources before importing.
+[Read the import guide](/docs/import/).

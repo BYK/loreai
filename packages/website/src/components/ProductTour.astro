@@ -1,0 +1,27 @@
+---
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
+const base=import.meta.env.BASE_URL;
+import { TOUR_SCREENS as screens } from "../lib/product-tour";
+import KnowledgeInspector from "./KnowledgeInspector.astro";
+
+---
+<section class="section product-tour" id="product" aria-labelledby="tour-title">
+
+ <div class="tour-journal field-frame"><ChoiceGroup class="tour-picker" legend="Explore the local app" hideLegend>{screens.map((screen,index)=><ChoiceItem name="product-tour" value={screen.id} checked={index===0} label={screen.id === "sessions" ? "Sessions" : screen.id === "knowledge" ? "Knowledge" : "Activity"} icon={screen.id === "sessions" ? "chat" : screen.id === "knowledge" ? "bookmark" : "activity"} controls={`tour-${screen.id}`} />)}</ChoiceGroup><div class="tour-pages">
+ {screens.map(screen=><figure class="tour-panel" data-tour-panel={screen.id} id={`tour-${screen.id}`}>
+  <div class="tour-caption"><h2>{screen.title}</h2><p>{screen.description}</p><a href={`${base}docs/${screen.link}`} class="icon-link"><span class="link-label">{screen.action}</span> <span aria-hidden="true">→</span></a></div>
+  {screen.id === "knowledge" ? <KnowledgeInspector /> : <>
+  {(["light","dark"] as const).map(theme=><a class:list={["tour-image-link",`tour-shot-${theme}`]} href={`${base}product-tour/${screen.id}-${theme}.png`} target="_blank" rel="noopener noreferrer" aria-label={`Open full-size ${screen.choice.toLowerCase()} screenshot`}><picture><source media="(max-width:640px)" srcset={`${base}product-tour/${screen.id}-mobile-${theme}.png`} width={screen.id === "sessions" ? 470 : 1000} height={screen.id === "sessions" ? 580 : 424} /><img src={`${base}product-tour/${screen.id}-${theme}.png`} width="1120" height="760" loading="lazy" decoding="async" alt={screen.alt} /></picture></a>)}
+  </>}
+  <figcaption class="small muted">{screen.id === "knowledge" ? "Sample data in the actual Lore app. Full-size captures remain available below." : "Sample data in the actual Lore app. Select the image to inspect it at full size."}
+  {screen.id === "knowledge" && <p class="capture-links small">{(["light","dark"] as const).map(theme => <a class={`icon-link tour-shot-${theme}`} href={`${base}product-tour/knowledge-${theme}.png`} target="_blank" rel="noopener noreferrer" aria-label="Open full-size review knowledge screenshot"><span class="link-label">Open full-size app screenshot</span> <span aria-hidden="true">↗</span></a>)}{(["light","dark"] as const).map(theme => <a class={`icon-link tour-shot-${theme}`} href={`${base}product-tour/knowledge-detail-${theme}.png`} target="_blank" rel="noopener noreferrer"><span class="link-label">Inspect source and revision details</span> <span aria-hidden="true">↗</span></a>)}</p>}</figcaption>
+ </figure>)}
+ </div></div>
+</section>
+
+<script>
+import { bindUrlChoice } from "../scripts/url-choice";
+import { TOUR_SCREENS } from "../lib/product-tour";
+bindUrlChoice(".tour-picker", "view", TOUR_SCREENS.map(screen => screen.id));
+</script>

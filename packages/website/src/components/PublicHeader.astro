@@ -1,0 +1,10 @@
+---
+import Logo from "./Logo.astro";
+import FieldGuideNav from "./FieldGuideNav.astro";
+import HeaderActions from "./HeaderActions.astro";
+import MobileNav from "./MobileNav.astro";
+---
+<header class="top-nav field-guide-header">
+  <div class="header-brand"><Logo theme="auto" size={30} /><div class="desktop-nav"><FieldGuideNav /></div></div>
+  <div class="header-actions"><HeaderActions /><MobileNav /></div>
+</header>

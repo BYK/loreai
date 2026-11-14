@@ -1,0 +1,36 @@
+---
+import JournalArt from "./JournalArt.astro";
+const kept = ["check whether the event was already handled", "reuse the existing check"];
+---
+<aside class="hero-proof conversation-preview" aria-label="Example: from conversation to project knowledge">
+  <div class="preview-heading"><p>Illustrative example</p><JournalArt name="decision" size={36} eager /></div>
+  <section aria-labelledby="preview-said-title">
+    <h2 id="preview-said-title">What you said</h2>
+    <blockquote>“Before updating an order, <mark>{kept[0]}</mark>. Please <mark>{kept[1]}</mark>. <span class="preview-temporary">The test server is on port 4330 today.</span>”</blockquote>
+    <p class="preview-legend">Lore keeps the highlighted rules.</p>
+  </section>
+  <div class="preview-transfer" aria-hidden="true"><span></span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 4v16m-6-6 6 6 6-6" /></svg><span></span></div>
+  <section class="preview-remembered" aria-labelledby="preview-kept-title">
+    <h2 id="preview-kept-title">What your next session remembers</h2>
+    <ul class="preview-kept">{kept.map(rule => <li>{rule[0].toUpperCase() + rule.slice(1)}.</li>)}</ul>
+  </section>
+  <p class="preview-history">Temporary details stay in the conversation history.</p>
+  <a class="text-link icon-link" href="#journal"><span class="link-label">Follow the full example</span> <span aria-hidden="true">↓</span></a>
+</aside>
+<style>
+  .conversation-preview { align-self:start; }
+  .preview-heading { display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px; }
+  .preview-heading p { color:var(--muted);font-size:.75rem;margin:0; }
+  .conversation-preview h2 { font-size:.9375rem;line-height:1.5;font-weight:600;letter-spacing:0;margin:0 0 10px; }
+  .conversation-preview blockquote { margin:0;padding:0;border:0;font-size:.9375rem;line-height:1.8;color:var(--text); }
+  .preview-temporary { color:var(--muted); }
+  .conversation-preview .preview-legend { color:var(--muted);font-size:.75rem;line-height:1.5;margin:10px 0 0; }
+  .preview-transfer { display:flex;align-items:center;gap:12px;color:var(--accent);margin:16px 0; }
+  .preview-transfer span { height:1px;flex:1;background:var(--line); }
+  .preview-remembered { border-inline-start:2px solid var(--accent);padding-inline-start:14px; }
+  .preview-kept { display:grid;gap:8px;list-style:none;padding:0;margin:0;font-size:.9375rem;line-height:1.65; }
+  .preview-kept li { position:relative;padding-inline-start:14px; }
+  .preview-kept li::before { content:"";position:absolute;inset-inline-start:0;top:.7em;width:4px;height:4px;border-radius:50%;background:var(--accent); }
+  .conversation-preview .preview-history { font-size:.75rem;line-height:1.6;margin:16px 0 8px;color:var(--muted); }
+  .conversation-preview .text-link { min-height:44px;font-size:.8125rem; }
+</style>

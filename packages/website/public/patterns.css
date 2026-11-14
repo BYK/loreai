@@ -1,0 +1,164 @@
+/* App-shaped native controls, shared by public pages and Starlight. */
+.ui-choice-group.ui-choice-group { display:flex;flex-wrap:wrap;gap:4px;min-width:0;border:0;margin:0;padding:4px;background:var(--bg);border-radius:8px; }
+.ui-choice-group.ui-choice-group > legend { padding:0 0 10px;font-size:.875rem;line-height:1.5;color:var(--heading);font-weight:500; }
+.ui-choice-group.ui-choice-group > legend.visually-hidden { position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%); }
+.ui-choice-group.ui-choice-group > .ui-choice-item { position:relative;display:flex;align-items:center;justify-content:center;min-width:0;min-height:44px;margin:0;padding:0;border:1px solid transparent;border-radius:6px;cursor:pointer;color:var(--muted);font-size:.8125rem;line-height:1.4;box-shadow:none; }
+.ui-choice-group.ui-choice-group > .ui-choice-item > input { position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer; }
+.ui-choice-group.ui-choice-group > .ui-choice-item > .ui-choice-label { display:flex;align-items:center;gap:6px;padding:9px 12px;overflow-wrap:anywhere; }
+.ui-choice-group.ui-choice-group > .ui-choice-item:has(:checked) { color:var(--heading);background:var(--surface);border-color:var(--muted);box-shadow:inset 0 -2px var(--accent); }
+.ui-choice-group.ui-choice-group > .ui-choice-item:has(:focus-visible) { outline:2px solid var(--accent);outline-offset:3px; }
+.ui-choice-group.setup-picker { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0;background:transparent;margin-bottom:24px; }
+.ui-choice-group.setup-picker > .ui-choice-item { justify-content:flex-start;border-color:var(--line); }
+.ui-choice-group.setup-picker > .ui-choice-item:has(:checked) { border-color:var(--muted); }
+.agent-setup .ui-command,.ui-command.install-box { border:0;border-radius:6px;background:var(--bg);padding:12px;margin:12px 0; }
+.ui-command .ui-command-row { display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap; }
+.ui-command .ui-command-row > pre { flex:1 1 220px;min-width:0;margin:0;padding:8px 0;border:0;border-radius:0;background:transparent;white-space:pre-wrap;overflow-wrap:anywhere; }
+.ui-command .ui-command-row > pre > code { display:block;font:.8125rem/1.65 ui-monospace,monospace;color:var(--text);background:transparent;padding:0;white-space:pre-wrap;overflow-wrap:anywhere; }
+.ui-command .ui-command-row > button { flex-shrink:0;margin:0; }
+.ui-command .ui-command-status { font-size:.75rem;color:var(--muted);margin:8px 0 0;line-height:1.6; }
+.ui-command-status:empty,[data-copy-install][hidden],[data-copy-setup][hidden] { display:none; }
+.agent-setup .setup-observation { padding:20px 0 0;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent; }
+.agent-setup .setup-observation h3 { margin-bottom:8px; }
+.agent-setup .setup-stage { color:var(--muted);font:400 .75rem ui-monospace,monospace;margin-inline-end:8px; }
+@media(hover:hover) and (pointer:fine) { .ui-choice-group > .ui-choice-item:hover { color:var(--heading);background:var(--chrome); } }
+@media(max-width:600px) { .ui-choice-group.setup-picker { grid-template-columns:repeat(2,minmax(0,1fr)); }.ui-choice-group.setup-picker > .ui-choice-item { flex:initial; } }
+
+/* One tour introduction, compact choices and a single evidence pane. */
+.product-tour.section { padding-top:0; }
+.tour-intro.section { padding-block:2rem 1.5rem; }
+.tour-intro .text-link { font-size:.8125rem; }
+.tour-intro h1 { margin-top:.75rem; }
+.tour-intro p { margin-top:.75rem; }
+.tour-journal { display:block;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--surface);overflow:visible; }
+.tour-journal > .ui-choice-group.tour-picker { display:flex;flex-direction:row;gap:4px;margin:0;padding:8px;border:0;border-bottom:1px solid var(--line);background:var(--bg);border-radius:12px 12px 0 0; }
+.tour-journal > .tour-picker > .ui-choice-item { flex:1; }
+.tour-journal .tour-pages { padding:20px;min-width:0; }
+.tour-journal .tour-caption { margin-bottom:16px; }
+.tour-journal .tour-caption h2 { font-size:1.125rem; }
+.tour-journal .tour-caption p { font-size:.875rem;line-height:1.65;max-width:80ch; }
+.tour-journal .tour-image-link { border:0;border-radius:6px;overflow:hidden; }
+.tour-inspector .inspection-capture { border:0;border-radius:6px; }
+.tour-inspector .inspection-notes { padding:4px 0 4px 16px;border:0;border-inline-start:1px solid var(--line);border-radius:0; }
+.inspection-notes .field-marker,.inspection-disclaimer { font-size:.75rem; }
+.docs-tasks a { border-radius:8px;box-shadow:none; }
+.docs-tasks .field-marker,.field-marker,.eyebrow.field-marker { font-size:.75rem;letter-spacing:.035em; }
+.fit-guide .fit-explanation { max-width:70ch; }
+@media(max-width:1000px) { .tour-inspector .inspection-notes { padding:16px 0 0;border-inline-start:0;border-top:1px solid var(--line); } }
+@media(max-width:640px) {
+  .tour-intro.section { padding-block:1rem 1.25rem; }
+  .tour-intro .text-link { min-height:36px; }
+  .tour-intro h1 { font-size:1.75rem; }
+  .tour-intro p { font-size:.875rem; }
+  .tour-journal .tour-pages { padding:12px; }
+  .tour-journal > .tour-picker > .ui-choice-item > .ui-choice-label { padding:8px 6px; }
+  .tour-journal .tour-panel { flex-direction:column; }
+  .product-tour .tour-journal:has(input[value="sessions"]:checked) [data-tour-panel="sessions"],.product-tour .tour-journal:has(input[value="knowledge"]:checked) [data-tour-panel="knowledge"],.product-tour .tour-journal:has(input[value="usage"]:checked) [data-tour-panel="usage"] { display:flex; }
+  .tour-panel > .tour-caption { order:2;margin:16px 0 8px; }
+  .tour-panel > figcaption { order:3; }
+  .tour-panel > .tour-image-link { order:1;height:340px;background:var(--bg); }
+  .tour-panel > .tour-image-link img { width:760px;min-width:760px;max-width:none;height:auto;transform:translateX(-44px); }
+  .tour-inspector .inspection-picker { flex-wrap:wrap;padding:0;margin-bottom:4px; }
+  .tour-inspector .inspection-picker label { flex:1; }
+  .tour-inspector .inspection-picker > legend { font-size:.8125rem; }
+  .tour-inspector .inspection-picker .ui-choice-label { padding:8px 6px; }
+}
+
+/* Reference lookup is a directory enhancement, never a content filter. */
+.reference-finder { margin-top:20px;padding-top:16px;border-top:1px solid var(--line);font-size:.875rem; }
+.reference-search { display:flex;align-items:flex-end;gap:8px; }
+.reference-search label { display:grid;gap:6px;flex:1;min-width:0;font-weight:500;color:var(--heading); }
+.reference-search input { min-width:0;width:100%;min-height:44px;border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--surface);color:var(--text);font:400 .875rem/1.4 "DM Sans Variable",sans-serif; }
+.reference-hint,.reference-finder [role="status"] { font-size:.8125rem;color:var(--muted);margin:8px 0; }
+.reference-finder [role="status"]:empty { display:none; }
+.reference-finder :is(.reference-results,.reference-directory-list) { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;list-style:none;padding:6px;margin:0;max-height:260px;overflow:auto; }
+.reference-finder li { min-width:0;padding:0; }
+.reference-finder li a { display:flex;align-items:center;min-height:44px;overflow-wrap:anywhere;color:var(--text);text-decoration:underline;text-underline-offset:3px; }
+.reference-finder li small { display:block;color:var(--muted);font-size:.75rem; }
+.reference-finder .reference-directory { border:0; }
+.reference-finder .reference-directory .ui-accordion-trigger { font-size:.875rem; }
+.reference-finder .ui-accordion-content { padding-inline:0; }
+.reference-finder [hidden],.recovery-actions [hidden] { display:none!important; }
+/* Ordinary actions use the same primary/outline roles as the app. */
+.page-recovery { display:flex;align-items:flex-start;gap:24px;padding-block:64px;max-width:760px; }
+.page-recovery h1 { font-size:clamp(1.75rem,4vw,2.5rem);font-weight:600;letter-spacing:-.025em;margin:8px 0 16px; }
+.page-recovery p:not(.field-marker) { color:var(--muted);font-size:1rem;line-height:1.65; }
+.recovery-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:24px; }
+@media(hover:hover) and (pointer:fine) { .recovery-actions .button-primary:hover { background:var(--accent-hover); }.recovery-actions .button-secondary:hover,.reference-search .button-secondary:hover { background:var(--chrome); }.reference-finder a:hover { color:var(--accent); } }
+@media(max-width:640px) { .reference-finder :is(.reference-results,.reference-directory-list) { grid-template-columns:1fr; }.page-recovery { flex-direction:column;gap:20px;padding-block:32px; }.page-recovery > .journal-art { width:64px;height:64px; } }
+
+/* Screenshot points are anchored to their image, not to the generic choice flow. */
+.tour-inspector .ui-choice-group.inspection-picker { padding:0;background:transparent; }
+.tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item { position:absolute;right:12px; }
+.agent-setup .setup-observation label { margin:0; }
+@media(max-width:1000px) { .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item { position:relative;inset:auto;flex:1; } }
+
+/* Short proof tabs have intrinsic width; words are never split to fit a capsule. */
+.spotlight-workbench .spotlight-choices { flex:0 0 auto; }
+.spotlight-workbench .spotlight-choices .ui-choice-item { flex:0 0 auto; }
+.spotlight-workbench .spotlight-choices .ui-choice-label { white-space:nowrap;overflow-wrap:normal; }
+/* Copy is a utility beside the command, including at the smallest phone width. */
+.ui-command .ui-command-row { flex-wrap:nowrap;align-items:flex-start;gap:8px; }
+.ui-command .ui-command-row > pre { flex:1 1 0; }
+.ui-command .ui-command-row > button { width:44px;height:44px;min-width:44px;padding:0; }
+.reference-finder .reference-results { max-height:none;overflow:visible;gap:0 20px;padding:0; }
+.reference-finder .reference-results li { padding:12px 0;border-bottom:1px solid var(--line); }
+.reference-finder .reference-results a { min-height:32px;font-family:ui-monospace,monospace;font-size:.8125rem; }
+.reference-finder .reference-description { margin:3px 0 6px;font-size:.8125rem;line-height:1.6;color:var(--text); }
+.reference-finder .reference-results small { font-size:.75rem;color:var(--muted); }
+.reference-more { margin-top:16px; }
+@media(max-width:640px) {
+  .spotlight-workbench .spotlight-choices { flex:1; }
+  .spotlight-workbench .spotlight-choices .ui-choice-item { flex:1; }
+  .spotlight-image img { min-width:0;width:100%;max-width:100%;height:auto;transform:none; }
+  .spotlight-image { display:grid;align-items:center;height:220px;padding:0; }
+  .spotlight-image > a { inset:0;display:none;align-content:center; }
+  .tour-panel > .tour-image-link { height:auto;max-height:none; }
+  .tour-panel > .tour-image-link img { width:100%;min-width:0;max-width:100%;height:auto;transform:none; }
+}
+/* Content, raised utilities and journal pages share the app palette but distinct roles. */
+.hero-proof .field-marker,.docs-journal-title .field-marker,.blog-hero .field-marker,
+.article-field-label .field-marker,.journal-intro .field-marker,.spotlight-explanations .field-marker { color:var(--muted); }
+.product-spotlight .spotlight-workbench .spotlight-explanations { background:var(--bg); }
+.spotlight-workbench .workbench-caption { background:var(--bg); }
+.journal-book .journal-result { background:var(--surface);border:1px solid var(--line);border-inline-start:3px solid var(--accent);border-radius:6px; }
+.journal-tasks { margin-top:20px; }
+.journal-transient { margin-top:16px;border-top:1px solid var(--line); }
+.journal-transient .ui-accordion-trigger { font-size:.8125rem;color:var(--muted); }
+.journal-transient .ui-accordion-content { font-size:.875rem; }
+.journal-transient .journal-note { margin-bottom:0; }
+
+.agent-setup .legacy-setup-anchor { display:block;width:1px;height:1px;scroll-margin-top:110px; }
+.product-spotlight .workbench-bar { background:var(--bg); }
+
+/* Recognizable symbols supplement readable labels, never replace them. */
+.ui-choice-label > :is(svg,.agent-mark) { flex-shrink:0; }
+.ui-choice-label > span:last-child { min-width:0; }
+.agent-setup h3 { display:flex;align-items:center;gap:8px; }
+.agent-setup .setup-stage { display:inline-flex;align-items:center;color:var(--muted);margin:0; }
+.compatibility { display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px; }
+.compatibility ul { display:flex;flex-wrap:wrap;gap:10px 16px;list-style:none;padding:0;margin:0; }
+.compatibility li { display:inline-flex;align-items:center;gap:6px; }
+.compatibility .agent-mark { width:16px;height:16px;flex-basis:16px; }
+.journal-chapters label { align-items:center;gap:10px; }
+.journal-chapters .journal-step { display:grid;width:28px;height:28px;flex-basis:28px;border:0;border-radius:6px;background:transparent;color:var(--muted); }
+.journal-chapters label:has(:checked) .journal-step { background:var(--accent-soft);color:var(--accent-soft-text); }
+.journal-chapter > h3:first-child { margin-top:0; }
+.diagnostic-checks li > span { display:flex;align-items:center;gap:8px;color:var(--heading);font-weight:500; }
+.diagnostic-checks li > span svg { flex-shrink:0;color:var(--muted); }
+@media(max-width:640px) {
+  .journal-chapters label { flex-direction:column;gap:4px;padding:8px 4px; }
+  .journal-chapters .journal-step { width:22px;height:22px;flex-basis:22px; }
+  .journal-chapters strong { font-size:.75rem; }
+  .journal-chapters label > span:last-child { font-size:.75rem;min-height:2.8em;display:grid;place-items:center; }
+  .tour-journal > .tour-picker > .ui-choice-item > .ui-choice-label,
+  .tour-inspector .ui-choice-group.inspection-picker > .ui-choice-item > .ui-choice-label { flex-direction:column;gap:5px;padding:8px 4px;white-space:nowrap;overflow-wrap:normal;font-size:.75rem; }
+  .spotlight-workbench .spotlight-choices .ui-choice-label { padding:9px 8px;gap:5px; }
+}
+
+/* Shared orientation and meaningful process icons across public pages. */
+.page-sections a { display:inline-flex;align-items:center;gap:8px; }
+.page-sections svg { flex-shrink:0;color:var(--muted); }
+.capabilities dt { display:flex;align-items:flex-start;gap:8px; }
+.capabilities dt svg { flex:0 0 18px;color:var(--muted);margin-top:3px; }
+.reference-label { display:flex;align-items:center;gap:8px; }
+.reference-label svg { color:var(--muted);flex-shrink:0; }
