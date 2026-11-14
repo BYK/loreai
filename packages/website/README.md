@@ -226,6 +226,15 @@ links remain useful. No generated reference file is edited by this feature.
 Its explicit search action mirrors the existing framework button's readiness and
 opens that same dialog; it neither duplicates Pagefind nor probes a gateway.
 
+Starlight 0.41.11 has a narrow pnpm patch in `patches/@astrojs__starlight@0.41.11.patch`.
+Its original search initialized Pagefind only in an unbounded idle callback, so
+opening search before an idle opportunity could leave the dialog empty. The patch
+shares one initializer between opening search and background preload, handles late
+DOMContentLoaded registration, retries failed initialization, and focuses only
+while the dialog remains open. Markup, Pagefind options, URL processing and native
+dismissal stay with Starlight. Keep the held-idle tests in `search-readiness.spec.ts`
+when upgrading or removing the patch.
+
 ### Mobile evidence and reference search
 
 Phone proof panels use documentary crops of the original synthetic-data app

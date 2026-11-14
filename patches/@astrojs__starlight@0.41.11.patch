@@ -1,0 +1,52 @@
+diff --git a/components/Search.astro b/components/Search.astro
+index d8c80d826995d6c8ce598aa618ddf7ea575ecadc..d724556d4ebc9c71f11dd995efecb7634f2c231c 100644
+--- a/components/Search.astro
++++ b/components/Search.astro
+@@ -102,6 +102,9 @@ if (project.trailingSlash === 'never') dataAttributes['data-strip-trailing-slash
+ 				this.querySelector('input')?.focus();
+ 				event?.stopPropagation();
+ 				window.addEventListener('click', onClick);
++				void initializeSearch().then(() => {
++					if (dialog.open) this.querySelector('input')?.focus();
++				});
+ 			};
+ 
+ 			const closeModal = () => dialog.close();
+@@ -132,10 +135,10 @@ if (project.trailingSlash === 'never') dataAttributes['data-strip-trailing-slash
+ 			const stripTrailingSlash = (path: string) => path.replace(/(.)\/(#.*)?$/, '$1$2');
+ 			const formatURL = shouldStrip ? stripTrailingSlash : (path: string) => path;
+ 
+-			window.addEventListener('DOMContentLoaded', () => {
+-				if (import.meta.env.DEV) return;
+-				const onIdle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
+-				onIdle(async () => {
++			let searchReady: Promise<void> | undefined;
++			const initializeSearch = () => {
++				if (import.meta.env.DEV) return Promise.resolve();
++				return (searchReady ??= (async () => {
+ 					// @ts-expect-error — Missing types for @pagefind/default-ui package.
+ 					const { PagefindUI } = await import('@pagefind/default-ui');
+ 					new PagefindUI({
+@@ -154,8 +157,20 @@ if (project.trailingSlash === 'never') dataAttributes['data-strip-trailing-slash
+ 							});
+ 						},
+ 					});
+-				});
+-			});
++				})().catch((error) => {
++					searchReady = undefined;
++					console.error('Search initialization failed:', error);
++				}));
++			};
++			const warmSearch = () => {
++				const onIdle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
++				onIdle(initializeSearch, { timeout: 1000 });
++			};
++			if (document.readyState === 'loading') {
++				window.addEventListener('DOMContentLoaded', warmSearch, { once: true });
++			} else {
++				warmSearch();
++			}
+ 		}
+ 	}
+ 	customElements.define('site-search', SiteSearch);
