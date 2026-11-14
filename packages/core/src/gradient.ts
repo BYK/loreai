@@ -3119,9 +3119,19 @@ function tryFitStable(input: {
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
 > | null {
-  // If the prefix already overflows its budget there's no point trying.
-  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
+  // If the prefix overflows its budget there is normally no point trying —
+  // but not when it would be omitted anyway. The omission rule drops the
+  // prefix whenever nothing was evicted, so a prefix that only overflows
+  // because zero-eviction suppression applies must not escalate the layer.
+  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0) {
+    // Probe with an empty prefix: when the raw window fits on its own and no
+    // eviction state says otherwise, this returns a prefix-less result and
+    // proves the omission applies. On any other outcome the oversized prefix
+    // is genuinely required and we fail this layer.
+    const probe = tryFitStable({ ...input, prefix: [], prefixTokens: 0 });
+    if (probe && probe.messages.length === input.messages.length) return probe;
     return null;
+  }
 
   const rawWindowCache = input.sessState.rawWindowCache;
   const cacheValid =

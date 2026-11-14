@@ -3802,6 +3802,50 @@ describe("onIdleResume", () => {
       r2Restart.messages.some((m) => m.info.id.startsWith("lore-distilled")),
     ).toBe(false);
 
+    // Same session, but the rendered prefix now EXCEEDS its distilled budget:
+    // an over-budget prefix that would be omitted anyway (nothing evicted)
+    // must not escalate the layer. context=10_000 → distilledBudget = 2_000;
+    // a ~9_000-char distillation (~3_000 tokens) exceeds it while the raw
+    // messages still fit. Note: transform() prefers the LIVE distillation set
+    // when the prefix cache is cold, so no snapshot reset is needed for the
+    // prefix change to be visible to tryFitStable.
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Over-budget summary: " + "z".repeat(9_000),
+        "[]",
+        0,
+        3_000,
+        0,
+        Date.now(),
+      );
+
+    const r2Big = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+        makeMsg("ne-a3", "assistant", "Carried on", SID),
+        makeMsg("ne-u4", "user", "Keep going", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2Big.layer).toBe(1);
+    expect(r2Big.distilledTokens).toBe(0);
+    expect(
+      r2Big.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2Big.messages.length).toBe(7);
+
     // Host front-trimming: if the host drops older messages so the input array
     // shrinks below maxSeenMessageCount (even without setting sourceWindow.offset
     // and with cutoff === 0 on the remaining slice), the distilled prefix IS
