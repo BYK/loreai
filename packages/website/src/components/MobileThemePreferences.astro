@@ -3,12 +3,12 @@ import ThemeToggle from "./ThemeToggle.astro";
 ---
 <div class="mobile-theme-preferences"><span>Appearance</span><ThemeToggle /></div>
 <style is:global>
-.mobile-theme-preferences { position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 8px;margin-bottom:12px;border-bottom:1px solid var(--line);background:var(--surface); }
+.mobile-theme-preferences { position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 8px;margin-bottom:12px;border-bottom:1px solid var(--line);background:var(--surface); }
 .mobile-theme-preferences > span { color:var(--muted);font-size:.875rem; }
 .mobile-theme-preferences .theme-toggle button { width:44px;height:44px; }
 .docs-group-icons > .mobile-theme-preferences { background:var(--bg); }
-.nav-mobile-panel { scroll-padding-block-start:88px; }
-:root[data-has-sidebar] #starlight__sidebar { scroll-padding-block-start:88px; }
+/* Scale clearance with text size when Appearance wraps above the controls. */
+.nav-mobile-panel,:root[data-has-sidebar] #starlight__sidebar { scroll-padding-block-start:calc(5rem + 8px); }
 :root[data-has-sidebar] .docs-site-header .header-utilities > .theme-toggle { display:none; }
 @media(min-width:50rem) {
   .docs-group-icons > .mobile-theme-preferences { display:none; }

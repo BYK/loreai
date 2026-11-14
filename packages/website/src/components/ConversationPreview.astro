@@ -18,12 +18,11 @@ const kept = ["check whether the event was already handled", "reuse the existing
   <a class="text-link icon-link" href="#journal"><span class="link-label">Follow the full example</span> <span aria-hidden="true">↓</span></a>
 </aside>
 <style>
-  .conversation-preview { --kept-bg:#dfefdc;--kept-text:#244c2d;--kept-line:#64916d;align-self:start; }
+  .conversation-preview { align-self:start; }
   .preview-heading { display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px; }
   .preview-heading p { color:var(--muted);font-size:.75rem;margin:0; }
   .conversation-preview h2 { font-size:.9375rem;line-height:1.5;font-weight:600;letter-spacing:0;margin:0 0 10px; }
   .conversation-preview blockquote { margin:0;padding:0;border:0;font-size:.9375rem;line-height:1.8;color:var(--text); }
-  .conversation-preview mark { background:var(--kept-bg);color:var(--kept-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:.06em .12em;border-bottom:1px solid var(--kept-line); }
   .preview-temporary { color:var(--muted); }
   .conversation-preview .preview-legend { color:var(--muted);font-size:.75rem;line-height:1.5;margin:10px 0 0; }
   .preview-transfer { display:flex;align-items:center;gap:12px;color:var(--accent);margin:16px 0; }
@@ -34,6 +33,4 @@ const kept = ["check whether the event was already handled", "reuse the existing
   .preview-kept li::before { content:"";position:absolute;inset-inline-start:0;top:.7em;width:4px;height:4px;border-radius:50%;background:var(--accent); }
   .conversation-preview .preview-history { font-size:.75rem;line-height:1.6;margin:16px 0 8px;color:var(--muted); }
   .conversation-preview .text-link { min-height:44px;font-size:.8125rem; }
-  :global(:root[data-theme="dark"]) .conversation-preview { --kept-bg:#263e2c;--kept-text:#dcf0df;--kept-line:#7bad87; }
-  @media(prefers-color-scheme:dark) { :global(:root:not([data-theme])) .conversation-preview { --kept-bg:#263e2c;--kept-text:#dcf0df;--kept-line:#7bad87; } }
 </style>

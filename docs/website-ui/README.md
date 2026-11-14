@@ -34,6 +34,9 @@ renderer, geometry/fallback code, and Three.js/type dependencies are removed.
 
 ## Current visual evidence
 
+See the [14 November QA follow-up](qa-2026-11-14.md) for mobile text enlargement,
+journal focus, shared green highlights and conditional diagram loading.
+
 These are direct captures of the built website. Desktop captures use the normal
 1280px browser width; phone captures use 320px. Both appearances are represented.
 No DOM, CSS, or image edits are applied to the captures. The original pre-PR PNGs

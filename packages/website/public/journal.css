@@ -56,7 +56,6 @@
 .journal-lead { font-size:.9375rem;color:var(--muted);margin-block:.75rem 1rem;line-height:1.65; }
 .journal-message { border-top:1px solid var(--line);padding-block:.875rem;font-size:.9375rem;line-height:1.7; }
 .journal-message > span { font-size:.8125rem;color:var(--muted);display:block;margin-bottom:.375rem; }
-.journal-message mark { background:var(--accent-soft);color:var(--text);padding:1px 3px; }
 .journal-note { font-size:.8125rem;line-height:1.65;color:var(--muted);margin-top:.75rem; }
 .journal-page-end { display:flex;align-items:center;justify-content:space-between;gap:.75rem;margin-top:auto;padding-top:1.25rem; }
 .journal-page-end .button { font-size:.875rem; }

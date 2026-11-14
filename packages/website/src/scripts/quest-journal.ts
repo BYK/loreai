@@ -55,10 +55,11 @@ if (root) {
     apply();
     writeHistory();
     const panel = chapterPanel();
-    if (focus)
-      panel
-        ?.querySelector<HTMLElement>("h3")
-        ?.focus({ preventScroll: !matchMedia("(max-width: 640px)").matches });
+    if (focus) {
+      const heading = panel?.querySelector<HTMLElement>("h3");
+      heading?.focus({ preventScroll: true });
+      heading?.scrollIntoView({ block: "nearest" });
+    }
     animation?.cancel();
     if (
       event instanceof MouseEvent &&

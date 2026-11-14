@@ -1,6 +1,6 @@
 /* Purpose-specific pages share the field guide's surfaces and native controls. */
 .page-guide-panel { padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--journal-page); }
-.journal-carried-rule mark,.journal-result mark,.revision-example mark { background:var(--accent-soft);color:var(--text);box-decoration-break:clone;-webkit-box-decoration-break:clone; }
+.conversation-preview mark,.journal-message mark,.journal-carried-rule mark,.journal-result mark,.revision-example mark { background:var(--kept-bg);color:var(--kept-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:.06em .12em;border-bottom:1px solid var(--kept-line); }
 .home-page .workflow-links { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px; }
 .workflow-links a { display:flex;align-items:flex-start;gap:12px;color:var(--text);text-decoration:none;padding:16px 0;border-block:1px solid var(--line); }
 .workflow-links strong,.workflow-links small { display:block; }
