@@ -7985,9 +7985,16 @@ function safeUpstreamErrorCategory(errorBody: string): string | undefined {
   return undefined;
 }
 
-function formatRecallUpstreamErrorDetail(errorBody: string): string {
-  const category = safeUpstreamErrorCategory(errorBody);
-  const diagnostic = upstreamRejectionDiagnostic(errorBody);
+function formatRecallUpstreamErrorDetail(
+  errorBody: string,
+  diagnosticBody?: string,
+): string {
+  // Parse structured diagnostics from the complete bounded prefix when
+  // available; `errorBody` is the smaller human-readable slice and may cut a
+  // valid JSON rejection mid-document.
+  const parseSource = diagnosticBody ?? errorBody;
+  const category = safeUpstreamErrorCategory(parseSource);
+  const diagnostic = upstreamRejectionDiagnostic(parseSource);
   return category ? `category=${category} ${diagnostic}` : diagnostic;
 }
 
@@ -9868,13 +9875,11 @@ export function buildStreamingResponse(
               }
 
               if (!streamingFollowUp.ok) {
-                if (
-                  finalRecallRound ||
-                  recallBudget.requiresVerifiedContinuation
-                )
-                  throw new RecallContinuationFailure("follow_up_failed");
+                // Sanitized diagnostics stay before the fail-fast guard so
+                // final-round / verified-continuation failures keep the
+                // upstream status and category this log is meant to expose.
                 reportRecallDiagnostic(
-                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(streamingFollowUp.detail)})`,
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(streamingFollowUp.detail, streamingFollowUp.diagnosticBody)})`,
                   "error",
                 );
                 captureToolPairing400({
@@ -9887,6 +9892,11 @@ export function buildStreamingResponse(
                   model: currentModifiedReq.model,
                   sessionID: recallContext.sessionState.sessionID,
                 });
+                if (
+                  finalRecallRound ||
+                  recallBudget.requiresVerifiedContinuation
+                )
+                  throw new RecallContinuationFailure("follow_up_failed");
                 // takeHeldBackEvents() — for Anthropic this is a no-op
                 // (already consumed before the marker envelope emission
                 // above); for non-Anthropic the held-back closes the
@@ -24550,7 +24560,7 @@ async function handleConversationTurnPrepared(
           );
           if (!recovery.ok) {
             reportRecallDiagnostic(
-              `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail)})`,
+              `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail, recovery.diagnosticBody)})`,
               "error",
             );
             return failRecall(category, false);
@@ -24686,7 +24696,7 @@ async function handleConversationTurnPrepared(
       if (!jsonFollowUp.ok) {
         recallBudget.recordContinuationUsage(undefined, undefined, false);
         reportRecallDiagnostic(
-          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(jsonFollowUp.detail)})`,
+          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} (${formatRecallUpstreamErrorDetail(jsonFollowUp.detail, jsonFollowUp.diagnosticBody)})`,
           "error",
         );
         captureToolPairing400({
@@ -25192,7 +25202,7 @@ async function handleConversationTurnPrepared(
                 );
                 if (!follow.ok) {
                   reportRecallDiagnostic(
-                    `recall follow-up upstream error: ${follow.status ?? "?"} (${formatRecallUpstreamErrorDetail(follow.detail)})`,
+                    `recall follow-up upstream error: ${follow.status ?? "?"} (${formatRecallUpstreamErrorDetail(follow.detail, follow.diagnosticBody)})`,
                     "error",
                   );
                   throw new Error(
@@ -25263,7 +25273,7 @@ async function handleConversationTurnPrepared(
                 );
                 if (!recovery.ok) {
                   reportRecallDiagnostic(
-                    `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail)})`,
+                    `recall recovery upstream error: ${recovery.status ?? "?"} (${formatRecallUpstreamErrorDetail(recovery.detail, recovery.diagnosticBody)})`,
                     "error",
                   );
                   throw new Error("recall recovery upstream failed");

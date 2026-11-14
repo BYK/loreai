@@ -391,6 +391,16 @@ function removeVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
 ): GatewayContentBlock {
+  // Parsed Chat text parts with metadata (e.g. cache_control) carry
+  // provenanceContent aliased to the SAME array as content
+  // (translate/openai.ts chatMessageWithTextProvenance). Splicing both would
+  // remove every block twice; copy the provenance array on first mutation.
+  if (
+    message.provenanceContent === message.content &&
+    message.provenancePositions
+  ) {
+    message.provenanceContent = [...message.content];
+  }
   const provenanceIndex = message.provenancePositions?.[visibleIndex];
   if (
     message.provenanceContent &&
@@ -2467,23 +2477,30 @@ async function ensureSSEResponse(
   );
 }
 
-async function readResponseTextLimited(
+/**
+ * Read a rejected follow-up's body in two bounded slices: a larger prefix kept
+ * intact for structured JSON diagnostics (truncating mid-JSON would turn a
+ * valid rejection into `body=json_invalid`), and a smaller, human-readable
+ * detail for capture/log paths.
+ */
+async function readRecallErrorBody(
   response: Response,
-  maxBytes = 500,
+  detailBytes = 500,
+  diagnosticBytes = 8_192,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ detail: string; diagnostic: string }> {
   const diagnosticSignal = AbortSignal.any(
     [signal, AbortSignal.timeout(1_000)].filter(
       (value): value is AbortSignal => value !== undefined,
     ),
   );
   const reader = response.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return { detail: "", diagnostic: "" };
   const decoder = new TextDecoder();
-  let text = "";
+  let diagnostic = "";
   let readBytes = 0;
   try {
-    while (readBytes < maxBytes) {
+    while (readBytes < diagnosticBytes) {
       diagnosticSignal.throwIfAborted();
       const { done, value } = await promiseAgainstAbort(
         () => reader.read(),
@@ -2492,14 +2509,16 @@ async function readResponseTextLimited(
       diagnosticSignal.throwIfAborted();
       if (done) break;
       if (!value) continue;
-      const chunk = value.subarray(0, maxBytes - readBytes);
+      const chunk = value.subarray(0, diagnosticBytes - readBytes);
       readBytes += chunk.byteLength;
-      text += decoder.decode(chunk, { stream: readBytes < maxBytes });
+      diagnostic += decoder.decode(chunk, {
+        stream: readBytes < diagnosticBytes,
+      });
     }
   } finally {
     cancelAndReleaseReader(reader, diagnosticSignal.reason);
   }
-  return text;
+  return { detail: diagnostic.slice(0, detailBytes), diagnostic };
 }
 
 /**
@@ -2569,8 +2588,13 @@ export interface RecallFollowUpError {
   ok: false;
   /** HTTP status when the upstream responded with a non-OK status. */
   status?: number;
-  /** Human-readable error detail for logging. */
+  /** Human-readable error detail for logging (bounded to ~500 bytes). */
   detail: string;
+  /**
+   * Bounded (8 KiB) complete prefix of the rejection body for structured
+   * diagnostics; never truncated mid-JSON the way `detail` can be.
+   */
+  diagnosticBody?: string;
 }
 
 /**
@@ -2610,8 +2634,14 @@ export async function runRecallFollowUpStreaming(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2619,7 +2649,7 @@ export async function runRecallFollowUpStreaming(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const body = sseResponse.body;
@@ -2674,8 +2704,14 @@ async function runRecallJSONRequest(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2683,7 +2719,7 @@ async function runRecallJSONRequest(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   assertJSONResponse(response);
   const continuation = await parseFollowUpAgainstAbort(
@@ -2755,8 +2791,14 @@ async function runRecallStreamAccumulatedRequest(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2764,7 +2806,7 @@ async function runRecallStreamAccumulatedRequest(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const continuation = await parseFollowUpAgainstAbort(

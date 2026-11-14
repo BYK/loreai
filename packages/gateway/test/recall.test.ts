@@ -5205,6 +5205,195 @@ test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(
   },
 );
 
+test("marker expansion with metadata-aliased provenance keeps companions on both sides", () => {
+  const anchorId = "b5f1a2c3-4d5e-4f60-8192-a3b4c5d6e7f8";
+  const userMsg = {
+    role: "user" as const,
+    content: [{ type: "text" as const, text: "list and read config" }],
+  };
+  const globBlock: GatewayContentBlock = {
+    type: "tool_use",
+    id: "call_glob_1",
+    name: "glob",
+    input: { pattern: "**/config.json" },
+  };
+  const writeBlock: GatewayContentBlock = {
+    type: "tool_use",
+    id: "call_write_1",
+    name: "write",
+    input: { filePath: "out.txt" },
+  };
+  const recallBlock: GatewayContentBlock = {
+    type: "tool_use",
+    id: "call_recall_1",
+    name: RECALL_TOOL_NAME,
+    input: { query: "config layout", scope: "all" },
+  };
+  const originalResp = makeResponse([globBlock, recallBlock, writeBlock]);
+  const anchorContextId = responsesAnchorContext(
+    [userMsg],
+    [],
+    originalResp,
+    "call_recall_1",
+  );
+
+  const store: RecallStore = new Map([
+    [
+      `anchor:${anchorId}`,
+      makeStoredRecall({
+        toolUseId: "call_recall_1",
+        anchorId,
+        anchorContextId,
+        input: { query: "config layout", scope: "all" },
+        position: 1,
+        result: "Config layout notes",
+        companionToolUses: [
+          {
+            id: "call_glob_1",
+            name: "glob",
+            input: { pattern: "**/config.json" },
+            side: "before",
+          },
+          {
+            id: "call_write_1",
+            name: "write",
+            input: { filePath: "out.txt" },
+            side: "after",
+          },
+        ],
+      }),
+    ],
+  ]);
+
+  // Parsed Chat messages whose text parts carry metadata (cache_control)
+  // alias provenanceContent to the SAME array as content
+  // (translate/openai.ts chatMessageWithTextProvenance). Companions sit on
+  // both sides of the marker in that single array.
+  const markerText = `${buildRecallMarker("config layout", "all")}\n${buildRecallAnchor(anchorId)}`;
+  const markerPart = {
+    type: "text" as const,
+    text: markerText,
+    raw: {
+      type: "text",
+      text: markerText,
+      cache_control: { type: "ephemeral" },
+    },
+  };
+  const assistantParts: GatewayContentBlock[] = [
+    globBlock,
+    markerPart,
+    writeBlock,
+  ];
+  const req = makeRequest([
+    userMsg,
+    {
+      role: "assistant",
+      content: assistantParts,
+      provenanceContent: assistantParts,
+      provenancePositions: assistantParts.map((_block, index) => index),
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: "call_glob_1",
+          content: [{ type: "text", text: "config.json" }],
+        },
+        {
+          type: "tool_result",
+          toolUseId: "call_write_1",
+          content: [{ type: "text", text: "written" }],
+        },
+      ],
+    },
+  ]);
+
+  expect(cleanupRecallStore(req, store, { gatewayRecallEnabled: true })).toBe(
+    false,
+  );
+  expect(expandRecallMarkers(req, store, { gatewayRecallEnabled: true })).toBe(
+    true,
+  );
+  // The marker must become the recall tool_use with glob before it and write
+  // after it — no companion dropped, no marker left behind.
+  expect(req.messages[1].content).toEqual([
+    globBlock,
+    {
+      type: "tool_use",
+      id: "call_recall_1",
+      name: RECALL_TOOL_NAME,
+      input: { query: "config layout", scope: "all" },
+    },
+    writeBlock,
+  ]);
+  expect(req.messages[2].content).toEqual([
+    {
+      type: "tool_result",
+      toolUseId: "call_glob_1",
+      content: [{ type: "text", text: "config.json" }],
+    },
+    {
+      type: "tool_result",
+      toolUseId: "call_recall_1",
+      toolName: RECALL_TOOL_NAME,
+      content: [{ type: "text", text: "Config layout notes" }],
+    },
+    {
+      type: "tool_result",
+      toolUseId: "call_write_1",
+      content: [{ type: "text", text: "written" }],
+    },
+  ]);
+});
+
+test("rejection bodies longer than 500 bytes keep their JSON diagnostics", async () => {
+  const recallBlock = makeRecallToolUse();
+  const resp = makeResponse([recallBlock], "tool_use");
+  // A valid JSON rejection whose body exceeds the 500-byte detail slice;
+  // the padding pushes `code` beyond the truncation point.
+  const longMessage = `request rejected: ${"x".repeat(900)}`;
+  const body = JSON.stringify({
+    error: {
+      message: longMessage,
+      code: "invalid_request_error",
+      param: "messages",
+    },
+  });
+  expect(body.length).toBeGreaterThan(500);
+  const ctx: RecallFollowUpCtx = {
+    forward: async () => ({
+      response: new Response(body, {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+      effectiveProtocol: "anthropic",
+    }),
+    parseJSON: () => {
+      throw new Error("should not be called");
+    },
+  };
+
+  const result = await runRecallFollowUpJSON(
+    ctx,
+    makeRequest(),
+    resp,
+    "recall results",
+    recallBlock,
+  );
+
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.status).toBe(400);
+    expect(result.detail.length).toBeLessThanOrEqual(500);
+    expect(result.diagnosticBody).toBeDefined();
+    expect(result.diagnosticBody).toContain("invalid_request_error");
+    expect(JSON.parse(result.diagnosticBody as string)).toEqual(
+      JSON.parse(body),
+    );
+  }
+});
+
 test("OpenAI Chat Completions mixed-tool round-trip preserves and expands before-companions placed after marker text", () => {
   const anchorId = "3dcd05dc-ae0e-476a-a5d8-80c502248762";
   const userMsg = {
