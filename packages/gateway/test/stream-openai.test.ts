@@ -68,6 +68,7 @@ describe("accumulateOpenAISSEStream", () => {
       { strict: true, stopAtTerminal: true, consumeUntilDone: true },
     );
     expect(result.content).toEqual([{ type: "text", text: "done" }]);
+    expect(result.usageComplete).toBe(true);
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
   });
 

@@ -782,11 +782,15 @@ export function parseGeminiResponseJSON(
       ? asString(promptFeedback.blockReason)
       : mapGeminiFinishReason(first.finishReason, hasToolCall);
 
+  const um = json.usageMetadata as Record<string, unknown> | undefined;
   return {
     id: asString(json.responseId),
     model: asString(json.modelVersion),
     content: blocks,
     stopReason,
+    usageComplete:
+      typeof um?.promptTokenCount === "number" &&
+      typeof um?.candidatesTokenCount === "number",
     usage: parseGeminiUsage(json),
   };
 }

@@ -991,6 +991,7 @@ export async function accumulateOpenAISSEStream(
     model,
     content,
     stopReason,
+    usageComplete: inputUsageSeen && outputUsageSeen,
     usage: {
       // prompt_tokens is inclusive of cache reads/writes; subtract them to
       // match the gateway's disjoint token convention (see

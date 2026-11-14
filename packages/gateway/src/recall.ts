@@ -294,6 +294,62 @@ function recallMessagePrefix(
   return message.provenanceContent.slice(0, end);
 }
 
+/**
+ * OpenAI Chat Completions serializes assistant `content` and `tool_calls` as
+ * separate fields, so `parseAssistantContent` places the text marker at index 0
+ * and all `tool_use` blocks after it — even when the original response had
+ * companion `tool_use` blocks before the recall block. Match those in-message
+ * `before` companions by fingerprint so anchor validation and marker expansion
+ * reconstruct the original prefix and tool_use order.
+ */
+function trailingBeforeCompanionsInMessage(
+  message: GatewayMessage,
+  markerIndex: number,
+  stored: StoredRecall,
+): GatewayToolUseBlock[] {
+  if (
+    message.content
+      .slice(0, markerIndex)
+      .some((block) => block.type === "tool_use")
+  ) {
+    return [];
+  }
+  const beforeFingerprints = companionFingerprintsFor(stored)?.filter(
+    (item) => item.side === "before",
+  );
+  if (!beforeFingerprints || beforeFingerprints.length === 0) return [];
+  const trailingToolUses = message.content
+    .slice(markerIndex + 1)
+    .filter((block): block is GatewayToolUseBlock => block.type === "tool_use");
+  if (trailingToolUses.length < beforeFingerprints.length) return [];
+  const candidate = trailingToolUses.slice(0, beforeFingerprints.length);
+  for (let i = 0; i < beforeFingerprints.length; i++) {
+    if (
+      companionFingerprint(stored.anchorId, {
+        ...candidate[i],
+        side: "before",
+      }) !== beforeFingerprints[i].hash
+    ) {
+      return [];
+    }
+  }
+  return candidate;
+}
+
+function recallMessagePrefixForStored(
+  message: GatewayMessage,
+  visibleBlocks: number,
+  stored: StoredRecall,
+): GatewayContentBlock[] {
+  const prefix = recallMessagePrefix(message, visibleBlocks);
+  const trailingBefore = trailingBeforeCompanionsInMessage(
+    message,
+    visibleBlocks,
+    stored,
+  );
+  return trailingBefore.length > 0 ? [...prefix, ...trailingBefore] : prefix;
+}
+
 function replaceVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
@@ -335,6 +391,16 @@ function removeVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
 ): GatewayContentBlock {
+  // Parsed Chat text parts with metadata (e.g. cache_control) carry
+  // provenanceContent aliased to the SAME array as content
+  // (translate/openai.ts chatMessageWithTextProvenance). Splicing both would
+  // remove every block twice; copy the provenance array on first mutation.
+  if (
+    message.provenanceContent === message.content &&
+    message.provenancePositions
+  ) {
+    message.provenanceContent = [...message.content];
+  }
   const provenanceIndex = message.provenancePositions?.[visibleIndex];
   if (
     message.provenanceContent &&
@@ -1022,14 +1088,14 @@ export function expandRecallMarkers(
           recallAnchorContext(
             incomingMessages,
             i,
-            recallMessagePrefix(message, j),
+            recallMessagePrefixForStored(message, j, candidate.stored),
           )
         : candidate.stored.anchorContextId === undefined ||
           candidate.stored.anchorContextId ===
             recallAnchorContext(
               incomingMessages,
               i,
-              recallMessagePrefix(message, j),
+              recallMessagePrefixForStored(message, j, candidate.stored),
             );
       const occurrences = anchorValidity.get(candidate.key) ?? [];
       const previous = incomingMessages[i - 1];
@@ -1255,6 +1321,29 @@ export function expandRecallMarkers(
       }
     }
 
+    const trailingBefore = trailingBeforeCompanionsInMessage(
+      msg,
+      markerIdx,
+      stored,
+    );
+    if (trailingBefore.length > 0) {
+      const moved: GatewayContentBlock[] = [];
+      let remaining = trailingBefore.length;
+      for (
+        let index = markerIdx + 1;
+        index < msg.content.length && remaining > 0;
+        index++
+      ) {
+        if (msg.content[index].type === "tool_use") {
+          moved.push(removeVisibleContentBlock(msg, index));
+          index--;
+          remaining--;
+        }
+      }
+      insertVisibleContentBlocks(msg, markerIdx, moved);
+      markerIdx += moved.length;
+    }
+
     // Replace marker with tool_use
     replaceVisibleContentBlock(msg, markerIdx, {
       type: "tool_use",
@@ -1414,7 +1503,11 @@ export function cleanupRecallStore(
             recallAnchorContext(
               req.messages,
               req.messages.indexOf(msg),
-              recallMessagePrefix(msg, msg.content.indexOf(block)),
+              recallMessagePrefixForStored(
+                msg,
+                msg.content.indexOf(block),
+                match.stored,
+              ),
             ))
       ) {
         activeKeys.add(match.key);
@@ -2384,23 +2477,30 @@ async function ensureSSEResponse(
   );
 }
 
-async function readResponseTextLimited(
+/**
+ * Read a rejected follow-up's body in two bounded slices: a larger prefix kept
+ * intact for structured JSON diagnostics (truncating mid-JSON would turn a
+ * valid rejection into `body=json_invalid`), and a smaller, human-readable
+ * detail for capture/log paths.
+ */
+async function readRecallErrorBody(
   response: Response,
-  maxBytes = 500,
+  detailBytes = 500,
+  diagnosticBytes = 8_192,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ detail: string; diagnostic: string }> {
   const diagnosticSignal = AbortSignal.any(
     [signal, AbortSignal.timeout(1_000)].filter(
       (value): value is AbortSignal => value !== undefined,
     ),
   );
   const reader = response.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return { detail: "", diagnostic: "" };
   const decoder = new TextDecoder();
-  let text = "";
+  let diagnostic = "";
   let readBytes = 0;
   try {
-    while (readBytes < maxBytes) {
+    while (readBytes < diagnosticBytes) {
       diagnosticSignal.throwIfAborted();
       const { done, value } = await promiseAgainstAbort(
         () => reader.read(),
@@ -2409,14 +2509,16 @@ async function readResponseTextLimited(
       diagnosticSignal.throwIfAborted();
       if (done) break;
       if (!value) continue;
-      const chunk = value.subarray(0, maxBytes - readBytes);
+      const chunk = value.subarray(0, diagnosticBytes - readBytes);
       readBytes += chunk.byteLength;
-      text += decoder.decode(chunk, { stream: readBytes < maxBytes });
+      diagnostic += decoder.decode(chunk, {
+        stream: readBytes < diagnosticBytes,
+      });
     }
   } finally {
     cancelAndReleaseReader(reader, diagnosticSignal.reason);
   }
-  return text;
+  return { detail: diagnostic.slice(0, detailBytes), diagnostic };
 }
 
 /**
@@ -2486,8 +2588,13 @@ export interface RecallFollowUpError {
   ok: false;
   /** HTTP status when the upstream responded with a non-OK status. */
   status?: number;
-  /** Human-readable error detail for logging. */
+  /** Human-readable error detail for logging (bounded to ~500 bytes). */
   detail: string;
+  /**
+   * Bounded (8 KiB) complete prefix of the rejection body for structured
+   * diagnostics; never truncated mid-JSON the way `detail` can be.
+   */
+  diagnosticBody?: string;
 }
 
 /**
@@ -2527,8 +2634,14 @@ export async function runRecallFollowUpStreaming(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2536,7 +2649,7 @@ export async function runRecallFollowUpStreaming(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const body = sseResponse.body;
@@ -2591,8 +2704,14 @@ async function runRecallJSONRequest(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2600,7 +2719,7 @@ async function runRecallJSONRequest(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   assertJSONResponse(response);
   const continuation = await parseFollowUpAgainstAbort(
@@ -2672,8 +2791,14 @@ async function runRecallStreamAccumulatedRequest(
   );
   if (!response.ok) {
     let detail = "";
+    let diagnosticBody: string | undefined;
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
+      ({ detail, diagnostic: diagnosticBody } = await readRecallErrorBody(
+        response,
+        500,
+        8_192,
+        signal,
+      ));
     } catch {
       if (signal?.aborted) throw signal.reason;
       reportRecallDiagnostic(
@@ -2681,7 +2806,7 @@ async function runRecallStreamAccumulatedRequest(
         "warn",
       );
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status, detail, diagnosticBody };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const continuation = await parseFollowUpAgainstAbort(
