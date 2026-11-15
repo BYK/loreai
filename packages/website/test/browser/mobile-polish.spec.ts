@@ -84,7 +84,9 @@ test("reference results explain their purpose and can expand without an internal
   await finder.getByRole("searchbox").fill("autoToolFailureGotchas");
   await expect(results.locator("li:visible")).toHaveCount(1);
   await expect(results).toContainText("tool");
-  await finder.getByRole("button", { name: "Clear", exact: true }).click();
+  await finder
+    .getByRole("button", { name: "Clear search", exact: true })
+    .click();
   await expect(page.locator("#knowledge")).toBeAttached();
 });
 

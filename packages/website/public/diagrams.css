@@ -1,10 +1,11 @@
 .mermaid { position:relative;text-align:center;max-width:100%;margin:1.5rem auto; }
 .mermaid > svg { display:block;max-width:100%;height:auto;margin:auto; }
-.diagram-expand,.diagram-dialog > button { min-height:44px;padding:.5rem .75rem;border:1px solid var(--line);border-radius:var(--radius-control,6px);background:var(--surface);color:var(--text);font:inherit;font-size:.8125rem;cursor:pointer; }
-.diagram-expand { display:block;margin:.75rem auto 0; }
+
+.mermaid { padding-top:44px; }
+.diagram-expand { position:absolute;inset-block-start:0;inset-inline-end:0;margin:0; }
 .diagram-dialog { width:calc(100vw - 2rem);max-width:1440px;max-height:calc(100dvh - 2rem);padding:1rem;border:1px solid var(--line);border-radius:var(--radius-card,12px);background:var(--bg);color:var(--text); }
 .diagram-dialog::backdrop { background:rgb(0 0 0 / .65); }
-.diagram-dialog > button { display:block;margin:0 0 .75rem auto; }
+.diagram-dialog > .diagram-close { display:flex;margin:0 0 .75rem auto; }
 .diagram-canvas { overflow:auto;max-height:calc(100dvh - 8rem); }
 .diagram-canvas > svg { display:block;min-width:800px;width:100%;max-width:none!important;height:auto; }
 .diagram-dialog { position:fixed;inset:0;margin:auto;box-sizing:border-box; }

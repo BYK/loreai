@@ -51,3 +51,9 @@ a.icon-link, a.icon-link:hover, a.icon-link:focus-visible { text-decoration:none
 a.icon-link > .link-label { min-width:0;text-decoration:underline;text-underline-offset:.2em; }
 a.icon-link > [aria-hidden="true"] { text-decoration:none; }
 .text-link.icon-link { column-gap:.35em; }
+
+/* Compact utility glyphs retain a full pointer target and an inward focus ring. */
+.ui-icon-button { display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:44px;height:44px;min-width:44px;min-height:44px;margin:0;padding:0;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);color:var(--muted);cursor:pointer; }
+.ui-icon-button svg { display:block;width:18px;height:18px;pointer-events:none; }
+.ui-icon-button:hover { background:var(--chrome);color:var(--heading); }
+.ui-icon-button:focus-visible { outline-offset:-3px;color:var(--heading); }

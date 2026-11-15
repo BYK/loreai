@@ -121,7 +121,7 @@ test("architecture diagrams follow theme changes and open a legible focused view
 }) => {
   await page.goto("/docs/architecture/");
   const diagrams = page.locator(".mermaid");
-  await expect(diagrams.locator("svg")).toHaveCount(5);
+  await expect(diagrams.locator(":scope > svg")).toHaveCount(5);
   await (await themeButton(page, "Dark")).click();
   if (await page.locator("starlight-menu-button button:visible").count())
     await page.locator("starlight-menu-button button:visible").click();
@@ -142,7 +142,7 @@ test("architecture diagrams follow theme changes and open a legible focused view
     .click();
   const dialog = page.getByRole("dialog", { name: "Expanded diagram" });
   await expect(dialog).toBeVisible();
-  await expect(dialog.locator("svg")).toHaveCount(1);
+  await expect(dialog.locator(".diagram-canvas > svg")).toHaveCount(1);
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
   await (await themeButton(page, "Light")).click();
@@ -240,7 +240,7 @@ test("expanded diagrams use a centered modal and a readable scrollable canvas on
   expect(Math.abs(rect!.y + rect!.height / 2 - 422)).toBeLessThan(2);
   expect(rect!.width).toBeLessThanOrEqual(390 - 24);
   expect(
-    (await dialog.locator("svg").boundingBox())!.width,
+    (await dialog.locator(".diagram-canvas > svg").boundingBox())!.width,
   ).toBeGreaterThanOrEqual(800);
   await expect(dialog.locator(".diagram-canvas")).toHaveCSS(
     "overflow-x",

@@ -1,5 +1,8 @@
 // Shared decorative line icons; names are internal, never supplied by URL input.
 export const UI_ICONS = {
+  close: "m6 6 12 12 M6 18 18 6",
+  expand: "M8 3H3v5 M16 3h5v5 M3 16v5h5 M21 16v5h-5",
+  menu: "M4 6h16 M4 12h16 M4 18h16",
   app: "M3 3h18v18H3z M3 8h18 M9 8v13",
   memory: "m12 3 9 5-9 5-9-5 9-5 M3 12l9 5 9-5 M3 16l9 5 9-5",
   connect: "M8 3v5 M16 3v5 M5 8h14v3a7 7 0 0 1-14 0V8 M12 18v3",
