@@ -215,7 +215,7 @@ test("the setting finder includes nested fields and environment variables", asyn
       name: "knowledge.autoToolFailureGotchas",
       exact: true,
     }),
-  ).toHaveAttribute("href", "#knowledge");
+  ).toHaveAttribute("href", "#setting-knowledge.autoToolFailureGotchas");
   await page.goto("/docs/environment/");
   await page
     .getByRole("searchbox", { name: "Find a setting", exact: true })

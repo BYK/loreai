@@ -15,18 +15,23 @@ const base = import.meta.env.BASE_URL;
   <ChoiceGroup class="setup-picker" legend="Choose your coding agent">
     {SETUP_AGENTS.map((agent,index) => <ChoiceItem name={`${id}-agent`} value={agent.id} checked={index===0} label={agent.name} controls={`${id}-${agent.id}`}><AgentIcon slot="icon" agent={agent.id} /></ChoiceItem>)}
   </ChoiceGroup>
-  {!installed && <div class="setup-install"><h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="download" /></span> Install Lore</h3><p>Run once in your terminal, then connect from your project.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
+  {!installed && <div class="setup-install"><h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="download" /></span> Install Lore</h3><p>Choose the machine where you code. Install once, then connect from your project.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
   {id === "install-setup" && <span id="3-connect-from-your-project" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {id === "install-setup" && <span id="4-verify-the-connection" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {id === "install-setup" && <span id="verify-recording" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
     <h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="connect" /></span> Connect {agent.name}</h3><p>{agent.detail}</p>
-    <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />
+    {agent.id === "codex-desktop" ? <ol class="setup-desktop-steps">
+      <li><strong>Configure routing once.</strong><CommandBlock command="lore setup codex" kind="connection" copyLabel="Copy Codex Desktop configuration command" /></li>
+      <li><strong>Start the local gateway.</strong><CommandBlock command="lore start --bg --local" kind="connection" copyLabel="Copy Codex Desktop gateway command" /></li>
+      <li><strong>Restart Codex Desktop.</strong> Save your work, fully quit the app, then reopen it so it reads the routing settings.</li>
+      <li><strong>Verify recording below.</strong> Open your project and send a message in a new conversation. <a href={`${base}docs/setup/#undoing-setup`}>Undo routing changes</a> if needed.</li>
+    </ol> : <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />}
     <div class="setup-observation"><h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="check" /></span> Verify a recorded session</h3><p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p><label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p></div>
     <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`} class="icon-link"><span class="link-label">{agent.name} guide</span> <span aria-hidden="true">→</span></a></div>
   </div>)}
   {id === "install-setup" && <span id="operational-telemetry" class="legacy-setup-anchor" aria-hidden="true"></span>}
-  <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
+  <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Local Lore runs on your machine; model-provider billing is separate. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
 </section>
 <script>import "../scripts/agent-setup";</script>
 <style is:global>
@@ -35,6 +40,7 @@ const base = import.meta.env.BASE_URL;
 .agent-setup h3 { font:500 1.1rem/1.4 var(--sans,"DM Sans Variable",sans-serif);margin:0 0 .5rem; }
 .setup-install { padding-block:0 1.5rem;border-bottom:1px solid var(--line); }
 .agent-setup .install-box { margin-block:.75rem; }
+.setup-desktop-steps { padding-inline-start:1.25rem; }.setup-desktop-steps > li { padding-inline-start:.25rem;margin-block:.75rem; }.setup-desktop-steps .ui-command { margin-block:.5rem; }
 .setup-panel { display:none;padding-block:1.5rem 0; }
 .agent-setup:has(input[value="claude-code"]:checked) [data-setup-panel="claude-code"],
 .agent-setup:has(input[value="codex"]:checked) [data-setup-panel="codex"],

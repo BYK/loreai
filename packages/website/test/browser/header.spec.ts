@@ -18,7 +18,7 @@ test("field guide menus show real destinations and dismiss predictably", async (
     await page.keyboard.press("Enter");
     await expect(product).toHaveAttribute("open", "");
     await expect(
-      product.getByRole("link", { name: "Explore the app", exact: false }),
+      product.getByRole("link", { name: "View app tour", exact: false }),
     ).toHaveAttribute("href", "/tour/?view=knowledge#product");
     await expect(
       product.getByRole("link", { name: /Open the quest journal/ }),
@@ -96,7 +96,7 @@ test("native field guide navigation works without JavaScript on desktop and phon
           .click();
         const nav = page.locator(".nav-mobile-panel").getByRole("navigation");
         for (const label of [
-          "Explore the app",
+          "View app tour",
           "How memory works",
           "The quest journal",
           "Why Lore",

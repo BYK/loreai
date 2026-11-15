@@ -29,21 +29,19 @@ whole value is that they are not you. A model sits in the same spot. Once it has
 shaky assumption into its own memory, it is not the thing you can count on to go back and
 find the error.
 
-Lore takes a different road to the same destination. You never have to manage memory, and
-neither does the agent. A fixed set of rules, enforced by the layer that sits in the request
-path, makes the call on every turn instead. That distinction matters more than it sounds. A
-set of principles written *for* an agent is guidance, and it holds only when the agent is
-paying attention. The same principles built *into* the layer are guarantees. They hold
-whether or not anyone is paying attention that turn.
+Lore puts capture and context management in a layer outside the agent. Once your
+client is connected, that layer can record conversations, distill older context,
+and select stored knowledge for a request. The model does not have to remember
+to maintain every part of that record itself.
 
-And because that layer sits outside the model, a model swap does not take your memory with
-it. A newer model arrives brilliant and completely unfamiliar with your work, the way a new
-hire does; the layer is the institutional memory already in the room, so the model is useful
-on the first turn instead of the fiftieth. Change the engine as often as you like. The
-assistant, and everything it has learned, stays.
+That does not make the resulting memory infallible. Distillation is lossy,
+curation can produce an incomplete rule, and selection depends on the current
+task, scope, confidence and context budget. Review what Lore keeps, especially
+before turning it into a shared project convention.
 
-So here are the rules Lore runs on. Not aspirations we hope a cooperative model follows: the
-actual behavior of the layer that touches every token.
+A model change can leave the local record available to another supported client.
+Whether a particular request receives the useful part of that record still needs
+to be checked. Here are the principles behind that workflow, with its limits.
 
 ## You never have to remember to remember
 
@@ -79,40 +77,43 @@ sessions and drifts down when it sits untouched. Fall below the floor and the en
 evicted. The store stays bounded by usefulness rather than by a fixed timer that forgets
 things on a schedule, whether or not you still need them.
 
-There is one deliberate exception. The preferences you state outright, the ones that follow
-you across every project, are protected from that decay. Those are not guesses Lore made
-about you, so they are not subject to the same erosion as things Lore inferred.
+There is one deliberate exception. Some explicitly stated preferences receive different treatment from inferred knowledge.
+Inspect scope and configuration before assuming an entry applies across projects.
 
 ## When two things disagree, you get told, not overruled
 
-Opposing rules are never quietly merged. "Always use tabs" and "always use spaces" are not
-two versions of one fact, and collapsing them would be Lore deciding for you. Both are kept
-and ranked by confidence.
+Conflicting rules deserve a review rather than a silent assumption. When Lore
+flags a contradiction, inspect both entries and their sources in the knowledge
+dashboard or with `lore data contradictions`. Correct an outdated rule, retire
+it, or keep both if they apply in different circumstances.
 
-Genuine contradictions still need settling, so Lore looks for them in the background and flags
-each pair for you: on the knowledge dashboard, or from `lore data contradictions`. You pick the
-rule that still holds, or you keep both. Lore never merges them and never deletes the losing
-side on its own. The layer's job here is narrow on purpose: notice the conflict and hand it to
-you. Picking a winner silently is exactly the kind of decision a memory system should not be
-making.
+Detection is not a guarantee that every conflict has been found. Curation,
+confidence changes and consolidation can also change the active set. Review
+consequential rules and the exported diff as the project evolves.
 
-## Nothing is really deleted
+## Changes leave a reviewable history
 
-Knowledge is append-only. An edit writes a new version and keeps the old one; a delete leaves
-a marker rather than erasing the trail. Because the history is intact, you can diff what your
-agent has learned and roll it back, the same way you already do with code.
+Ordinary knowledge edits append a revision. Deleting an entry marks it deleted
+rather than immediately erasing its version history. Those revisions help you
+inspect what changed; they do not mean all data is retained forever.
 
-That is not an abstract property. Curated knowledge lands in a plain
-[`.lore.md`](/different/) file in your repo, so a change to your agent's memory shows up in a
-pull request and gets reviewed by the same people and the same process that review your code.
-Memory that changes without a diff is memory nobody can audit.
+Bulk deletion and purge operations have different effects. Uninstall normally
+preserves memory; the explicit purge option can remove the default local data
+directory. Neither operation removes copies already committed to Git or data
+already sent to a provider. Read the [data lifecycle and cleanup boundaries](/docs/data-and-costs/#undo-or-remove-lore)
+before choosing an operation.
 
-## The live edge stays whole
+Curated knowledge can be exported to a plain `.lore.md` file. Review that diff,
+and keep identity markers when correcting an entry. Version history and a Git
+review help you inspect a rule; neither proves that it is correct.
 
-The most recent turns are always protected. Whatever gets distilled or dropped as older
-context is compressed, the active end of the conversation, where the work is actually
-happening right now, is never touched. Everything else is negotiable under pressure; the edge
-you are working on is not.
+## The current request has a context limit
+
+Lore aims to retain recent working material while distilling older context. Under
+pressure it can compress tool output and use more aggressive context layers.
+A stored detail is not necessarily present verbatim in the current prompt.
+Use recall and the recorded conversation when exact wording matters; see
+[stored history and active context](/docs/memory/).
 
 ## What's learned lives in tokens, not weights
 
@@ -128,10 +129,9 @@ Making a model better at checking itself is worth doing, and we hope it keeps im
 the corrections you can lean on are the ones that do not wait for the model to notice, this
 turn, that it was wrong. Those come from outside it.
 
-Lore's bet is narrower, and honestly a little boring in the way infrastructure should be: the
-rules that decide what stays, what fades, and what gets surfaced ought to hold on every single
-turn, not only when the agent happens to be attending to them. A principle the layer enforces
-is one you never have to hope about.
+Lore's bet is that capture, review and retrieval belong in an inspectable layer,
+with rules you can test and correct. That reduces the housekeeping asked of the
+agent, while leaving you responsible for checking consequential knowledge.
 
 And because a layer that sees every token is a lot to ask you to trust, the rules above are
 not a description you take on faith. Lore is [Fair Source](https://fair.io)

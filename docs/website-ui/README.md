@@ -7,7 +7,7 @@ icon-and-label choices, and explicit selection marks now connect the homepage, a
 tour, client setup, Starlight docs, Why Lore and blog.
 
 The homepage starts with a concrete explanation and a conversation-to-knowledge preview.
-An actual-app preview comes before the journal. Conversation is the default chapter;
+The interactive journal comes next, followed by a compact actual-app preview. Conversation is the default chapter;
 one durable project decision becomes reviewable knowledge, then relevant context for
 a later task. An optional inventory keeps secondary choices out of the main reading
 path and uses full-width phone rows. Source and file excerpts expand natively.
@@ -33,6 +33,8 @@ resources, scripts, or account metadata. Source provenance is in
 renderer, geometry/fallback code, and Three.js/type dependencies are removed.
 
 ## Current visual evidence
+
+See the [16 November clarity and reference follow-up](qa-2026-11-16.md) for exact setting links, platform setup, centered diagram dialogs and reproducible workflow evidence.
 
 See the [14 November QA follow-up](qa-2026-11-14.md) for mobile text enlargement,
 journal focus, shared green highlights and conditional diagram loading.

@@ -49,9 +49,13 @@ test("clipboard denial keeps the command readable and explains manual copying", 
   );
   await page.goto("/docs/install/");
   await page.getByRole("button", { name: "Copy installation command" }).click();
-  await expect(page.locator(".copy-status")).toContainText(/select and copy/i);
-  await expect(page.locator(".install-command")).toContainText(command);
-  await expect(page.locator(".copy-status")).not.toContainText("Copied");
+  await expect(page.locator(".copy-status:visible")).toContainText(
+    /select and copy/i,
+  );
+  await expect(page.locator(".install-command:visible")).toContainText(command);
+  await expect(page.locator(".copy-status:visible")).not.toContainText(
+    "Copied",
+  );
 });
 
 test("release lookup failure does not invent a version", async ({ page }) => {

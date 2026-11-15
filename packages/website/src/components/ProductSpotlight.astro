@@ -4,13 +4,13 @@ import ChoiceItem from "./ui/ChoiceItem.astro";
 import NavigationIcon from "./NavigationIcon.astro";
 const base = import.meta.env.BASE_URL;
 const views = [
-  { id: "rule", label: "Rule", title: "Keep handlers idempotent", description: "Edit an outdated convention directly in Knowledge.", note: "Review the source and recorded revisions before relying on an entry.", action: "Inspect the rule" },
+  { id: "rule", label: "Rule", title: "Keep handlers idempotent", description: "Read the saved rule and correct it when the project changes.", note: "Review the source and recorded revisions before relying on an entry.", action: "Inspect the rule" },
   { id: "source", label: "Source", title: "Follow the source session", note: "The source session is available; exact-message attribution is not recorded.", action: "Inspect the source" },
   { id: "history", label: "History", title: "See which version is current", note: "Two versions are recorded in this sample.", action: "Inspect the history" },
 ] as const;
 ---
 <section class="section product-spotlight" id="product" aria-labelledby="product-title">
-  <div class="spotlight-heading"><div><p class="eyebrow">Inside the local app</p><h2 id="product-title">Memory you can inspect.</h2></div><a class="text-link icon-link" href={`${base}tour/?view=knowledge#product`}><span class="link-label">Explore the app</span> <span aria-hidden="true">↗</span></a></div>
+  <div class="spotlight-heading"><div><p class="eyebrow">Inside the local app</p><h2 id="product-title">Check what your agent will rely on.</h2></div><a class="text-link icon-link" href={`${base}tour/?view=knowledge#product`}><span class="link-label">View app tour</span> <span aria-hidden="true">↗</span></a></div>
   <div class="spotlight-workbench">
     <div class="workbench-bar"><span class="workbench-project"><NavigationIcon name="app" />webhook-service <span>/ Knowledge</span></span><ChoiceGroup class="guide-segments spotlight-choices" legend="Explore project memory" hideLegend>{views.map((view,index)=><ChoiceItem name="product-preview" value={view.id} checked={index===0} label={view.label} icon={view.id === "rule" ? "bookmark" : view.id === "source" ? "chat" : "history"} controls={`preview-${view.id}`} />)}</ChoiceGroup></div>
     <div class="workbench-body">
@@ -64,5 +64,5 @@ bindUrlChoice(".spotlight-choices", "preview", ["rule", "source", "history"]);
   .workbench-caption { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 16px;padding:4px 16px;border-top:1px solid var(--line);font-size:.75rem;color:var(--muted); }
   .workbench-caption a { min-height:44px;align-content:center; }
   @media(max-width:900px) { .workbench-body { grid-template-columns:1.3fr 1fr; }.spotlight-explanations { padding:20px; }.workbench-project > span { display:none; } }
-  @media(max-width:640px) { .spotlight-heading { display:block;margin-bottom:8px; }.spotlight-heading > a { margin-top:8px; }.workbench-project { display:none; }.workbench-bar { padding:8px 10px; }.spotlight-choices { width:100%; }.workbench-body { grid-template-columns:1fr; }.spotlight-image { height:220px; }.spotlight-image img { width:100%;min-width:0;max-width:100%;height:auto;transform:none; }.spotlight-image > a { align-content:center; }.spotlight-explanations { border-inline-start:0;border-top:1px solid var(--line);padding:20px; }.workbench-caption { padding:10px 16px 4px; }.workbench-caption > span { font-size:.6875rem; } }
+  @media(max-width:640px) { .spotlight-heading { display:block;margin-bottom:8px; }.spotlight-heading > a { margin-top:8px; }.workbench-project { display:none; }.workbench-bar { padding:8px 10px; }.spotlight-choices { width:100%; }.workbench-body { grid-template-columns:1fr; }.spotlight-image { height:180px; }.spotlight-image img { width:100%;min-width:0;max-width:100%;height:auto;transform:none; }.spotlight-image > a { align-content:center; }.spotlight-explanations { border-inline-start:0;border-top:1px solid var(--line);padding:16px; }.workbench-caption { padding:10px 16px 4px; }.workbench-caption > span { font-size:.6875rem; } }
 </style>

@@ -7,13 +7,10 @@ test("each primary navigation identifies one current section", async ({
   await page.goto("/docs/install/");
   for (const nav of await page.locator(".primary-nav").all()) {
     await expect(nav.locator("a[aria-current]")).toHaveCount(1);
-    await expect(
-      nav.getByRole("link", {
-        name: "Documentation",
-        exact: false,
-        includeHidden: true,
-      }),
-    ).toHaveAttribute("aria-current", "true");
+    await expect(nav.locator('a[href="/docs/"][aria-current]')).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
   }
 });
 

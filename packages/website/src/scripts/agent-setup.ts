@@ -1,7 +1,7 @@
 import { SETUP_AGENTS } from "../lib/agent-setup";
 import { bindUrlChoice } from "./url-choice";
 bindUrlChoice(
-  ".agent-setup",
+  ".agent-setup > .setup-picker",
   "agent",
   SETUP_AGENTS.map((agent) => agent.id),
 );
@@ -16,7 +16,7 @@ for (const setup of document.querySelectorAll<HTMLElement>(".agent-setup")) {
     });
 }
 async function copy(button: HTMLButtonElement) {
-  const panel = button.closest<HTMLElement>(".setup-panel"),
+  const panel = button.closest<HTMLElement>(".ui-command"),
     status = panel?.querySelector<HTMLElement>(".setup-copy-status"),
     code = panel?.querySelector("code")?.textContent;
   if (!status || !code || button.disabled) return;

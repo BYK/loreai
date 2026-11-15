@@ -47,7 +47,7 @@
 .quest-journal:has([data-journal-choice="chapter"][value="knowledge"]:checked) .journal-progress span:nth-child(-n+2),
 .quest-journal:has([data-journal-choice="chapter"][value="recall"]:checked) .journal-progress span { background:var(--accent); }
 .journal-pages { min-width:0;padding:1.5rem; }
-.journal-chapter { display:none;flex-direction:column;min-height:390px;max-width:72ch;margin-inline:auto; }
+.journal-chapter { display:none;flex-direction:column;min-height:280px;max-width:72ch;margin-inline:auto; }
 .quest-journal:has([data-journal-choice="chapter"][value="conversation"]:checked) [data-journal-chapter="conversation"],
 .quest-journal:has([data-journal-choice="chapter"][value="knowledge"]:checked) [data-journal-chapter="knowledge"],
 .quest-journal:has([data-journal-choice="chapter"][value="recall"]:checked) [data-journal-chapter="recall"] { display:flex; }

@@ -21,7 +21,11 @@ export function buildReferenceDirectory(
       ? []
       : headings
           .slice(start + 1)
-          .filter((h) => h.depth === 2 || h.depth === 3)
+          .filter(
+            (h) =>
+              (h.depth === 2 || h.depth === 3) &&
+              !h.slug.startsWith("field-heading-"),
+          )
           .map((h) => ({
             label: h.text.replaceAll("`", ""),
             slug: h.slug,
@@ -55,13 +59,12 @@ export function buildReferenceDirectory(
       kind === "environment" || field.startsWith(section.label + ".")
         ? field
         : section.label + "." + field;
-    if (!settings.has(label))
-      settings.set(label, {
-        label,
-        slug: section.slug,
-        group: section.label,
-        description: plainDescription(line.split(/(?<!\\)\|/).at(-2) ?? ""),
-      });
+    settings.set(label, {
+      label,
+      slug: `setting-${label}`,
+      group: section.label,
+      description: plainDescription(line.split(/(?<!\\)\|/).at(-2) ?? ""),
+    });
   }
   return { categories, settings: [...settings.values()] };
 }

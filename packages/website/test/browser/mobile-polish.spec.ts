@@ -52,7 +52,7 @@ test("phone copy actions stay alongside the command and setup has one verificati
 }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await page.goto("/docs/install/#4-verify-the-connection");
-  const row = page.locator(".install-command");
+  const row = page.locator(".install-command:visible");
   const code = (await row.locator("pre").boundingBox())!;
   const button = (await row.getByRole("button").boundingBox())!;
   expect(Math.abs(button.y - code.y)).toBeLessThan(20);

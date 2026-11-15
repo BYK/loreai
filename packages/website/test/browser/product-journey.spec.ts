@@ -79,7 +79,7 @@ test("product tour shows the actual app and an accessible next step", async ({
   ).toHaveCount(0);
   await page
     .locator("#product")
-    .getByRole("link", { name: "Explore the app", exact: true })
+    .getByRole("link", { name: "View app tour", exact: true })
     .click();
   await expect(page.locator("h1")).toContainText(
     "See what your agent remembers",
@@ -173,18 +173,20 @@ test("documentation copy actions recover from a denied clipboard", async ({
   await setup
     .getByRole("button", { name: "Copy installation command", exact: true })
     .click();
-  await expect(setup.locator(".copy-status")).toContainText("Select and copy");
+  await expect(setup.locator(".copy-status:visible")).toContainText(
+    "Select and copy",
+  );
   const panel = setup.locator("[data-setup-panel=codex-desktop]");
   await panel
     .getByRole("button", {
-      name: "Copy Codex Desktop connection command",
+      name: "Copy Codex Desktop configuration command",
       exact: true,
     })
     .click();
-  await expect(panel.locator(".setup-copy-status")).toContainText(
+  await expect(panel.locator(".setup-copy-status").first()).toContainText(
     "Select and copy",
   );
-  await expect(panel.locator("pre")).toContainText("lore setup codex");
+  await expect(panel.locator("pre").first()).toContainText("lore setup codex");
 });
 
 test("documentation header search and navigation never overlap at intermediate widths", async ({

@@ -18,13 +18,16 @@ await test("nested names retain their real parent anchors and ignore fenced exam
   );
   assert.ok(
     settings.some(
-      (e) => e.label === "knowledge.enabled" && e.slug === "knowledge",
+      (e) =>
+        e.label === "knowledge.enabled" &&
+        e.slug === "setting-knowledge.enabled",
     ),
   );
   assert.ok(
     settings.some(
       (e) =>
-        e.label === "search.embeddings.model" && e.slug === "searchembeddings",
+        e.label === "search.embeddings.model" &&
+        e.slug === "setting-search.embeddings.model",
     ),
   );
   assert.ok(!settings.some((e) => e.label.includes("leaked")));
@@ -84,7 +87,8 @@ await test("every generated setting and variable row is discoverable", () => {
       );
     for (const entry of settings)
       assert.ok(
-        headings.some((h) => h.slug === entry.slug),
+        headings.some((h) => h.slug === entry.slug) ||
+          entry.slug === `setting-${entry.label}`,
         entry.label,
       );
     assert.equal(new Set(settings.map((e) => e.label)).size, settings.length);
@@ -104,8 +108,8 @@ await test("environment metadata in the first table cell does not hide a variabl
       .filter((e) => e.label.startsWith("LORE_"))
       .map((e) => ({ label: e.label, slug: e.slug })),
     [
-      { label: "LORE_LISTEN_PORT", slug: "startup" },
-      { label: "LORE_WORKER_API_KEY", slug: "startup" },
+      { label: "LORE_LISTEN_PORT", slug: "setting-LORE_LISTEN_PORT" },
+      { label: "LORE_WORKER_API_KEY", slug: "setting-LORE_WORKER_API_KEY" },
     ],
   );
 });
@@ -142,5 +146,49 @@ await test("description formatting keeps code identifiers and escaped pipes inta
   assert.equal(
     settings.find((e) => e.label === "LORE_TEST").description,
     "Keep SQLITE_BUSY and A|B visible.",
+  );
+});
+
+await test("rendered field headings do not become categories or shadow exact record links", () => {
+  const { settings, categories } = buildReferenceDirectory(
+    "## Field reference\n## `curator`\n| `maxEntries` | number | 200 | min 10 | Maximum entries |",
+    [
+      { depth: 2, text: "Field reference", slug: "field-reference" },
+      { depth: 2, text: "curator", slug: "curator" },
+      {
+        depth: 3,
+        text: "curator.maxEntries",
+        slug: "field-heading-curator.maxEntries",
+      },
+    ],
+    "configuration",
+  );
+  assert.deepEqual(
+    categories.map((e) => e.label),
+    ["curator"],
+  );
+  assert.equal(
+    settings.find((e) => e.label === "curator.maxEntries").slug,
+    "setting-curator.maxEntries",
+  );
+});
+
+await test("a parent object field takes the exact record link when its name also has a category", () => {
+  const { settings, categories } = buildReferenceDirectory(
+    "## Field reference\n## `search`\n| `embeddings` | object | {} | | Vector provider |\n### `search.embeddings`\n| `enabled` | boolean | true | | Enable vectors |",
+    [
+      { depth: 2, text: "Field reference", slug: "field-reference" },
+      { depth: 2, text: "search", slug: "search" },
+      { depth: 3, text: "search.embeddings", slug: "searchembeddings" },
+    ],
+    "configuration",
+  );
+  assert.equal(
+    categories.find((e) => e.label === "search.embeddings").slug,
+    "searchembeddings",
+  );
+  assert.equal(
+    settings.find((e) => e.label === "search.embeddings").slug,
+    "setting-search.embeddings",
   );
 });

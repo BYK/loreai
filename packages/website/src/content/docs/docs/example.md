@@ -45,6 +45,29 @@ event-ID check? Does it cite or recover the original reasoning? The unrelated lu
 plan should not drive this implementation. Check the actual behavior rather than
 assuming a recorded memory was supplied or followed.
 
+## A reproducible engine check
+
+The repository includes `packages/core/test/website-workflow-evidence.test.ts`.
+From a development checkout with dependencies installed, run:
+
+```bash
+pnpm exec vitest run packages/core/test/website-workflow-evidence.test.ts
+```
+
+This controlled check uses an isolated test database and two different session IDs:
+
+| Stage | Input or action | Observed result |
+| --- | --- | --- |
+| First session | Record the webhook decision and a temporary port in a conversation | The original conversation remains retrievable. |
+| Human review | Create the rule, then correct its incomplete wording to include reusing the duplicate-event guard | Version history retains both the initial text and the corrected current revision. |
+| Later session | Search for `webhook duplicate event guard` within the same project | Recall returns the corrected rule and the earlier conversation. The temporary port is absent from the knowledge entry. |
+
+The check passed on 16 November 2026. It calls the real storage, versioning and
+recall functions; knowledge is deliberately created and corrected through the API,
+and embeddings are disabled. It does **not** run LLM curation, connect a coding
+client, measure savings, or establish that an agent follows the rule in generated
+code. Those remain separate observations in the hands-on workflow above.
+
 ## What this proves
 
 A recorded conversation, a reviewable knowledge entry, and successful retrieval

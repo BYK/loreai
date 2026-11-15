@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { themeButton } from "../helpers/theme";
 
-test("the story begins with the conversation and shows product proof first", async ({
+test("the story leads from the conversation into the interactive journal, then app proof", async ({
   page,
 }) => {
   await page.goto("/");
@@ -12,7 +12,7 @@ test("the story begins with the conversation and shows product proof first", asy
     product: document.querySelector("#product")!.getBoundingClientRect().top,
     journal: document.querySelector("#journal")!.getBoundingClientRect().top,
   }));
-  expect(positions.product).toBeLessThan(positions.journal);
+  expect(positions.journal).toBeLessThan(positions.product);
   await expect(page.locator(".hero-copy")).toContainText(
     "What your next session remembers",
   );

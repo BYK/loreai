@@ -255,3 +255,12 @@ and retained legacy verification/telemetry anchors. Verification stays a manual
 observation; copy success does not certify a connection. The journal keeps its
 three native stages, with temporary test details available in a disclosure and
 the next-session outcome before the task choices.
+
+## Reference rendering
+
+`integrations/reference-search.mjs` presents generator-owned configuration and
+environment tables as field records with exact `setting-<full identifier>` anchors.
+`reference-directory.ts` uses those same IDs. Existing category anchors stay intact.
+After changing a Markdown integration locally, run `pnpm exec astro sync --force`
+in this package before rebuilding: Astro's content cache otherwise retains the old
+rendered reference even though component changes are rebuilt.

@@ -1,4 +1,20 @@
 ---
 import CommandBlock from "./ui/CommandBlock.astro";
+import ChoiceGroup from "./ui/ChoiceGroup.astro";
+import ChoiceItem from "./ui/ChoiceItem.astro";
 ---
-<CommandBlock command="curl -fsSL https://withlore.ai/install | bash" kind="install" copyLabel="Copy installation command" hint="Copy, then run in your terminal." />
+<div class="platform-install">
+  <ChoiceGroup class="guide-segments" legend="Where will you run Lore?">
+    <ChoiceItem name="install-platform" value="unix" checked label="macOS / Linux" controls="install-unix" />
+    <ChoiceItem name="install-platform" value="windows" label="Windows" controls="install-windows" />
+  </ChoiceGroup>
+  <div data-platform="unix" id="install-unix"><p class="small">Run in a terminal with Bash and curl. Downloads the standalone executable; Node.js is not required for this installer.</p><CommandBlock command="curl -fsSL https://withlore.ai/install | bash" kind="install" copyLabel="Copy installation command" hint="Copy, then run in your terminal." /></div>
+  <div data-platform="windows" id="install-windows"><p class="small">In PowerShell or Command Prompt, install with npm. Requires Node.js 22.16+ in the 22.x line, or 24+; Node.js 23 is excluded.</p><CommandBlock command="npm install -g @loreai/gateway" kind="install" copyLabel="Copy Windows installation command" hint="After installation, open a new terminal and run lore --version." /></div>
+</div>
+<style is:global>
+.platform-install { margin-block:1rem; }
+.platform-install [data-platform] { display:none; }
+.platform-install:has(input[value="unix"]:checked) [data-platform="unix"],.platform-install:has(input[value="windows"]:checked) [data-platform="windows"] { display:block; }
+.platform-install .guide-segments > label { margin:0; }
+.platform-install .guide-segments { margin-bottom:.75rem; }
+</style>

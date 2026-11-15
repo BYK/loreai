@@ -4,7 +4,8 @@ description: Choose your coding agent, install Lore, connect a session, and veri
 ---
 import AgentSetup from '../../../components/AgentSetup.astro';
 
-Connect the coding agent you already use. Have it installed and signed in before
+Choose the operating system of the machine where you code, then your coding agent.
+Have the agent installed and signed in before
 you begin; the hosted installer installs **Lore**, not your coding agent.
 
 <span id="1-choose-your-agent" class="legacy-setup-anchor" aria-hidden="true"></span>
@@ -46,7 +47,9 @@ Preview the plan with `lore uninstall --dry-run`.
 
 ### Other installation options
 
-With a supported Node.js runtime, run Lore through npm:
+The Windows path above installs the `lore` command with npm and also works on
+macOS and Linux with a supported Node.js runtime. To try the default launch flow
+without a global install:
 
 ```bash
 npx @loreai/gateway

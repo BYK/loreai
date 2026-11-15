@@ -5,6 +5,7 @@
 @import "../../public/journal.css";
 @import "../../public/page-field-guide.css";
 @import "../../public/patterns.css";
+@import "../../public/diagrams.css";
 
 :root {
   --sl-font: "DM Sans Variable", "DM Sans", sans-serif;
@@ -170,3 +171,18 @@
 .pagination-links a { min-height:64px;padding:12px 16px;gap:12px;font-size:.75rem;line-height:1.5;border-radius:8px; }
 .pagination-links .link-title { font-size:1rem;line-height:1.5;font-weight:500; }
 .pagination-links svg { width:18px;height:18px; }
+
+/* One generated setting per record: identifiers never compete with five narrow
+   table columns, and an exact link keeps its metadata and explanation together. */
+.reference-fields { margin-block:1rem 2rem; }
+.sl-markdown-content .reference-field { padding:1.25rem 0;border-top:1px solid var(--line);scroll-margin-top:1rem; }
+.sl-markdown-content .reference-field .reference-field-heading { margin:0 0 .75rem;font-size:1rem;line-height:1.5; }
+.sl-markdown-content .reference-field .reference-field-heading a { color:var(--heading);text-decoration:none; }
+.sl-markdown-content .reference-field .reference-field-heading code { overflow-wrap:anywhere;word-break:normal;background:transparent;padding:0; }
+.sl-markdown-content .reference-metadata { display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;margin:0; }
+.sl-markdown-content .reference-metadata > div { margin:0;min-width:0; }
+.sl-markdown-content .reference-metadata :is(dt,dd) { display:inline;margin:0;font-size:.8125rem; }
+.sl-markdown-content .reference-metadata dt { color:var(--muted);margin-inline-end:.5rem; }
+.sl-markdown-content .reference-defaults { color:var(--muted);font-size:.8125rem;margin-block:0 .75rem; }
+.sl-markdown-content .reference-description { color:var(--text);font-size:1rem;line-height:1.7;margin:0; }
+.sl-markdown-content .reference-field:target { padding:1.25rem;border:1px solid var(--heading);border-radius:var(--radius-control);background:var(--journal-page); }

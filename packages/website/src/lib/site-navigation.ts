@@ -7,7 +7,7 @@ export function navigationGroups(base: string) {
       heading: "Meet your project memory",
       links: [
         {
-          label: "Explore the app",
+          label: "View app tour",
           href: `${base}tour/?view=knowledge#product`,
           section: `${base}tour/`,
           description: "See saved sessions, rules and their sources.",

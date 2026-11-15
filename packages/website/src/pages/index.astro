@@ -11,15 +11,15 @@ const base = import.meta.env.BASE_URL;
 ---
 <PublicLayout title="Lore.AI — Project memory for coding agents" description="Keep project decisions available across coding sessions. Lore manages context and curates reviewable knowledge for the coding agent you already use." bodyClass="home-page">
   <section class="home-hero section" id="problem">
-    <div class="hero-copy"><div class="hero-overview"><div class="hero-heading"><p class="eyebrow">Memory for coding agents</p><h1>Keep project decisions <em>across coding sessions.</em></h1></div><div class="hero-details"><p class="hero-desc">Connect Lore to the coding agent you already use. Keep searchable conversations and reviewable project rules, so you can pick up where you left off.</p>
-      <div class="hero-actions"><a class="button button-primary" href={`${base}docs/install/`}>Install Lore <span aria-hidden="true">→</span></a><a class="text-link icon-link" href="#product"><span class="link-label">See the app</span> <span aria-hidden="true">↓</span></a></div>
+    <div class="hero-copy"><div class="hero-overview"><div class="hero-heading"><p class="eyebrow">Memory for coding agents</p><h1>Keep project decisions <em>across coding sessions.</em></h1></div><div class="hero-details"><p class="hero-desc">Your agent starts a new session. Your project decisions shouldn’t start over. Lore keeps searchable history and rules you can review.</p>
+      <div class="hero-actions"><a class="button button-primary" href={`${base}docs/install/`}>Install Lore <span aria-hidden="true">→</span></a><a class="text-link icon-link" href="#product"><span class="link-label">See inside Lore</span> <span aria-hidden="true">↓</span></a></div>
       <div class="compatibility"><span>Works with</span><ul role="list">{([{id:"claude-code",name:"Claude Code"},{id:"codex",name:"Codex"},{id:"opencode",name:"OpenCode"},{id:"pi",name:"Pi"},{id:"hermes",name:"Hermes"}] as const).map(agent=><li><AgentIcon agent={agent.id} />{agent.name}</li>)}</ul></div>
     </div></div><ConversationPreview /></div>
   </section>
-  <ProductSpotlight />
   <section class="section home-journal"><QuestJournal /></section>
+  <ProductSpotlight />
   <section class="section home-workflow" id="how" aria-labelledby="workflow-title"><span id="unified" class="fragment-anchor" aria-hidden="true"></span><span id="everyday" class="fragment-anchor" aria-hidden="true"></span>
-    <div class="section-heading"><p class="eyebrow">In your everyday work</p><h2 id="workflow-title">Less explaining the same things again.</h2></div>
+    <div class="section-heading"><p class="eyebrow">In your everyday work</p><h2 id="workflow-title">Your next step, when you need it.</h2></div>
     <nav class="workflow-links" aria-label="Use your project memory">
       <a href={`${base}docs/using-lore/#find-an-earlier-decision`}><JournalArt name="decision" size={44} /><span><strong>Find an earlier decision</strong><small>Search recorded work instead of reconstructing it.</small></span><span aria-hidden="true">↗</span></a>
       <a href={`${base}docs/using-lore/#review-knowledge`}><JournalArt name="pattern" size={44} /><span><strong>Correct a project rule</strong><small>Review its source, then update what the agent keeps.</small></span><span aria-hidden="true">↗</span></a>

@@ -7,7 +7,7 @@ const chapterIcons = { conversation:"chat",knowledge:"bookmark",recall:"compass"
 const base = import.meta.env.BASE_URL;
 ---
 <section class="quest-journal" id="journal" aria-label="The quest journal">
-  <div class="journal-intro"><div><p class="eyebrow field-marker">The quest journal</p><h2>One decision. Remembered next session.</h2></div><p>A fictional project, with a rule you can follow from conversation to reuse.</p></div>
+  <div class="journal-intro"><div><p class="eyebrow field-marker">The quest journal</p><h2>One decision. Remembered next session.</h2></div><p>Try the selection process: conversation → saved rule → a later task. A fictional project.</p></div>
   <div class="journal-frame">
     <aside class="journal-spine">
       <fieldset class="journal-chapters"><legend>Follow a project decision</legend>{chapters.map(chapter => <label><input type="radio" name="journal-chapter" data-journal-choice="chapter" value={chapter.id} checked={chapter.id === "conversation"} aria-label={chapter.name} aria-controls={`journal-${chapter.id}`} /><span class="journal-step" aria-hidden="true"><NavigationIcon name={chapterIcons[chapter.id]} /></span><span><strong>{chapter.name}</strong></span></label>)}</fieldset>
@@ -19,7 +19,7 @@ const base = import.meta.env.BASE_URL;
       <div class="journal-pages">
         <section class="journal-chapter" id="journal-conversation" data-journal-chapter="conversation">
           <h3 tabindex="-1">You explain a project decision.</h3>
-          <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Keep webhook handlers idempotent.</mark> Reuse the event-id check when the provider delivers an event twice.”</p></div>
+          <div class="journal-message"><span>You · Webhook delivery</span><p>“<mark>Check whether an event was already handled before applying it.</mark> Reuse our event-id check when the provider delivers it twice.”</p></div>
           <AccordionItem class="journal-transient" title="What stays out of project knowledge"><p>“The local server is on port 4330 for this test. Restart it after changing the fixture.”</p><p class="journal-note">A temporary test port is not a project convention.</p></AccordionItem>
           <div class="journal-page-end"><button type="button" class="button button-primary" data-journal-next="knowledge" hidden>See saved knowledge <span aria-hidden="true">→</span></button><span class="journal-folio" aria-hidden="true">01 / 03</span></div>
         </section>
@@ -41,7 +41,7 @@ const base = import.meta.env.BASE_URL;
         </section>
       </div>
       <AccordionItem class="journal-inventory" title="Explore saved knowledge" meta="3 example entries"><fieldset><legend class="visually-hidden">Knowledge inventory</legend><p class="journal-inventory-hint">Choose an entry to inspect its rule and source.</p><div class="journal-cards">{entries.map((entry,index) => <label class="journal-card" data-journal-card={entry.id}><input type="radio" name="journal-entry" data-journal-choice="entry" value={entry.id} checked={index === 0} aria-label={`Inspect ${entry.name}`} aria-controls={`journal-entry-${entry.id}`} /><JournalArt name={entry.art} size={52} /><span class="journal-card-copy"><span class="journal-category">{entry.category}</span><strong>{entry.title}</strong><small class="journal-card-tag">#{entry.tag}</small><small class="journal-relevant">Included for this task</small><small class="journal-stored">Kept for another task</small></span></label>)}</div></fieldset></AccordionItem>
-      <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`} class="icon-link"><span class="link-label">Try the sample workflow</span> <span aria-hidden="true">→</span></a></footer>
+      <footer class="journal-book-footer"><span>Curated knowledge is selected by relevance, scope, confidence and context budget.</span><a href={`${base}docs/example/`} class="icon-link"><span class="link-label">Run the two-session check</span> <span aria-hidden="true">→</span></a></footer>
     </div>
   </div>
   <p class="visually-hidden" data-journal-status role="status"></p>
