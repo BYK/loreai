@@ -10,6 +10,7 @@ for (const finder of document.querySelectorAll<HTMLElement>(
   const results = finder.querySelector<HTMLElement>("[data-finder-results]");
   const directory = finder.querySelector<HTMLElement>(".reference-directory");
   const more = finder.querySelector<HTMLButtonElement>("[data-finder-more]");
+  const recovery = finder.querySelector<HTMLElement>("[data-finder-recovery]");
   let expanded = false;
   const status = finder.querySelector<HTMLElement>("[data-finder-status]");
   if (!search || !field || !clear || !results || !directory || !status || !more)
@@ -51,6 +52,7 @@ for (const finder of document.querySelectorAll<HTMLElement>(
     more.setAttribute("aria-controls", "setting-results");
     results.hidden = !query || count === 0;
     directory.hidden = Boolean(query);
+    if (recovery) recovery.hidden = !query || count > 0;
     clear.hidden = !search.value;
     status.textContent = !query
       ? ""
@@ -92,5 +94,71 @@ for (const finder of document.querySelectorAll<HTMLElement>(
     update();
     search.focus();
   });
+  for (const button of finder.querySelectorAll<HTMLButtonElement>(
+    "[data-finder-suggestion], [data-finder-reset]",
+  )) {
+    button.addEventListener("click", () => {
+      search.value = button.dataset.finderSuggestion ?? "";
+      update();
+      search.focus();
+    });
+  }
   window.addEventListener("popstate", restore);
+}
+
+// Apply the same safe copy behavior to result cards, full field records and examples.
+for (const actions of document.querySelectorAll<HTMLElement>(
+  "[data-reference-copy]",
+)) {
+  const statusElement = actions.querySelector<HTMLElement>('[role="status"]');
+  const fallbackElement = actions.querySelector<HTMLTextAreaElement>(
+    ".reference-copy-fallback",
+  );
+  if (!statusElement || !fallbackElement) continue;
+  const status = statusElement;
+  const fallback = fallbackElement;
+  let latest = 0;
+  actions.hidden = false;
+  for (const button of actions.querySelectorAll<HTMLButtonElement>(
+    "[data-copy-kind]",
+  )) {
+    button.addEventListener("click", () => {
+      void copy();
+      async function copy() {
+        const request = ++latest;
+        let value = actions.dataset.copyValue ?? "";
+        if (button.dataset.copyKind === "link") {
+          // Share the actual field with the deployment prefix, without the filter query.
+          const url = new URL(location.pathname, location.origin);
+          url.hash = actions.dataset.copySlug ?? "";
+          value = url.href;
+        }
+        if (!value) return;
+        fallback.hidden = true;
+        status.textContent = "Copying…";
+        try {
+          await navigator.clipboard.writeText(value);
+          if (request !== latest) return;
+          status.textContent =
+            button.dataset.copyKind === "link"
+              ? "Setting link copied."
+              : "Copied.";
+        } catch {
+          if (request !== latest) return;
+          fallback.value = value;
+          fallback.hidden = false;
+          status.textContent =
+            "Clipboard unavailable. Select and copy the value below.";
+          // A delayed denial must not steal focus after the user moves on.
+          if (
+            document.activeElement === button &&
+            actions.getClientRects().length
+          ) {
+            fallback.focus();
+            fallback.select();
+          }
+        }
+      }
+    });
+  }
 }

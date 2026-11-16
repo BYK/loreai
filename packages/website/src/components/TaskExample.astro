@@ -1,0 +1,35 @@
+---
+interface Props { task: "session-search" | "knowledge-edit" | "source-history"; }
+const { task } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const examples = {
+  "session-search": {
+    original:"sessions", crop:"task-session-search", width:640, height:210,
+    alt:"Actual Lore Sessions list showing the title or ID search field above a sample webhook conversation",
+    action:"In Sessions, enter part of a title or ID in Search sessions and submit. In this sample, try duplicate webhook.",
+    result:"The list filters to matching sessions. Open a result to read the conversation. For message contents, use the project memory search instead; this list searches titles and IDs.",
+  },
+  "knowledge-edit": {
+    original:"knowledge", crop:"task-knowledge-edit", width:390, height:355,
+    alt:"Actual Lore knowledge entry with its title, recorded confidence, Edit control and webhook rule",
+    action:"Open a knowledge entry and choose Edit. Correct its title or content, then save.",
+    result:"A save receipt identifies the new version and file effects. Read that receipt, then review the resulting .lore.md diff before committing. This capture shows where Edit is; it does not submit a change.",
+  },
+  "source-history": {
+    original:"knowledge-detail", crop:"proof-source-mobile", width:340, height:205,
+    alt:"Actual Lore Source and history details showing a sample source session with exact message not recorded",
+    action:"Expand Source & history. Open the source session to check the conversation, then inspect History to compare the recorded versions.",
+    result:"You can distinguish the source evidence from later revisions. The sample has a source session but no exact-message attribution; do not assume the link identifies a particular message. Restoring a prior version creates a new version.",
+  },
+} as const;
+const example = examples[task];
+---
+<figure class="task-example" data-task-example={task}>
+  <div class="task-example-action"><p><strong>Try it:</strong> {example.action}</p></div>
+  {(["light", "dark"] as const).map(theme => <a class={`task-shot-${theme}`} href={`${base}product-tour/${example.original}-${theme}.png`} data-media-viewer target="_blank" rel="noopener noreferrer" aria-label={`Enlarge ${task === "session-search" ? "session search" : task === "knowledge-edit" ? "knowledge editing" : "source and history"} app screenshot`}><img src={`${base}product-tour/${example.crop}-${theme}.png`} srcset={`${base}product-tour/${example.crop}-${theme}.png 2x`} width={example.width} height={example.height} style={`max-width:${example.width}px`} loading="lazy" decoding="async" alt={example.alt} />{task === "source-history" && <img class="task-history-crop" src={`${base}product-tour/proof-history-mobile-${theme}.png`} srcset={`${base}product-tour/proof-history-mobile-${theme}.png 2x`} width="678" height="177" style="max-width:678px" loading="lazy" decoding="async" alt="Actual Lore History list showing the current v2 and superseded v1 of the sample knowledge entry" />}</a>)}
+  <figcaption><p><strong>Expected result:</strong> {example.result}</p><p class="task-example-note">Read-only example from the actual Lore app with sample data. Select the image to enlarge the original capture.</p></figcaption>
+</figure>
+<style>
+.task-example { margin:1.5rem 0;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);overflow:hidden; }.task-example-action,figcaption { padding:.875rem 1rem; }.task-example p { margin:0;font-size:.875rem;line-height:1.7; }.task-example a { display:block;border-block:1px solid var(--line); }.task-example img { display:block;width:100%;height:auto;margin-inline:auto; }.task-history-crop { border-top:1px solid var(--line); }.task-example a:focus-visible { outline-offset:-4px; }.task-example .task-example-note { margin-top:.75rem;font-size:.75rem;color:var(--muted); }.task-shot-dark { display:none!important; }:global(:root[data-theme="dark"]) .task-shot-light { display:none!important; }:global(:root[data-theme="dark"]) .task-shot-dark { display:block!important; }
+@media(prefers-color-scheme:dark) { :global(:root:not([data-theme="light"])) .task-shot-light { display:none!important; }:global(:root:not([data-theme="light"])) .task-shot-dark { display:block!important; } }
+</style>

@@ -46,8 +46,8 @@
 .primary-nav-mobile ul { display:block;list-style:none;margin:0;padding:0; }
 .primary-nav-mobile a:not(.nav-start) { display:flex;align-items:center;min-height:44px;width:100%;padding:8px 12px;border-radius:9px;color:var(--text);font-size:.875rem;text-decoration:none; }
 .primary-nav-mobile a[aria-current] { text-decoration:underline;text-decoration-color:var(--accent);text-decoration-thickness:2px; }
-.top-nav .nav-mobile { position:static; }
-.top-nav .nav-mobile-panel { inset-inline:0;top:calc(100% + 10px);width:auto;max-height:calc(100dvh - 100px);padding:14px;border-radius:18px; }
+.field-guide-header .nav-mobile { position:static; }
+.field-guide-header .nav-mobile-panel { inset-inline:0;top:calc(100% + 10px);width:auto;max-height:calc(100dvh - 100px);padding:14px;border-radius:18px; }
 @media (hover:hover) and (pointer:fine) {
   .guide-trigger:hover,.guide-navigation a.guide-destination:hover,.primary-nav-mobile a:not(.nav-start):hover { background:var(--chrome);color:var(--heading); }
   .guide-navigation a.guide-feature:hover { border-color:var(--muted); }

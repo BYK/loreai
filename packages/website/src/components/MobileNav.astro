@@ -10,3 +10,11 @@ import PrimaryLinks from "./PrimaryLinks.astro";
     <PrimaryLinks />
   </div>
 </details>
+
+<style>
+  .nav-mobile { display:none;position:relative; }
+  .nav-burger { display:flex;align-items:center;justify-content:center;width:44px;height:44px;list-style:none;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);color:var(--text);cursor:pointer; }
+  .nav-burger::-webkit-details-marker { display:none; }
+  .nav-mobile-panel { position:absolute;top:calc(100% + .5rem);right:0;width:min(260px,calc(100vw - 2rem));max-height:calc(100dvh - 5rem);overflow-y:auto;padding:.75rem;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--shadow-lifted); }
+  @media(max-width:900px) { .nav-mobile { display:block; } }
+</style>

@@ -1,0 +1,11 @@
+---
+interface Props { current: "Install" | "Connect" | "Verify"; }
+const { current } = Astro.props;
+---
+<ol class="setup-progress" aria-label="Setup stages">
+  {(["Install", "Connect", "Verify"] as const).map((step, index) => <li aria-current={current === step ? "step" : undefined}><span aria-hidden="true">{index + 1}</span>{step}</li>)}
+</ol>
+<style>
+.setup-progress { display:flex;flex-wrap:wrap;gap:.5rem 1rem;list-style:none;padding:0;margin:0 0 1.25rem;font-size:.8125rem;color:var(--muted); }
+.setup-progress li { display:flex;align-items:center;gap:.375rem;margin:0; }.setup-progress li[aria-current] { color:var(--heading);font-weight:600; }.setup-progress span { display:inline-grid;place-items:center;border:1px solid var(--line);border-radius:50%;width:1.5rem;height:1.5rem; }
+</style>

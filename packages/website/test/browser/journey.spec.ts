@@ -118,7 +118,10 @@ test("installation guides lead through connection and verification before refere
 }) => {
   await page.goto("/docs/install/");
   await expect(
-    page.getByRole("heading", { name: "Connect your agent", exact: true }),
+    page.getByRole("heading", {
+      name: "Install and connect your agent",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", {

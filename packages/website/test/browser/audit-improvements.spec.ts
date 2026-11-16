@@ -36,7 +36,7 @@ test("Knowledge preview opens the matching tour and tour choices survive history
   page,
 }) => {
   await page.goto("/#product");
-  await page.locator(".spotlight-image .tour-image-link:visible").click();
+  await page.locator('[data-preview-panel="rule"] a').click();
   await expect(page).toHaveURL(/tour\/\?view=knowledge&inspect=rule#product$/);
   // The URL changes at navigation commit, before the tour enhancement loads.
   // This case exercises enhanced history; delayed native input has its own test.

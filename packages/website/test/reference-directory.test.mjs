@@ -192,3 +192,38 @@ await test("a parent object field takes the exact record link when its name also
     "setting-search.embeddings",
   );
 });
+
+await test("result metadata preserves literal types, defaults and environment default absence", () => {
+  const heading = (text, slug) => ({ depth: 2, text, slug });
+  const configuration = buildReferenceDirectory(
+    "## Field reference\n## `search`\n| `mode` | `fts` \\| `hybrid` | `hybrid` | | Search mode |",
+    [
+      heading("Field reference", "field-reference"),
+      heading("search", "search"),
+    ],
+    "configuration",
+  );
+  const field = configuration.settings.find(
+    (entry) => entry.label === "search.mode",
+  );
+  assert.equal(field.type, "fts | hybrid");
+  assert.equal(field.defaultValue, "hybrid");
+  const environment = buildReferenceDirectory(
+    "## Setting reference\n## Startup\n| `LORE_IDLE_TIMEOUT`<br>**Default:** `60` | Idle time |\n| `LORE_WORKER_MODEL` | Provider model |",
+    [
+      heading("Setting reference", "setting-reference"),
+      heading("Startup", "startup"),
+    ],
+    "environment",
+  );
+  assert.equal(
+    environment.settings.find((entry) => entry.label === "LORE_IDLE_TIMEOUT")
+      .defaultValue,
+    "60",
+  );
+  assert.equal(
+    environment.settings.find((entry) => entry.label === "LORE_WORKER_MODEL")
+      .defaultValue,
+    undefined,
+  );
+});

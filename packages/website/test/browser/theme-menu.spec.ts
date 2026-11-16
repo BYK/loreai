@@ -57,13 +57,13 @@ test("theme ownership follows the public and docs menu breakpoints", async ({
     }
 });
 
-test("recovery keeps appearance accessible without a sidebar menu", async ({
+test("recovery keeps appearance accessible in its native phone menu", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/missing-field-guide-page/");
-  await expect(page.locator(".mobile-theme-preferences")).toHaveCount(0);
-  await expect(page.locator("header .theme-toggle")).toBeVisible();
+  await expect(page.locator(".mobile-theme-preferences")).toHaveCount(1);
+  await expect(page.locator(".header-utilities .theme-toggle")).toBeHidden();
   await (await themeButton(page, "Dark")).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });

@@ -9,6 +9,21 @@ const directory = fileURLToPath(
 for (const theme of ["light", "dark"]) {
   const crops = [
     {
+      source: "sessions",
+      name: "sessions-overview",
+      region: { left: 60, top: 60, width: 1060, height: 480 },
+    },
+    {
+      source: "sessions",
+      name: "task-session-search",
+      region: { left: 76, top: 80, width: 640, height: 210 },
+    },
+    {
+      source: "knowledge-mobile",
+      name: "task-knowledge-edit",
+      region: { left: 0, top: 80, width: 390, height: 355 },
+    },
+    {
       source: "session-detail",
       name: "session-detail-mobile",
       region: { left: 386, top: 48, width: 394, height: 500 },

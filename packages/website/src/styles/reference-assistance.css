@@ -1,0 +1,19 @@
+/* Kept beside the reference components; generated rows use these same classes. */
+.reference-result-meta { display:flex;flex-wrap:wrap;gap:.25rem .85rem;color:var(--muted);font-size:.8125rem;line-height:1.5;margin:.25rem 0 .45rem; }
+.reference-result-meta span { overflow-wrap:anywhere;max-width:100%; }
+.reference-actions { display:flex;align-items:center;flex-wrap:wrap;gap:.5rem;margin-block:.6rem 0;font-size:.8125rem; }
+.reference-actions[hidden], .reference-copy-fallback[hidden], .reference-recovery[hidden] { display:none; }
+.reference-copy-button { appearance:none;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);color:var(--heading);font:inherit;line-height:1.4;min-height:2.75rem;padding:.45rem .7rem;cursor:pointer; }
+.reference-copy-button:hover { border-color:var(--heading); }
+.reference-copy-button:focus-visible, .reference-copy-fallback:focus-visible { outline:2px solid var(--heading);outline-offset:3px; }
+.reference-actions [role="status"] { flex-basis:100%;color:var(--muted); }
+.reference-actions [role="status"]:empty { display:none; }
+.reference-copy-fallback { flex-basis:100%;width:100%;min-width:0;min-height:4rem;max-height:12rem;resize:vertical;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);color:var(--heading);font:inherit;padding:.6rem;overflow-wrap:anywhere; }
+.reference-suggestions { display:flex;flex-wrap:wrap;gap:.5rem; }
+.reference-recovery { padding-block:0 1rem; }
+.reference-recovery p { margin-block:.6rem; }
+.reference-examples { margin-top:.75rem; }
+.reference-examples [data-setting-example] { margin-block:1.25rem;padding-block:.5rem;border-top:1px solid var(--line); }
+.sl-markdown-content .reference-examples h3 { font-size:1rem;margin-block:0 .5rem; }
+.reference-examples pre { max-width:100%;overflow:auto;padding:1rem;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface);font-size:.875rem;line-height:1.5; }
+.reference-examples pre code { padding:0;background:transparent; }

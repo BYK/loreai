@@ -106,6 +106,26 @@ if (root) {
           pointerSelection &&
           matchMedia("(max-width: 640px)").matches,
       );
+      if (
+        key === "task" &&
+        pointerSelection &&
+        matchMedia("(max-width: 640px)").matches
+      ) {
+        // Show the changed rule after a tap; keyboard navigation retains radio focus.
+        const result = [
+          ...root.querySelectorAll<HTMLElement>("[data-journal-result]"),
+        ].find((panel) => panel.dataset.journalResult === state.task);
+        const heading = result?.querySelector<HTMLElement>("h4");
+        const bounds = heading?.getBoundingClientRect();
+        const headerBottom =
+          document.querySelector(".field-guide-header")?.getBoundingClientRect()
+            .bottom ?? 0;
+        if (
+          bounds &&
+          (bounds.top < headerBottom + 12 || bounds.bottom > innerHeight)
+        )
+          heading?.scrollIntoView({ block: "center" });
+      }
     });
   // A checked radio has no change event, but its card still opens the rule.
   for (const input of inputs.filter(

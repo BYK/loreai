@@ -1,11 +1,10 @@
 ---
-import ActionLinks from "./ActionLinks.astro";
+import DocsNextAction from "./DocsNextAction.astro";
 import type { SETUP_AGENTS } from "../lib/agent-setup";
 interface Props { agent: (typeof SETUP_AGENTS)[number]["id"]; }
 const {agent}=Astro.props;
 ---
-<ActionLinks label="Use your connected agent" items={[
- {title:"Verify a recorded session",href:`/docs/first-session/?agent=${agent}#verify`,icon:"check"},
- {title:"Use Lore day to day",href:"/docs/using-lore/",icon:"compass"},
- {title:"Troubleshoot a missing session",href:"/docs/troubleshooting/?issue=session#diagnostic",icon:"help"},
+<DocsNextAction label="Use your connected agent" title="Verify a recorded session" href={`/docs/first-session/?agent=${agent}#verify`} text="Send a message and check its recorded conversation in your local Lore app." related={[
+ {title:"Use Lore day to day",href:"/docs/using-lore/"},
+ {title:"Troubleshoot a missing session",href:"/docs/troubleshooting/?issue=session#diagnostic"},
 ]} />

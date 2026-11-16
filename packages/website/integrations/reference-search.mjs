@@ -119,6 +119,41 @@ export default function referenceSearch() {
                       { className: ["reference-description"] },
                       values.at(-1)?.children ?? [],
                     ),
+                    element(
+                      "div",
+                      {
+                        className: ["reference-actions"],
+                        dataReferenceCopy: "",
+                        dataCopyValue: label,
+                        dataCopySlug: `setting-${label}`,
+                        dataPagefindIgnore: "",
+                        hidden: true,
+                      },
+                      [
+                        ...["path", "link"].map((kind) =>
+                          element(
+                            "button",
+                            {
+                              type: "button",
+                              dataCopyKind: kind,
+                              className: ["reference-copy-button"],
+                            },
+                            [{ type: "text", value: `Copy setting ${kind}` }],
+                          ),
+                        ),
+                        element("span", { role: "status" }, []),
+                        element(
+                          "textarea",
+                          {
+                            readOnly: true,
+                            hidden: true,
+                            ariaLabel: "Value to copy manually",
+                            className: ["reference-copy-fallback"],
+                          },
+                          [],
+                        ),
+                      ],
+                    ),
                   ],
                 );
               });

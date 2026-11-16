@@ -2,6 +2,7 @@
 title: Use Lore day to day
 description: Resume work, find past decisions, review knowledge, and switch coding agents.
 ---
+import TaskExample from '../../../components/TaskExample.astro';
 
 Once [your first session is recorded](/docs/first-session/), keep working in your
 coding agent. Use Lore's local browser when you need to inspect the record.
@@ -18,6 +19,8 @@ Starting a new session does not erase stored project knowledge.
 Select the project in the local browser. Use its search to find a remembered error,
 file, or decision. Open **Sessions** to read the conversation around it, or
 **Knowledge** for the curated rule. Source material can be more detailed than a summary.
+
+<TaskExample task="session-search" />
 
 You can also search from your project's terminal:
 
@@ -39,6 +42,10 @@ signal, not proof that a statement is correct.
   confirmation: this does not erase the original conversation or all retained history.
 - Use the available version history and restore controls when recovering an earlier
   entry. Restoring creates a new version.
+
+<TaskExample task="knowledge-edit" />
+
+<TaskExample task="source-history" />
 
 Do not remove or rewrite `<!-- lore:... -->` identity markers when hand-editing
 `.lore.md`. [File sharing and import behavior](/docs/team-memory/).

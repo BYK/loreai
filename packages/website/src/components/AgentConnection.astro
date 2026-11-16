@@ -1,0 +1,15 @@
+---
+import NavigationIcon from "./NavigationIcon.astro";
+import CommandBlock from "./ui/CommandBlock.astro";
+import type { SETUP_AGENTS } from "../lib/agent-setup";
+interface Props { agent: (typeof SETUP_AGENTS)[number]; }
+const { agent } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+<h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="connect" /></span> Connect {agent.name}</h3><p>{agent.detail}</p>
+{agent.id === "codex-desktop" ? <ol class="setup-desktop-steps">
+  <li><strong>Configure routing once.</strong><CommandBlock command="lore setup codex" kind="connection" copyLabel="Copy Codex Desktop configuration command" /></li>
+  <li><strong>Start the local gateway.</strong><CommandBlock command="lore start --bg --local" kind="connection" copyLabel="Copy Codex Desktop gateway command" /></li>
+  <li><strong>Restart Codex Desktop.</strong> Save your work, fully quit the app, then reopen it so it reads the routing settings.</li>
+  <li><strong>Verify recording below.</strong> Open your project and send a message in a new conversation. <a href={`${base}docs/setup/#undoing-setup`}>Undo routing changes</a> if needed.</li>
+</ol> : <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />}

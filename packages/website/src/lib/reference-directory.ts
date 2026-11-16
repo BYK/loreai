@@ -5,6 +5,8 @@ export interface ReferenceEntry {
   slug: string;
   group: string;
   description: string;
+  type?: string;
+  defaultValue?: string;
 }
 
 /** Index authored field tables against rendered heading IDs, without deriving IDs. */
@@ -32,7 +34,9 @@ export function buildReferenceDirectory(
             group: "",
             description: "",
           }));
-  const settings = new Map(categories.map((entry) => [entry.label, entry]));
+  const settings = new Map<string, ReferenceEntry>(
+    categories.map((entry) => [entry.label, entry]),
+  );
   let section: ReferenceEntry | undefined;
   let fence: string | undefined;
   for (const line of body.split("\n")) {
@@ -59,11 +63,22 @@ export function buildReferenceDirectory(
       kind === "environment" || field.startsWith(section.label + ".")
         ? field
         : section.label + "." + field;
+    const cells = line.split(/(?<!\\)\|/).slice(1, -1);
+    const defaultValue =
+      kind === "configuration"
+        ? plainDescription(cells[2] ?? "")
+        : plainDescription(
+            /\*\*Default:\*\*\s*(.*)$/.exec(cells[0] ?? "")?.[1] ?? "",
+          );
     settings.set(label, {
       label,
       slug: `setting-${label}`,
       group: section.label,
       description: plainDescription(line.split(/(?<!\\)\|/).at(-2) ?? ""),
+      ...(kind === "configuration" && {
+        type: plainDescription(cells[1] ?? ""),
+      }),
+      ...(defaultValue && { defaultValue }),
     });
   }
   return { categories, settings: [...settings.values()] };

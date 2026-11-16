@@ -7,6 +7,7 @@ import {
 } from "./integrations/favicon-assets";
 import prefixBaseLinks from "./integrations/prefix-base-links.mjs";
 import referenceSearch from "./integrations/reference-search.mjs";
+import searchContent from "./integrations/search-content.mjs";
 import mermaidRenderer from "./integrations/mermaid-renderer.mjs";
 import { publicationUri } from "./src/lib/standard-site";
 
@@ -58,6 +59,8 @@ export default defineConfig({
     // (`/_preview/pr-<n>/`). No-op in production. Covers markdown body,
     // frontmatter hero links, and component links. See prefix-base-links.mjs.
     prefixBaseLinks(),
+    // Runs on final HTML before Starlight indexes it, after code-block rendering.
+    searchContent(),
     // Bundles the Mermaid renderer into every page so fenced ```mermaid
     // blocks render on the blog AND the docs (the previous CDN script
     // was scoped to Starlight pages only). See mermaid-renderer.mjs.

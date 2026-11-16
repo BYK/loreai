@@ -1,5 +1,6 @@
 import mermaid from "mermaid";
 import { setUtilityIcon } from "./utility-icon";
+import { expandDiagram, refreshExpandedDiagram } from "./media-viewer";
 
 // Sources are exclusively build-authored Markdown, never URL or user content.
 // Preserve line boundaries from both Expressive Code and Shiki.
@@ -23,47 +24,9 @@ const records = [
   button.addEventListener("click", () => {
     const svg = wrap.querySelector(":scope > svg");
     if (!svg) return;
-    expanded = wrap;
-    canvas.append(svg);
-    dialog.showModal();
+    expandDiagram(wrap, button, svg as SVGSVGElement);
   });
   return { target, source, wrap };
-});
-const dialog = document.createElement("dialog");
-dialog.className = "diagram-dialog";
-dialog.setAttribute("aria-label", "Expanded diagram");
-const close = document.createElement("button");
-close.type = "button";
-close.className = "diagram-close ui-icon-button";
-setUtilityIcon(close, "close", "Close diagram");
-const canvas = document.createElement("div");
-canvas.className = "diagram-canvas";
-canvas.tabIndex = 0;
-canvas.setAttribute("role", "region");
-canvas.setAttribute("aria-label", "Diagram; scroll to explore");
-const hint = document.createElement("p");
-hint.className = "diagram-scroll-hint";
-hint.textContent = "Scroll sideways to explore the full diagram.";
-dialog.append(close, hint, canvas);
-document.body.append(dialog);
-let expanded: HTMLElement | undefined;
-close.addEventListener("click", () => dialog.close());
-dialog.addEventListener("click", (event) => {
-  if (event.target !== dialog) return;
-  const bounds = dialog.getBoundingClientRect();
-  if (
-    event.clientX < bounds.left ||
-    event.clientX > bounds.right ||
-    event.clientY < bounds.top ||
-    event.clientY > bounds.bottom
-  )
-    dialog.close();
-});
-dialog.addEventListener("close", () => {
-  const svg = canvas.querySelector("svg");
-  if (svg && expanded) expanded.prepend(svg);
-  expanded?.querySelector("button")?.focus({ preventScroll: true });
-  expanded = undefined;
 });
 const theme = () =>
   document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -101,11 +64,9 @@ async function renderAll() {
           template.innerHTML = svg;
           const rendered = template.content.querySelector("svg");
           if (!rendered) continue;
-          if (expanded === record.wrap) canvas.replaceChildren(rendered);
-          else {
-            record.wrap.querySelector(":scope > svg")?.remove();
-            record.wrap.prepend(rendered);
-          }
+          record.wrap.querySelector(":scope > svg")?.remove();
+          record.wrap.prepend(rendered);
+          refreshExpandedDiagram(record.wrap, rendered);
           if (record.target.isConnected) record.target.replaceWith(record.wrap);
           record.wrap.dataset.renderedTheme = current;
         } catch (error) {
