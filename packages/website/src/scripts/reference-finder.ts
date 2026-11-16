@@ -129,7 +129,8 @@ for (const actions of document.querySelectorAll<HTMLElement>(
         let value = actions.dataset.copyValue ?? "";
         if (button.dataset.copyKind === "link") {
           // Share the actual field with the deployment prefix, without the filter query.
-          const url = new URL(location.pathname, location.origin);
+          const url = new URL(location.href);
+          url.search = "";
           url.hash = actions.dataset.copySlug ?? "";
           value = url.href;
         }

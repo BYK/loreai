@@ -1,4 +1,5 @@
 import { defineConfig } from "astro/config";
+import { rehypeHeadingIds } from "@astrojs/markdown-remark";
 import starlight from "@astrojs/starlight";
 import { fileURLToPath } from "node:url";
 import {
@@ -42,7 +43,8 @@ export default defineConfig({
   // `prefers-color-scheme: dark` media query block so the code block
   // adapts to the active theme.
   markdown: {
-    rehypePlugins: [referenceSearch],
+    // Resolve real heading IDs before attaching copy links to root settings.
+    rehypePlugins: [rehypeHeadingIds, referenceSearch],
     syntaxHighlight: "shiki",
     shikiConfig: {
       themes: {

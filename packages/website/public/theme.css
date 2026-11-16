@@ -187,7 +187,6 @@ th { font-weight: 500; }
 .hero-proof { min-width:0;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--journal-page);padding:1.25rem; }
 .home-journal { padding-block:3rem; }
 @media(max-width:600px) { .home-page .hero-copy { gap:1.5rem; }.hero-proof { padding:1rem; }.home-page .home-hero { padding-block:2rem; } }
-@media(max-width:600px) { .fit-table { min-width:0!important; }.fit-table thead { position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%); }.fit-table tbody,.fit-table tr,.fit-table td,.fit-table th[scope="row"] { display:block;width:100%; }.fit-table tr { border-bottom:1px solid var(--line);padding-block:.875rem; }.fit-table th,.fit-table td { border:0;padding:.375rem .25rem; }.fit-table th[scope="row"] { font-size:1rem;font-weight:600; }.fit-table td::before { content:attr(data-label);display:block;font-size:.8125rem;color:var(--muted);margin-bottom:.25rem; } }
 
 /* Keep the phone overview compact; the journal carries the detailed example. */
 @media(max-width:600px) { .home-page .section { padding-block:2rem; }.home-page .home-hero { padding-block:1.5rem; }.home-page .hero-desc { margin-top:.75rem; }.home-page .compatibility { margin-top:1rem; }.home-page .hero-copy { gap:1rem; } }

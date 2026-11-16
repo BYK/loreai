@@ -14,6 +14,7 @@ export default function referenceSearch() {
       let reference = false;
       let inReference = false;
       let section = "";
+      let sectionId;
       let fieldHeading = 3;
       for (const [index, node] of (parent.children ?? []).entries()) {
         if (node.type === "element") {
@@ -36,6 +37,7 @@ export default function referenceSearch() {
           }
           if (inReference && heading) {
             section = text(heading).replaceAll("`", "").trim();
+            sectionId = heading.properties?.id;
             fieldHeading = heading.tagName === "h3" ? 4 : 3;
           }
           if (node.tagName === "thead")
@@ -61,10 +63,14 @@ export default function referenceSearch() {
                 );
                 if (!key) return row;
                 const field = text(key);
+                const isRootSetting = !environment && field === section;
                 const label =
-                  environment || field.startsWith(section + ".")
+                  environment ||
+                  isRootSetting ||
+                  field.startsWith(section + ".")
                     ? field
                     : section + "." + field;
+                const slug = isRootSetting ? sectionId : `setting-${label}`;
                 const meta = environment
                   ? values[0].children
                       .slice(values[0].children.indexOf(key) + 1)
@@ -94,25 +100,32 @@ export default function referenceSearch() {
                 return element(
                   "section",
                   {
-                    id: `setting-${label}`,
+                    ...(isRootSetting ? {} : { id: slug }),
                     className: ["reference-field"],
                     ariaLabel: label,
                   },
                   [
-                    element(
-                      "div",
-                      {
-                        id: `field-heading-${label}`,
-                        className: ["reference-field-heading"],
-                        role: "heading",
-                        ariaLevel: fieldHeading,
-                      },
-                      [
-                        element("a", { href: `#setting-${label}` }, [
-                          element("code", {}, [{ type: "text", value: label }]),
-                        ]),
-                      ],
-                    ),
+                    // The existing root heading already names this record and owns its ID.
+                    ...(!isRootSetting
+                      ? [
+                          element(
+                            "div",
+                            {
+                              id: `field-heading-${label}`,
+                              className: ["reference-field-heading"],
+                              role: "heading",
+                              ariaLevel: fieldHeading,
+                            },
+                            [
+                              element("a", { href: `#${slug}` }, [
+                                element("code", {}, [
+                                  { type: "text", value: label },
+                                ]),
+                              ]),
+                            ],
+                          ),
+                        ]
+                      : []),
                     element("div", { className: ["reference-defaults"] }, meta),
                     element(
                       "div",
@@ -125,7 +138,7 @@ export default function referenceSearch() {
                         className: ["reference-actions"],
                         dataReferenceCopy: "",
                         dataCopyValue: label,
-                        dataCopySlug: `setting-${label}`,
+                        dataCopySlug: slug,
                         dataPagefindIgnore: "",
                         hidden: true,
                       },

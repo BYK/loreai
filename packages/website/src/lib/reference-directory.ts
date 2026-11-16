@@ -1,6 +1,7 @@
 import type { MarkdownHeading } from "astro";
 
 export interface ReferenceEntry {
+  kind: "setting" | "group";
   label: string;
   slug: string;
   group: string;
@@ -28,12 +29,15 @@ export function buildReferenceDirectory(
               (h.depth === 2 || h.depth === 3) &&
               !h.slug.startsWith("field-heading-"),
           )
-          .map((h) => ({
-            label: h.text.replaceAll("`", ""),
-            slug: h.slug,
-            group: "",
-            description: "",
-          }));
+          .map(
+            (h): ReferenceEntry => ({
+              kind: "group",
+              label: h.text.replaceAll("`", ""),
+              slug: h.slug,
+              group: "",
+              description: "",
+            }),
+          );
   const settings = new Map<string, ReferenceEntry>(
     categories.map((entry) => [entry.label, entry]),
   );
@@ -59,29 +63,40 @@ export function buildReferenceDirectory(
       section.description = plainDescription(line);
     if (!field || (kind === "environment" && !/^[A-Z][A-Z0-9_]+$/.test(field)))
       continue;
+    const isRootSetting = kind === "configuration" && field === section.label;
     const label =
-      kind === "environment" || field.startsWith(section.label + ".")
+      kind === "environment" ||
+      isRootSetting ||
+      field.startsWith(section.label + ".")
         ? field
         : section.label + "." + field;
     const cells = line.split(/(?<!\\)\|/).slice(1, -1);
     const defaultValue =
       kind === "configuration"
-        ? plainDescription(cells[2] ?? "")
+        ? literalCell(cells[2] ?? "")
         : plainDescription(
             /\*\*Default:\*\*\s*(.*)$/.exec(cells[0] ?? "")?.[1] ?? "",
           );
-    settings.set(label, {
+    const entry: ReferenceEntry = {
+      kind: "setting",
       label,
-      slug: `setting-${label}`,
-      group: section.label,
-      description: plainDescription(line.split(/(?<!\\)\|/).at(-2) ?? ""),
+      slug: isRootSetting ? section.slug : `setting-${label}`,
+      group: isRootSetting ? "" : section.label,
+      description: plainDescription(cells.at(-1) ?? ""),
       ...(kind === "configuration" && {
-        type: plainDescription(cells[1] ?? ""),
+        type: literalCell(cells[1] ?? ""),
       }),
       ...(defaultValue && { defaultValue }),
-    });
+    };
+    if (isRootSetting) Object.assign(section, entry);
+    settings.set(label, entry);
   }
   return { categories, settings: [...settings.values()] };
+}
+
+// Table escaping and Markdown code delimiters are not part of a schema literal.
+function literalCell(value: string): string {
+  return value.replaceAll("`", "").replaceAll("\\|", "|").trim();
 }
 
 /** Rendered as escaped text by Astro, never used as HTML or a selector. */

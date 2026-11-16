@@ -101,6 +101,8 @@ function createViewer() {
     record?: Diagram,
   ) {
     if (dialog.open) return;
+    // close() clears open immediately, but its close event is queued.
+    if (trigger) restore(false);
     trigger = opener;
     diagram = record;
     zoom = 1;
@@ -120,6 +122,7 @@ function createViewer() {
     close.focus({ preventScroll: true });
   }
   dialog.addEventListener("keydown", (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
       resize(zoom + 0.25);
@@ -132,6 +135,8 @@ function createViewer() {
     }
   });
   canvas.addEventListener("keydown", (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+      return;
     const steps: Record<string, [number, number]> = {
       ArrowLeft: [-80, 0],
       ArrowRight: [80, 0],
@@ -181,8 +186,7 @@ function createViewer() {
     )
       dialog.close();
   });
-  dialog.addEventListener("close", () => {
-    // Hidden or removed theme variants cannot receive focus safely.
+  function restore(returnFocus: boolean) {
     if (diagram?.origin.isConnected && media instanceof SVGSVGElement) {
       // A theme render can finish after close() but before its queued close event.
       // Keep that newer inline SVG instead of restoring a second stale one.
@@ -194,20 +198,42 @@ function createViewer() {
       diagram.origin.style.removeProperty("min-height");
     }
     const original = trigger;
-    const fallback = original
-      ?.closest("figure, section")
-      ?.querySelectorAll<HTMLElement>(
-        "a[data-media-viewer], button.diagram-expand",
-      );
-    const destination = [original, ...(fallback ?? [])].find(
-      (element) => element?.isConnected && element.getClientRects().length,
-    );
-    destination?.focus({ preventScroll: true });
     trigger = undefined;
     diagram = undefined;
     media = undefined;
     canvas.replaceChildren();
     stopDrag();
+    if (!returnFocus || !original) return;
+    if (original.isConnected && original.getClientRects().length) {
+      original.focus({ preventScroll: true });
+      return;
+    }
+    // A theme change can hide this exact opener. Prefer its matching action.
+    const candidates = [
+      ...(original
+        .closest("figure, section")
+        ?.querySelectorAll<HTMLElement>(
+          "a[data-media-viewer], button.diagram-expand",
+        ) ?? []),
+    ].filter((element) => element.getClientRects().length);
+    const capture = (element: HTMLElement) =>
+      element instanceof HTMLAnchorElement
+        ? element.href.replace(/-(?:light|dark)\.png$/, ".png")
+        : undefined;
+    const equivalent = candidates.filter(
+      (element) => capture(element) === capture(original),
+    );
+    const destination =
+      equivalent.find(
+        (element) => element.parentElement === original.parentElement,
+      ) ??
+      equivalent[0] ??
+      candidates[0];
+    destination?.focus({ preventScroll: true });
+  }
+  dialog.addEventListener("close", () => {
+    // A newer open session owns the canvas when the prior close event arrives.
+    if (!dialog.open && trigger) restore(true);
   });
   window.addEventListener("resize", measure);
   return {

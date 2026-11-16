@@ -71,3 +71,31 @@ await test("Starlight wrapped headings produce exact field records without losin
   assert.ok(JSON.stringify(field).includes("200"));
   assert.ok(JSON.stringify(field).includes("min 10"));
 });
+
+await test("root field copy links use the rendered section ID even when an earlier heading has the same slug", async () => {
+  const { createMarkdownProcessor, rehypeHeadingIds } =
+    await import("@astrojs/markdown-remark");
+  const processor = await createMarkdownProcessor({
+    syntaxHighlight: false,
+    rehypePlugins: [rehypeHeadingIds, referenceSearch],
+  });
+  const { code } = await processor.render(
+    [
+      "## Workspaces",
+      "",
+      "## Field reference",
+      "",
+      "## `workspaces`",
+      "",
+      "| Field | Type | Default | Constraints | Description |",
+      "|---|---|---|---|---|",
+      "| `workspaces` | `array<string>` | `[]` | | Workspace paths. |",
+    ].join("\n"),
+  );
+  assert.match(code, /id="workspaces-1"/);
+  assert.match(
+    code,
+    /data-copy-value="workspaces" data-copy-slug="workspaces-1"/,
+  );
+  assert.doesNotMatch(code, /workspaces\.workspaces/);
+});

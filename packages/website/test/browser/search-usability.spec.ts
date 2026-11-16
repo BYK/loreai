@@ -222,3 +222,121 @@ test("reference examples and exact field links remain readable without JavaScrip
     await context.close();
   }
 });
+
+test("copied field links preserve same-origin paths with doubled leading slashes", async ({
+  page,
+}) => {
+  await page.goto("/docs/configuration/?setting=curator.maxEntries");
+  const current = await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: (text: string) => {
+          document.body.dataset.copied = text;
+          return Promise.resolve();
+        },
+      },
+    });
+    const url = new URL(location.href);
+    url.pathname = "/" + url.pathname;
+    history.replaceState(history.state, "", url.href);
+    return { origin: url.origin, pathname: url.pathname };
+  });
+  await page
+    .locator("#setting-results li:visible")
+    .first()
+    .getByRole("button", { name: "Copy setting link", exact: true })
+    .click();
+  const copied = new URL(
+    (await page.locator("body").getAttribute("data-copied"))!,
+  );
+  expect({
+    origin: copied.origin,
+    pathname: copied.pathname,
+    search: copied.search,
+    hash: copied.hash,
+  }).toEqual({ ...current, search: "", hash: "#setting-curator.maxEntries" });
+});
+
+test("generic types remain literal in both search results and full field records", async ({
+  page,
+}) => {
+  await page.goto("/docs/configuration/");
+  const search = page.getByRole("searchbox", { name: "Find a setting" });
+  for (const [key, type] of [
+    ["knowledge.contextSources", "array<enum>"],
+    ["user.aliases", "array<{ type, value }>"],
+    ["user.metadata", "Record<string, unknown>"],
+  ]) {
+    await search.fill(key);
+    const result = page.locator("#setting-results li:visible").first();
+    await expect(
+      result.locator(".reference-result-meta span").first(),
+    ).toHaveText(type);
+    await expect(
+      page.locator('[id="setting-' + key + '"] .reference-metadata dd').first(),
+    ).toHaveText(type);
+  }
+});
+
+test("root settings share real heading links and metadata, while environment categories stay groups", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/docs/configuration/");
+  const search = page.getByRole("searchbox", { name: "Find a setting" });
+  for (const [key, type, value] of [
+    ["crossProject", "boolean", "true"],
+    ["idleResumeMinutes", "number", "5"],
+    ["workspaces", "array<string>", "[]"],
+  ]) {
+    await search.fill(key);
+    const result = page.locator("#setting-results li:visible").first();
+    const hash = "#" + key.toLowerCase();
+    await expect(
+      result.getByRole("link", { name: key, exact: true }),
+    ).toHaveAttribute("href", hash);
+    await expect(result.locator(".reference-result-meta span")).toHaveText([
+      type,
+      "Default: " + value,
+    ]);
+    const record = page.getByRole("region", { name: key, exact: true });
+    for (const actions of [result, record]) {
+      await actions.getByRole("button", { name: "Copy setting path" }).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        key,
+      );
+      await actions.getByRole("button", { name: "Copy setting link" }).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        new URL("/docs/configuration/" + hash, page.url()).href,
+      );
+    }
+    await result.getByRole("link", { name: key, exact: true }).click();
+    await expect(page.locator(hash)).toHaveText(key);
+  }
+  await page.goto("/docs/environment/?setting=Cache%20usage");
+  const group = page.locator("#setting-results li:visible").first();
+  await expect(
+    group.getByRole("link", { name: "Cache usage", exact: true }),
+  ).toBeVisible();
+  await expect(group.getByRole("button")).toHaveCount(0);
+});
+
+test("example cards disclose eviction and both warming overrides before copy", async ({
+  page,
+}) => {
+  await page.goto("/docs/configuration/");
+  const examples = page.getByRole("group", { name: "Common setting examples" });
+  await examples.locator("summary").click();
+  const cap = examples.locator("[data-setting-example]").filter({
+    has: page.getByRole("link", { name: "Read curator.maxEntries" }),
+  });
+  const warming = examples.locator("[data-setting-example]").filter({
+    has: page.getByRole("link", { name: "Read cache.warming.enabled" }),
+  });
+  await expect(cap).toContainText(/remove.*active entries/i);
+  await expect(cap).toContainText(/200/);
+  await expect(warming).toContainText(/LORE_WARMING_ENABLED/);
+  await expect(warming).toContainText(/saved dashboard preference/i);
+  await expect(warming).toContainText(/normal provider calls/i);
+});

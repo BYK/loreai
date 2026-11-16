@@ -227,3 +227,47 @@ await test("result metadata preserves literal types, defaults and environment de
     undefined,
   );
 });
+
+await test("generated root settings and generic types keep schema metadata and actual heading anchors", () => {
+  const body = readFileSync(
+    new URL("../src/content/docs/docs/configuration.md", import.meta.url),
+    "utf8",
+  );
+  const headings = [...body.matchAll(/^(#{2,3}) (.+)$/gm)].map(
+    (match, index) => ({
+      depth: match[1].length,
+      text: match[2].replaceAll("`", ""),
+      slug:
+        match[2] === "Field reference"
+          ? "field-reference"
+          : "rendered-" + index,
+    }),
+  );
+  const { settings } = buildReferenceDirectory(body, headings, "configuration");
+  for (const [label, type] of [
+    ["knowledge.contextSources", "array<enum>"],
+    ["user.aliases", "array<{ type, value }>"],
+    ["user.metadata", "Record<string, unknown>"],
+  ]) {
+    assert.equal(
+      settings.find((entry) => entry.label === label)?.type,
+      type,
+      label,
+    );
+  }
+  for (const [label, type, defaultValue] of [
+    ["crossProject", "boolean", "true"],
+    ["idleResumeMinutes", "number", "5"],
+    ["workspaces", "array<string>", "[]"],
+  ]) {
+    const entry = settings.find((entry) => entry.label === label);
+    assert.equal(entry?.kind, "setting", label);
+    assert.equal(entry.slug, headings.find((h) => h.text === label).slug);
+    assert.equal(entry.type, type);
+    assert.equal(entry.defaultValue, defaultValue);
+    assert.equal(
+      settings.some((entry) => entry.label === label + "." + label),
+      false,
+    );
+  }
+});

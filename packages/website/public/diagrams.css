@@ -3,7 +3,7 @@
 .diagram-expand { position:absolute;inset-block-start:0;inset-inline-end:0;margin:0; }
 .media-dialog { position:fixed;inset:0;margin:auto;box-sizing:border-box;width:calc(100vw - 2rem);max-width:1440px;max-height:calc(100dvh - 2rem);padding:1rem;border:1px solid var(--line);border-radius:var(--radius-card,12px);background:var(--bg);color:var(--text); }
 .media-dialog::backdrop { background:rgb(0 0 0 / .7); }
-.media-toolbar { display:flex;align-items:center;gap:.25rem; }
+.media-toolbar { display:flex;flex-wrap:wrap;align-items:center;gap:.25rem; }
 .media-toolbar button { display:grid;place-items:center;min-width:44px;min-height:44px;margin:0;border:1px solid var(--line);border-radius:var(--radius-control,6px);background:var(--surface,var(--bg));color:var(--text);font:500 .875rem/1 var(--sans,system-ui);cursor:pointer; }
 .media-toolbar button:disabled { opacity:.45;cursor:default; }
 .media-toolbar button:focus-visible,.media-canvas:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }

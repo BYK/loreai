@@ -11,5 +11,5 @@ const base = import.meta.env.BASE_URL;
   <li><strong>Configure routing once.</strong><CommandBlock command="lore setup codex" kind="connection" copyLabel="Copy Codex Desktop configuration command" /></li>
   <li><strong>Start the local gateway.</strong><CommandBlock command="lore start --bg --local" kind="connection" copyLabel="Copy Codex Desktop gateway command" /></li>
   <li><strong>Restart Codex Desktop.</strong> Save your work, fully quit the app, then reopen it so it reads the routing settings.</li>
-  <li><strong>Verify recording below.</strong> Open your project and send a message in a new conversation. <a href={`${base}docs/setup/#undoing-setup`}>Undo routing changes</a> if needed.</li>
+  <li><strong>Verify recording.</strong> Open your project and send a message in a new conversation. <a href={`${base}docs/setup/#undoing-setup`}>Undo routing changes</a> if needed.</li>
 </ol> : <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />}

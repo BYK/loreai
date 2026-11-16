@@ -209,3 +209,149 @@ test("closing during a diagram theme render restores exactly one latest diagram"
       .locator(".media-canvas > svg"),
   ).toHaveCount(1);
 });
+
+test("reopening a second diagram before the native close event restores both originals", async ({
+  page,
+}) => {
+  await page.goto("/docs/architecture/");
+  const diagrams = page.locator(".mermaid");
+  const second = diagrams.nth(1);
+  await expect(second.locator(":scope > svg")).toHaveCount(1);
+  const dialog = page.locator("dialog.media-dialog");
+  const firstId = await diagrams
+    .first()
+    .locator(":scope > svg")
+    .getAttribute("id");
+  const secondId = await second.locator(":scope > svg").getAttribute("id");
+  await diagrams
+    .first()
+    .getByRole("button", { name: "Expand diagram" })
+    .click();
+  await second.evaluate(async (el) => {
+    const dialog = document.querySelector<HTMLDialogElement>(
+      "dialog.media-dialog",
+    )!;
+    const closed = new Promise<void>((resolve) =>
+      dialog.addEventListener("close", () => resolve(), { once: true }),
+    );
+    dialog.close();
+    el.querySelector<HTMLButtonElement>("button.diagram-expand")!.click();
+    await closed;
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".media-canvas > svg")).toHaveAttribute(
+    "id",
+    secondId!,
+  );
+  await expect(diagrams.first().locator(":scope > svg")).toHaveAttribute(
+    "id",
+    firstId!,
+  );
+  await expect(second.locator(":scope > svg")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close diagram" }).click();
+  await expect(second.locator(":scope > svg")).toHaveAttribute("id", secondId!);
+  await expect(
+    second.getByRole("button", { name: "Expand diagram" }),
+  ).toBeFocused();
+});
+
+test("modified zoom shortcuts pass through while plain keys still zoom the viewer", async ({
+  page,
+}) => {
+  await page.goto("/tour/");
+  await page
+    .locator(
+      '.tour-panel[data-tour-panel="sessions"] a[data-media-viewer]:visible',
+    )
+    .first()
+    .click();
+  const dialog = page.getByRole("dialog", { name: "App screenshot" });
+  const observations = await dialog.evaluate((el) =>
+    ["ctrlKey", "metaKey", "altKey"].flatMap((modifier) =>
+      ["+", "=", "-", "0", "ArrowLeft", "ArrowRight"].map((key) => {
+        const event = new KeyboardEvent("keydown", {
+          key,
+          [modifier]: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        el.querySelector(".media-canvas")!.dispatchEvent(event);
+        return {
+          key,
+          modifier,
+          cancelled: event.defaultPrevented,
+          status: el.querySelector("output")?.textContent,
+        };
+      }),
+    ),
+  );
+  expect(
+    observations.filter((row) => row.cancelled || row.status !== "Fit"),
+  ).toEqual([]);
+  await page.keyboard.press("+");
+  await expect(dialog.getByRole("status")).toHaveText("125%");
+  await page.keyboard.press("-");
+  await expect(dialog.getByRole("status")).toHaveText("Fit");
+});
+
+test("detail capture returns focus to the same action after changing themes", async ({
+  page,
+}) => {
+  await page.goto("/tour/?view=knowledge");
+  const detail = page.getByRole("link", {
+    name: /Inspect source and revision details/,
+  });
+  const href = await detail.getAttribute("href");
+  await detail.click();
+  const next = href!.endsWith("-dark.png") ? "light" : "dark";
+  await page.evaluate((next) => {
+    document.documentElement.dataset.theme = next;
+  }, next);
+  await page.getByRole("button", { name: "Close image" }).click();
+  await expect(detail).toHaveAttribute(
+    "href",
+    href!.replace(/-(light|dark)\.png$/, "-" + next + ".png"),
+  );
+  await expect(detail).toBeFocused();
+});
+
+test("all viewer controls fit at 320px with 200% text", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.goto("/tour/");
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  const opener = page
+    .locator(
+      '.tour-panel[data-tour-panel="sessions"] a[data-media-viewer]:visible',
+    )
+    .first();
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "App screenshot" });
+  const close = dialog.getByRole("button", { name: "Close image" });
+  await expect(close).toBeFocused();
+  for (const status of ["Fit", "125%"]) {
+    if (status !== "Fit") await page.keyboard.press("+");
+    await expect(dialog.getByRole("status")).toHaveText(status);
+    const overflow = await dialog.evaluate((el) => {
+      const bounds = el.getBoundingClientRect();
+      return [...el.querySelectorAll(".media-toolbar button")]
+        .filter((button) => {
+          const rect = button.getBoundingClientRect();
+          return (
+            rect.left < Math.max(0, bounds.left) ||
+            rect.right > Math.min(innerWidth, bounds.right) ||
+            rect.top < Math.max(0, bounds.top) ||
+            rect.bottom > Math.min(innerHeight, bounds.bottom) ||
+            rect.width < 44 ||
+            rect.height < 44
+          );
+        })
+        .map((button) => button.getAttribute("aria-label"));
+    });
+    expect(overflow).toEqual([]);
+  }
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
