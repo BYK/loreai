@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { referenceShareLink } from "../src/lib/reference-link.ts";
 import { buildReferenceDirectory } from "../src/lib/reference-directory.ts";
 
 await test("nested names retain their real parent anchors and ignore fenced examples", () => {
@@ -270,4 +271,16 @@ await test("generated root settings and generic types keep schema metadata and a
       false,
     );
   }
+});
+
+await test("a copied setting link omits credentials and query while preserving the origin and deployment path", () => {
+  const current = new URL(
+    "http://synthetic-user:synthetic-password@127.0.0.1:4342//_preview/pr-2143/docs/configuration/?setting=maxEntries#curator",
+  );
+  assert.equal(current.username, "synthetic-user");
+  assert.equal(current.password, "synthetic-password");
+  assert.equal(
+    referenceShareLink(current.href, "setting-curator.maxEntries"),
+    "http://127.0.0.1:4342//_preview/pr-2143/docs/configuration/#setting-curator.maxEntries",
+  );
 });

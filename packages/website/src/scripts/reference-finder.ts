@@ -1,3 +1,5 @@
+import { referenceShareLink } from "../lib/reference-link";
+
 // A local directory filter; the reference document and its anchors never change.
 for (const finder of document.querySelectorAll<HTMLElement>(
   ".reference-finder",
@@ -128,11 +130,10 @@ for (const actions of document.querySelectorAll<HTMLElement>(
         const request = ++latest;
         let value = actions.dataset.copyValue ?? "";
         if (button.dataset.copyKind === "link") {
-          // Share the actual field with the deployment prefix, without the filter query.
-          const url = new URL(location.href);
-          url.search = "";
-          url.hash = actions.dataset.copySlug ?? "";
-          value = url.href;
+          value = referenceShareLink(
+            location.href,
+            actions.dataset.copySlug ?? "",
+          );
         }
         if (!value) return;
         fallback.hidden = true;

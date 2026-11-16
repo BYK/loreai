@@ -250,11 +250,19 @@ test("copied field links preserve same-origin paths with doubled leading slashes
     (await page.locator("body").getAttribute("data-copied"))!,
   );
   expect({
+    username: copied.username,
+    password: copied.password,
     origin: copied.origin,
     pathname: copied.pathname,
     search: copied.search,
     hash: copied.hash,
-  }).toEqual({ ...current, search: "", hash: "#setting-curator.maxEntries" });
+  }).toEqual({
+    ...current,
+    username: "",
+    password: "",
+    search: "",
+    hash: "#setting-curator.maxEntries",
+  });
 });
 
 test("generic types remain literal in both search results and full field records", async ({

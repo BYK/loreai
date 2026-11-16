@@ -18,7 +18,7 @@ const base = import.meta.env.BASE_URL;
 </footer>
 
 <style>
-.site-footer { width: min(1120px, calc(100% - 3rem)); margin-inline: auto; padding-block: 2.5rem; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1.5rem; align-items: center; color: var(--muted); font-size: .8125rem; }
+.site-footer { width: min(1120px, calc(100% - 3rem)); margin-inline: auto; padding-block: 32px 20px; border-top: 1px solid var(--line); display: block; color: var(--muted); font-size: .8125rem; }
 .footer-links { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
 .footer-links a { display: inline-flex; align-items: center; min-height: 44px; }
 .footer-community { gap:8px;align-items:center; }
@@ -28,7 +28,6 @@ const base = import.meta.env.BASE_URL;
 .footer-community .release-link { margin-inline-start:8px; }
 
 @media(max-width:600px) { .site-footer { width:calc(100% - 2rem); } }
-  .site-footer { display:block;padding-block:32px 20px; }
   .footer-main { display:grid;grid-template-columns:minmax(0,1fr) repeat(2,minmax(160px,.42fr));gap:32px;padding-bottom:24px; }
   .footer-identity :global(.logo .logo-text) { display:inline;font:600 1.375rem/1 var(--sans);letter-spacing:-.04em; }
   .footer-identity :global(.logo) { gap:8px;min-height:44px; }
