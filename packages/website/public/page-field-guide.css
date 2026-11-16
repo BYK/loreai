@@ -28,7 +28,7 @@
 .setup-observation { margin-top:20px; }
 .setup-observation .field-marker { font-size:.75rem;margin:0 0 8px; }.setup-observation > p { margin:6px 0;font-size:.8125rem;line-height:1.65; }
 .setup-observation label { display:flex;align-items:center;gap:10px;min-height:44px;cursor:pointer;font-size:.875rem; }.setup-observation input { width:18px;height:18px;accent-color:var(--accent);flex-shrink:0; }
-.setup-observation .setup-confirmed { display:none;border-inline-start:2px solid var(--accent);padding-left:10px;color:var(--text); }.setup-observation:has(input:checked) .setup-confirmed { display:block; }
+.setup-observation .setup-confirmed { display:none;border:1px solid var(--line);border-radius:6px;padding:8px 12px;color:var(--text);background:var(--surface); }.setup-observation:has(input:checked) .setup-confirmed { display:block; }
 .setup-observation .setup-observation-note { font-size:.75rem;color:var(--muted); }
 .docs-tasks { display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-block:24px; }
 .docs-tasks a { display:flex;gap:12px;align-items:flex-start;padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--journal-page);text-decoration:none!important;color:var(--text); }
