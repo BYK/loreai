@@ -6,7 +6,8 @@ export default function mermaidRenderer() {
       "astro:config:setup": ({ injectScript }) => {
         injectScript(
           "page",
-          `if (document.querySelector('pre[data-language="mermaid"]')) await import('/src/scripts/mermaid');`,
+          `if (document.querySelector('a[data-media-viewer]')) await import('/src/scripts/media-viewer');
+if (document.querySelector('pre[data-language="mermaid"]')) await import('/src/scripts/mermaid');`,
         );
       },
     },

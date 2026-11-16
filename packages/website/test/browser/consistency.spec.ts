@@ -116,14 +116,16 @@ test("reference directories work without JavaScript and do not alter ordinary do
   try {
     const page = await context.newPage();
     await page.goto(baseURL + "/docs/configuration/");
-    const directory = page.locator(".reference-finder details");
+    const directory = page.locator(".reference-finder .reference-directory");
     await directory.locator("summary").click();
     await directory
       .getByRole("link", { name: "knowledge", exact: true })
       .click();
     await expect(page).toHaveURL(/#knowledge$/);
     await page.goto(baseURL + "/docs/environment/");
-    await expect(page.locator(".reference-finder details")).toBeVisible();
+    await expect(
+      page.locator(".reference-finder .reference-directory"),
+    ).toBeVisible();
     await page.goto(baseURL + "/docs/install/");
     await expect(page.locator(".docs-journal-title")).toContainText(
       "Get started",

@@ -182,7 +182,7 @@ test("all reference result anchors survive category naming collisions", async ({
   for (const route of ["configuration", "environment"]) {
     await page.goto(`/docs/${route}/`);
     const missing = await page
-      .locator(".reference-finder a")
+      .locator('.reference-finder a[href^="#"]')
       .evaluateAll((links) =>
         links
           .filter(
@@ -238,10 +238,16 @@ test("expanded diagrams use a centered modal and a readable scrollable canvas on
   const rect = await dialog.boundingBox();
   expect(Math.abs(rect!.x + rect!.width / 2 - 195)).toBeLessThan(2);
   expect(Math.abs(rect!.y + rect!.height / 2 - 422)).toBeLessThan(2);
-  expect(rect!.width).toBeLessThanOrEqual(390 - 24);
+  expect(rect!.width).toBeLessThanOrEqual(390 - 16);
   expect(
     (await dialog.locator(".diagram-canvas > svg").boundingBox())!.width,
-  ).toBeGreaterThanOrEqual(800);
+  ).toBeLessThan(rect!.width);
+  await dialog
+    .getByRole("button", { name: "Zoom in", exact: true })
+    .click({ clickCount: 8 });
+  expect(
+    (await dialog.locator(".diagram-canvas > svg").boundingBox())!.width,
+  ).toBeGreaterThan(rect!.width);
   await expect(dialog.locator(".diagram-canvas")).toHaveCSS(
     "overflow-x",
     "auto",

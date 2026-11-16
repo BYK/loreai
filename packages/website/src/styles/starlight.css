@@ -96,7 +96,6 @@
 .sidebar-content a[aria-current="page"] { background:color-mix(in srgb,var(--heading) 8%,var(--bg));color:var(--heading);font-weight:600; }
 .sl-markdown-content { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }
 .sl-markdown-content :is(h1, h2, h3, h4) { color: var(--heading); }
-.pagination-links a { border-radius: var(--radius-card); background: var(--surface); box-shadow: var(--shadow-soft); }
 .right-sidebar-panel a[aria-current="true"] { color: var(--accent); }
 @media (max-width: 50rem), (pointer: coarse) {
   .sidebar-content a { min-height: 44px; display: flex; align-items: center; }
@@ -140,9 +139,8 @@
 .sidebar-content summary .caret, #starlight__mobile-toc .caret { transition:none; }
 #starlight__on-this-page--mobile { min-height:44px; }
 @media(hover:hover) and (pointer:fine) { .sidebar-content summary:hover { background:var(--journal-page); } }
-.pagination-links a { box-shadow:none;border-color:var(--line);background:var(--journal-page); }
 .right-sidebar-panel a[aria-current="true"] { border-inline-start-color:var(--accent); }
-@media(hover:hover) and (pointer:fine) { .sidebar-content a:not([aria-current="page"]):hover { background:color-mix(in srgb,var(--heading) 4%,var(--bg));color:var(--heading); }.pagination-links a:hover { background:var(--journal-page);border-inline-start-color:var(--accent); } }
+@media(hover:hover) and (pointer:fine) { .sidebar-content a:not([aria-current="page"]):hover { background:color-mix(in srgb,var(--heading) 4%,var(--bg));color:var(--heading); } }
 @media(max-width:40rem) { .docs-journal-title { gap:.75rem; }.docs-journal-title > .journal-art { width:56px;height:56px; }.docs-journal-title .field-marker { font-size:.5625rem; } }
 .docs-journal-title { align-items:center; }.docs-journal-title .field-marker { font-size:.75rem; }
 .sl-markdown-content table { table-layout:auto; }.sl-markdown-content th,.sl-markdown-content td { overflow-wrap:normal;word-break:normal; }.sl-markdown-content :is(td,th) code { overflow-wrap:anywhere; }
@@ -165,12 +163,6 @@
 #starlight__on-this-page--mobile .toggle { border:0;background:transparent;border-radius:6px;padding:8px;min-height:44px; }
 .docs-journal-title { display:block; }
 .docs-journal-title .field-marker { font-size:.75rem; }
-
-/* Adjacent pages are quiet navigation rows, not oversized calls to action. */
-.pagination-links { gap:12px; }
-.pagination-links a { min-height:64px;padding:12px 16px;gap:12px;font-size:.75rem;line-height:1.5;border-radius:8px; }
-.pagination-links .link-title { font-size:1rem;line-height:1.5;font-weight:500; }
-.pagination-links svg { width:18px;height:18px; }
 
 /* One generated setting per record: identifiers never compete with five narrow
    table columns, and an exact link keeps its metadata and explanation together. */

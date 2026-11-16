@@ -5,15 +5,20 @@ import LanguageSelect from "virtual:starlight/components/LanguageSelect";
 import Logo from "./Logo.astro";
 import FieldGuideNav from "./FieldGuideNav.astro";
 import HeaderActions from "./HeaderActions.astro";
+import MobileNav from "./MobileNav.astro";
+import SearchAssistance from "./SearchAssistance.astro";
+const recoveryPage = Astro.locals.starlightRoute.entry.id === "404";
 const shouldRenderSearch = config.pagefind || config.components.Search !== "@astrojs/starlight/components/Search.astro";
 ---
-<div class="docs-site-header field-guide-header"><Logo theme="auto" size={30} /><div class="docs-primary"><FieldGuideNav /></div>{shouldRenderSearch && <Search />}<div class="docs-controls"><HeaderActions /><LanguageSelect /></div></div>
+<div class:list={["docs-site-header field-guide-header", { "recovery-header": recoveryPage }]}><Logo theme="auto" size={30} /><div class="docs-primary"><FieldGuideNav /></div>{shouldRenderSearch && <><Search /><SearchAssistance /></>}<div class="docs-controls"><HeaderActions /><LanguageSelect />{recoveryPage && <MobileNav />}</div></div>
 <script>import "../scripts/menus.js";</script>
 <style>
   .docs-site-header { display:flex;align-items:center;gap:.75rem; }
   .docs-primary { flex-shrink:0; }
   .docs-site-header :global(button[data-open-modal]) { min-width:44px;min-height:44px;flex:1;max-width:14rem; }
   .docs-controls { display:flex;align-items:center;gap:.5rem;margin-inline-start:auto; }
+  .recovery-header :global(.nav-mobile) { display:none; }
+  @media (max-width:50rem) { .recovery-header :global(.nav-mobile) { display:block; }.recovery-header :global(.header-utilities) { display:none; } }
   @media (max-width:70rem) { .docs-site-header :global(button[data-open-modal] > kbd) { display:none; } }
   @media (max-width:58rem) { .docs-site-header :global(button[data-open-modal]) { flex:0 0 44px;width:44px;max-width:44px;padding:0;justify-content:center; } .docs-site-header :global(button[data-open-modal] > span) { display:none; } }
   @media (max-width:50rem) { .docs-primary { display:none; } .docs-site-header { gap:.375rem; } .docs-controls { gap:.375rem; } }

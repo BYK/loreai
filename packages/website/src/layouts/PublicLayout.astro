@@ -30,6 +30,6 @@ const path = Astro.url.pathname.startsWith(base) ? Astro.url.pathname.slice(base
     <main id="main-content"><slot /></main>
     <PublicFooter />
     <script is:inline set:html={siteJs} />
-    <script>import "../scripts/menus.js";</script>
+    <script>import "../scripts/menus.js"; import "../scripts/media-viewer";</script>
   </body>
 </html>

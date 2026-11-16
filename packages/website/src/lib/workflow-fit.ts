@@ -1,0 +1,71 @@
+// One set of authored facts supplies the guide, desktop table and phone disclosure.
+export const WORKFLOW_APPROACHES = [
+  {
+    id: "coding",
+    icon: "app",
+    label: "Use an existing coding agent",
+    title: "Add memory to your existing agent.",
+    action: "Choose your coding agent",
+    href: "docs/install/",
+    local: true,
+    text: "Check your client’s connection path, then verify a recorded session.",
+    situation: "Project memory for an existing coding agent",
+    starting: [{ text: "Lore’s gateway and supported integrations" }],
+    check:
+      "Does your client work with the connection path, and do reviewable Markdown knowledge and local history suit your workflow?",
+  },
+  {
+    id: "rules",
+    icon: "notes",
+    label: "Keep a few stable rules",
+    title: "A concise instruction file may be enough.",
+    action: "Read the instruction-file guide",
+    href: "docs/team-memory/#reviewing-memory-changes",
+    local: true,
+    text: "Keep the instructions accurate as your project changes.",
+    situation: "A small set of stable rules",
+    starting: [
+      { text: "A hand-maintained " },
+      { text: "AGENTS.md", code: true },
+      { text: " or client instruction file" },
+    ],
+    check:
+      "Can your team keep it accurate and concise without automatic history or curation?",
+  },
+  {
+    id: "application",
+    icon: "code",
+    label: "Build an application",
+    title: "Evaluate memory as part of your application.",
+    action: "Explore memory APIs",
+    href: "https://docs.mem0.ai/platform/quickstart",
+    local: false,
+    text: "Check SDK/API fit, deployment, data boundaries and retrieval behavior. Compare Mem0 and Supermemory below.",
+    situation: "Memory inside an application you are building",
+    starting: [
+      { text: "Memory infrastructure such as " },
+      { text: "Mem0", href: "https://docs.mem0.ai/platform/quickstart" },
+      { text: " or " },
+      { text: "Supermemory", href: "https://supermemory.ai/docs" },
+    ],
+    check:
+      "Do its SDK/API, deployment options, data boundaries, and retrieval behavior fit your application?",
+  },
+  {
+    id: "framework",
+    icon: "workflow",
+    label: "Build an agent workflow",
+    title: "Build around the agent you own.",
+    action: "Explore Mastra workflows",
+    href: "https://mastra.ai/docs",
+    local: false,
+    text: "Compare memory, tools and workflow orchestration together.",
+    situation: "Building agents and workflows in TypeScript",
+    starting: [
+      { text: "An agent framework such as " },
+      { text: "Mastra", href: "https://mastra.ai/docs" },
+      { text: ", with memory as part of its stack" },
+    ],
+    check: "Do you want to own the agent implementation, tools, and workflow?",
+  },
+] as const;

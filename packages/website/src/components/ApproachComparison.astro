@@ -1,0 +1,35 @@
+---
+import { WORKFLOW_APPROACHES as approaches } from "../lib/workflow-fit";
+import ApproachStartingPoint from "./ApproachStartingPoint.astro";
+import AccordionItem from "./ui/AccordionItem.astro";
+---
+<div class="approach-comparison" role="region" aria-label="Approach comparison">
+  <div class="table-scroll desktop-comparison" tabindex="0"><table class="fit-table"><caption>Where to start when evaluating project memory</caption><thead><tr><th scope="col">Your situation</th><th scope="col">Useful starting point</th><th scope="col">What to check</th></tr></thead><tbody>{approaches.map(approach => <tr data-fit-row={approach.id}><th scope="row">{approach.situation}</th><td data-label="Useful starting point"><ApproachStartingPoint segments={approach.starting} /></td><td data-label="What to check">{approach.check}</td></tr>)}</tbody></table></div>
+  <div class="phone-comparison" data-pagefind-ignore>
+    {approaches.map(approach => <section class="approach-selected" data-selected-approach={approach.id}><p class="field-marker">Your selected approach</p><h3>{approach.situation}</h3><dl><dt>Useful starting point</dt><dd><ApproachStartingPoint segments={approach.starting} /></dd><dt>What to check</dt><dd>{approach.check}</dd></dl></section>)}
+    <AccordionItem class="fit-alternatives" title="Compare other approaches" meta="3 alternatives">{approaches.map(approach => <section data-alternative-approach={approach.id}><h3>{approach.situation}</h3><dl><dt>Useful starting point</dt><dd><ApproachStartingPoint segments={approach.starting} /></dd><dt>What to check</dt><dd>{approach.check}</dd></dl></section>)}</AccordionItem>
+  </div>
+</div>
+<style>
+  .phone-comparison { display:none; }
+  @media(max-width:640px) {
+    .desktop-comparison { display:none; }
+    .phone-comparison { display:block;margin-top:16px; }
+    .approach-selected { display:none;padding:20px;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--surface); }
+    .phone-comparison h3 { margin:0 0 12px;line-height:1.5; }
+    .phone-comparison .field-marker { font-size:.6875rem;margin-bottom:8px; }
+    .phone-comparison dl { margin:0; }
+    .phone-comparison dt { color:var(--muted);font-size:.75rem;margin-top:12px; }
+    .phone-comparison dd { font-size:.875rem;margin:4px 0 0;line-height:1.65; }
+    .phone-comparison :global(details) { margin-top:12px; }
+    [data-alternative-approach] { padding-block:16px;border-top:1px solid var(--line); }
+    :global(.fit-section:has(input[value="coding"]:checked)) [data-selected-approach="coding"],
+    :global(.fit-section:has(input[value="rules"]:checked)) [data-selected-approach="rules"],
+    :global(.fit-section:has(input[value="application"]:checked)) [data-selected-approach="application"],
+    :global(.fit-section:has(input[value="framework"]:checked)) [data-selected-approach="framework"] { display:block; }
+    :global(.fit-section:has(input[value="coding"]:checked)) [data-alternative-approach="coding"],
+    :global(.fit-section:has(input[value="rules"]:checked)) [data-alternative-approach="rules"],
+    :global(.fit-section:has(input[value="application"]:checked)) [data-alternative-approach="application"],
+    :global(.fit-section:has(input[value="framework"]:checked)) [data-alternative-approach="framework"] { display:none; }
+  }
+</style>

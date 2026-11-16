@@ -36,7 +36,7 @@ test("phone evidence uses focused sources without clipping its width", async ({
     );
     await expect(stage.locator("a:visible")).toHaveAttribute(
       "href",
-      /inspect=/,
+      /product-tour\/knowledge-detail-/,
     );
   }
   await page.goto("/tour/?view=usage");
@@ -90,7 +90,7 @@ test("reference results explain their purpose and can expand without an internal
   await expect(page.locator("#knowledge")).toBeAttached();
 });
 
-test("journal gives its temporary detail less weight and its next-session result priority", async ({
+test("journal keeps temporary detail collapsed and task selection before its relevant result", async ({
   page,
 }) => {
   await page.goto("/#journal");
@@ -102,8 +102,8 @@ test("journal gives its temporary detail less weight and its next-session result
   await page.getByRole("radio", { name: "Next session", exact: true }).check();
   const result = page.locator('[data-journal-result="webhook"]');
   const choices = page.locator(".journal-tasks");
-  expect((await result.boundingBox())!.y).toBeLessThan(
-    (await choices.boundingBox())!.y,
+  expect((await choices.boundingBox())!.y).toBeLessThan(
+    (await result.boundingBox())!.y,
   );
   await page
     .getByRole("radio", { name: "Add a settings field", exact: true })

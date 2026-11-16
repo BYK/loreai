@@ -224,7 +224,7 @@ function renderFieldRow(name: string, schema: ZodTypeAny): string {
   const description = (getDescription(schema) ?? "")
     .replace(/\|/g, "\\|")
     .replace(/\n/g, " ");
-  return `| \`${name}\` | ${type} | ${def} | ${constraints} | ${description} |`;
+  return `| \`${name}\` | \`${type}\` | ${def} | ${constraints} | ${description} |`;
 }
 
 function renderObject(name: string, schema: ZodTypeAny, depth = 0): string {
@@ -233,21 +233,21 @@ function renderObject(name: string, schema: ZodTypeAny, depth = 0): string {
   // and so on. Capped at h6 to keep heading hierarchy sensible.
   const heading = `${"#".repeat(Math.min(depth + 2, 6))} \`${name}\``;
   lines.push(heading);
+  const shape = getShape(schema);
   const description = getDescription(schema);
-  if (description) {
+  if (shape && description) {
     lines.push("");
     lines.push(description);
   }
   lines.push("");
 
-  const shape = getShape(schema);
-  if (!shape) {
-    return lines.join("\n");
-  }
-
-  // Render the field table
+  // Root scalars and arrays use their own heading and a single field row.
   lines.push("| Field | Type | Default | Constraints | Description |");
   lines.push("|---|---|---|---|---|");
+  if (!shape) {
+    lines.push(renderFieldRow(name, schema));
+    return lines.join("\n");
+  }
   for (const [fieldName, fieldSchema] of Object.entries(shape)) {
     lines.push(renderFieldRow(fieldName, fieldSchema));
   }
@@ -320,7 +320,7 @@ The file is **JSONC** (JSON with // line comments and slash-star block comments,
   "```jsonc" +
   `
 {
-  // An optional example: allow up to 30 active curated entries.
+  // Lowering the default (200) can remove lower-value entries above this limit.
   "curator": { "enabled": true, "maxEntries": 30 },
 }
 ` +

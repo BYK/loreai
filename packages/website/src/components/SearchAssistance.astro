@@ -1,0 +1,31 @@
+---
+// Render once beside Starlight Search. Its native dialog, input and results remain in charge.
+const base = import.meta.env.BASE_URL;
+---
+<template data-search-assistance>
+  <section class="search-recovery" data-search-recovery aria-label="Search suggestions" hidden>
+    <p>Try a shorter phrase or a common task.</p>
+    <div class="search-suggestions">
+      { ["session", "knowledge", "install"].map(query => <button type="button" data-search-suggestion={query} aria-label={`Search for ${query}`}>{query}</button>) }
+    </div>
+    <p><a href={`${base}docs/configuration/`}>Browse settings</a><span aria-hidden="true"> · </span><a href={`${base}docs/troubleshooting/`}>Troubleshoot a problem</a></p>
+  </section>
+</template>
+<script>import "../scripts/search-assistance";</script>
+<style is:global>
+  site-search .search-recovery { margin-block:1rem 0;padding:1rem;border:1px solid var(--sl-color-gray-5);border-radius:.5rem;font-size:.875rem;line-height:1.6;color:var(--sl-color-gray-2); }
+  site-search .search-recovery[hidden] { display:none; }
+  site-search .search-recovery p { margin:0 0 .65rem; }
+  site-search .search-recovery p:last-child { margin-bottom:0; }
+  site-search .search-recovery a { color:var(--sl-color-text-accent);text-underline-offset:.2em; }
+  site-search .search-suggestions { display:flex;flex-wrap:wrap;gap:.5rem;margin-block:.7rem; }
+  site-search .search-suggestions button { border:1px solid var(--sl-color-gray-5);border-radius:.35rem;background:var(--sl-color-black);color:var(--sl-color-white);font:inherit;min-height:2.75rem;padding:.4rem .7rem;cursor:pointer; }
+  site-search .search-suggestions button:focus-visible { outline:2px solid var(--sl-color-text-accent);outline-offset:3px; }
+  /* One quiet card per page, with directly indented section matches instead of a tree. */
+  #starlight__search .pagefind-ui__result-inner { border:1px solid var(--sl-color-gray-5);border-radius:.4rem;overflow:hidden;gap:0; }
+  #starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title { padding:.75rem 1rem; }
+  #starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title::before,
+  #starlight__search .pagefind-ui__result-nested::before { content:none; }
+  #starlight__search .pagefind-ui__result-nested { padding:.65rem 1rem;border-top:1px solid var(--sl-color-gray-5); }
+  #starlight__search .pagefind-ui__result-excerpt { font-size:.875rem;line-height:1.6; }
+</style>

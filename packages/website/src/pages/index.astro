@@ -1,4 +1,5 @@
 ---
+import StartCard from "../components/StartCard.astro";
 import AgentIcon from "../components/AgentIcon.astro";
 import PublicLayout from "../layouts/PublicLayout.astro";
 import ProductSpotlight from "../components/ProductSpotlight.astro";
@@ -34,8 +35,5 @@ const base = import.meta.env.BASE_URL;
     <AccordionItem title="Does local Lore include live team sync?" name="home-faq"><p>Git-based knowledge sharing is available today. Folk Lore’s hosted team experience is in early access; you can join its interest list on the Why Lore page. It does not enable sync.</p></AccordionItem>
     </Accordion><p class="faq-help">Something missing? <a href={`${base}docs/troubleshooting/?issue=session#diagnostic`}>Check a missing session</a> or <a href={`${base}docs/troubleshooting/?issue=gateway#diagnostic`}>check your gateway</a>.</p>
   </div></section>
-  <section class="section home-start" id="get-started">
-    <div><h2>Bring your next session along.</h2><p>Choose your agent and connect your first project.</p></div><a class="button button-primary" href={`${base}docs/install/`}>Get started <span aria-hidden="true">→</span></a>
-    <div class="home-resources"><p id="evidence"><span id="voices" class="fragment-anchor" aria-hidden="true"></span><a href={`${base}docs/benchmark/`}>Read the evaluation and its limitations</a></p><p id="waitlist"><a href={`${base}different/#waitlist`}>Early access to Folk Lore for teams</a></p></div>
-  </section>
+  <StartCard id="get-started" resources />
 </PublicLayout>

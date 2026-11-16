@@ -1,0 +1,5 @@
+---
+interface Props { segments: readonly { text: string; href?: string; code?: boolean }[]; }
+const { segments } = Astro.props;
+---
+{segments.map(segment => segment.href ? <a href={segment.href}>{segment.text}</a> : segment.code ? <code>{segment.text}</code> : segment.text)}

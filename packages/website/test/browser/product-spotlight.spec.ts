@@ -34,7 +34,10 @@ test("product detail choices keep independent history and open the matching tour
   ).toBeChecked();
   await expect(
     spotlight.locator(".spotlight-image .tour-image-link:visible"),
-  ).toHaveAttribute("href", "/tour/?view=knowledge&inspect=source#product");
+  ).toHaveAttribute(
+    "href",
+    /product-tour\/knowledge-detail-(light|dark)\.png$/,
+  );
   await spotlight.locator('[data-preview-panel="source"] a').click();
   await expect(page.locator('[data-inspect-panel="source"]')).toBeVisible();
 });

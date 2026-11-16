@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { referenceShareLink } from "../src/lib/reference-link.ts";
 import { buildReferenceDirectory } from "../src/lib/reference-directory.ts";
 
 await test("nested names retain their real parent anchors and ignore fenced examples", () => {
@@ -190,5 +191,96 @@ await test("a parent object field takes the exact record link when its name also
   assert.equal(
     settings.find((e) => e.label === "search.embeddings").slug,
     "setting-search.embeddings",
+  );
+});
+
+await test("result metadata preserves literal types, defaults and environment default absence", () => {
+  const heading = (text, slug) => ({ depth: 2, text, slug });
+  const configuration = buildReferenceDirectory(
+    "## Field reference\n## `search`\n| `mode` | `fts` \\| `hybrid` | `hybrid` | | Search mode |",
+    [
+      heading("Field reference", "field-reference"),
+      heading("search", "search"),
+    ],
+    "configuration",
+  );
+  const field = configuration.settings.find(
+    (entry) => entry.label === "search.mode",
+  );
+  assert.equal(field.type, "fts | hybrid");
+  assert.equal(field.defaultValue, "hybrid");
+  const environment = buildReferenceDirectory(
+    "## Setting reference\n## Startup\n| `LORE_IDLE_TIMEOUT`<br>**Default:** `60` | Idle time |\n| `LORE_WORKER_MODEL` | Provider model |",
+    [
+      heading("Setting reference", "setting-reference"),
+      heading("Startup", "startup"),
+    ],
+    "environment",
+  );
+  assert.equal(
+    environment.settings.find((entry) => entry.label === "LORE_IDLE_TIMEOUT")
+      .defaultValue,
+    "60",
+  );
+  assert.equal(
+    environment.settings.find((entry) => entry.label === "LORE_WORKER_MODEL")
+      .defaultValue,
+    undefined,
+  );
+});
+
+await test("generated root settings and generic types keep schema metadata and actual heading anchors", () => {
+  const body = readFileSync(
+    new URL("../src/content/docs/docs/configuration.md", import.meta.url),
+    "utf8",
+  );
+  const headings = [...body.matchAll(/^(#{2,3}) (.+)$/gm)].map(
+    (match, index) => ({
+      depth: match[1].length,
+      text: match[2].replaceAll("`", ""),
+      slug:
+        match[2] === "Field reference"
+          ? "field-reference"
+          : "rendered-" + index,
+    }),
+  );
+  const { settings } = buildReferenceDirectory(body, headings, "configuration");
+  for (const [label, type] of [
+    ["knowledge.contextSources", "array<enum>"],
+    ["user.aliases", "array<{ type, value }>"],
+    ["user.metadata", "Record<string, unknown>"],
+  ]) {
+    assert.equal(
+      settings.find((entry) => entry.label === label)?.type,
+      type,
+      label,
+    );
+  }
+  for (const [label, type, defaultValue] of [
+    ["crossProject", "boolean", "true"],
+    ["idleResumeMinutes", "number", "5"],
+    ["workspaces", "array<string>", "[]"],
+  ]) {
+    const entry = settings.find((entry) => entry.label === label);
+    assert.equal(entry?.kind, "setting", label);
+    assert.equal(entry.slug, headings.find((h) => h.text === label).slug);
+    assert.equal(entry.type, type);
+    assert.equal(entry.defaultValue, defaultValue);
+    assert.equal(
+      settings.some((entry) => entry.label === label + "." + label),
+      false,
+    );
+  }
+});
+
+await test("a copied setting link omits credentials and query while preserving the origin and deployment path", () => {
+  const current = new URL(
+    "http://synthetic-user:synthetic-password@127.0.0.1:4342//_preview/pr-2143/docs/configuration/?setting=maxEntries#curator",
+  );
+  assert.equal(current.username, "synthetic-user");
+  assert.equal(current.password, "synthetic-password");
+  assert.equal(
+    referenceShareLink(current.href, "setting-curator.maxEntries"),
+    "http://127.0.0.1:4342//_preview/pr-2143/docs/configuration/#setting-curator.maxEntries",
   );
 });

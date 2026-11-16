@@ -5,30 +5,35 @@ import ChoiceGroup from "./ui/ChoiceGroup.astro";
 import ChoiceItem from "./ui/ChoiceItem.astro";
 import { SETUP_AGENTS } from "../lib/agent-setup";
 import InstallCommand from "./InstallCommand.astro";
-import CommandBlock from "./ui/CommandBlock.astro";
-interface Props { id?: string; installed?: boolean; }
-const { id = "agent-setup", installed = false } = Astro.props;
+import AgentConnection from "./AgentConnection.astro";
+import SetupProgress from "./SetupProgress.astro";
+interface Props { id?: string; installed?: boolean; verify?: boolean; }
+const { id = "agent-setup", installed = false, verify = false } = Astro.props;
 const base = import.meta.env.BASE_URL;
 
 ---
 <section class="agent-setup field-frame" aria-label="Set up Lore with your agent">
+  <SetupProgress current={verify ? "Verify" : installed ? "Connect" : "Install"} />
+  {!installed && <details class="setup-install" open><summary>Install Lore <span class="small muted">· collapse this step when ready</span></summary><div class="setup-install-body"><p>Choose the machine where you code. Install once, then connect from your project.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div></details>}
   <ChoiceGroup class="setup-picker" legend="Choose your coding agent">
     {SETUP_AGENTS.map((agent,index) => <ChoiceItem name={`${id}-agent`} value={agent.id} checked={index===0} label={agent.name} controls={`${id}-${agent.id}`}><AgentIcon slot="icon" agent={agent.id} /></ChoiceItem>)}
   </ChoiceGroup>
-  {!installed && <div class="setup-install"><h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="download" /></span> Install Lore</h3><p>Choose the machine where you code. Install once, then connect from your project.</p><InstallCommand /><p class="small muted">Already installed? Continue with your connection command below. <a href={`${base}docs/install/#other-installation-options`}>npm and installation details</a></p></div>}
   {id === "install-setup" && <span id="3-connect-from-your-project" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {id === "install-setup" && <span id="4-verify-the-connection" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {id === "install-setup" && <span id="verify-recording" class="legacy-setup-anchor" aria-hidden="true"></span>}
   {SETUP_AGENTS.map(agent => <div class="setup-panel" data-setup-panel={agent.id} id={`${id}-${agent.id}`}>
-    <h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="connect" /></span> Connect {agent.name}</h3><p>{agent.detail}</p>
-    {agent.id === "codex-desktop" ? <ol class="setup-desktop-steps">
-      <li><strong>Configure routing once.</strong><CommandBlock command="lore setup codex" kind="connection" copyLabel="Copy Codex Desktop configuration command" /></li>
-      <li><strong>Start the local gateway.</strong><CommandBlock command="lore start --bg --local" kind="connection" copyLabel="Copy Codex Desktop gateway command" /></li>
-      <li><strong>Restart Codex Desktop.</strong> Save your work, fully quit the app, then reopen it so it reads the routing settings.</li>
-      <li><strong>Verify recording below.</strong> Open your project and send a message in a new conversation. <a href={`${base}docs/setup/#undoing-setup`}>Undo routing changes</a> if needed.</li>
-    </ol> : <CommandBlock command={agent.command} kind="connection" copyLabel={`Copy ${agent.name} connection command`} />}
-    <div class="setup-observation"><h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="check" /></span> Verify a recorded session</h3><p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p><label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p></div>
-    <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`} class="icon-link"><span class="link-label">{agent.name} guide</span> <span aria-hidden="true">→</span></a></div>
+    {!verify && <AgentConnection agent={agent} />}
+    <div class="setup-observation">
+      {!verify && <h3><span class="setup-stage" aria-hidden="true"><NavigationIcon name="check" /></span> Verify a recorded session</h3>}
+      {verify ? <ol class="setup-verification-steps">
+        <li>Send a normal project-related message in {agent.name}. For a disposable example: “This service should reject duplicate webhook deliveries by event ID.”</li>
+        <li>Open the <strong>Dashboard URL printed by Lore</strong>. Use the actual printed address and port; the local memory browser is separate from withlore.ai.</li>
+        <li>Select your project in the project picker, then open <strong>Sessions</strong>.</li>
+        <li>Open the recorded session. Check that your message appears in its conversation.</li>
+      </ol> : <p>Send a message, open Lore’s printed Dashboard URL, and look in this project’s Sessions list.</p>}
+      <label><input type="checkbox" /><span>I can see a recorded session from {agent.name}.</span></label><p class="setup-confirmed">Your observation is checked. Next, open the session and inspect its recorded messages.</p><p class="setup-observation-note">This checklist does not inspect your local gateway or mark setup complete automatically.</p>
+    </div>
+    {verify ? <details class="setup-earlier"><summary>Need the earlier install or connection steps?</summary><div><p>If <code>lore --version</code> is unavailable, <a href={`${base}docs/install/?agent=${agent.id}`}>install Lore first</a>. Have {agent.name} installed and authenticated. Run these commands from the project you want to record.</p><AgentConnection agent={agent} /><p><a href={`${base}docs/guides/${agent.guide}/`}>{agent.name} guide</a></p></div></details> : <div class="setup-next"><a class="button button-primary" href={`${base}docs/first-session/?agent=${agent.id}#verify`}>See verification steps</a><a href={`${base}docs/guides/${agent.guide}/`} class="icon-link"><span class="link-label">{agent.name} guide</span> <span aria-hidden="true">→</span></a></div>}
   </div>)}
   {id === "install-setup" && <span id="operational-telemetry" class="legacy-setup-anchor" aria-hidden="true"></span>}
   <p class="setup-disclosure small muted">Model requests use your configured providers and can incur charges. Local Lore runs on your machine; model-provider billing is separate. Production telemetry is on by default; set <code>SENTRY_ENABLED=0</code> before starting Lore to opt out. <a href={`${base}docs/data-and-costs/`}>Data and costs</a></p>
@@ -38,7 +43,8 @@ const base = import.meta.env.BASE_URL;
 .agent-setup { min-width:0;padding:1.25rem; }
 [data-copy-setup][hidden] { display:none; }
 .agent-setup h3 { font:500 1.1rem/1.4 var(--sans,"DM Sans Variable",sans-serif);margin:0 0 .5rem; }
-.setup-install { padding-block:0 1.5rem;border-bottom:1px solid var(--line); }
+.setup-install { padding-block:0 1.25rem;margin-block:0 1.25rem;border-bottom:1px solid var(--line); }
+.setup-install > summary,.setup-earlier > summary { cursor:pointer;min-height:44px;padding-block:.625rem;font-weight:500;line-height:1.5; }.setup-install-body { padding-top:.25rem; }.setup-earlier { margin-top:1rem;border-top:1px solid var(--line);padding-top:.5rem; }.setup-earlier > div { padding-top:.75rem; }.setup-verification-steps { padding-inline-start:1.25rem; }.setup-verification-steps li { padding-inline-start:.25rem; }
 .agent-setup .install-box { margin-block:.75rem; }
 .setup-desktop-steps { padding-inline-start:1.25rem; }.setup-desktop-steps > li { padding-inline-start:.25rem;margin-block:.75rem; }.setup-desktop-steps .ui-command { margin-block:.5rem; }
 .setup-panel { display:none;padding-block:1.5rem 0; }

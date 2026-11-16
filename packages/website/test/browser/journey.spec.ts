@@ -28,10 +28,10 @@ test("benchmark evidence names the task, denominator and limitations", async ({
 }) => {
   await page.goto("/#evidence");
   const evidence = page.locator("#evidence");
-  await expect(evidence.getByRole("link")).toHaveAttribute("href", /benchmark/);
+  await expect(evidence).toHaveAttribute("href", /benchmark/);
   await expect(page.locator("#features")).toContainText("Available now");
-  await expect(page.locator("#waitlist")).toContainText("Early access");
-  await evidence.getByRole("link").click();
+  await expect(page.locator("#waitlist")).toContainText(/early.access/i);
+  await evidence.click();
   const benchmark = page.locator("main");
   await expect(benchmark).toContainText("Twenty authored questions");
   await expect(benchmark).toContainText("13/20");
@@ -118,7 +118,10 @@ test("installation guides lead through connection and verification before refere
 }) => {
   await page.goto("/docs/install/");
   await expect(
-    page.getByRole("heading", { name: "Connect your agent", exact: true }),
+    page.getByRole("heading", {
+      name: "Install and connect your agent",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", {

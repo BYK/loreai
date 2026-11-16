@@ -1,0 +1,16 @@
+---
+interface Link { title: string; href: string; }
+interface Props { title: string; href: string; text?: string; related?: readonly Link[]; label?: string; }
+const { title, href, text, related = [], label = "Continue from here" } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const local = (path: string) => path.startsWith(base) ? path : `${base}${path.replace(/^\//, "")}`;
+---
+<nav class="docs-next-action" aria-label={label}>
+  <p class="field-marker">{label}</p>
+  <a class="next-primary icon-link" href={local(href)}><span class="link-label">{title}</span><span aria-hidden="true">→</span></a>
+  {text && <p class="next-context">{text}</p>}
+  {related.length > 0 && <ul class="next-related" aria-label="Related reading">{related.map(link => <li><a href={local(link.href)}>{link.title}</a></li>)}</ul>}
+</nav>
+<style>
+.docs-next-action { margin-top:2rem;padding-block:1.25rem;border-top:1px solid var(--line);min-width:0; }.docs-next-action p { margin:0; }.next-primary { display:flex;align-items:center;justify-content:space-between;gap:1rem;min-height:44px;margin-block:.5rem;color:var(--heading);font-size:1.125rem;font-weight:500;line-height:1.5; }.next-primary > span:last-child { flex:0 0 auto;color:var(--accent); }.next-context { max-width:65ch;font-size:.875rem;color:var(--muted);line-height:1.65; }.next-related { display:flex;flex-wrap:wrap;gap:0 1.25rem;list-style:none;padding:0;margin:1rem 0 0; }.next-related li { margin:0; }.next-related a { display:inline-flex;align-items:center;min-height:44px;font-size:.8125rem;color:var(--muted);text-underline-offset:3px; }.next-related a:hover { color:var(--accent); }
+</style>
