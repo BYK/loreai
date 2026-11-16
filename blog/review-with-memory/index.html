@@ -1,8 +1,68 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>The Semantic Linter: Automating reviews without losing touch | Lore</title><meta name="description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><!-- Open Graph --><meta property="og:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta property="og:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta property="og:image" content="https://withlore.ai/og-image-c43f89de.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Lore.AI — Shared Context for AI Agents"><meta property="og:url" content="https://withlore.ai/blog/review-with-memory/"><meta property="og:type" content="article"><meta property="og:site_name" content="Lore.AI"><!-- Twitter Card --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta name="twitter:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta name="twitter:image" content="https://withlore.ai/og-image-c43f89de.png"><meta name="twitter:site" content="@withLoreAI"><!-- RSS feed autodiscovery --><link rel="alternate" type="application/rss+xml" title="Lore Blog" href="https://withlore.ai/rss.xml"><!--
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><script>// Shared by every page, including Starlight. Run in the head before paint.
+// Reuse Starlight's storage key so existing documentation preferences survive.
+(() => {
+  const key = "starlight-theme";
+  const root = document.documentElement;
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const parse = (value) =>
+    value === "light" || value === "dark" ? value : "auto";
+  let choice = "auto";
+  try {
+    choice = parse(window.localStorage.getItem(key));
+  } catch {
+    // Storage can be disabled. Choices still work for this page.
+  }
+
+  function apply() {
+    root.dataset.themeChoice = choice;
+    root.dataset.theme =
+      choice === "auto" ? (media.matches ? "dark" : "light") : choice;
+    document.querySelectorAll("button[data-theme-choice]").forEach((button) => {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.themeChoice === choice),
+      );
+    });
+  }
+
+  apply();
+  media.addEventListener("change", () => {
+    if (choice === "auto") apply();
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === key || event.key === null) {
+      choice = parse(event.newValue);
+      apply();
+    }
+  });
+
+  function connect() {
+    document.querySelectorAll("button[data-theme-choice]").forEach((button) => {
+      button.addEventListener("click", () => {
+        choice = parse(button.dataset.themeChoice);
+        try {
+          if (choice === "auto") window.localStorage.removeItem(key);
+          else window.localStorage.setItem(key, choice);
+        } catch {
+          // Preserve the in-memory choice even when persistence is unavailable.
+        }
+        apply();
+      });
+    });
+    apply();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", connect, { once: true });
+  } else {
+    connect();
+  }
+})();
+</script><noscript><style>.theme-toggle, .mobile-theme-preferences, [data-copy-install] { display: none !important; }</style></noscript><title>The Semantic Linter: Automating reviews without losing touch | Lore</title><meta name="description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><!-- Open Graph --><meta property="og:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta property="og:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta property="og:image" content="https://withlore.ai/og-image-c43f89de.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Lore.AI — Shared Context for AI Agents"><meta property="og:url" content="https://withlore.ai/blog/review-with-memory/"><meta property="og:type" content="article"><meta property="og:site_name" content="Lore.AI"><!-- Twitter Card --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta name="twitter:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta name="twitter:image" content="https://withlore.ai/og-image-c43f89de.png"><meta name="twitter:site" content="@withLoreAI"><!-- RSS feed autodiscovery --><link rel="alternate" type="application/rss+xml" title="Lore Blog" href="https://withlore.ai/rss.xml"><!--
   standard.site publication discovery hint. This is a hint only; the
   authoritative check is the /.well-known/site.standard.publication endpoint.
---><link rel="site.standard.publication" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self"><link rel="site.standard.document" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/review-with-memory"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="/theme.css"><style>.blog-body{background:var(--bg);cursor:auto;min-height:100svh}.blog-body:after{z-index:0}.blog-nav{z-index:20;background:var(--nav-bg);color:var(--inverse-text);justify-content:space-between;align-items:center;gap:2rem;padding:.6rem 3rem;display:flex;position:sticky;top:0}.blog-brand img{width:auto;height:64px;display:block}.blog-nav nav{align-items:center;gap:1.5rem;font-size:.9rem;display:flex}.blog-hero,.blog-list,.blog-post{width:min(980px,100% - 2rem);margin:0 auto}.blog-hero{padding:7rem 0 4rem}.blog-hero h1,.blog-post h1{font-family:var(--serif);color:var(--heading);font-weight:400}.blog-hero h1{max-width:760px;font-size:clamp(2.6rem,6vw,5rem);line-height:1.05}.blog-hero p:not(.eyebrow),.blog-card p,.blog-post header p{max-width:68ch;color:var(--text-muted)}.blog-list{border:1px solid var(--border);background:var(--border);gap:1px;padding-bottom:6rem;display:grid}.blog-card{background:var(--surface);padding:2rem}.blog-card time,.blog-post time,.blog-back{color:var(--eyebrow);letter-spacing:.1em;text-transform:uppercase;font-size:.78rem}.blog-card h2{font-family:var(--serif);margin:.7rem 0 .6rem;font-size:1.8rem;font-weight:400}.blog-card ul{flex-wrap:wrap;gap:.5rem;margin-top:1rem;list-style:none;display:flex}.blog-card li{border:1px solid var(--border);color:var(--link);border-radius:3px;padding:.15rem .5rem;font-size:.78rem}.blog-post{width:min(720px,100% - 3rem);padding:5rem 0 7rem}.blog-post header{margin:2rem 0 3.5rem}.blog-post h1{font-size:clamp(2.4rem,5vw,4rem);line-height:1.08}.blog-post .blog-subtitle{max-width:none;font-family:var(--serif);color:var(--heading-accent);margin:.8rem 0 0;font-size:clamp(1.3rem,3vw,1.9rem);font-style:italic;font-weight:400;line-height:1.2}.blog-post time{margin:1.6rem 0 .5rem;display:block}.blog-post header p:not(.blog-subtitle){margin:0;font-size:1.1rem;line-height:1.6}.blog-prose{max-width:none}.blog-prose p,.blog-prose li{color:var(--text);font-size:1.05rem;line-height:1.75}.blog-prose p,.blog-prose ul,.blog-prose ol,.blog-prose blockquote,.blog-prose pre,.blog-prose table{margin:0 0 1.4rem}.blog-prose>:first-child{margin-top:0}.blog-prose h2{font-family:var(--serif);color:var(--heading);margin:2.8rem 0 1rem;font-size:1.75rem;font-weight:500;line-height:1.2}.blog-prose h3{font-family:var(--serif);color:var(--heading);margin:2.2rem 0 .8rem;font-size:1.3rem;font-weight:500;line-height:1.25}.blog-prose ul,.blog-prose ol{padding-left:1.3rem}.blog-prose li{margin-bottom:.5rem}.blog-prose li:last-child{margin-bottom:0}.blog-prose a{color:var(--emphasis);text-underline-offset:2px;text-decoration:underline 1px}.blog-prose a:hover{color:var(--link-hover)}.blog-prose :not(pre)>code{background:var(--bg-alt);border-radius:3px;padding:.12em .35em;font-size:.9em}.blog-prose blockquote{border-left:3px solid var(--eyebrow);color:var(--emphasis);font-family:var(--serif);padding:.4rem 0 .4rem 1.3rem;font-size:1.45rem;font-style:italic;line-height:1.3}.blog-prose blockquote p{margin:0}.blog-prose table{border-collapse:collapse;width:100%;font-size:1rem}.blog-prose th,.blog-prose td{border:1px solid var(--border);text-align:left;vertical-align:top;padding:.7rem .9rem;line-height:1.55}.blog-prose thead th{background:var(--surface-alt);color:var(--heading);font-weight:600}.blog-prose tbody tr:nth-child(2n) td{background:var(--surface-alt)}.blog-prose pre{border-radius:4px;padding:1rem;font-size:.92em;overflow-x:auto}@media (prefers-color-scheme:light){.blog-prose pre{color:#24292f;background:#fff;border:1px solid #d0d7de}.blog-prose pre span[style*="--0:#82AAFF"]{color:#0550ae}.blog-prose pre span[style*="--0:#D6DEEB"]{color:#24292f}.blog-prose pre span[style*="--0:#ECC48D"]{color:#0a3069}.blog-prose pre span[style*="--0:#7FDBCA"]{color:#116329}}@media (width<=780px){.blog-nav{flex-direction:column;align-items:flex-start;padding:.8rem 1rem 1rem}.blog-nav nav{flex-wrap:wrap}}
-</style><script type="module" src="/_astro/page.CVtX0EDl.js"></script></head><body class="blog-body"><header class="blog-nav"><a href="/" class="logo" data-theme="dark" aria-label="Lore.AI — home"><img src="/_astro/loreai-dark.BoECdKok.svg" class="logo-img" alt="" width="48" height="48" style="height: 48px; width: 48px;"><span class="logo-text">Lore<span class="logo-dot">.</span>AI</span></a><nav aria-label="Primary navigation"><a href="/docs/">Docs</a><a href="/blog/">Blog</a><a href="/different/">Why Lore</a><a href="/rss.xml">RSS</a><a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer">GitHub</a></nav></header><main><article class="blog-post"><a class="blog-back" href="/blog/">Back to blog</a><header><p class="eyebrow">Burak Yigit Kaya</p><h1>The Semantic Linter: Automating reviews without losing touch</h1><p class="blog-subtitle">Why AI code reviews need grounding with team context</p><time datetime="2026-07-26T00:00:00.000Z">July 26, 2026</time><p>You can&#39;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</p></header><div class="blog-prose"><p>About ten years ago, when machine learning got good enough that you could train a real classifier
+--><link rel="site.standard.publication" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self"><link rel="site.standard.document" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/review-with-memory"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/_astro/blog-kind.C4LQeiHz.css"><style>.mobile-theme-preferences{z-index:2;border-bottom:1px solid var(--line);background:var(--surface);flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;padding:12px 8px;display:flex;position:sticky;top:0}.mobile-theme-preferences>span{color:var(--muted);font-size:.875rem}.mobile-theme-preferences .theme-toggle button{width:44px;height:44px}.docs-group-icons>.mobile-theme-preferences{background:var(--bg)}.nav-mobile-panel,:root[data-has-sidebar] #starlight__sidebar{scroll-padding-block-start:calc(5rem + 8px)}:root[data-has-sidebar] .docs-site-header .header-utilities>.theme-toggle{display:none}@media (width>=50rem){.docs-group-icons>.mobile-theme-preferences{display:none}:root[data-has-sidebar] .docs-site-header .header-utilities>.theme-toggle{display:inline-flex}:root[data-has-sidebar] #starlight__sidebar{scroll-padding-block-start:0}}@media (width<=900px){.top-nav .header-utilities>.theme-toggle{display:none}}@font-face{font-family:DM Sans Variable;font-style:normal;font-display:swap;font-weight:100 1000;src:url(/_astro/dm-sans-latin-wght-normal.Xz1IZZA0.woff2)format("woff2-variations");unicode-range:U+??,U+131,U+152-153,U+2BB-2BC,U+2C6,U+2DA,U+2DC,U+304,U+308,U+329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}@font-face{font-family:DM Sans Variable;font-style:normal;font-display:swap;font-weight:100 1000;src:url(/_astro/dm-sans-latin-ext-wght-normal.BOFOeGcA.woff2)format("woff2-variations");unicode-range:U+100-2BA,U+2BD-2C5,U+2C7-2CC,U+2CE-2D7,U+2DD-2FF,U+304,U+308,U+329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}@font-face{font-family:DM Sans Variable;font-style:italic;font-display:swap;font-weight:100 1000;src:url(/_astro/dm-sans-latin-wght-italic.Cz4n9dED.woff2)format("woff2-variations");unicode-range:U+??,U+131,U+152-153,U+2BB-2BC,U+2C6,U+2DA,U+2DC,U+304,U+308,U+329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}@font-face{font-family:DM Sans Variable;font-style:italic;font-display:swap;font-weight:100 1000;src:url(/_astro/dm-sans-latin-ext-wght-italic.DUE6_iCb.woff2)format("woff2-variations");unicode-range:U+100-2BA,U+2BD-2C5,U+2C7-2CC,U+2CE-2D7,U+2DD-2FF,U+304,U+308,U+329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+</style><script type="module" src="/_astro/page.D7d3J-YR.js"></script></head><body class="blog-body"><a class="skip-link" href="#main-content">Skip to content</a><header class="top-nav field-guide-header"><div class="header-brand"><a href="/" class="logo" data-theme="auto" aria-label="Lore.AI — home"><img src="/_astro/loreai.BYyO8ZaX.svg" class="logo-img logo-img-light" alt="" width="30" height="30" style="height: 30px; width: 30px;"><img src="/_astro/loreai-dark.BoECdKok.svg" class="logo-img logo-img-dark" alt="" width="30" height="30" style="height: 30px; width: 30px;"><span class="logo-text">Lore<span class="logo-suffix"><span class="logo-dot">.</span>AI</span></span></a><div class="desktop-nav"><nav class="primary-nav guide-navigation" aria-label="Primary navigation"><ul class="guide-triggers"><li><a class="guide-trigger" href="/docs/">Docs</a></li><li><details class="guide-menu" data-menu name="field-guide"><summary class="guide-trigger">Product<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></summary><div class="guide-panel"><div class="guide-list"><p class="guide-label">Meet your project memory</p><a class="guide-destination" href="/tour/?view=knowledge#product"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 3h18v18H3z M3 8h18 M9 8v13"></path></svg><span><strong>View app tour</strong><small>See saved sessions, rules and their sources.</small></span></a><a class="guide-destination" href="/docs/memory/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3 9 5-9 5-9-5 9-5 M3 12l9 5 9-5 M3 16l9 5 9-5"></path></svg><span><strong>How memory works</strong><small>What stays stored. What reaches your agent.</small></span></a><a class="guide-destination" href="/docs/install/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 3v5 M16 3v5 M5 8h14v3a7 7 0 0 1-14 0V8 M12 18v3"></path></svg><span><strong>Connect your coding agent</strong><small>Keep the client you already work with.</small></span></a></div><a class="guide-feature" href="/#journal"><img class="journal-art art-for-dark" src="/journal-art/journal.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/journal-art/journal-light.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><span class="guide-label">An interactive field guide</span><strong>One decision. Remembered.</strong><small>Follow a useful rule from conversation to your next task.</small><span class="guide-feature-action">Open the quest journal<span aria-hidden="true">→</span></span></a><div class="guide-bottom"><span>Local history. Reviewable knowledge.</span><a href="/docs/data-and-costs/">Data &amp; costs<span aria-hidden="true">↗</span></a></div></div></details></li><li><details class="guide-menu" data-menu name="field-guide"><summary class="guide-trigger guide-current">Resources<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></summary><div class="guide-panel"><div class="guide-list"><p class="guide-label">Learn and build</p><a class="guide-destination" href="/docs/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5c-3-2-6-2-10-1v15c4-1 7-1 10 1 3-2 6-2 10-1V4c-4-1-7-1-10 1v15"></path></svg><span><strong>Documentation</strong><small>Setup, everyday use and configuration.</small></span></a><a class="guide-destination" href="/blog/" aria-current="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h10l4 4v14H5V3 M14 3v5h5 M8 12h8 M8 16h5"></path></svg><span><strong>Blog</strong><small>Product ideas and engineering from Lore.</small></span></a><a class="guide-destination" href="/docs/troubleshooting/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M9 8a3 3 0 0 1 6 0c0 2-3 2-3 5 M12 17h.01"></path></svg><span><strong>Troubleshooting</strong><small>Find a missing session or check your setup.</small></span></a></div><a class="guide-feature" href="/docs/first-session/"><img class="journal-art art-for-dark" src="/journal-art/field-tools.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/journal-art/field-tools-light.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><span class="guide-label">Your first session</span><strong>A result you can check.</strong><small>Connect your agent and find its first recorded conversation.</small><span class="guide-feature-action">Follow the setup guide<span aria-hidden="true">→</span></span></a><div class="guide-bottom"><span>Decisions worth keeping.</span><a href="https://github.com/BYK/loreai/releases" target="_blank" rel="noopener noreferrer">Release notes<span aria-hidden="true">↗</span></a></div></div></details></li><li><a class="guide-trigger" href="/different/">Why Lore</a></li></ul></nav></div></div><div class="header-actions"><div class="header-utilities"><a class="header-github" href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer" title="GitHub"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7M15 22v-3.4c0-1 .1-1.6-.5-2.2 3.3-.4 6.7-1.6 6.7-7.3 0-1.6-.5-2.8-1.5-3.9.2-.4.6-1.9-.1-3.8 0 0-1.3-.4-4.1 1.5a14.3 14.3 0 0 0-7 0C5.7 1 4.4 1.4 4.4 1.4c-.7 1.9-.3 3.4-.1 3.8a5.5 5.5 0 0 0-1.5 3.9c0 5.7 3.4 6.9 6.7 7.3-.5.5-.6 1.1-.5 2.2V22"></path></svg><span class="visually-hidden">GitHub</span></a><div class="theme-toggle" role="group" aria-label="Colour theme"><button type="button" data-theme-choice="light" aria-label="Light theme" aria-pressed="false" title="Light theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v1m0 16v1M3 12h1m16 0h1M5.64 5.64l.7.7m11.32 11.32.7.7M5.64 18.36l.7-.7M17.66 6.34l.7-.7"></path><circle cx="12" cy="12" r="4"></circle></svg></button><button type="button" data-theme-choice="auto" aria-label="System theme" aria-pressed="false" title="System theme — follow your device"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 21h8m-4-4v4"></path><rect x="3" y="3" width="18" height="14" rx="2"></rect></svg></button><button type="button" data-theme-choice="dark" aria-label="Dark theme" aria-pressed="false" title="Dark theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.9 13.1A9 9 0 0 1 10.9 3.1 9 9 0 1 0 20.9 13.1Z"></path></svg></button></div><a class="header-start" href="/docs/install/">Get started <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"></path></svg></a></div><details class="nav-mobile" data-menu><summary class="nav-burger" aria-label="Toggle navigation menu"><span data-menu-icon="open" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"></path></svg></span><span data-menu-icon="close" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12 M6 18 18 6"></path></svg></span><span class="visually-hidden">Navigation</span></summary><div class="nav-mobile-panel"><div class="mobile-theme-preferences"><span>Appearance</span><div class="theme-toggle" role="group" aria-label="Colour theme"><button type="button" data-theme-choice="light" aria-label="Light theme" aria-pressed="false" title="Light theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v1m0 16v1M3 12h1m16 0h1M5.64 5.64l.7.7m11.32 11.32.7.7M5.64 18.36l.7-.7M17.66 6.34l.7-.7"></path><circle cx="12" cy="12" r="4"></circle></svg></button><button type="button" data-theme-choice="auto" aria-label="System theme" aria-pressed="false" title="System theme — follow your device"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 21h8m-4-4v4"></path><rect x="3" y="3" width="18" height="14" rx="2"></rect></svg></button><button type="button" data-theme-choice="dark" aria-label="Dark theme" aria-pressed="false" title="Dark theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.9 13.1A9 9 0 0 1 10.9 3.1 9 9 0 1 0 20.9 13.1Z"></path></svg></button></div></div><nav aria-label="Primary navigation" class="primary-nav primary-nav-mobile"><div class="mobile-nav-group"><p class="guide-label">Product</p><ul><li><a href="/tour/?view=knowledge#product">View app tour</a></li><li><a href="/docs/memory/">How memory works</a></li><li><a href="/#journal">The quest journal</a></li><li><a href="/different/">Why Lore</a></li><li><a href="/#how">Day-to-day workflow</a></li></ul></div><div class="mobile-nav-group"><p class="guide-label">Resources</p><ul><li><a href="/docs/">Documentation</a></li><li><a href="/blog/" aria-current="true">Blog</a></li><li><a href="/docs/troubleshooting/">Get help</a></li><li><a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub<span aria-hidden="true"> ↗</span></a></li></ul></div><a class="nav-start" href="/docs/install/">Get started <span aria-hidden="true">↗</span></a></nav></div></details></div></header><main id="main-content"><article class="blog-post"><a class="blog-back icon-link" href="/blog/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 12H4 m7-7-7 7 7 7"></path></svg><span class="link-label">Back to blog</span></a><header><div class="article-field-label"><p class="eyebrow field-marker"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m8 6-6 6 6 6 m8-12 6 6-6 6 m-3-15-2 18"></path></svg>Engineering</p><img class="journal-art art-for-dark" src="/journal-art/memory-satchel.svg" width="48" height="48" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/journal-art/memory-satchel-light.svg" width="48" height="48" loading="eager" decoding="async" alt="" aria-hidden="true"></div><h1>The Semantic Linter: Automating reviews without losing touch</h1><p class="blog-subtitle">Why AI code reviews need grounding with team context</p><div class="article-meta"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M17 3a4 4 0 0 1 0 8 M18 15a4 4 0 0 1 4 4v2"></path></svg>Burak Yigit Kaya</span><time datetime="2026-07-26T00:00:00.000Z"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5h16v16H4V5 M8 2v6 M16 2v6 M4 11h16"></path></svg>July 26, 2026</time></div><p>You can&#39;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</p></header><aside class="article-takeaway" aria-label="Practical takeaway"><strong class="takeaway-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h14v18l-7-4-7 4V3 M9 7h6"></path></svg>In practice</strong><p>Review the knowledge behind a semantic-linter finding. Treat an LLM judge as evidence to inspect, rather than a deterministic rule engine.</p></aside><details data-slot="accordion-item" class="ui-accordion-item article-outline"><summary data-slot="accordion-trigger" class="ui-accordion-trigger"><span class="ui-accordion-label">On this page</span><svg data-slot="accordion-chevron" class="ui-accordion-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg></summary><div data-slot="accordion-content" class="ui-accordion-content"><nav aria-label="Article sections"><ul><li><a href="#the-same-complaint-from-two-sides">The same complaint from two sides</a></li><li><a href="#what-review-was-really-passing-along">What review was really passing along</a></li><li><a href="#you-are-what-you-do-not-what-you-write-down">You are what you do, not what you write down</a></li><li><a href="#the-apprentice-reviews-the-code">The apprentice reviews the code</a></li><li><a href="#the-boring-part-handled">The boring part, handled</a></li><li><a href="#wheres-the-limit">Where’s the limit?</a></li><li><a href="#try-it">Try it</a></li></ul></nav></div></details><script type="module">var e=document.querySelectorAll(`details.ui-accordion-item`);for(let t of e)t.querySelector(`:scope > summary`)?.addEventListener(`pointerdown`,e=>{e.isPrimary&&e.button===0&&(t.dataset.accordionMotion=`pointer`)});document.addEventListener(`keydown`,()=>{for(let t of e)delete t.dataset.accordionMotion},{capture:!0});</script><div class="blog-prose"><p>About ten years ago, when machine learning got good enough that you could train a real classifier
 without a research lab, I had a specific project in mind. I wanted to train something that reviewed
 code the way I did, so I could step back from reviewing every change without the codebase drifting.
 I never built it. I never had enough of the right data, and I never had the time.</p>
@@ -96,5 +156,133 @@ otherwise stays quiet.</p>
 <p>Then run the check against any range and see what it flags:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">lore</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lint</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--base</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">main</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--head</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">HEAD</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="lore lint --base main --head HEAD"><div></div></button></div></figure></div>
 <p>With no arguments it auto-detects the range. When you’re ready for CI, the
-<a href="/docs/guides/semantic-linter/">semantic linter guide</a> has a copy-paste GitHub Action.</p>
-</div></article></main><footer><div class="foot-bottom"><small>&copy; 2026 Lore.AI</small></div></footer></body></html>
+<a href="/docs/guides/semantic-linter/">semantic linter guide</a> has a copy-paste GitHub Action.</p></div><nav class="article-next" aria-label="Put this into practice"><img class="journal-art art-for-dark" src="/journal-art/decision-note.svg" width="56" height="56" loading="lazy" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/journal-art/decision-note-light.svg" width="56" height="56" loading="lazy" decoding="async" alt="" aria-hidden="true"><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href="/docs/guides/semantic-linter/" class="icon-link"><span class="link-label">Set up the semantic linter</span> <span aria-hidden="true">→</span></a><a href="/docs/troubleshooting/">Get help with your setup</a></nav></article></main><footer class="site-footer"><div><a href="/" class="footer-brand">Lore.AI</a><p>Local memory. Reviewable knowledge.</p></div><nav class="footer-links" aria-label="Use Lore"><a href="/docs/install/">Get started</a><a href="/docs/using-lore/">Using Lore</a><a href="/docs/troubleshooting/">Troubleshooting</a><a href="/docs/data-and-costs/">Data &amp; costs</a></nav><nav class="footer-links footer-community" aria-label="Community links"><a class="social-icon" href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7M15 22v-3.4c0-1 .1-1.6-.5-2.2 3.3-.4 6.7-1.6 6.7-7.3 0-1.6-.5-2.8-1.5-3.9.2-.4.6-1.9-.1-3.8 0 0-1.3-.4-4.1 1.5a14.3 14.3 0 0 0-7 0C5.7 1 4.4 1.4 4.4 1.4c-.7 1.9-.3 3.4-.1 3.8a5.5 5.5 0 0 0-1.5 3.9c0 5.7 3.4 6.9 6.7 7.3-.5.5-.6 1.1-.5 2.2V22"></path></svg></a><a class="social-icon" href="https://x.com/withLoreAI" target="_blank" rel="noopener noreferrer" aria-label="Follow on X" title="Follow on X"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.982 21.75H1.672l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231ZM17.083 19.77h1.833L7.084 4.126H5.117L17.083 19.77Z"></path></svg></a><a class="social-icon" href="/rss.xml" aria-label="RSS" title="RSS feed"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 4a16 16 0 0 1 16 16M4 11a9 9 0 0 1 9 9"></path><circle cx="5" cy="19" r="1.5" fill="currentColor" stroke="none"></circle></svg></a><a class="release-link" href="https://github.com/BYK/loreai/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a></nav><small>© 2026 Lore.AI · FSL-1.1-Apache-2.0</small></footer><script>// Public-page interactions. Commands and destination URLs remain static markup.
+const releaseLinks = document.querySelectorAll(".release-link");
+if (releaseLinks.length) {
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(
+        "https://api.github.com/repos/BYK/loreai/releases/latest",
+        { signal: controller.signal },
+      );
+      if (!response.ok) return;
+      const data = await response.json();
+      if (
+        typeof data?.tag_name !== "string" ||
+        !/^v?\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(data.tag_name)
+      )
+        return;
+      const version = data.tag_name.replace(/^v/, "");
+      releaseLinks.forEach((link) => {
+        link.textContent = `Latest: v${version}`;
+      });
+    } catch {
+      // The existing Releases link remains useful without a version lookup.
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+}
+
+const form = document.getElementById("waitlist-form");
+const email = document.getElementById("waitlist-email");
+const button = document.getElementById("waitlist-btn");
+const formView = document.getElementById("waitlist-form-view");
+const successView = document.getElementById("waitlist-success");
+const errorView = document.getElementById("waitlist-error");
+const errorMessage = document.getElementById("waitlist-error-msg");
+const rateKey = "loops-form-timestamp";
+let submitting = false;
+let failed = false;
+
+function clearError() {
+  errorView?.classList.remove("show");
+  email?.removeAttribute("aria-describedby");
+}
+function showSuccess() {
+  clearError();
+  formView?.classList.remove("show");
+  successView?.classList.add("show");
+  successView?.focus();
+}
+function showError(message) {
+  failed = true;
+  if (errorMessage) errorMessage.textContent = message;
+  errorView?.classList.add("show");
+  email?.setAttribute("aria-describedby", "waitlist-error-msg");
+  if (button) button.textContent = "Try again";
+  errorView?.focus();
+}
+
+// oxlint-disable-next-line typescript/no-misused-promises -- DOM event callbacks ignore the returned promise
+form?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (
+    !(email instanceof HTMLInputElement) ||
+    !(button instanceof HTMLButtonElement) ||
+    submitting
+  )
+    return;
+  const value = email.value.trim();
+  if (!value || !email.checkValidity()) return;
+  let last = 0;
+  try {
+    last = Number.parseInt(localStorage.getItem(rateKey) || "0", 10);
+  } catch {
+    /* Storage is optional. */
+  }
+  if (Date.now() - last < 60_000) {
+    showError(
+      "You recently joined this list. Wait a minute before trying again.",
+    );
+    return;
+  }
+  submitting = true;
+  failed = false;
+  clearError();
+  button.disabled = true;
+  button.textContent = "Joining…";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(form.action, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ email: value }),
+      signal: controller.signal,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      /* A successful response need not contain JSON. */
+    }
+    if (response.ok || data?.message === "Email already on list.") {
+      try {
+        localStorage.setItem(rateKey, String(Date.now()));
+      } catch {
+        /* The server accepted the signup. */
+      }
+      email.value = "";
+      showSuccess();
+    } else {
+      showError(
+        "We couldn’t add your email. Your address has been kept so you can try again.",
+      );
+    }
+  } catch {
+    showError(
+      controller.signal.aborted
+        ? "The request timed out. Try again when your connection is ready."
+        : "We couldn’t reach the signup service. Check your connection and try again.",
+    );
+  } finally {
+    clearTimeout(timer);
+    submitting = false;
+    button.disabled = false;
+    button.textContent = failed ? "Try again" : "Join early access list";
+  }
+});
+</script><script type="module" src="/_astro/PublicLayout.astro_astro_type_script_index_0_lang.SlH_Nutx.js"></script></body></html>

@@ -1,0 +1,16 @@
+.mermaid { position:relative;text-align:center;max-width:100%;margin:1.5rem auto; }
+.mermaid > svg { display:block;max-width:100%;height:auto;margin:auto; }
+
+.mermaid { padding-top:44px; }
+.diagram-expand { position:absolute;inset-block-start:0;inset-inline-end:0;margin:0; }
+.diagram-dialog { width:calc(100vw - 2rem);max-width:1440px;max-height:calc(100dvh - 2rem);padding:1rem;border:1px solid var(--line);border-radius:var(--radius-card,12px);background:var(--bg);color:var(--text); }
+.diagram-dialog::backdrop { background:rgb(0 0 0 / .65); }
+.diagram-dialog > .diagram-close { display:flex;margin:0 0 .75rem auto; }
+.diagram-canvas { overflow:auto;max-height:calc(100dvh - 8rem); }
+.diagram-canvas > svg { display:block;min-width:800px;width:100%;max-width:none!important;height:auto; }
+.diagram-dialog { position:fixed;inset:0;margin:auto;box-sizing:border-box; }
+.diagram-scroll-hint { display:none;color:var(--muted);font:400 .8125rem/1.5 var(--sans,system-ui);margin:0 0 .75rem; }
+.diagram-canvas { overscroll-behavior:contain; }
+@media(max-width:640px) { .diagram-scroll-hint { display:block; } }
+/* Mermaid's generic paragraph color must inherit each authored class color. */
+:is(.mermaid,.diagram-canvas) .nodeLabel p { color:inherit!important; }

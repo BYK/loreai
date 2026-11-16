@@ -45,9 +45,9 @@ your model. The whole engine runs on your machine. The memory lives
 in your repo and your local machine as plain Markdown and an open
 SQLite database. You can read, query, and edit it with or without
 Lore.&lt;/p&gt;
-&lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;mermaid&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;flowchart LR&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H[&quot;&amp;lt;b&amp;gt;Harness&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;Claude Code · OpenCode · Pi · Codex&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L[&quot;&amp;lt;b&amp;gt;Lore&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;local-first, vendor-neutral&amp;lt;br/&amp;gt;.lore.md + lore.db&amp;lt;br/&amp;gt;local, sqlite &amp;amp; markdown&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;A[&quot;&amp;lt;b&amp;gt;Model Provider API&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;Anthropic · OpenAI · Google · others&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
-&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H --&amp;gt; L&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L --&amp;gt; A&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
-&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef ext fill:#ececec,stroke:#888,color:#333&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class L lore&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class H,A ext&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;flowchart LR    H[&amp;quot;&lt;b&gt;Harness&lt;/b&gt;&lt;br/&gt;Claude Code · OpenCode · Pi · Codex&amp;quot;]    L[&amp;quot;&lt;b&gt;Lore&lt;/b&gt;&lt;br/&gt;local-first, vendor-neutral&lt;br/&gt;.lore.md + lore.db&lt;br/&gt;local, sqlite &amp;amp; markdown&amp;quot;]    A[&amp;quot;&lt;b&gt;Model Provider API&lt;/b&gt;&lt;br/&gt;Anthropic · OpenAI · Google · others&amp;quot;]    H --&gt; L    L --&gt; A    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320    classDef ext fill:#ececec,stroke:#888,color:#333    class L lore    class H,A ext&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;mermaid&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;flowchart LR&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H[&quot;&amp;#x3C;b&gt;Harness&amp;#x3C;/b&gt;&amp;#x3C;br/&gt;Claude Code · OpenCode · Pi · Codex&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L[&quot;&amp;#x3C;b&gt;Lore&amp;#x3C;/b&gt;&amp;#x3C;br/&gt;local-first, vendor-neutral&amp;#x3C;br/&gt;.lore.md + lore.db&amp;#x3C;br/&gt;local, sqlite &amp;#x26; markdown&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;A[&quot;&amp;#x3C;b&gt;Model Provider API&amp;#x3C;/b&gt;&amp;#x3C;br/&gt;Anthropic · OpenAI · Google · others&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
+&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H --&gt; L&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L --&gt; A&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
+&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef ext fill:#ececec,stroke:#888,color:#333&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class L lore&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class H,A ext&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;flowchart LR    H[&amp;#x22;&lt;b&gt;Harness&lt;/b&gt;&lt;br/&gt;Claude Code · OpenCode · Pi · Codex&amp;#x22;]    L[&amp;#x22;&lt;b&gt;Lore&lt;/b&gt;&lt;br/&gt;local-first, vendor-neutral&lt;br/&gt;.lore.md + lore.db&lt;br/&gt;local, sqlite &amp;#x26; markdown&amp;#x22;]    A[&amp;#x22;&lt;b&gt;Model Provider API&lt;/b&gt;&lt;br/&gt;Anthropic · OpenAI · Google · others&amp;#x22;]    H --&gt; L    L --&gt; A    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320    classDef ext fill:#ececec,stroke:#888,color:#333    class L lore    class H,A ext&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
 &lt;p&gt;&lt;em&gt;The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.&lt;/em&gt;&lt;/p&gt;
 &lt;ul&gt;
 &lt;li&gt;&lt;strong&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/strong&gt; at the root of your repo. The curated knowledge the
@@ -77,11 +77,11 @@ simplest possible substrate: files.”&lt;/p&gt;
 &lt;/blockquote&gt;
 &lt;p&gt;All these systems, including Mem0, don’t really solve the immediate
 context problem. Lore unifies this and, unsurprisingly, by fusing two
-approaches together: locality &amp;amp; files along with long-term memory.&lt;/p&gt;
+approaches together: locality &amp;#x26; files along with long-term memory.&lt;/p&gt;
 &lt;h2 id=&quot;the-vendor-route-vs-the-local-first-route&quot;&gt;The vendor route vs the local-first route&lt;/h2&gt;
 &lt;p&gt;Harrison is right. You shouldn’t put your memory into a vendor’s hands.
 The lock-in is real, and the way to escape it is to keep the data
-on your machine, local, sqlite &amp;amp; markdown, where you can read with
+on your machine, local, sqlite &amp;#x26; markdown, where you can read with
 &lt;code&gt;sqlite3&lt;/code&gt; and edit with any text editor. To change a memory entry,
 you edit the file. To delete an entry, you delete the row. To export
 the corpus, you copy the file. To move to a different vendor, you
@@ -113,8 +113,7 @@ data. That belongs to the team, on infrastructure the team controls.&lt;/p&gt;
 &lt;div class=&quot;expressive-code&quot;&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;curl&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;-fsSL&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;https://withlore.ai/install&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#7FDBCA;--1:#096E72&quot;&gt;|&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;bash&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;run&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;curl -fsSL https://withlore.ai/install | bashlore run&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
 &lt;p&gt;After a few sessions, open &lt;code&gt;.lore.md&lt;/code&gt; and the database at
 &lt;code&gt;~/.local/share/lore/lore.db&lt;/code&gt;. Read what your agent has written
-down. Open a PR when it gets something wrong. That is the workflow.&lt;/p&gt;
-</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>infrastructure</category><category>open standards</category><category>data</category><category>ownership</category></item><item><title>The Semantic Linter: Automating reviews without losing touch</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Sun, 26 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
+down. Open a PR when it gets something wrong. That is the workflow.&lt;/p&gt;</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>infrastructure</category><category>open standards</category><category>data</category><category>ownership</category></item><item><title>The Semantic Linter: Automating reviews without losing touch</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Sun, 26 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
 without a research lab, I had a specific project in mind. I wanted to train something that reviewed
 code the way I did, so I could step back from reviewing every change without the codebase drifting.
 I never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
@@ -208,8 +207,7 @@ otherwise stays quiet.&lt;/p&gt;
 &lt;p&gt;Then run the check against any range and see what it flags:&lt;/p&gt;
 &lt;div class=&quot;expressive-code&quot;&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;lint&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--base&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;main&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--head&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;HEAD&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;lore lint --base main --head HEAD&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
 &lt;p&gt;With no arguments it auto-detects the range. When you’re ready for CI, the
-&lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter guide&lt;/a&gt; has a copy-paste GitHub Action.&lt;/p&gt;
-</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
+&lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter guide&lt;/a&gt; has a copy-paste GitHub Action.&lt;/p&gt;</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
 &lt;p&gt;Satya Nadella &lt;a href=&quot;https://x.com/satyanadella/status/2076323181154230284&quot;&gt;posted this week&lt;/a&gt; about
 what he calls the Reverse Information Paradox, and if you build with these models you already
 feel it. You pay for intelligence in cash, and then you pay again in the proprietary knowledge
@@ -288,8 +286,7 @@ welcome to watch it.&lt;/p&gt;
 exists in a form that asks no one’s permission: token-space, local, model-agnostic, running
 today. In consuming intelligence, you are creating intelligence. That’s his line, and he’s
 right about it. The only question is who keeps it, and you can answer that one yourself this
-afternoon.&lt;/p&gt;
-</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>How Lore remembers, forgets, and changes its mind</title><link>https://withlore.ai/blog/how-lore-remembers-and-forgets/</link><guid isPermaLink="true">https://withlore.ai/blog/how-lore-remembers-and-forgets/</guid><description>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&apos;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</description><pubDate>Thu, 02 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
+afternoon.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>How Lore remembers, forgets, and changes its mind</title><link>https://withlore.ai/blog/how-lore-remembers-and-forgets/</link><guid isPermaLink="true">https://withlore.ai/blog/how-lore-remembers-and-forgets/</guid><description>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&apos;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</description><pubDate>Thu, 02 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
 self-improving memory, a model that reads back its own transcript, rewrites its own
 instructions, and prunes whatever it decides has gone stale. There is real energy here, and
 some of it genuinely works.&lt;/p&gt;
@@ -301,19 +298,17 @@ you are sure is fine, a colleague who remembers you already tried that back in M
 whole value is that they are not you. A model sits in the same spot. Once it has written a
 shaky assumption into its own memory, it is not the thing you can count on to go back and
 find the error.&lt;/p&gt;
-&lt;p&gt;Lore takes a different road to the same destination. You never have to manage memory, and
-neither does the agent. A fixed set of rules, enforced by the layer that sits in the request
-path, makes the call on every turn instead. That distinction matters more than it sounds. A
-set of principles written &lt;em&gt;for&lt;/em&gt; an agent is guidance, and it holds only when the agent is
-paying attention. The same principles built &lt;em&gt;into&lt;/em&gt; the layer are guarantees. They hold
-whether or not anyone is paying attention that turn.&lt;/p&gt;
-&lt;p&gt;And because that layer sits outside the model, a model swap does not take your memory with
-it. A newer model arrives brilliant and completely unfamiliar with your work, the way a new
-hire does; the layer is the institutional memory already in the room, so the model is useful
-on the first turn instead of the fiftieth. Change the engine as often as you like. The
-assistant, and everything it has learned, stays.&lt;/p&gt;
-&lt;p&gt;So here are the rules Lore runs on. Not aspirations we hope a cooperative model follows: the
-actual behavior of the layer that touches every token.&lt;/p&gt;
+&lt;p&gt;Lore puts capture and context management in a layer outside the agent. Once your
+client is connected, that layer can record conversations, distill older context,
+and select stored knowledge for a request. The model does not have to remember
+to maintain every part of that record itself.&lt;/p&gt;
+&lt;p&gt;That does not make the resulting memory infallible. Distillation is lossy,
+curation can produce an incomplete rule, and selection depends on the current
+task, scope, confidence and context budget. Review what Lore keeps, especially
+before turning it into a shared project convention.&lt;/p&gt;
+&lt;p&gt;A model change can leave the local record available to another supported client.
+Whether a particular request receives the useful part of that record still needs
+to be checked. Here are the principles behind that workflow, with its limits.&lt;/p&gt;
 &lt;h2 id=&quot;you-never-have-to-remember-to-remember&quot;&gt;You never have to remember to remember&lt;/h2&gt;
 &lt;p&gt;Capture is automatic. Lore sits between your agent and the model, and it distills your work
 as it happens. You do not tag a message, save a decision, or file anything away for later.&lt;/p&gt;
@@ -339,32 +334,34 @@ strictly out of that accounting.&lt;/p&gt;
 sessions and drifts down when it sits untouched. Fall below the floor and the entry is
 evicted. The store stays bounded by usefulness rather than by a fixed timer that forgets
 things on a schedule, whether or not you still need them.&lt;/p&gt;
-&lt;p&gt;There is one deliberate exception. The preferences you state outright, the ones that follow
-you across every project, are protected from that decay. Those are not guesses Lore made
-about you, so they are not subject to the same erosion as things Lore inferred.&lt;/p&gt;
+&lt;p&gt;There is one deliberate exception. Some explicitly stated preferences receive different treatment from inferred knowledge.
+Inspect scope and configuration before assuming an entry applies across projects.&lt;/p&gt;
 &lt;h2 id=&quot;when-two-things-disagree-you-get-told-not-overruled&quot;&gt;When two things disagree, you get told, not overruled&lt;/h2&gt;
-&lt;p&gt;Opposing rules are never quietly merged. “Always use tabs” and “always use spaces” are not
-two versions of one fact, and collapsing them would be Lore deciding for you. Both are kept
-and ranked by confidence.&lt;/p&gt;
-&lt;p&gt;Genuine contradictions still need settling, so Lore looks for them in the background and flags
-each pair for you: on the knowledge dashboard, or from &lt;code&gt;lore data contradictions&lt;/code&gt;. You pick the
-rule that still holds, or you keep both. Lore never merges them and never deletes the losing
-side on its own. The layer’s job here is narrow on purpose: notice the conflict and hand it to
-you. Picking a winner silently is exactly the kind of decision a memory system should not be
-making.&lt;/p&gt;
-&lt;h2 id=&quot;nothing-is-really-deleted&quot;&gt;Nothing is really deleted&lt;/h2&gt;
-&lt;p&gt;Knowledge is append-only. An edit writes a new version and keeps the old one; a delete leaves
-a marker rather than erasing the trail. Because the history is intact, you can diff what your
-agent has learned and roll it back, the same way you already do with code.&lt;/p&gt;
-&lt;p&gt;That is not an abstract property. Curated knowledge lands in a plain
-&lt;a href=&quot;https://withlore.ai/different/&quot;&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/a&gt; file in your repo, so a change to your agent’s memory shows up in a
-pull request and gets reviewed by the same people and the same process that review your code.
-Memory that changes without a diff is memory nobody can audit.&lt;/p&gt;
-&lt;h2 id=&quot;the-live-edge-stays-whole&quot;&gt;The live edge stays whole&lt;/h2&gt;
-&lt;p&gt;The most recent turns are always protected. Whatever gets distilled or dropped as older
-context is compressed, the active end of the conversation, where the work is actually
-happening right now, is never touched. Everything else is negotiable under pressure; the edge
-you are working on is not.&lt;/p&gt;
+&lt;p&gt;Conflicting rules deserve a review rather than a silent assumption. When Lore
+flags a contradiction, inspect both entries and their sources in the knowledge
+dashboard or with &lt;code&gt;lore data contradictions&lt;/code&gt;. Correct an outdated rule, retire
+it, or keep both if they apply in different circumstances.&lt;/p&gt;
+&lt;p&gt;Detection is not a guarantee that every conflict has been found. Curation,
+confidence changes and consolidation can also change the active set. Review
+consequential rules and the exported diff as the project evolves.&lt;/p&gt;
+&lt;h2 id=&quot;changes-leave-a-reviewable-history&quot;&gt;Changes leave a reviewable history&lt;/h2&gt;
+&lt;p&gt;Ordinary knowledge edits append a revision. Deleting an entry marks it deleted
+rather than immediately erasing its version history. Those revisions help you
+inspect what changed; they do not mean all data is retained forever.&lt;/p&gt;
+&lt;p&gt;Bulk deletion and purge operations have different effects. Uninstall normally
+preserves memory; the explicit purge option can remove the default local data
+directory. Neither operation removes copies already committed to Git or data
+already sent to a provider. Read the &lt;a href=&quot;https://withlore.ai/docs/data-and-costs/#undo-or-remove-lore&quot;&gt;data lifecycle and cleanup boundaries&lt;/a&gt;
+before choosing an operation.&lt;/p&gt;
+&lt;p&gt;Curated knowledge can be exported to a plain &lt;code&gt;.lore.md&lt;/code&gt; file. Review that diff,
+and keep identity markers when correcting an entry. Version history and a Git
+review help you inspect a rule; neither proves that it is correct.&lt;/p&gt;
+&lt;h2 id=&quot;the-current-request-has-a-context-limit&quot;&gt;The current request has a context limit&lt;/h2&gt;
+&lt;p&gt;Lore aims to retain recent working material while distilling older context. Under
+pressure it can compress tool output and use more aggressive context layers.
+A stored detail is not necessarily present verbatim in the current prompt.
+Use recall and the recorded conversation when exact wording matters; see
+&lt;a href=&quot;https://withlore.ai/docs/memory/&quot;&gt;stored history and active context&lt;/a&gt;.&lt;/p&gt;
 &lt;h2 id=&quot;whats-learned-lives-in-tokens-not-weights&quot;&gt;What’s learned lives in tokens, not weights&lt;/h2&gt;
 &lt;p&gt;Lore learns by writing durable text, not by fine-tuning the model. That is a deliberate
 choice. Text is something you can read, carry across providers and across model generations,
@@ -375,16 +372,14 @@ the part you replace. The knowledge is the part you keep.&lt;/p&gt;
 &lt;p&gt;Making a model better at checking itself is worth doing, and we hope it keeps improving. But
 the corrections you can lean on are the ones that do not wait for the model to notice, this
 turn, that it was wrong. Those come from outside it.&lt;/p&gt;
-&lt;p&gt;Lore’s bet is narrower, and honestly a little boring in the way infrastructure should be: the
-rules that decide what stays, what fades, and what gets surfaced ought to hold on every single
-turn, not only when the agent happens to be attending to them. A principle the layer enforces
-is one you never have to hope about.&lt;/p&gt;
+&lt;p&gt;Lore’s bet is that capture, review and retrieval belong in an inspectable layer,
+with rules you can test and correct. That reduces the housekeeping asked of the
+agent, while leaving you responsible for checking consequential knowledge.&lt;/p&gt;
 &lt;p&gt;And because a layer that sees every token is a lot to ask you to trust, the rules above are
 not a description you take on faith. Lore is &lt;a href=&quot;https://fair.io&quot;&gt;Fair Source&lt;/a&gt;
 (FSL-1.1-Apache-2.0), so the code that decides what your agent remembers and forgets is right
 there for you to read, and it turns into Apache 2.0 on a timer. Principles you can enforce are
-better than principles you have to believe.&lt;/p&gt;
-</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>principles</category><category>agents</category></item><item><title>Why memory is not enough</title><link>https://withlore.ai/blog/why-memory-is-not-enough/</link><guid isPermaLink="true">https://withlore.ai/blog/why-memory-is-not-enough/</guid><description>A long-term memory store remembers what you said last week. It can&apos;t manage the context window that&apos;s overflowing right now. Those are two different problems, and only one of them is getting solved.</description><pubDate>Fri, 26 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Ask anyone building agents what “memory” means and you’ll get the same answer: a place to
+better than principles you have to believe.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>principles</category><category>agents</category></item><item><title>Why memory is not enough</title><link>https://withlore.ai/blog/why-memory-is-not-enough/</link><guid isPermaLink="true">https://withlore.ai/blog/why-memory-is-not-enough/</guid><description>A long-term memory store remembers what you said last week. It can&apos;t manage the context window that&apos;s overflowing right now. Those are two different problems, and only one of them is getting solved.</description><pubDate>Fri, 26 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Ask anyone building agents what “memory” means and you’ll get the same answer: a place to
 store facts and decisions so the agent can pull them back later. A vector DB, a knowledge
 graph, a folder of notes, take your pick. It remembers what you discussed last week, and
 there are good tools that do this well now.&lt;/p&gt;
@@ -405,24 +400,24 @@ quite remember its own name. We all quietly accepted this for something that hap
 session, often more than once: the most predictable failure in agentic coding, answered by a
 guillotine. So why has nobody built the thing that keeps up?&lt;/p&gt;
 &lt;h2 id=&quot;two-problems-hiding-behind-one-word&quot;&gt;Two problems hiding behind one word&lt;/h2&gt;
-&lt;table&gt;
-&lt;thead&gt;
-&lt;tr&gt;
-&lt;th&gt;What you say&lt;/th&gt;
-&lt;th&gt;What it actually needs&lt;/th&gt;
-&lt;/tr&gt;
-&lt;/thead&gt;
-&lt;tbody&gt;
-&lt;tr&gt;
-&lt;td&gt;“What did we decide about auth last week?”&lt;/td&gt;
-&lt;td&gt;A long-term memory store.&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;“Wait, what was the other thing you said we should do after this?”&lt;/td&gt;
-&lt;td&gt;Active context-window management.&lt;/td&gt;
-&lt;/tr&gt;
-&lt;/tbody&gt;
-&lt;/table&gt;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+&lt;table&gt;&lt;thead data-pagefind-ignore=&quot;&quot;&gt;&lt;tr&gt;&lt;th&gt;What you say&lt;/th&gt;&lt;th&gt;What it actually needs&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;“What did we decide about auth last week?”&lt;/td&gt;&lt;td&gt;A long-term memory store.&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;“Wait, what was the other thing you said we should do after this?”&lt;/td&gt;&lt;td&gt;Active context-window management.&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
 &lt;p&gt;These are not the same layer. A long-term store sits &lt;em&gt;beside&lt;/em&gt; your conversation, like a
 notebook you keep open on the desk. It only holds what you bothered to write down, and it
 only helps when you reach for it. That’s exactly right for what carries across sessions: a
@@ -559,7 +554,5 @@ still yours to handle. That’s fine, and a good store is genuinely worth having
 no answer for the session that’s overflowing right now, which is the problem you’ll hit
 today, not next week.&lt;/p&gt;
 &lt;p&gt;Memory is table stakes. Managing the window, in the loop, while it fills, is the part
-nobody wants to build. Make sure you know which one you’re being sold.&lt;/p&gt;
-</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>Introducing the Lore Blog</title><link>https://withlore.ai/blog/hello-lore/</link><guid isPermaLink="true">https://withlore.ai/blog/hello-lore/</guid><description>A home for product notes, memory architecture deep dives, and engineering updates from Lore.</description><pubDate>Fri, 05 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;The Lore blog is ready for longer-form writing: release notes, implementation notes, architecture posts, and the practical lessons that show up when AI coding agents work inside real codebases for days at a time.&lt;/p&gt;
-&lt;p&gt;Future posts will cover LLM memory architecture, distillation techniques, context management strategies, and engineering updates from the Lore team.&lt;/p&gt;
-</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>agents</category></item></channel></rss>
+nobody wants to build. Make sure you know which one you’re being sold.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>Introducing the Lore Blog</title><link>https://withlore.ai/blog/hello-lore/</link><guid isPermaLink="true">https://withlore.ai/blog/hello-lore/</guid><description>A home for product notes, memory architecture deep dives, and engineering updates from Lore.</description><pubDate>Fri, 05 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;The Lore blog is ready for longer-form writing: release notes, implementation notes, architecture posts, and the practical lessons that show up when AI coding agents work inside real codebases for days at a time.&lt;/p&gt;
+&lt;p&gt;Future posts will cover LLM memory architecture, distillation techniques, context management strategies, and engineering updates from the Lore team.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>agents</category></item></channel></rss>

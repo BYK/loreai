@@ -1,0 +1,1 @@
+import{t as e}from"./url-choice.CwzeK0Vc.js";e(`.spotlight-choices`,`preview`,[`rule`,`source`,`history`]);
