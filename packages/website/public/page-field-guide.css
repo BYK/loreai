@@ -1,5 +1,4 @@
-/* Purpose-specific pages share the field guide's surfaces and native controls. */
-.page-guide-panel { padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--journal-page); }
+
 .conversation-preview mark,.journal-message mark,.journal-carried-rule mark,.journal-result mark,.revision-example mark { background:var(--kept-bg);color:var(--kept-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:.06em .12em;border-bottom:1px solid var(--kept-line); }
 .home-page .workflow-links { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px; }
 .workflow-links a { display:flex;align-items:flex-start;gap:12px;color:var(--text);text-decoration:none;padding:16px 0;border-block:1px solid var(--line); }
@@ -25,8 +24,6 @@
 .capture-links { display:flex;flex-wrap:wrap;gap:8px 20px; }.capture-links a { min-height:44px;align-content:center; }
 @media(max-width:1000px) { .tour-inspector { grid-template-columns:1fr;grid-template-areas:"capture" "notes"; }.inspection-stage { display:flex;flex-direction:column;gap:12px; }.inspection-picker { position:static;order:-1;box-shadow:none;pointer-events:auto; }.inspection-picker label { position:relative;inset:auto;flex:1;box-shadow:none; }.inspection-picker legend { position:static;width:auto;height:auto;clip-path:none;padding:0 0 6px; }.inspection-notes { min-height:0; } }
 @media(max-width:640px) { .home-page .workflow-links { grid-template-columns:1fr;gap:0; }.workflow-links a + a { border-top:0; }.inspection-picker label { flex:auto; }.inspection-picker label > span { padding:8px; }.inspection-notes { padding:16px; } }
-
-
 
 .setup-observation { margin-top:20px; }
 .setup-observation .field-marker { font-size:.75rem;margin:0 0 8px; }.setup-observation > p { margin:6px 0;font-size:.8125rem;line-height:1.65; }

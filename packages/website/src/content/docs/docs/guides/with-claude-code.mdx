@@ -20,18 +20,18 @@ curl -fsSL https://withlore.ai/install | bash
 Then launch Claude Code through the gateway:
 
 ```bash
-lore run
+lore run claude
 ```
 
-`lore run` starts the Lore gateway (if not already running) and launches Claude Code with the right env vars to route through it. The gateway auto-detects Claude Code on your `PATH`.
+`lore run claude` starts the Lore gateway (if not already running) and launches Claude Code with the right env vars to route through it. The explicit `claude` argument selects Claude Code even when other clients are installed.
 
 ## Manual setup
 
-If you'd rather start the gateway yourself and launch Claude Code directly:
+Start the gateway from your project directory with `--local` to enable local project files. Use the address printed after `Gateway listening on` as `ANTHROPIC_BASE_URL`; `http://127.0.0.1:3207` below is an example. Do not include the dashboard’s `/ui` path:
 
 ```bash
 # Terminal 1
-lore start
+lore start --local
 
 # Terminal 2
 ANTHROPIC_BASE_URL=http://127.0.0.1:3207 \

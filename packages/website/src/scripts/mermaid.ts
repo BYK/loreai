@@ -49,7 +49,15 @@ document.body.append(dialog);
 let expanded: HTMLElement | undefined;
 close.addEventListener("click", () => dialog.close());
 dialog.addEventListener("click", (event) => {
-  if (event.target === dialog) dialog.close();
+  if (event.target !== dialog) return;
+  const bounds = dialog.getBoundingClientRect();
+  if (
+    event.clientX < bounds.left ||
+    event.clientX > bounds.right ||
+    event.clientY < bounds.top ||
+    event.clientY > bounds.bottom
+  )
+    dialog.close();
 });
 dialog.addEventListener("close", () => {
   const svg = canvas.querySelector("svg");

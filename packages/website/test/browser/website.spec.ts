@@ -49,18 +49,17 @@ for (const surface of surfaces) {
     await expect(page.locator("h1")).toContainText(surface.heading, {
       ignoreCase: true,
     });
-    await page.evaluate(() => document.fonts.load('16px "Playfair Display"'));
     await page.evaluate(() => document.fonts.ready);
     expect(
       await page.evaluate(() =>
         document.fonts.check('16px "DM Sans Variable"'),
       ),
     ).toBe(true);
-    expect(
-      await page.evaluate(() =>
-        document.fonts.check('16px "Playfair Display"'),
-      ),
-    ).toBe(true);
+    await expect(page.locator("body")).toHaveCSS("font-family", /DM Sans/);
+    await expect(page.locator(".logo-text").first()).toHaveCSS(
+      "font-family",
+      /DM Sans/,
+    );
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBeLessThanOrEqual((page.viewportSize()?.width ?? 0) + 1);

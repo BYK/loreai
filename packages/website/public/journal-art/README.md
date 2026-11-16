@@ -1,11 +1,10 @@
 # Quest journal illustrations
 
-Nine original illustrations generated with QuiverAI Arrow 2 for Lore’s RPG field journal, each with a static light-appearance variant.
+Eight original illustrations generated with QuiverAI Arrow 2 for Lore’s RPG field journal, each with a static light-appearance variant.
 
 | Asset | Purpose |
 | --- | --- |
 | journal | Field-journal identity |
-| expedition-desk | Longer walkthroughs and future editorial uses |
 | decision-note | A saved project decision |
 | pattern-routes | A reusable convention |
 | gotcha-lantern | A lesson from a failure |

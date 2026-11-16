@@ -45,7 +45,7 @@
   max-height: 2.8rem;
 }
 .logo-text {
-  font-family: "Playfair Display", Georgia, serif;
+  font-family: "DM Sans Variable", "DM Sans", sans-serif;
   font-style: italic;
   font-weight: 400;
   font-size: 1.5rem;
@@ -111,7 +111,7 @@
 .starlight-aside--note .starlight-aside__title { color: var(--heading); }
 
 /* Task documentation uses the same functional typography as the local app. */
-:root { --sans:"DM Sans Variable","DM Sans",sans-serif;--serif:"Playfair Display",Georgia,serif; }
+:root { --sans:"DM Sans Variable","DM Sans",sans-serif; }
 .sl-markdown-content :is(h1,h2,h3) { font-family:var(--sans);font-weight:600;letter-spacing:-.015em; }
 .sl-markdown-content h2 { font-size:1.5rem;line-height:1.3;margin-top:2rem; }
 .sl-markdown-content h3 { font-size:1.125rem;line-height:1.4; }

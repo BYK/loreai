@@ -1,7 +1,7 @@
 # Website UI and first-use journey
 
 The website uses the local memory browser’s olive foundation, amber accents and
-self-hosted DM Sans. Serif lettering is reserved for the brand mark. The approved
+self-hosted DM Sans. The wordmark uses the same DM Sans family. The approved
 quest journal replaces the 3D camp; its local Quiver illustrations, quiet margins,
 icon-and-label choices, and explicit selection marks now connect the homepage, actual-app
 tour, client setup, Starlight docs, Why Lore and blog.
@@ -27,7 +27,7 @@ all six existing client choices, copy/error handling and the connection-to-first
 session path. Pagefind, generated references, public fragments, signup recovery,
 compact Light/System/Dark controls, and availability/cost distinctions remain.
 
-Nine Quiver objects (18 geometry-identical light/dark SVG variants) ship as static local geometry-only images, with no external
+Eight Quiver objects (16 geometry-identical light/dark SVG variants) ship as static local geometry-only images, with no external
 resources, scripts, or account metadata. Source provenance is in
 [the art directory](../../packages/website/public/journal-art/README.md). The old
 renderer, geometry/fallback code, and Three.js/type dependencies are removed.
@@ -117,12 +117,12 @@ while capturing or testing the error/retry flow.
 
 | Area | Delivered behavior |
 | --- | --- |
-| Product proof | Readable knowledge-file artifact near the headline; actual app before the fictional journal |
+| Product proof | Conversation-to-next-session preview near the headline; journal followed by actual-app evidence |
 | Journal sequence | Conversation → Saved knowledge → Next session; optional inventory, real file excerpt and task-relevance reasons |
 | Readability | 15px reading text, 13px controls/status, full-width phone inventory; unrelated entries retain readable contrast |
 | Setup | One visible sequence, six clients, honest “See verification steps” action, recorded-session example and preserved legacy fragments |
 | Source fidelity | One consistent webhook rule across the journal, actual-app record, two revisions and linked conversation; exact-message limitation stated |
-| Illustration | Nine purposeful objects, separate light ink palettes, local inert geometry and no brightness filter |
+| Illustration | Eight purposeful objects, separate light ink palettes, local inert geometry and no brightness filter |
 | Memory model | Recent conversation, distilled context and relevant knowledge shown as current-request inputs; stored history remains searchable |
 | Decision guide | Fit-first introduction, all comparison facts stacked on phones, explicit local/provider/telemetry boundaries |
 | Reading paths | Practical featured article, quiet metadata, relevant availability notes and compact, purpose-specific docs artwork |

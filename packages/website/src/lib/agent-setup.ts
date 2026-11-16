@@ -49,6 +49,3 @@ export const SETUP_AGENTS = [
       "Run this from your project. Lore launches your installed Hermes Agent with routing for this session.",
   },
 ] as const;
-export function setupAgent(value: string | null) {
-  return SETUP_AGENTS.find((agent) => agent.id === value) ?? SETUP_AGENTS[0];
-}

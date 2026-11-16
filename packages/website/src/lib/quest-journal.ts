@@ -1,6 +1,5 @@
 export const JOURNAL_ART = {
   journal: "journal.svg",
-  expedition: "expedition-desk.svg",
   chest: "archive-chest.svg",
   bird: "messenger-bird.svg",
   satchel: "memory-satchel.svg",
@@ -14,20 +13,14 @@ export const JOURNAL_CHAPTERS = [
   {
     id: "conversation",
     name: "Conversation",
-    title: "A decision is made",
-    number: "01",
   },
   {
     id: "knowledge",
     name: "Saved knowledge",
-    title: "Save the project rule",
-    number: "02",
   },
   {
     id: "recall",
     name: "Next session",
-    title: "Use it next time",
-    number: "03",
   },
 ] as const;
 

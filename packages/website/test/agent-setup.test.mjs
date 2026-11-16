@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
-import { SETUP_AGENTS, setupAgent } from "../src/lib/agent-setup.ts";
+import { SETUP_AGENTS } from "../src/lib/agent-setup.ts";
 await test("every website launch command uses the actual registered client binary", () => {
   const text = readFileSync(
       new URL("../../gateway/src/cli/agents.ts", import.meta.url),
@@ -51,17 +51,4 @@ await test("every website launch command uses the actual registered client binar
       if (line.startsWith("lore setup "))
         assert.ok(clients.has(line.split(" ")[2]));
     }
-});
-await test("only known setup choices can reach commands or selector IDs", () => {
-  for (const agent of SETUP_AGENTS) assert.equal(setupAgent(agent.id), agent);
-  for (const value of [
-    null,
-    "",
-    "__proto__",
-    "constructor",
-    '"],script',
-    "<script>alert(1)</script>",
-    "codex-desktop&agent=pi",
-  ])
-    assert.equal(setupAgent(value), SETUP_AGENTS[0]);
 });

@@ -19,8 +19,7 @@ Marketing/blog aliases live in `public/theme.css`; Starlight maps its roles in
 `src/styles/starlight.css`. Each consumes the same palette, controls, and journal CSS.
 Logo SVGs retain their brand colors. Journal illustrations have separate geometry-identical light and dark palettes.
 
-`src/styles/fonts.css` uses the same pinned self-hosted DM Sans Variable and
-Playfair Display fonts as the app, including latin and latin-ext subsets.
+`src/styles/fonts.css` uses the pinned self-hosted DM Sans Variable font used by the app, including latin and latin-ext subsets.
 The website does not load the application's CSS or JavaScript.
 
 Every page uses `ThemeProvider.astro` and an icon-only `ThemeToggle.astro` pill.
@@ -70,8 +69,8 @@ compatible. URL values never become HTML or selectors. Valid URL choices take
 precedence; early native choices survive delayed loading. Keyboard selection
 retains radio focus; pointer-selected cards bring their rule into view.
 
-Nine local Quiver objects ship in `public/journal-art/`, each with a dark and light
-version (18 SVG files). See that directory's README for provenance and paint
+Eight local Quiver objects ship in `public/journal-art/`, each with a dark and light
+version (16 SVG files). See that directory's README for provenance and paint
 adaptation. `JournalArt.astro` prefixes static URLs, marks the images decorative,
 and selects a palette by appearance, including the device preference without JS.
 Light art uses darker ink rather than a brightness filter. Chest, messenger bird,
@@ -88,7 +87,7 @@ reduced-motion interactions remain immediate.
 
 Public pages, articles, and docs use the local app’s functional DM Sans headings,
 neutral title colors, olive surfaces, amber actions, subtle borders, and 6–14px
-control/pane radii. Playfair is reserved for the wordmark. The journal uses the same illustrated objects, page margins, numbered choices,
+control/pane radii. The wordmark uses the same DM Sans family. The journal uses the same illustrated objects, page margins, numbered choices,
 and amber selection marks across the tour, client setup, docs and blog. Keep the
 ordinary product labels and bounded reading columns; illustration must not
 obscure commands, product captures, or source material.

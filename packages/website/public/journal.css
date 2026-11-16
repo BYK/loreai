@@ -13,9 +13,6 @@
 .field-heading > .journal-art { width:100px;height:100px;transform:rotate(-4deg); }
 .field-marker { color:var(--accent);font:500 .75rem/1.5 var(--sans);letter-spacing:.07em;text-transform:uppercase; }
 .field-frame { border:1px solid var(--line);border-radius:var(--radius-card);background:var(--journal-page);overflow:hidden; }
-.field-frame-heading { display:flex;gap:.75rem;align-items:center;padding:1rem 1.25rem;border-bottom:1px solid var(--line);background:var(--journal-margin); }
-.field-frame-heading p { margin:0; }
-.field-frame-heading .journal-art { width:44px;height:44px; }
 .quest-journal { min-width:0; }
 .journal-intro { display:flex;justify-content:space-between;align-items:flex-end;gap:1.5rem;margin-bottom:1.25rem; }
 .journal-intro .eyebrow { margin-bottom:.5rem; }
@@ -51,7 +48,6 @@
 .quest-journal:has([data-journal-choice="chapter"][value="conversation"]:checked) [data-journal-chapter="conversation"],
 .quest-journal:has([data-journal-choice="chapter"][value="knowledge"]:checked) [data-journal-chapter="knowledge"],
 .quest-journal:has([data-journal-choice="chapter"][value="recall"]:checked) [data-journal-chapter="recall"] { display:flex; }
-.journal-kicker { color:var(--muted);font-size:.75rem;margin-bottom:.75rem; }
 .journal-chapter > h3 { font-size:clamp(1.25rem,2vw,1.625rem);line-height:1.25;letter-spacing:-.02em;font-weight:600; }
 .journal-lead { font-size:.9375rem;color:var(--muted);margin-block:.75rem 1rem;line-height:1.65; }
 .journal-message { border-top:1px solid var(--line);padding-block:.875rem;font-size:.9375rem;line-height:1.7; }
