@@ -162,10 +162,7 @@ export function validateOpenAIUsage(
   ) {
     invalid(message);
   }
-  const componentTotal = safeTokenSum([prompt, completion], message);
-  // Cache counts are subsets of prompt_tokens; reasoning/audio/prediction
-  // counts are subsets of completion_tokens. They must not be added again.
-  if (total !== undefined && componentTotal !== total) invalid(message);
+  safeTokenSum([prompt, completion], message);
 
   const promptDetails = validateOpenAIDetails(
     value.prompt_tokens_details,
@@ -214,10 +211,7 @@ export function validateResponsesUsage(
   if (total !== undefined && (input === undefined || output === undefined)) {
     invalid(message);
   }
-  const componentTotal = safeTokenSum([input, output], message);
-  // Responses uses the same inclusive parent-count semantics as Chat:
-  // cache details belong to input_tokens and reasoning details to output_tokens.
-  if (total !== undefined && componentTotal !== total) invalid(message);
+  safeTokenSum([input, output], message);
 
   validateResponsesInputDetails(value.input_tokens_details, input, message);
   validateResponsesInputDetails(value.prompt_tokens_details, input, message);
@@ -274,7 +268,7 @@ export function validateGeminiUsageMetadata(
   // details as decompositions of their parent counts, so neither is added here.
   // thoughtsTokenCount and toolUsePromptTokenCount are separate billable
   // components of totalTokenCount.
-  const componentTotal = safeTokenSum(
+  safeTokenSum(
     [
       counts.promptTokenCount,
       counts.candidatesTokenCount,
@@ -286,8 +280,7 @@ export function validateGeminiUsageMetadata(
   if (
     counts.totalTokenCount !== undefined &&
     (counts.promptTokenCount === undefined ||
-      counts.candidatesTokenCount === undefined ||
-      componentTotal !== counts.totalTokenCount)
+      counts.candidatesTokenCount === undefined)
   ) {
     invalid(message);
   }

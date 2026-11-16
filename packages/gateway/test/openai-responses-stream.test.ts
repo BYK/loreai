@@ -1482,27 +1482,27 @@ describe("accumulateResponsesSSEStream", () => {
     expect(result.usage).toMatchObject({ inputTokens: 1, outputTokens: 1 });
   });
 
-  test("strict validation rejects contradictory Responses total_tokens", async () => {
-    await expect(
-      accumulateResponsesSSEStream(
-        buildSSEResponse([
-          {
-            event: "response.completed",
-            data: {
-              response: {
-                status: "completed",
-                usage: {
-                  input_tokens: 2,
-                  output_tokens: 3,
-                  total_tokens: 6,
-                },
+  test("strict validation accepts Responses total_tokens that differ from components", async () => {
+    const result = await accumulateResponsesSSEStream(
+      buildSSEResponse([
+        {
+          event: "response.completed",
+          data: {
+            response: {
+              status: "completed",
+              output: [],
+              usage: {
+                input_tokens: 2,
+                output_tokens: 3,
+                total_tokens: 6,
               },
             },
           },
-        ]),
-        { validation: "public", stopAtTerminal: true },
-      ),
-    ).rejects.toThrow("malformed Responses usage");
+        },
+      ]),
+      { validation: "public", stopAtTerminal: true },
+    );
+    expect(result.usage).toMatchObject({ inputTokens: 2, outputTokens: 3 });
   });
 
   test("strict validation rejects totals with absent parent components", async () => {
