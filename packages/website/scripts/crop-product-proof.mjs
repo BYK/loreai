@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Documentary crops of the existing fictional-data captures. No pixels are redrawn.
+// Documentary crops of the 2x fictional-data captures. No pixels are redrawn.
+// Regions are expressed in CSS pixels, then extracted at the capture density.
 import sharp from "sharp";
 import { fileURLToPath } from "node:url";
 const directory = fileURLToPath(
@@ -40,7 +41,11 @@ for (const theme of ["light", "dark"]) {
   ];
   for (const { source, name, region } of crops)
     await sharp(`${directory}${source}-${theme}.png`)
-      .extract(region)
+      .extract(
+        Object.fromEntries(
+          Object.entries(region).map(([key, value]) => [key, value * 2]),
+        ),
+      )
       .png()
       .toFile(`${directory}${name}-${theme}.png`);
 }

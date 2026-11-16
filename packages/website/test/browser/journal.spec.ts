@@ -348,9 +348,13 @@ for (const path of [
     await page.goto(path);
     if (path === "/") await openInventory(page);
     const art = page.locator("img.journal-art:visible");
-    if (["/tour/", "/docs/install/"].includes(path))
-      await expect(art).toHaveCount(0);
-    else expect(await art.count()).toBeGreaterThan(0);
+    if (path === "/docs/install/") await expect(art).toHaveCount(0);
+    else if (path === "/tour/") {
+      await expect(art).toHaveCount(1);
+      await expect(
+        page.locator(".start-card img.journal-art:visible"),
+      ).toHaveCount(1);
+    } else expect(await art.count()).toBeGreaterThan(0);
     for (const image of await art.all()) {
       await image.scrollIntoViewIfNeeded();
       await expect

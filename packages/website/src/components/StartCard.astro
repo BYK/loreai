@@ -1,0 +1,40 @@
+---
+import JournalArt from "./JournalArt.astro";
+import NavigationIcon from "./NavigationIcon.astro";
+interface Props { resources?: boolean; id?: string; }
+const { resources = false, id } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+<section class="section start-card" id={id} aria-labelledby="start-title">
+  <div class="start-main">
+    <div class="start-art"><JournalArt name="satchel" size={112} /></div>
+    <div class="start-copy"><p class="eyebrow">Your next chapter</p><h2 id="start-title">Pick up where you left off.</h2><p>Connect your coding agent, then verify your first recorded session.</p></div>
+    <a class="button button-primary" href={`${base}docs/install/`}>Connect your agent <span aria-hidden="true">→</span></a>
+  </div>
+  {resources && <nav class="start-resources" aria-label="Explore Lore further">
+    <a id="evidence" href={`${base}docs/benchmark/`}><span id="voices" class="fragment-anchor" aria-hidden="true"></span><NavigationIcon name="activity" /><span><strong>Evaluate Lore</strong><small>Benchmarks and limitations</small></span><span class="start-arrow" aria-hidden="true">↗</span></a>
+    <a id="waitlist" href={`${base}different/#waitlist`}><NavigationIcon name="people" /><span><strong>Folk Lore for teams</strong><small>Join the early-access list</small></span><span class="start-arrow" aria-hidden="true">↗</span></a>
+  </nav>}
+</section>
+<style>
+  .section.start-card { padding:0;margin-block:1rem 2rem;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--journal-page);overflow:hidden; }
+  .start-main { display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:24px;padding:32px; }
+  .start-art { display:grid;place-items:center;width:112px;height:112px; }
+  .start-art :global(img) { width:100%;height:100%;object-fit:contain; }
+  .start-copy .eyebrow { color:var(--accent);font-size:.6875rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px; }
+  .start-copy h2 { font-size:clamp(1.5rem,2.5vw,2rem);letter-spacing:-.035em;text-wrap:balance; }
+  .start-copy > p:last-child { max-width:46ch;margin-top:10px;color:var(--muted);font-size:.875rem;line-height:1.6; }
+  .start-main > a { justify-self:end;white-space:nowrap; }
+  .start-resources { display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line); }
+  .start-resources a { position:relative;display:flex;align-items:center;gap:12px;padding:18px 24px;color:var(--text);text-decoration:none;min-height:76px; }
+  .start-resources a + a { border-inline-start:1px solid var(--line); }
+  .start-resources :global(svg) { color:var(--muted);flex-shrink:0; }
+  .start-resources strong,.start-resources small { display:block; }
+  .start-resources strong { font-size:.8125rem;font-weight:550; }
+  .start-resources small { margin-top:3px;font-size:.75rem;color:var(--muted); }
+  .start-arrow { margin-inline-start:auto;color:var(--muted); }
+  .start-resources a:focus-visible { outline-offset:-4px; }
+  @media(hover:hover) and (pointer:fine) { .start-resources a:hover { background:var(--surface); }.start-resources a:hover strong { color:var(--accent);text-decoration:underline;text-underline-offset:.2em; }.start-resources a:hover .start-arrow { color:var(--accent); } }
+  @media(max-width:900px) { .start-main { grid-template-columns:88px minmax(0,1fr);gap:16px 24px;padding:24px; }.start-art { width:88px;height:88px;grid-row:span 2; }.start-main > a { grid-column:2;justify-self:start; } }
+  @media(max-width:600px) { .start-main { grid-template-columns:minmax(0,1fr);gap:16px;padding:24px; }.start-art { width:72px;height:72px;grid-row:auto; }.start-copy h2 { max-width:20ch; }.start-main > a { grid-column:auto;justify-self:stretch;white-space:normal; }.start-resources { grid-template-columns:1fr; }.start-resources a { padding:16px 24px; }.start-resources a + a { border-inline-start:0;border-top:1px solid var(--line); } }
+</style>

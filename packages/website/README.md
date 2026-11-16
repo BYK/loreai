@@ -126,7 +126,10 @@ appearance variants are saved under `public/product-tour/`, with no DOM/CSS/imag
 The same idempotency rule appears in the journal, knowledge record, two revisions,
 and linked source session. Additional knowledge-detail and recorded-session captures
 show what to inspect; the Knowledge tour links to its complete source/revision capture. Exact-message attribution is not promised. Knowledge includes a
-390×700 mobile capture alongside the 1120×760 desktop view.
+390×700 mobile viewport alongside the 1120×760 desktop viewport. All captures are
+rendered natively at 2× device pixel ratio (780×1400 and 2240×1520 pixels),
+including detail panels. Responsive images declare `2x` density so their layout
+and aspect ratios remain unchanged while text stays sharp on Retina displays.
 Responsive pictures retain explicit dimensions and link to the original full-size image.
 
 
@@ -237,8 +240,8 @@ when upgrading or removing the patch.
 ### Mobile evidence and reference search
 
 Phone proof panels use documentary crops of the original synthetic-data app
-captures. Reproduce the ten derived PNGs with
-`node packages/website/scripts/crop-product-proof.mjs`; no UI is redrawn, and the
+captures. Reproduce the twelve derived PNGs with
+`node packages/website/scripts/crop-product-proof.mjs`; crop coordinates are expressed in CSS pixels and extracted at 2× density; no UI is redrawn, and the
 full-size originals remain linked. The activity crop includes the chart, while
 rule/source/history crops show the detail named by the adjacent readable notes.
 
@@ -263,3 +266,13 @@ environment tables as field records with exact `setting-<full identifier>` ancho
 After changing a Markdown integration locally, run `pnpm exec astro sync --force`
 in this package before rebuilding: Astro's content cache otherwise retains the old
 rendered reference even though component changes are rebuilt.
+
+
+### Shared start card and public footer
+
+`StartCard.astro` provides the illustrated setup action on home and tour pages.
+Homepage evaluation/team links sit in a separate resource row; legacy
+`get-started`, `evidence`, `voices`, and `waitlist` fragments remain valid.
+The shared public footer groups setup and help destinations, keeps social controls
+icon-only with accessible names, and presents release metadata as a quiet pill.
+Both layouts use existing palette tokens and native links without new scripts.

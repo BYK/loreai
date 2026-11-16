@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Captures the real built Solid app using only synthetic fixture responses.
 // No gateway, account, provider, production database, or external network is used.
+// Native 2x rendering keeps text sharp; website markup declares the same density.
 import { createServer } from "node:http";
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -231,6 +232,7 @@ try {
   for (const scheme of ["light", "dark"]) {
     const context = await browser.newContext({
       viewport: { width: 1120, height: 760 },
+      deviceScaleFactor: 2,
       colorScheme: scheme,
       reducedMotion: "reduce",
     });

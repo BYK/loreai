@@ -1,14 +1,37 @@
 ---
+import Logo from "./Logo.astro";
 const base = import.meta.env.BASE_URL;
 ---
 <footer class="site-footer">
-  <div><a href={base} class="footer-brand">Lore.AI</a><p>Local memory. Reviewable knowledge.</p></div>
-  <nav class="footer-links" aria-label="Use Lore"><a href={`${base}docs/install/`}>Get started</a><a href={`${base}docs/using-lore/`}>Using Lore</a><a href={`${base}docs/troubleshooting/`}>Troubleshooting</a><a href={`${base}docs/data-and-costs/`}>Data &amp; costs</a></nav>
+  <div class="footer-main"><div class="footer-identity"><Logo size={42} /><p>Local memory.<br />Reviewable knowledge.</p></div>
+  <div class="footer-group"><h2>Start your journey</h2>
+  <nav class="footer-links" aria-label="Use Lore"><a href={`${base}docs/install/`}>Get started</a><a href={`${base}docs/using-lore/`}>Using Lore</a></nav></div>
+  <div class="footer-group"><h2>Find your bearings</h2><nav class="footer-links" aria-label="Lore help"><a href={`${base}docs/troubleshooting/`}>Troubleshooting</a><a href={`${base}docs/data-and-costs/`}>Data &amp; costs</a></nav></div></div>
+  <div class="footer-bottom"><small>© {new Date().getFullYear()} Lore.AI <span aria-hidden="true">·</span> FSL-1.1-Apache-2.0</small>
   <nav class="footer-links footer-community" aria-label="Community links">
     <a class="social-icon" href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7M15 22v-3.4c0-1 .1-1.6-.5-2.2 3.3-.4 6.7-1.6 6.7-7.3 0-1.6-.5-2.8-1.5-3.9.2-.4.6-1.9-.1-3.8 0 0-1.3-.4-4.1 1.5a14.3 14.3 0 0 0-7 0C5.7 1 4.4 1.4 4.4 1.4c-.7 1.9-.3 3.4-.1 3.8a5.5 5.5 0 0 0-1.5 3.9c0 5.7 3.4 6.9 6.7 7.3-.5.5-.6 1.1-.5 2.2V22" /></svg></a>
     <a class="social-icon" href="https://x.com/withLoreAI" target="_blank" rel="noopener noreferrer" aria-label="Follow on X" title="Follow on X"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.982 21.75H1.672l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231ZM17.083 19.77h1.833L7.084 4.126H5.117L17.083 19.77Z" /></svg></a>
     <a class="social-icon" href={`${base}rss.xml`} aria-label="RSS" title="RSS feed"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 4a16 16 0 0 1 16 16M4 11a9 9 0 0 1 9 9" /><circle cx="5" cy="19" r="1.5" fill="currentColor" stroke="none" /></svg></a>
     <a class="release-link" href="https://github.com/BYK/loreai/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a>
   </nav>
-  <small>© {new Date().getFullYear()} Lore.AI · FSL-1.1-Apache-2.0</small>
+  </div>
 </footer>
+
+<style>
+  .site-footer { display:block;padding-block:32px 20px; }
+  .footer-main { display:grid;grid-template-columns:minmax(0,1fr) repeat(2,minmax(160px,.42fr));gap:32px;padding-bottom:24px; }
+  .footer-identity :global(.logo .logo-text) { display:inline;font:600 1.375rem/1 var(--sans);letter-spacing:-.04em; }
+  .footer-identity :global(.logo) { gap:8px;min-height:44px; }
+  .footer-identity p { margin:12px 0 0 50px;max-width:28ch;font-size:.8125rem;line-height:1.7;color:var(--muted); }
+  .footer-group h2 { margin:12px 0 8px;font-size:.6875rem;font-weight:550;letter-spacing:.06em;text-transform:uppercase;color:var(--muted); }
+  .footer-group .footer-links { display:flex;flex-direction:column;gap:0;align-items:flex-start; }
+  .footer-group { min-width:0; }
+  .footer-group a { max-width:100%;overflow-wrap:anywhere;color:var(--text);text-decoration:none;font-size:.8125rem;min-height:36px; }
+  .footer-group a:hover { color:var(--accent);text-decoration:underline; }
+  .footer-bottom { display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding-top:16px; }
+  .footer-bottom small { font-size:.6875rem;line-height:1.6; }
+  .footer-bottom .footer-community { gap:4px; }
+  .release-link { border:1px solid var(--line);border-radius:999px;padding:0 12px;color:var(--muted);text-decoration:none;font-size:.75rem; }
+  .release-link:hover { color:var(--heading);border-color:var(--muted); }
+  @media(max-width:600px) { .footer-main { grid-template-columns:repeat(2,minmax(0,1fr));gap:20px 16px;padding-bottom:20px; }.footer-identity { grid-column:1/-1; }.footer-group h2 { margin-top:0; }.footer-group a { min-height:44px; }.footer-bottom { flex-direction:column-reverse;align-items:flex-start;gap:16px; }.footer-bottom .footer-community { width:100%; }.footer-community .release-link { margin-inline-start:auto; } }
+</style>
