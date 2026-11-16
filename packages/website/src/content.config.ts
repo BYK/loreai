@@ -20,6 +20,13 @@ const blog = defineCollection({
     draft: z.boolean().default(false),
     author: z.string().default("Lore Team"),
     tags: z.array(z.string()).default([]),
+    kind: z
+      .enum(["Product note", "Engineering", "Perspective", "Tutorial"])
+      .default("Engineering"),
+    takeaway: z.string().optional(),
+    nextStep: z
+      .object({ label: z.string(), href: z.string().startsWith("/docs/") })
+      .optional(),
   }),
 });
 

@@ -1,0 +1,6 @@
+---
+interface Props { command: string; kind: "install" | "connection"; copyLabel: string; hint?: string; }
+const { command,kind,copyLabel,hint } = Astro.props;
+---
+<div class:list={["ui-command",{"install-box":kind === "install"}]}><div class:list={["ui-command-row",{"install-command":kind === "install"}]}><pre><code tabindex="0">{command}</code></pre><button type="button" class="button button-secondary" data-copy-install={kind === "install" ? "" : undefined} data-copy-setup={kind === "connection" ? "" : undefined} hidden aria-label={copyLabel}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V4H4v12h4" /></svg><span class="visually-hidden">Copy command</span></button></div><p class:list={["ui-command-status",kind === "install" ? "copy-status" : "setup-copy-status"]} role="status" aria-live="polite">{hint}</p></div>
+<script>import "../../scripts/install-copy";</script>

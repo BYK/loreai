@@ -246,25 +246,25 @@ function subsystemOf(file: string): string {
   // root first and dispatch on which package the file belongs to.
   const coreSrc = join(REPO_ROOT, "packages/core/src");
   if (file.startsWith(coreSrc + sep)) {
-    return "Memory engine (`@loreai/core`)";
+    return "Memory, recall, and context";
   }
   const rel = relative(GATEWAY_SRC, file).split(sep);
   const top = rel[0] ?? "";
   switch (top) {
     case "cli":
-      return "CLI / `lore` command";
+      return "Launching and managing Lore";
     case "cache-warmer.ts":
     case "cost-tracker.ts":
     case "worker-model.ts":
     case "llm-adapter.ts":
     case "translate":
-      return "Upstream + worker pipeline";
+      return "Model providers and background work";
     case "pipeline.ts":
     case "idle.ts":
     case "batch-queue.ts":
-      return "Pipeline + idle work";
+      return "Session processing and idle work";
     case "config.ts":
-      return "Gateway startup + routing";
+      return "Gateway startup and routing";
     case "fetch-interceptor.ts":
     case "fetch.ts":
       return "Fetch interceptor";
@@ -272,9 +272,17 @@ function subsystemOf(file: string): string {
     case "auth.ts":
     case "instrument.ts":
     case "hosted-config.ts":
-      return "Auth + billing + observability";
+      return "Authentication and operational telemetry";
     default:
-      return top.replace(/\.ts$/, "");
+      const names: Record<string, string> = {
+        "background-limiter.ts": "Background request limits",
+        "cache-analytics.ts": "Cache usage",
+        "model-tides-client.ts": "Optional Model Tides uploads",
+        "runtime-files.ts": "Runtime paths",
+        "shutdown-deadline.ts": "Shutdown behavior",
+        "sse-inactivity.ts": "Streaming timeouts",
+      };
+      return names[top] ?? top.replace(/\.ts$/, "").replaceAll("-", " ");
   }
 }
 
@@ -364,7 +372,7 @@ function renderPage(): string {
   lines.push("---");
   lines.push("title: Environment variables");
   lines.push(
-    "description: Every LORE_* env var, grouped by subsystem, with the parsing rule and default value.",
+    "description: Configure Lore startup, providers, memory, and operational behavior with environment variables.",
   );
   lines.push("sidebar:");
   lines.push("  order: 5");
@@ -376,16 +384,35 @@ function renderPage(): string {
   );
   lines.push("");
   lines.push(
-    "Every env var the gateway reads. Default values are extracted from the source (look for the " +
-      "`||` / `??` / `parseXxx(env.LORE_X, DEFAULT)` pattern at the first use site) and shown under " +
-      "the variable name when set. The parser used to coerce the raw string is also shown under the " +
-      "variable name when present.",
+    "Set environment variables in the shell or service that starts Lore, then restart the gateway. " +
+      "For everyday tasks, start with [data and costs](/docs/data-and-costs/) or " +
+      "[troubleshooting](/docs/troubleshooting/); use this page when you need a specific setting.",
   );
   lines.push("");
+  lines.push("## Common tasks");
+  lines.push("");
+  lines.push("| Task | Setting or guide |");
+  lines.push("|---|---|");
   lines.push(
-    "Env vars override `.lore.json` for the same setting. To override a `.lore.json` field, " +
-      "look for the corresponding `LORE_*` variable in this table — not all fields are env-var " +
-      "overridable; most budget, distillation, and search tuning fields require a config file change.",
+    "| Opt out of production telemetry | Set `SENTRY_ENABLED=0` before startup; [full data boundary](/docs/installation-reference/#operational-telemetry) |",
+  );
+  lines.push(
+    "| Choose a background model | `LORE_WORKER_MODEL`; review provider/auth requirements below |",
+  );
+  lines.push(
+    "| Use a different data location | `LORE_DB_PATH`; point it at the database you intend to use |",
+  );
+  lines.push(
+    "| Connect to a different gateway | [Setup and remote gateway guidance](/docs/setup/) |",
+  );
+  lines.push(
+    "| Tune relevant knowledge | [Knowledge injection guide](/docs/guides/tune-knowledge-injection/) |",
+  );
+  lines.push("");
+  lines.push("## Setting reference");
+  lines.push("");
+  lines.push(
+    "Environment overrides are setting-specific. Not every `.lore.json` field has an environment equivalent; consult [configuration](/docs/configuration/) for file-based settings. Runtime-dependent defaults vary by platform or other configuration.",
   );
   lines.push("");
 
@@ -411,13 +438,32 @@ function renderPage(): string {
     lines.push("|---|---|");
     for (const e of list) {
       const meta: string[] = [];
-      if (e.defaultValue) meta.push(`**Default:** \`${e.defaultValue}\``);
-      if (e.parser) meta.push(`**Parser:** \`${e.parser}\``);
+      if (e.defaultValue) {
+        const defaultValue = e.defaultValue.replace(
+          /^parse\w+\((true|false|\d+(?:\.\d+)?)\)$/,
+          "$1",
+        );
+        const literal = /^(?:true|false|\d+(?:\.\d+)?|"[^"]*"|'[^']*')$/.test(
+          defaultValue,
+        );
+        meta.push(
+          defaultValue === "undefined"
+            ? "**Default:** not set"
+            : literal
+              ? `**Default:** \`${defaultValue}\``
+              : "**Default:** runtime-dependent",
+        );
+      }
+
       const variableCell =
         meta.length > 0
           ? `\`${e.name}\`<br>${meta.join("<br>")}`
           : `\`${e.name}\``;
-      const desc = (e.description || "_no description in source_")
+      const desc = (
+        e.description ||
+        "No usage guidance is currently published for this setting. Keep the default unless an integration guide or maintainer directs otherwise."
+      )
+        .replace(/\{@link\s+([^}\s]+)(?:\s+[^}]+)?\}/g, "`$1`")
         .replace(/\|/g, "\\|")
         .replace(/\n/g, " ");
       lines.push(`| ${variableCell} | ${desc} |`);
@@ -428,17 +474,14 @@ function renderPage(): string {
   lines.push("## How variables are evaluated");
   lines.push("");
   lines.push(
-    "The gateway reads env vars once at startup (`loadConfig()` in `packages/gateway/src/config.ts`) " +
-      "and once at the boundary of each subsystem (worker model, cache warmer, cost tracker, etc.). " +
-      "Process-level changes after startup are not picked up — restart the gateway to apply.",
+    "Restart Lore after changing its environment. A shell export does not change the environment of an already-running gateway. The startup diagnostics report invalid settings; interpretation and validation depend on the variable.",
   );
   lines.push("");
   lines.push(
-    "Boolean env vars use the rule: `LORE_X=1` or `LORE_X=true` (case-insensitive) is truthy; " +
-      "anything else (including `LORE_X=0` or unset) is falsy. Numeric env vars use `parsePositiveInt` " +
-      "or `parseNonNegativeInt`; invalid values fall back to the default with a `console.error` warning.",
+    "The reference is generated from documented source settings. Descriptions can contain advanced integration details; [open a docs issue](https://github.com/BYK/loreai/issues/new/choose) if a setting's effect is unclear.",
   );
   lines.push("");
+
   return lines.join("\n");
 }
 

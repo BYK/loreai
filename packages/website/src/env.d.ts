@@ -6,3 +6,5 @@
 // component virtual modules have been merged into virtual.d.ts.
 // See: https://github.com/withastro/starlight/pull/3572
 /// <reference path="../node_modules/@astrojs/starlight/virtual-internal.d.ts" />
+
+/// <reference path="../node_modules/@astrojs/starlight/locals.d.ts" />

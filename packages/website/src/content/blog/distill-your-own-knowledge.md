@@ -8,6 +8,11 @@ tags:
   - memory
   - context management
   - agents
+kind: "Perspective"
+takeaway: "Lore curates knowledge into reviewable project records. It does not fine-tune your model weights."
+nextStep:
+  label: "Follow a project-memory example"
+  href: "/docs/example/"
 ---
 
 ## The diagnosis is right

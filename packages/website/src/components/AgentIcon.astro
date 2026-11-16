@@ -1,0 +1,12 @@
+---
+import type { SETUP_AGENTS } from "../lib/agent-setup";
+interface Props { agent: (typeof SETUP_AGENTS)[number]["id"]; }
+const agent = Astro.props.agent === "codex-desktop" ? "codex" : Astro.props.agent;
+const source = `${import.meta.env.BASE_URL}agents/${agent}.svg`;
+const colored = agent === "pi" || agent === "hermes";
+---
+{colored ? <img class="agent-mark" src={source} alt="" width="20" height="20" loading="lazy" /> : <span class="agent-mark agent-mark-mono" style={`--agent-mark:url("${source}")`} aria-hidden="true"></span>}
+<style>
+.agent-mark { display:inline-block;width:20px;height:20px;flex:0 0 20px;object-fit:contain;vertical-align:middle; }
+.agent-mark-mono { background:currentColor;mask:var(--agent-mark) center / contain no-repeat; }
+</style>

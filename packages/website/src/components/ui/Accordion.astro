@@ -1,0 +1,5 @@
+---
+interface Props { class?: string; }
+const { class: className } = Astro.props;
+---
+<div data-slot="accordion" class:list={["ui-accordion", className]}><slot /></div>

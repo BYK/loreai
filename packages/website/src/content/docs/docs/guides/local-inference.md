@@ -84,7 +84,7 @@ The gateway talks to your local server on the harness's behalf, with no external
 
 Recall uses `@huggingface/transformers` with `nomic-embed-text-v1.5` (768-dim INT8 quantized, ~137 MB) for on-device vector search by default — no API key required. The model downloads on first use and is cached locally.
 
-If local embeddings fail (CUDA 13 on Linux/x64 with `onnxruntime-node` is a known case — [microsoft/onnxruntime#26586](https://github.com/microsoft/onnxruntime/discussions/26586)), set `VOYAGE_API_KEY` or `OPENAI_API_KEY` in your environment and recall transparently switches to that provider. You can also pin a hosted provider explicitly in `.lore.json`:
+If local embeddings fail, recall falls back to keyword-only FTS search. Setting an API key alone does not switch providers. To use hosted embeddings, explicitly configure a provider in `.lore.json` and set its matching API key (`VOYAGE_API_KEY` for `voyage`, or `OPENAI_API_KEY` for `openai`), then restart Lore. Hosted embeddings send embedding input to that provider:
 
 ```json
 { "search": { "embeddings": { "provider": "voyage" } } }

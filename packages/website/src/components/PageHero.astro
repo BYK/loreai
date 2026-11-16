@@ -1,0 +1,22 @@
+---
+import Hero from "@astrojs/starlight/components/Hero.astro";
+import JournalArt from "./JournalArt.astro";
+const missing = Astro.locals.starlightRoute.entry.id === "404";
+const base = import.meta.env.BASE_URL;
+---
+{missing ? <section class="page-recovery"><JournalArt name="satchel" size={96} eager /><div><p class="field-marker">404 / Field guide</p><h1 id="_top">Page not found.</h1><p>This address is not in the field guide. Return to Lore or find the documentation you need.</p><div class="recovery-actions"><a class="button button-primary" href={base}>Back to Lore</a><a class="button button-secondary" href={`${base}docs/`}>Open documentation</a><button type="button" class="button button-secondary" data-recovery-search hidden disabled>Search documentation</button></div></div></section> : <Hero {...Astro.props} />}
+<script is:inline>
+for (const action of document.querySelectorAll("[data-recovery-search]")) {
+  const search = document.querySelector("site-search [data-open-modal]");
+  if (!(action instanceof HTMLButtonElement) || !(search instanceof HTMLButtonElement)) continue;
+  const sync = () => { action.disabled = search.disabled; };
+  sync();
+  new MutationObserver(sync).observe(search, { attributes: true, attributeFilter: ["disabled"] });
+  action.hidden = false;
+  action.addEventListener("click", (event) => {
+    // Keep this originating click out of the framework's outside-click dismissal.
+    event.stopPropagation();
+    if (!search.disabled) search.click();
+  });
+}
+</script>

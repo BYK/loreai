@@ -1,0 +1,14 @@
+---
+import NavigationIcon from "./NavigationIcon.astro";
+---
+<figure class="sharing-flow" aria-label="Share reviewed project knowledge"><ol><li><NavigationIcon name="notes" /><strong>Export knowledge</strong><p>Lore writes curated entries to <code>.lore.md</code> when knowledge changes.</p></li><li><NavigationIcon name="branch" /><strong>Review the diff</strong><p>Correct the rules and keep their identity markers. Commit and review the file with your code.</p></li><li><NavigationIcon name="people" /><strong>Import next session</strong><p>A teammate’s merged entries are imported locally. Context selection still depends on relevance, scope and budget.</p></li></ol><figcaption>Git shares the reviewed knowledge file, rather than the full conversation database.</figcaption></figure>
+<style>
+.sharing-flow { margin:20px 0;padding:20px;border:1px solid var(--line);border-radius:8px;background:var(--journal-page); }
+.sharing-flow ol { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;list-style:none;margin:0;padding:0; }
+.sharing-flow li { margin:0;min-width:0; }
+.sharing-flow li > :global(svg) { display:block;color:var(--muted);margin-bottom:12px; }
+.sharing-flow strong { display:block;font-size:.875rem;color:var(--heading); }
+.sharing-flow p,.sharing-flow figcaption { font-size:.8125rem;line-height:1.65;color:var(--muted);margin:8px 0 0; }
+.sharing-flow figcaption { border-top:1px solid var(--line);padding-top:12px;margin-top:16px; }
+@media(max-width:640px) { .sharing-flow ol { grid-template-columns:1fr;gap:16px; }.sharing-flow li { position:relative;padding-inline-start:30px; }.sharing-flow li > :global(svg) { position:absolute;inset-inline-start:0;top:2px; } }
+</style>

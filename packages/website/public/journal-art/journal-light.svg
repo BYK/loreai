@@ -1,0 +1,326 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" fill="none" viewBox="0 0 320 320">
+<!-- SVG created with Arrow, by QuiverAI (https://quiver.ai) -->
+  <path d="m56.08 54.68c-6.36-0.44-11.88 9.6-9.84 17.08 21.36 50.68 43.64 109.2 58.76 153.4 2.12 4.68 5.44 6.32 8.6 6.12 3.08-0.2 6.36-1.28 6.92-3.8 1.04 0.92 2.2 1.24 3.36 0.92l87.64-32.28 0.92-0.12 38-14.72c2.56-1.04 3.48-3.2 3.24-5.88-0.28-3-3.08-6.24-4.04-8.28l3.12-2.32c2.68-1.8 3.12-4.92 1.6-8.16-25.24-46-55.76-102.7-75.04-134-1.92-2.72-4.4-3.4-7.8-2.72l-112.8 32.8c-1.16 0.4-1.92 1.2-2.68 2.04z" fill="#456642" />
+  <path d="m56.36 55.04c-0.48 0.2-0.64 0.64-0.44 1.4l66.08 152.6-1.4 0.48c-7.32-0.24-14.2 9.36-11.76 15.56 1.48 3.92 8.04 3.8 11 1.32l0.64 0.84c-3.08 4.2-11.64 4.28-14.44-1.88l-50.4-168.8c-0.4-0.8-0.04-1.44 0.72-1.6z" fill="#456642" />
+  <path d="m249.5 166.6-1.04 2.12 0.12 6.48c0.24 1.04-0.24 1.76-1.36 2.24l-30.04 11.32 1.16 5.36-6.44 1.56-88.36 31.36-2.44 0.28-0.52-1.52-0.72-0.48-1.48 0.96 1.4 0.32 1.96 1.12 89.84-31.68 1.68-0.44 3.68 0.36 33.44-14.92c2.2-0.96 3.12-2.88 3-5.52-0.4-3.16-2.56-6.52-3.88-8.92z" fill="#456642" />
+  <path d="m248.4 166.7-127.2 43.16c-6.96 1.48-12.8 8.84-10.68 13.8 0.96 1.76 3.08 2.28 5.08 1.76l96.4-35.24 2.68-0.04 32.36-12.92c1.24-0.56 1.52-1.6 1.28-2.76l-0.72-4.28 1.44-2.76-0.6-0.72z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <path d="m112.5 216.2 13.28-4.8" stroke="#456642" stroke-width=".425" />
+  <path d="m111.1 219.4 17.16-6.24" stroke="#456642" stroke-width=".425" />
+  <path d="m111 222.2 18.76-6.72" stroke="#456642" stroke-width=".6375" />
+  <path d="m112.6 224.8 17.96-6.32" stroke="#456642" stroke-width=".6375" />
+  <path d="m122.1 224.6 4.32-1.52" stroke="#456642" stroke-width=".6375" />
+  <path d="m124.5 223.8 4.36-1.6" stroke="#456642" stroke-width=".425" />
+  <path d="m123.8 207.9-1.8 1.04" stroke="#456642" stroke-width=".425" />
+  <path d="m140.5 203.8 12.32-4.04" stroke="#456642" stroke-width=".425" />
+  <path d="m142.8 207 19.56-6.28" stroke="#456642" stroke-width=".425" />
+  <path d="m145 209.5 13.56-4.56" stroke="#456642" stroke-width=".425" />
+  <path d="m145.9 212.4 8.2-2.72" stroke="#456642" stroke-width=".425" />
+  <path d="m146.9 216.4 8.48-2.88" stroke="#456642" stroke-width=".425" />
+  <path d="m186.6 190.8 29.56-10.96" stroke="#456642" stroke-width=".5313" />
+  <path d="m184.8 197.2 27.72-9.92" stroke="#456642" stroke-width=".5313" />
+  <path d="m174.8 199.4 36.76-12.56" stroke="#456642" stroke-width=".425" />
+  <path d="m215.4 184.8 11.84-4.68" stroke="#456642" stroke-width=".425" />
+  <path d="m218 186.2 8.96-3.32" stroke="#456642" stroke-width=".425" />
+  <path d="m232.2 173.9 14.56-5.2" stroke="#456642" stroke-width=".425" />
+  <path d="m233.4 176.6 13.12-4.44" stroke="#456642" stroke-width=".425" />
+  <path d="m234 179.4 12.44-4.4" stroke="#456642" stroke-width=".5313" />
+  <path d="m55.32 55.96 0.76 0.92" stroke="#456642" stroke-width=".3399" />
+  <path d="m48.32 65.24 0.44 5.72" stroke="#456642" stroke-width=".3399" />
+  <path d="m49.8 68.72 0.6 5.4" stroke="#456642" stroke-width=".3399" />
+  <path d="m51.32 72.36 0.6 5.12" stroke="#456642" stroke-width=".3399" />
+  <path d="m52.84 76.04 0.48 4.48" stroke="#456642" stroke-width=".3399" />
+  <path d="m54.6 88.72 0.44 4.32" stroke="#456642" stroke-width=".3399" />
+  <path d="m56.68 91.12 0.48 5.52" stroke="#456642" stroke-width=".3399" />
+  <path d="m58.44 94.88 0.44 5.04" stroke="#456642" stroke-width=".3399" />
+  <path d="m60.32 99.52 0.36 4.96" stroke="#456642" stroke-width=".3399" />
+  <path d="m62.08 104.2 0.32 4.6" stroke="#456642" stroke-width=".3399" />
+  <path d="m63.76 109.1 0.32 4.64" stroke="#456642" stroke-width=".3399" />
+  <path d="m65.56 114.2 0.32 4.72" stroke="#456642" stroke-width=".3399" />
+  <path d="m67.36 119.1 0.28 4.88" stroke="#456642" stroke-width=".3399" />
+  <path d="m76.36 137 0.2 5.52" stroke="#456642" stroke-width=".3399" />
+  <path d="m78.16 141.2 0.2 5.08" stroke="#456642" stroke-width=".3399" />
+  <path d="m80.24 146.8 0.2 5.28" stroke="#456642" stroke-width=".3399" />
+  <path d="m82.16 152 0.28 5.4" stroke="#456642" stroke-width=".3399" />
+  <path d="m84.36 157.7 0.2 5.32" stroke="#456642" stroke-width=".3399" />
+  <path d="m86.48 163.1 0.2 5.4" stroke="#456642" stroke-width=".3399" />
+  <path d="m88.72 168.7 0.24 5.08" stroke="#456642" stroke-width=".3399" />
+  <path d="m95.36 185.9 0.28 4.76" stroke="#456642" stroke-width=".3399" />
+  <path d="m97.28 190.1 0.28 4.96" stroke="#456642" stroke-width=".3399" />
+  <path d="m99.24 195.1 0.24 4.84" stroke="#456642" stroke-width=".3399" />
+  <path d="m101.1 200.2 0.24 4.84" stroke="#456642" stroke-width=".3399" />
+  <path d="m103.1 205.4 0.32 4.8" stroke="#456642" stroke-width=".3399" />
+  <path d="m105.2 210 0.16 4.56" stroke="#456642" stroke-width=".3399" />
+  <path d="m106.1 180.4-2.32 1.08" stroke="#456642" stroke-width=".3399" />
+  <path d="m107.2 183.4-2.6 1.28" stroke="#456642" stroke-width=".5098" />
+  <path d="m108.2 186.2-2.88 1.64" stroke="#456642" stroke-width=".5098" />
+  <path d="m109.4 189.5-3.2 1.88" stroke="#456642" stroke-width=".5098" />
+  <path d="m110.5 192.5-3.48 2.08" stroke="#456642" stroke-width=".5098" />
+  <path d="m111.4 195.7-3.36 2.04" stroke="#456642" stroke-width=".5098" />
+  <path d="m112.8 198.6-3.44 2.24" stroke="#456642" stroke-width=".5098" />
+  <path d="m114.4 201.7-2.92 1.68" stroke="#456642" stroke-width=".5098" />
+  <path d="m115.8 204.6-3.68 1.68" stroke="#456642" stroke-width=".5098" />
+  <path d="m84.28 128.9-0.96 0.56" stroke="#456642" stroke-width=".3399" />
+  <path d="m85.44 131-1.4 0.8" stroke="#456642" stroke-width=".425" />
+  <path d="m86.84 134.1-1.68 0.88" stroke="#456642" stroke-width=".425" />
+  <path d="m88.16 137.2-1.8 0.92" stroke="#456642" stroke-width=".425" />
+  <path d="m89.52 140.4-2.24 1.2" stroke="#456642" stroke-width=".425" />
+  <path d="m90.84 143.7-2.32 1.4" stroke="#456642" stroke-width=".425" />
+  <path d="m92.08 146.8-2.56 1.6" stroke="#456642" stroke-width=".425" />
+  <path d="m93.48 150.2-3 1.96" stroke="#456642" stroke-width=".425" />
+  <path d="m94.76 153.4-3.24 2.12" stroke="#456642" stroke-width=".425" />
+  <path d="m96.12 157-3.32 2" stroke="#456642" stroke-width=".425" />
+  <path d="m97.44 160.1-3.4 1.88" stroke="#456642" stroke-width=".425" />
+  <path d="m119.1 163.3 0.24 0.72" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m120.9 165.3-2.08 0.84" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m123.2 167.3-3.36 1.28" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m126.6 169.5-5.08 1.76" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m127.5 172.7-4.44 1.52" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m134 172.6-4.32 1.28" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m135 175.5-5 1.32" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m142.6 175.5-7.76 2.44" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m130 178.5-5.04 1.4" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m133.1 179.1-6.64 2.2" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m138 183.4-5.28 1.64" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m142.9 184.6-6.88 2.44" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m151.8 184.2-14.64 5.12" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m194.8 171.8-17.24 7.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m210.8 169.2c-11.12 4.92-23.6 8.72-31.48 10.68" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m236.3 160.1c-6.16 2.8-14.16 5.44-19.16 6.96" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m231.5 148.3-4.76 1.6" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m230.5 151.6-5.48 2" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m225.2 155.9-4.28 1.56" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m230.7 156.9-15.32 4.92" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m216.2 113-2.48 0.88" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m217.6 115.7-3.8 1.16" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m218.9 118.1-4.96 1.56" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m220.2 121.1-4.8 1.56" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m212.9 123.2-6.64 1.56" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m216.6 124.4-4.72 1.04" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m221.9 124.8-4.04 1.36" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m222.7 127.1-4.64 1.72" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m224.4 130-4.68 1.72" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m225.9 131.4-4.36 1.48" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m227.2 133.8-3.84 1.16" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m228.5 137.4-3.56 1.08" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m229.7 139.3-2.72 0.88" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m231.1 141.6-1.96 0.6" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m218.2 134.2-5.08 1.28" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m222.2 135.9-4.12 1.36" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m224.9 137.9-4.04 1.4" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m87.28 81.96-3.32 0.88" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m100.6 81.36-0.92 0.4" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m94.64 100.6-2.68 0.88" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m100.9 103.2-6.28 2.12" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m97.32 105.5-3.76 1.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m98.64 107.4-4.36 1.48" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m99.96 109.4-4.88 1.56" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m106.2 110.8-3.92 1.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m100.9 112.2-4.2 1.24" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m108.6 115.6-4.08 1.2" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m115.6 116.2-5.92 1.64" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m111.6 119.8-4.48 1.52" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m106 122.2-4.12 1.28" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m108.6 124.4-5.72 1.48" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m114 125.5-3.72 1.08" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m117.6 127-5.68 1.6" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m110 130-5 1.56" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m113.2 131.2-6.48 2.28" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m110.7 135.1-3.96 1.4" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m111 138.4-2.36 0.76" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m111 140.6-2.12 0.48" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m102.7 118.6-3.52 1.2" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m103.9 115.8-4.64 1.2" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m100.5 112.9-3.44 1.04" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m70.32 53.24-8.36 2.44 3.28 8.44" stroke="#F4EAD1" stroke-width=".5098" />
+  <path d="m69.16 55.16-4.84 1.52 1.12 4.08" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m75 56.84c0.36 4.04-2.44 7.4-4.92 8.52 17.64 39.76 38.6 89.88 52.92 123.5 5.48-1.8 10.52 0.24 12.72 4.68 35.32-11.92 74.32-27 100-35.52-2.2-5.12-0.08-9.04 3.28-10.88-18.4-36.88-44.64-86.6-63.04-113.2-4.84 0.84-9.6-0.96-11.8-4.08-29.32 8.16-63.32 18.04-87.44 25.96 1.72 3.72-0.4 8-4.48 9.44" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m70.32 65.08c2.12 7.2 7.8 18.04 10.52 24.64" stroke="#F4EAD1" stroke-width=".5313" />
+  <path d="m73.04 65.64c17.84 37.96 36.12 83.44 51.96 120.1 4.48-0.2 9.32 2.48 10.88 6.84" stroke="#F4EAD1" stroke-width=".6375" />
+  <path d="m124.2 196.4 0.2 3.44 4.96-0.44" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m121.5 196.4 2.24 6.6 10-3.04" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m128.7 189.8c-1.48 0.2-3.88 0.32-5.32-0.6-3.52-8.96-11.68-29.36-17.64-41.92" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m164.6 30.56c1.52 3.12 6.96 4.88 10.72 3.96" stroke="#F4EAD1" stroke-width=".6375" />
+  <path d="m176.5 34.64c3.6 6.2 9.8 16.52 14 24.04" stroke="#F4EAD1" stroke-width=".5313" />
+  <path d="m174.6 36.28c19.04 30.8 44.64 75.44 62.72 111" stroke="#F4EAD1" stroke-width=".6375" />
+  <path d="m239.9 147.4c-4 1.64-5.56 6-4.36 10.08" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m235.5 158c-23.12 8.76-71.08 26.04-99.76 35.6" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m164.1 185.5c-9.32 4.08-21.12 8-28 9.84" stroke="#F4EAD1" stroke-width=".5313" />
+  <path d="m163.8 30.64c-19.72 5.44-45.72 12.48-62.16 17.6" stroke="#F4EAD1" stroke-width=".5313" />
+  <path d="m136.6 37.68c-14.32 4-30.28 9.04-38.2 11.32" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m163.4 31.72c-17.16 4.84-35.76 9.52-45.32 12.72" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m163.1 33.16-14.72 4.6" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m158 37-6.08 2.16" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m164.3 35.16-4.44 1.56" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m165.9 37.28-3.28 0.92" stroke="#F4EAD1" stroke-width=".2125" />
+  <path d="m161.8 38.48-3.28 0.96" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m161.4 38.44-2.84 0.92" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m177.3 46.04 2.56 0.32" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m176.5 48.32 3.28-0.52" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m177 50.76 3.52-1.2" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m178 53.44 3.2-1.12" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m180 55.08 2.92-0.8" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m181.6 57.6 2.64-0.76" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m182.8 59.64 2.68-0.68" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m184.5 62.48 2.52-0.84" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m186 64.84 2.24-0.8" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m188.1 66.68 1.32-0.4" stroke="#F4EAD1" stroke-width=".2125" />
+  <path d="m190.2 69.16 0.52-0.12" stroke="#F4EAD1" stroke-width=".1523" />
+  <path d="m178.3 55.2-6.16 2.16" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m178 58.48-9.52 2.8" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m179.3 60.72-3.88 0.92" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m181.8 62.44-2.84 0.92" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m90.16 54.76-12.2 3.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m89.88 57.12-7.52 2.24" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m86.36 58.68-5.24 1.56" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m83.64 61.4-3.72 0.84" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m80.96 67.08-3.44 0.76" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m82 68.72-4.08 1.16" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m84.84 69.8-5.64 1.96" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m90.08 70.48-5.84 1.8" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m96.92 70.44-5.16 1.44" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m93.52 73.88-4.56 1.56" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m87.56 74-6 2.24" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m85.44 76.84-3.92 1.24" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m87.64 78.72-4.72 1.36" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m83.92 53.16c-2.16 0.48-4.36 0.96-5.92 1.4" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m162.4 29.16-11.2 2.36" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m148.5 33.76-7.64 1.36" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m174.6 23.16-4.36 0.8" stroke="#456642" stroke-width=".3399" />
+  <path d="m174.1 23.8-3.76 0.8" stroke="#456642" stroke-width=".2549" />
+  <path d="m199.3 59.52 8.2 15.36" stroke="#456642" stroke-width=".3399" />
+  <path d="m209.4 83.56 6.44 12" stroke="#456642" stroke-width=".425" />
+  <path d="m216.2 102.8 18.44 32.12" stroke="#F4EAD1" stroke-width=".5313" />
+  <path d="m63.52 72.96c-6.48-2.12-11.84 6.8-9.48 16.12 0.32-7.04 5.72-12.84 10.4-12.84l-0.92-3.28z" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m82.36 118.5c-6-0.96-12.76 8.6-10.8 16.16l0.6 0.92c0.6-8.36 7.04-13.88 11.6-13.68l-1.4-3.4z" fill="#F4EAD1" stroke="#456642" stroke-width=".6375" />
+  <path d="m102.4 166.7c-6.84-1.16-13.28 9.36-12.12 16.08l1.2 2.32c0.76-8.44 7.08-14.72 12.24-14.24l-1.32-4.16z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <path d="m118 208.4c-6.28 0.08-12.72 8.68-11.6 14.72" stroke="#F4EAD1" stroke-width="1.127" />
+  <path d="m64.76 77.28 16.2 39.56" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m83.96 123.7 17.04 41.48" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m103.7 172 13.92 34.68" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m55.68 57.24 5.56 13.48" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m55.64 57.88-2.8 1.2" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m56.44 59.96-3.08 1.88" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m57.24 62.12-3.16 2.08" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m58.4 64.6-3.04 2.08" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m59.56 67.16-2.52 2.08" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m61.12 69.36-2.64 1.72" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m67.48 88.64 2.4 1.6" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m68.72 92.68 1.88 1.04" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m69.92 95.6 1.84 0.96" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m71.16 98.76 1.84 0.8" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m72.28 101.8-2.12 1.44" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m73.8 103.2-3.52 2.4" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m74.72 106-2.6 1.48" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m75.84 108-2.4 1.52" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m77.04 110.2-2.72 1.72" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m78.04 112.8-2.8 1.76" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m142 205-15.04 5.28c5.24 8.2 6.56 20.44 11 30.76 4.56 10.56 11.88 17 16.8 23.88 3.6 5.04 4.92 10.92 5.68 14.04 1.04 1.72 4.52-8.12 4.8-12.64 4.92 1.6 9.84 4.64 12.44 6.04 1.4-0.28-3.96-10.08-16.12-23.52-14.4-14.88-13.04-33.6-19.56-43.84z" fill="#A95A1D" stroke="#A95A1D" stroke-width=".5098" />
+  <path d="m136.8 231c1.92 8.28 7.44 16.8 11.24 21" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m139.6 234.8 2.8 7.36" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m142.2 236.4 3.4 6.24" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m146 227.8c1.36 5.48 4.36 11.08 6.52 14" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m146.6 230.6 4.36 8.8" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m165.4 255.4c3.36 3.36 6.96 8.16 8.4 10.92" stroke="#A95A1D" stroke-width=".425" />
+  <path d="m166 260.3 5.28 5.6" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m166 260.9 4.12 4.48" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m155.9 262c2.88 3.64 5.04 8.8 5.6 11.8" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m158.8 263.2 3.4 8.52" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m160.3 265.6 2.04 7.12" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m129.6 211.8 2.84 6.16" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m131.2 210.2 2.68 4.84" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m134.8 208.6 2.4 3.92" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m138 207.2 2.36 4.04" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m140.8 206.6 1.88 3.48" stroke="#A95A1D" stroke-width=".2549" />
+  <path d="m212.8 185.8c0.64 2.96 0.56 8.2-0.48 10.96-5.56 4.76-8.4 11.6-8.04 16.36 0.16 0.44 0.92-0.04 1.08-0.92-1.04 7.24 1.8 9.96 1.84 13.6 0 2.04 0 3.76 0.4 3.96 2.08-4.16 8.16-9.56 7.4-15.56 0.6 1.44 0.76 3.2 1.16 3.32 2.32-4.52 3.2-11.12 1.04-16.04-1.72-4.24-1.84-8.72-1.72-10.92l6.4 8.04c2.44 5.56 3.96 11.4 2.56 15.56-3.44 6.16-4.2 13.2-2.48 17.4l0.64-0.4c0.2 2.08 0.88 4.4 1.64 5.6l0.24-1.4c0.96 4.2 4.76 6.88 6.16 11.32 0.44 0.64 0.68 0.2 0.72-0.72 0.48-4.92 2.64-9.72 1.8-14.04l0.72 0.96c0.96-6.84-2.4-12.92-5.84-17-1.92-4.16-2.8-9.44-3.28-11.72l8.48 11.12c2.08 5.32 4.28 11.8 4.64 15.16-1.76 3.56-2.36 7.6-0.04 8.64l0.92-0.2c-2.84 3.48-1.96 6.6-0.28 6.68l1.16-0.24c-2.16 3.68-0.24 6.8 2.08 5.32 0.48 3.28 2.32 3.52 2.92 2.88 0.76 2.92 2.36 3.84 3 3.24 0.92-1.24 0.76-3.76 0.04-4.88 2.72 0.08 2.04-4.08 0.12-4.88 3.2-0.36 1.92-4.56-1-5.24-1.24-0.52-2.68-1.16-3.56-2.44l-1.48-4.08 2.96-10.2c-6.44-5.68-12.8-15-16.84-20.4l13.56 9.04 1.72-0.96-14.12-8.76 3.68-0.12c4.24-0.56 4.96-2.56 4.4-1.44-5.4 2.04-11.88-0.36-14.96-4.84l-7.12-11.88-2.24 0.12z" fill="#456642" />
+  <path d="m213.5 196.7c-0.16 6.48-1.12 16.44-3.96 21.8" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m212.4 201.4-6.16 7.04" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m211.1 208.7-3.8 4.96" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m213.3 203.3-1.56 8" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m214.6 203.6 1.64 6.36" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m225.7 217.3c-1.56 5.48-1.12 16.36 1.68 21.72" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m225.7 222.2-1.24 6.2" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m227.1 223.6 0.32 9.28" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m227.7 218.9 4.28 8.4" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m231.4 228.8-1.84 7.32" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m235.9 231.7 2.28-0.44" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m235.9 218.1 4.04 11.8" stroke="#456642" stroke-width="1.275" />
+  <path d="m239.7 218.8 3.68 8.8" stroke="#456642" stroke-width="1.275" />
+  <path d="m241.4 226.5c2.24 7.56 7.12 14.12 11.32 16.16l-0.2-1.32c1.44 1.92 4.52 3.4 5.88 3.36l-0.44-1.28c4.08 2.72 11.72 2.52 16.16 4 1.68-0.16-5.56-6.08-8.32-9.04-0.88-3.04-3.52-4.88-5.6-5.4l1.12-1.4c-3.56-4.8-10.84-6-15.04-7.04-2.56-1-5.32-3.84-4.88 1.96z" fill="#456642" />
+  <path d="m244.1 226.8c4.68 7.2 13.8 15.28 19.16 17" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m247 228.7 10.68 4.56" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m250.5 232.3 10 2.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m256.2 238.3 6.64 1.56" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m249.6 228.4 6.32-0.88" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m238.8 231.9c-3.24 2.52-3.12 6.52-1.44 7.04 1.8 0.6 3-3.52 2.76-6l-1.32-1.04z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <ellipse cx="237.7" cy="236.2" rx="1.318" ry="2.419" fill="#F4EAD1" stroke="#456642" stroke-width=".6375" />
+  <path d="m239.2 238.8c-2.88 2.32-2.36 5.8-0.96 5.96 2.12-0.04 3-4.12 2.52-5.28l-1.56-0.68z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="239" cy="241.6" r="1.091" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m240.6 245.6c-3.36 1.44-2.52 5.16-1 5.24 2.6-0.24 3.12-4.44 2.84-5l-1.84-0.24z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="241" cy="248.1" r="1.009" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m243.3 248.3c-2.48 1.72-1.32 5 0.56 5 1.84-0.32 1.28-4.44 1-4.84l-1.56-0.16z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="244.1" cy="251.3" r=".9076" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m245.1 251.2c-1.08 2.16 1.08 5.36 2.16 5.08 1.56-1.2 0.44-4.64-0.64-5.12l-1.52 0.04z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="247.4" cy="250.5" r="1.244" fill="#F4EAD1" stroke="#456642" stroke-width=".6375" />
+  <path d="m246.2 244.1c-1.44 2.68 0.96 5.2 2.56 3.68 1.44-1.92-0.52-4.12-2.56-3.68z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="247.8" cy="245.4" r=".8685" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m243.1 239.5c-1.32 2.48 1.24 5.32 3.44 4.44 1.96-1.92-0.84-5-3.44-4.44z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="245.5" cy="241.2" r=".9506" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m240 231.2c-1.56 2.6 2.08 6.12 4.44 5.48 1.76-2.24-1.52-5.76-4.44-5.48z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="243" cy="233.6" r="1.044" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m243.9 211.1c-3 2.68-0.28 7.6 3.2 7.24 2.2-1.64 0.44-6.48-3.2-7.24z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="244.9" cy="215.3" r="1.134" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m247.9 217.2c-1.44 3.24 0.64 5.04 2.4 4.2 1.96-1.88 0.44-5.08-2.4-4.2z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="249.8" cy="219.7" r=".8881" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m252.5 220c-2.08 2.48 0 4.68 1.92 3.84 2.08-2 0.68-4.8-1.92-3.84z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="254.7" cy="221.9" r=".9275" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m257.3 220.4c0.28 3.08 3.64 3.72 4.76 2.6 0.44-2.36-2.92-4.4-4.76-2.6z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="260.5" cy="221.9" r=".8021" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m254.1 215.8c-1.4 3.2 2.64 6.68 5 4.2 1.24-2.72-2-5.6-5-4.2z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="258" cy="216.9" r=".9545" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m245 211c-0.92 3.36 3.76 6.28 6.2 4.52 2.16-3.12-2.56-6.24-6.2-4.52z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="249.8" cy="213" r="1.075" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m244.4 211.1c-0.04 2.44 4.76 4.48 6.84 3.48 2.84-2.52-2.64-5.48-6.84-3.48z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="250.1" cy="212.5" r=".9939" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m253.6 215.1c-0.44 3.08 4.52 4.56 5.32 1.72 0.84-2.88-3.28-3.56-5.32-1.72z" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <circle cx="257.6" cy="215.9" r=".8568" fill="#F4EAD1" stroke="#456642" stroke-width=".5098" />
+  <path d="m264 194.1c-4.08 1.52-8.96 0.44-12.44 0.92l-2.6 0.56 0.28-1.48c-5.76 0.6-9.36 3.8-12.56 6.76-2.24 1.8-5.52 2.24-6.48 2.8 5.72 0.72 9.68 4.96 15.32 4.72 2 0.12 4.52-1.24 4.8-1.92l1.88-0.08c1.32-0.68 2.36-1.72 2.44-2.16l-0.96-0.64c4.68-2.04 8.6-6.44 10.32-9.08v-0.4z" fill="#456642" />
+  <path d="m261.4 196.4c-7.8 4.6-18.2 7.36-25.04 6.92" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m247.2 196.7-9.72 5.84" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m251.4 197.5-7.12 4.72" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m253.9 200.6-8.76 2.64" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m249.3 204.8-5.2-0.12" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m214.8 185.6c4.4 4.68 17.52 5.8 20.76 7.44l2.32 0.24c-3.08 1.44-10.16 2.48-13.36 1.12-4.76-1.6-9.04-4.52-10.76-7.72l1.04-1.08z" fill="#456642" stroke="#456642" stroke-width=".6375" />
+  <path d="m218.2 189.5c3.52 2.28 8.68 4 11.92 4.08" stroke="#F4EAD1" stroke-width=".425" />
+  <path d="m222.4 190.1 4.76-0.76" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m226.2 191.8 3.68 0.04" stroke="#F4EAD1" stroke-width=".2549" />
+  <path d="m292.7 181.3-1.92-8.56 3.44-13.76-3.76 6.64c1.08-5.88 3-11.2 2-17.16-1.4-5.76-2.08-12.76-3.08-14.44l-1.84 10.48c-0.52-7.92 2.24-15.12-0.56-19.36l-1 4.88c0.52-10.6-5.04-20.6-7.48-25.84l-0.36 27.28c-1-11.56-0.04-25.4-2.48-31.52-3.36-6.28-6.64-14.64-9.4-16.88l-0.24 3.36c-1-4.88-3.96-9.8-5.12-11.28l0.88 18c-1.88-8-2.68-18.44-4.12-21.8-3.96-6.6-10.48-13.56-12.68-15.6l1.2 12.72c-1.72-6.8-2.8-13.76-4.96-16.32-6.52-7.16-14.8-15.04-18.84-18.28-1.16 2.68-0.84 7.8-0.28 10.6l-0.28 0.68c0.04 5.48 1.2 11.12 2.88 13.92l0.48 2.52c0.84 4.28 3.6 9.04 5.32 11l-1.84-0.12c1.48 4.84 6.76 9.72 9.64 12.52l-6.56-5.08c3.4 7.24 6.72 16.44 11.44 20.52 7.36 6.56 17.52 14.8 23.84 20.68-8.68-7.76-20.4-15.56-25.92-19.16 2.64 7.28 7.92 18.72 14 22.76l-5.72-4.28c2.4 6.04 6.32 12.24 10.72 16.56l-3.6-2.96c1.48 4.8 14.6 12.88 22 20.52-6.64-5.32-15.24-11.52-18.52-12.92 3.68 5.96 6.88 13.48 12.6 18 5.52 4.24 11.92 12.56 14.32 18.6l1.48 3.96 4.32-0.88z" fill="#A95A1D" stroke="#A95A1D" stroke-width=".5098" />
+  <path d="m222.8 35.24c6.76 13.56 20.04 30.84 28.84 45.92 18.64 31.28 32.16 71.36 38.24 99.96l1.76-0.52c-5.8-29.2-19.6-65-36.52-95.28-11.2-19.76-24.84-40-32.32-50.08z" fill="#F4EAD1" stroke="#A95A1D" stroke-width=".5098" />
+  <path d="m291.6 180.9c-0.72-0.24-4.48 2.2-4.12 3.96 0.48 0.92 1 1.48 1.52 1.68-0.6 1.84-0.08 3.76 1.24 4.28-1.04 1.4-0.64 2.64 0.92 2.88l6.08-1.88c1.56-1 0.72-3.04-1.28-3.4 1.24-1.44 0.68-3.2-0.44-3.88 1.32-2.08-1.2-4.36-3.92-3.64z" fill="#A95A1D" stroke="#A95A1D" stroke-width=".8499" />
+  <path d="m296.9 191.6c2.2 7 5.48 14.8 8.68 19.72-0.76 5.2-0.4 11.48 0.28 15.28 0.2 0.68-0.68 0.52-0.92-0.08-2.52-4.52-6.96-8.84-10.24-11.64 0.12-7.76-2.28-16.16-3.92-21.44l6.12-1.84z" fill="#F4EAD1" stroke="#A95A1D" stroke-width="1.019" />
+  <circle cx="300.6" cy="211.7" r="1.572" fill="#F4EAD1" stroke="#456642" stroke-width=".8499" />
+  <path d="m301.9 213.6 2.92 11.48" stroke="#456642" stroke-width=".8499" />
+  <path d="m289 184.2c1.2-1.44 5.28-2.76 6.04-1.04" stroke="#F4EAD1" stroke-width="1.019" />
+  <path d="m290.1 186.7c1.44-1.4 4.76-2.36 5.68-1.44" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m290.7 190.4c1.6-1.16 5.12-2.12 6.32-1" stroke="#F4EAD1" stroke-width=".8499" />
+  <path d="m292.7 193.5c1.28 6.2 3.12 15.4 3.24 20.32 2.48 2.88 6.48 7.76 8.4 10.64" stroke="#A95A1D" stroke-width=".5098" />
+  <path d="m223 36.48 1.8 7.2" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m231.8 43.76 1.04 7.32" stroke="#A95A1D" stroke-width=".425" />
+  <path d="m238 50.96 2.92 8.08" stroke="#A95A1D" stroke-width=".425" />
+  <path d="m244.4 63.52 2.6 7.08" stroke="#456642" stroke-width=".425" />
+  <path d="m252.9 71.48 2.88 9.24" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m261.9 88.36 1.4 10.48" stroke="#456642" stroke-width=".425" />
+  <path d="m267.5 92.28 1.52 12.68" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m274.3 107.6 0.76 13.48" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m281 118.8 0.64 14.6" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m285 128.6-0.96 13.12" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m289.1 147.3-1.24 9.24" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m222.8 45.96c3.48 7.6 11.44 16.04 16.16 20.88" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m225 57.68c4.12 5.08 10.2 10.12 13.8 12.92" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m235.4 75.08c5.24 5.48 12.4 11.64 16.48 15.2" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m247.8 95.76c6.64 6 14.92 14.32 19.2 19.68" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m250.3 111.6c6.88 5.04 14.72 11.44 18.8 15.2" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m261.6 130.9c5.84 4.32 12.4 10.12 15.56 13.6" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m268.6 149 9.84 8.04" stroke="#F4EAD1" stroke-width=".3399" />
+  <path d="m278.6 164.4 6.6 6.96" stroke="#A95A1D" stroke-width=".3399" />
+  <path d="m174.2 36.6h-0.04" stroke="#F4EAD1" stroke-width=".2125" />
+</svg>
