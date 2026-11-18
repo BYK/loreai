@@ -836,6 +836,10 @@ type SessionState = {
   lastKnownLtm: number;
   /** Total messages sent to the model in the last turn (compressed count on layers 1-4) */
   lastKnownMessageCount: number;
+  /** High-water raw message count ever observed for this session — detects host front-trimming */
+  maxSeenMessageCount: number;
+  /** True once a compressed turn shipped the distilled prefix or restored from persisted Layer >= 1 */
+  priorPrefixShipped: boolean;
   /** Number of messages in the most recent transform() output */
   lastTransformedCount: number;
   /** Layer used by the most recent transform() call — sticky-layer guard */
@@ -999,6 +1003,8 @@ function makeSessionState(): SessionState {
     lastKnownInput: 0,
     lastKnownLtm: 0,
     lastKnownMessageCount: 0,
+    maxSeenMessageCount: 0,
+    priorPrefixShipped: false,
     lastTransformedCount: 0,
     lastLayer: 0,
     maxSustainedLayer: 0,
@@ -1072,11 +1078,14 @@ function getSessionState(sessionID: string): SessionState {
       } else if (state.lastLayer === 4) {
         state.maxSustainedLayer = 1;
       }
+      state.priorPrefixShipped =
+        state.lastLayer >= 1 && persisted.bustRateEMA !== 0;
       state.lastKnownInput = persisted.lastKnownInput;
       // v43: restore the last-sent message count so the calibrated-delta
       // estimate identifies only genuinely-new messages on the resume turn
       // (without it, the whole conversation looks new → over-escalation). (#796)
       state.lastKnownMessageCount = persisted.lastKnownMessageCount;
+      state.maxSeenMessageCount = persisted.lastKnownMessageCount;
       state.lastTurnAt = persisted.lastTurnAt;
       // Don't restore consecutiveBusts from DB — it's a short-term rolling
       // signal that must rebuild from live API responses in the current process.
@@ -2071,6 +2080,7 @@ export function saveGradientState(sessionID: string): void {
     // Repurpose the dead dynamicContextCap column (v24, always 0 now)
     // to persist consecutiveBusts — avoids a new DB migration.
     dynamicContextCap: state.consecutiveBusts,
+    bustRateEMA: state.priorPrefixShipped ? 1 : 0,
   });
 }
 
@@ -3109,9 +3119,19 @@ function tryFitStable(input: {
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
 > | null {
-  // If the prefix already overflows its budget there's no point trying.
-  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
+  // If the prefix overflows its budget there is normally no point trying —
+  // but not when it would be omitted anyway. The omission rule drops the
+  // prefix whenever nothing was evicted, so a prefix that only overflows
+  // because zero-eviction suppression applies must not escalate the layer.
+  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0) {
+    // Probe with an empty prefix: when the raw window fits on its own and no
+    // eviction state says otherwise, this returns a prefix-less result and
+    // proves the omission applies. On any other outcome the oversized prefix
+    // is genuinely required and we fail this layer.
+    const probe = tryFitStable({ ...input, prefix: [], prefixTokens: 0 });
+    if (probe && probe.messages.length === input.messages.length) return probe;
     return null;
+  }
 
   const rawWindowCache = input.sessState.rawWindowCache;
   const cacheValid =
@@ -3185,10 +3205,24 @@ function tryFitStable(input: {
         const parts = cleanParts(msg.parts);
         return parts !== msg.parts ? { info: msg.info, parts } : msg;
       });
-      const total = input.prefixTokens + pinnedTokens;
+      // When the pinned window retains every raw message (nothing evicted, no
+      // host sourceWindow offset, no prior prefix shipped, and no host-side
+      // front-trimming), omit the distilled prefix so summary and raw turns
+      // are not duplicated in context.
+      const totalRawSeen =
+        input.messages.length + (input.sourceWindow?.offset ?? 0);
+      const evictedAny =
+        adjustedPinnedIdx > 0 ||
+        (input.sourceWindow?.offset ?? 0) > 0 ||
+        input.sessState.priorPrefixShipped ||
+        input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+        totalRawSeen < input.sessState.maxSeenMessageCount;
+      const effectivePrefix = evictedAny ? input.prefix : [];
+      const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
+      const total = effectivePrefixTokens + pinnedTokens;
       return {
-        messages: [...input.prefix, ...processed],
-        distilledTokens: input.prefixTokens,
+        messages: [...effectivePrefix, ...processed],
+        distilledTokens: effectivePrefixTokens,
         rawTokens: pinnedTokens,
         totalTokens: total,
         capFit: false,
@@ -3214,6 +3248,12 @@ function tryFitStable(input: {
   // large can still march. That's an extreme regime (the old full-budget rescan
   // also degraded, just at the 100% boundary); higher layers (tool stripping)
   // take over when even the current turn doesn't fit the full rawBudget.
+  const totalRawSeen =
+    input.messages.length + (input.sourceWindow?.offset ?? 0);
+  const priorEvicted =
+    input.sessState.priorPrefixShipped ||
+    input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+    totalRawSeen < input.sessState.maxSeenMessageCount;
   const result = tryFit({
     sourceWindow: input.sourceWindow,
     messages: input.messages,
@@ -3223,6 +3263,7 @@ function tryFitStable(input: {
     rawBudget: input.rawBudget,
     rawFillBudget: Math.floor(input.rawBudget * RAW_WINDOW_EVICT_TARGET),
     strip: "none",
+    priorEvicted,
   });
 
   if (result) {
@@ -3231,7 +3272,9 @@ function tryFitStable(input: {
     // front-trimming by the host (e.g. OpenCode evicting old messages).
     // Snapshot the current rawBudget so future pin checks use the budget that
     // was in effect when this window was chosen (Option 1: snapshot isolation).
-    const rawMessageCount = result.messages.length - input.prefix.length;
+    const shippedPrefixCount =
+      result.distilledTokens > 0 ? input.prefix.length : 0;
+    const rawMessageCount = result.messages.length - shippedPrefixCount;
     if (rawMessageCount > 0) {
       input.sessState.rawWindowCache = {
         sessionID: input.sessionID,
@@ -3612,24 +3655,11 @@ function transformInner(input: {
   }
 
   // --- Post-idle compact layer ---
-  // When the cache just went cold (onIdleResume fired), skip layer 0 full-raw
-  // passthrough and use a tighter raw budget. Rationale: the entire context is
-  // a cache WRITE regardless — a smaller total costs less to write, and
-  // aggressive idle distillation already captured older history in the prefix.
-  // The flag is one-shot: consumed here and reset so subsequent turns use
-  // normal budgets once the cache is warm.
+  // Consumed one-shot after layer0Bounds() below so a small Layer-0 session
+  // that still fits the post-idle budget is not permanently latched into Layer 1.
   const postIdleCompact = sessState.postIdleCompact;
   if (postIdleCompact) {
     sessState.postIdleCompact = false;
-    // Skip layer 0 — don't pass through all raw messages on a cold cache.
-    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
-    // Use a tighter raw budget on cold cache to limit write cost. chars/3 scale
-    // (bodyUsable) to match the body estimates, same as the base rawBudget.
-    rawBudget = Math.floor(bodyUsable * 0.2);
-    log.info(
-      `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
-        ` (${Math.floor(bodyUsable * cfg.budget.raw)}→${rawBudget})`,
-    );
   }
 
   let expectedInput: number;
@@ -3697,6 +3727,35 @@ function transformInner(input: {
     calibrated,
     sid,
   );
+
+  // When the cache just went cold (onIdleResume fired), skip layer 0 full-raw
+  // passthrough and use a tighter raw budget ONLY if the session was already in
+  // gradient mode (effectiveMinLayer >= 1) or the raw body exceeds the post-idle
+  // raw budget / fails Layer-0 passthrough. A small Layer-0 session whose full
+  // raw body already fits the tight post-idle budget stays at Layer 0 — forcing
+  // Layer 1 when tryFit would evict 0 messages permanently latches the session
+  // out of Layer 0 via maxSustainedLayer for no cold-write savings.
+  if (postIdleCompact) {
+    const postIdleRawBudget = Math.floor(bodyUsable * 0.2);
+    // Measure raw body on the same chars/3 scale as postIdleRawBudget
+    // (expectedInput on calibrated turns is on the API token scale ~1.68x higher).
+    const rawBodyTokens = input.messages.reduce(
+      (s, m) => s + estimateMessage(m),
+      input.sourceWindow?.omittedTokens ?? 0,
+    );
+    const needsPostIdleCompact =
+      effectiveMinLayer >= 1 ||
+      !layer0Passes(layer0Input, layer0Ceiling, maxInput) ||
+      rawBodyTokens > postIdleRawBudget;
+    if (needsPostIdleCompact) {
+      effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
+      rawBudget = postIdleRawBudget;
+      log.info(
+        `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
+          ` (${Math.floor(bodyUsable * cfg.budget.raw)}→${rawBudget})`,
+      );
+    }
+  }
 
   // Record the gradient's own full-body size estimate so the shared cache-
   // economics evaluator (and therefore the warmer) read identical sizes from one
@@ -4020,6 +4079,12 @@ function transformInner(input: {
       // stages), so the high-water never relaxes an escalated stage's clamp.
       sessState.rawWindowCache = null;
       sessState.distilledBudgetHighWater = 0;
+      const totalRawSeen =
+        dedupMessages.length + (input.sourceWindow?.offset ?? 0);
+      const priorEvicted =
+        sessState.priorPrefixShipped ||
+        sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+        totalRawSeen < sessState.maxSeenMessageCount;
       result = tryFit({
         sourceWindow: input.sourceWindow,
         messages: dedupMessages,
@@ -4029,6 +4094,7 @@ function transformInner(input: {
         rawBudget: stageRawBudget,
         strip: stage.strip,
         protectedTurns: stage.protectedTurns,
+        priorEvicted,
       });
     }
 
@@ -4270,6 +4336,13 @@ function transformWithCounts(input: {
     state.lastTransformedCount = result.messages.length;
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
+    state.maxSeenMessageCount = Math.max(
+      state.maxSeenMessageCount,
+      input.messages.length + (input.sourceWindow?.offset ?? 0),
+    );
+    if (result.distilledTokens > 0) {
+      state.priorPrefixShipped = true;
+    }
     // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
     // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
     // the session at emergency — after recovery it settles back to this floor.
@@ -4411,6 +4484,12 @@ function tryFit(input: {
    * overflow again next turn).
    */
   rawFillBudget?: number;
+  /**
+   * True when the session previously shipped the distilled prefix or observed
+   * a larger raw history (host-side front-trimming). Preserves the prefix even
+   * when `cutoff === 0` on the remaining raw array.
+   */
+  priorEvicted?: boolean;
 }): Omit<
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
@@ -4470,7 +4549,12 @@ function tryFit(input: {
   // If the cutoff produces a raw window starting with assistant(s), advance it
   // past them — otherwise loreMessagesToGateway produces back-to-back assistants
   // and the API rejects with "tool_use ids found without tool_result" (#424).
-  if (input.prefix.length > 0) {
+  // Skip when cutoff === 0 (and no sourceWindow offset or prior eviction)
+  // because the distilled prefix is omitted when 0 raw messages are evicted.
+  if (
+    input.prefix.length > 0 &&
+    (cutoff > 0 || (input.sourceWindow?.offset ?? 0) > 0 || input.priorEvicted)
+  ) {
     while (
       cutoff < olderMessages.length &&
       olderMessages[cutoff].info.role === "assistant"
@@ -4533,10 +4617,19 @@ function tryFit(input: {
     return changed ? { info: msg.info, parts } : msg;
   });
 
-  const total = input.prefixTokens + rawTokens;
+  // When tryFit retained every raw message (cutoff === 0, no host sourceWindow
+  // offset, and no prior eviction / host front-trimming), omit the distilled
+  // prefix so summary and raw turns are not duplicated in context.
+  const evictedAny =
+    cutoff > 0 ||
+    (input.sourceWindow?.offset ?? 0) > 0 ||
+    Boolean(input.priorEvicted);
+  const effectivePrefix = evictedAny ? input.prefix : [];
+  const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
+  const total = effectivePrefixTokens + rawTokens;
   return {
-    messages: [...input.prefix, ...processed],
-    distilledTokens: input.prefixTokens,
+    messages: [...effectivePrefix, ...processed],
+    distilledTokens: effectivePrefixTokens,
     rawTokens,
     totalTokens: total,
     capFit: false,
