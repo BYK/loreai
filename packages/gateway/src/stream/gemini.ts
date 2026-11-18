@@ -385,6 +385,7 @@ export async function accumulateGeminiSSEStream(
     model,
     content: contentBlocks,
     stopReason: mapGeminiFinishReason(finishReason, hasToolCall),
+    usageComplete: terminalUsageComplete,
     usage,
   };
 }
