@@ -442,6 +442,8 @@ export type GatewayResponse = {
    * accumulators always try to populate it.
    */
   usage?: GatewayUsage;
+  /** Input of the principal request before adding internal recall calls. */
+  principalInputTokens?: number;
   /** Both provider input and output token totals were present, not synthesized. */
   usageComplete?: boolean;
 };

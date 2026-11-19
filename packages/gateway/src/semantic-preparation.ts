@@ -9,6 +9,7 @@ import {
   temporal,
   SemanticTokenCache,
   type LoreMessageWithParts,
+  type EncodingName,
 } from "@loreai/core";
 import { gatewayMessagesToLore, resolveToolResults } from "./temporal-adapter";
 import { captureTurnTemporalInput } from "./turn-temporal";
@@ -282,6 +283,7 @@ export async function prepareSemanticMessages(input: {
   timing: PreparationTiming;
   protocol?: string;
   checkpointProtocol?: string;
+  encoding?: EncodingName;
   /** Client harness detected from request headers; stored on user rows. */
   harness?: string;
   /** Whether the raw protocol item seam is safe for a future suffix. */
@@ -330,6 +332,7 @@ export async function prepareSemanticMessages(input: {
           sessionID: input.sessionID,
           projectPath: input.projectPath,
           protocol: input.checkpointProtocol ?? input.protocol,
+          encoding: input.encoding,
           messages: input.messages,
         })
       : undefined;
@@ -391,7 +394,8 @@ export async function prepareSemanticMessages(input: {
       input.sessionID,
       suffixStart,
       suffixStart,
-      (visible, provenance) => tokenCache.count(visible, provenance),
+      (visible, provenance) =>
+        tokenCache.count(visible, provenance, input.encoding),
       input.harness,
     ),
   );
@@ -499,6 +503,7 @@ export async function prepareSemanticMessages(input: {
       rememberSpeculativeSource(input.sessionID, {
         projectPath: input.projectPath,
         protocol: input.checkpointProtocol ?? input.protocol!,
+        encoding: input.encoding,
         sourceCount,
         sourceDigest: checkpoint.digest,
         fallbackReason: checkpoint.reason,

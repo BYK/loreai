@@ -2611,6 +2611,10 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- Existing root rows are unclassified, not evidence of an adapter lookup.
   ALTER TABLE session_state ADD COLUMN parent_session_primary INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 109: identify the model that produced the persisted gradient usage.
+  ALTER TABLE session_state ADD COLUMN last_known_input_model_receipt TEXT;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -5255,6 +5259,11 @@ function recoverMissingObjects(database: Database) {
         "ALTER TABLE session_state ADD COLUMN dedup_decisions TEXT;",
       );
     }
+    if (!scols.some((c) => c.name === "last_known_input_model_receipt")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN last_known_input_model_receipt TEXT",
+      );
+    }
     // Version 44: persisted last-known message count for restart-proof calibration.
     if (!scols.some((c) => c.name === "last_known_message_count")) {
       database.exec(
@@ -7625,6 +7634,7 @@ export type SessionTrackingState = {
   interBustIntervalEMA?: number;
   lastLayer?: number;
   lastKnownInput?: number;
+  lastKnownInputModelReceipt?: string | null;
   /** v43: messages sent last turn — for restart-proof calibrated-delta estimation. */
   lastKnownMessageCount?: number;
   lastTurnAt?: number;
@@ -7770,6 +7780,10 @@ export function saveSessionTracking(
     sets.push("last_known_input = ?");
     vals.push(state.lastKnownInput);
   }
+  if (state.lastKnownInputModelReceipt !== undefined) {
+    sets.push("last_known_input_model_receipt = ?");
+    vals.push(state.lastKnownInputModelReceipt);
+  }
   if (state.lastKnownMessageCount !== undefined) {
     sets.push("last_known_message_count = ?");
     vals.push(state.lastKnownMessageCount);
@@ -7865,6 +7879,7 @@ export type LoadedSessionTracking = {
   interBustIntervalEMA: number;
   lastLayer: number;
   lastKnownInput: number;
+  lastKnownInputModelReceipt: string | null;
   /** v43: messages sent last turn (0 for pre-v43 / never-calibrated rows). */
   lastKnownMessageCount: number;
   lastTurnAt: number;
@@ -8226,7 +8241,7 @@ export function loadSessionTracking(
                last_upstream,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
-              last_layer, last_known_input, last_known_message_count,
+              last_layer, last_known_input, last_known_input_model_receipt, last_known_message_count,
               last_turn_at, last_bust_at, last_accepted_provenance_layer,
                parent_session_id, is_subagent, parent_session_pending, parent_session_primary,
               project_path, project_path_provisional,
@@ -8260,6 +8275,7 @@ export function loadSessionTracking(
     inter_bust_interval_ema: number;
     last_layer: number;
     last_known_input: number;
+    last_known_input_model_receipt: string | null;
     last_known_message_count: number;
     last_turn_at: number;
     last_bust_at: number;
@@ -8301,6 +8317,7 @@ export function loadSessionTracking(
     interBustIntervalEMA: row.inter_bust_interval_ema,
     lastLayer: row.last_layer,
     lastKnownInput: row.last_known_input,
+    lastKnownInputModelReceipt: row.last_known_input_model_receipt,
     lastKnownMessageCount: row.last_known_message_count,
     lastTurnAt: row.last_turn_at,
     lastBustAt: row.last_bust_at,
