@@ -80,7 +80,6 @@ function state(): SessionState {
     projectPath,
     fingerprint: "test",
     lastRequestTime: 0,
-    lastUserTurnTime: 0,
     messageCount: 1,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,

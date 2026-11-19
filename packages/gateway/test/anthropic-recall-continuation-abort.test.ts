@@ -130,7 +130,6 @@ function sessionState(): SessionState {
     projectPath: "/tmp/recall-abort",
     fingerprint: "fingerprint",
     lastRequestTime: Date.now(),
-    lastUserTurnTime: Date.now(),
     messageCount: 1,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,

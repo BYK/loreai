@@ -113,7 +113,6 @@ function sessionState(): SessionState {
     projectPath: "/tmp/parallel-recall",
     fingerprint: "fingerprint",
     lastRequestTime: Date.now(),
-    lastUserTurnTime: Date.now(),
     messageCount: 1,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,

@@ -63,7 +63,6 @@ function makeSessionState(overrides?: Partial<SessionState>): SessionState {
     projectPath: "/tmp/test-project",
     fingerprint: "fp-123",
     lastRequestTime: Date.now(),
-    lastUserTurnTime: 0,
     messageCount: 5,
     turnsSinceCuration: 0,
     consecutiveTextOnlyTurns: 0,
