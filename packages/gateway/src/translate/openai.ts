@@ -1067,7 +1067,7 @@ export function buildOpenAIUpstreamRequest(
     if (req.extras.top_logprobs !== undefined) {
       body.top_logprobs = req.extras.top_logprobs;
     }
-    if (req.extras.stream_options !== undefined) {
+    if (req.stream && req.extras.stream_options !== undefined) {
       body.stream_options = req.extras.stream_options;
     }
     if (req.extras.response_format !== undefined) {
