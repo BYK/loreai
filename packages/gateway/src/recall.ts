@@ -350,11 +350,104 @@ function recallMessagePrefixForStored(
   return trailingBefore.length > 0 ? [...prefix, ...trailingBefore] : prefix;
 }
 
+/**
+ * Provenance-aware mutations assume `provenanceContent` is an independent
+ * array: splices/truncations applied to both arrays must each land exactly
+ * once. A caller may hand over a message whose `provenanceContent` is the
+ * SAME array reference as `content` (aliased at construction); detach it on
+ * first mutation so one logical edit can never splice the shared array twice
+ * — or truncate the provenance array before its length is read.
+ */
+function detachAliasedProvenance(message: GatewayMessage): void {
+  if (
+    message.provenanceContent === message.content &&
+    message.provenancePositions
+  ) {
+    message.provenanceContent = [...message.content];
+  }
+}
+
+/**
+ * Copy a text block with new text, keeping the parsed caller object
+ * untouched. The raw envelope (cache_control metadata) follows the visible
+ * text — a stale `raw.text` would leak the pre-edit text back upstream
+ * (translate/openai.ts emits `{ ...block.raw }` for native Chat messages)
+ * and trip the `block.raw.text === block.text` invariant in pipeline.ts.
+ */
+function withReplacedText(
+  block: Extract<GatewayContentBlock, { type: "text" }>,
+  text: string,
+): Extract<GatewayContentBlock, { type: "text" }> {
+  return block.raw
+    ? {
+        ...block,
+        text,
+        raw:
+          typeof block.raw.text === "string"
+            ? { ...block.raw, text }
+            : block.raw,
+      }
+    : { ...block, text };
+}
+
+/**
+ * Strip a recall marker from the visible text block at `visibleIndex`,
+ * replacing it with `continuation` in BOTH the visible content and the
+ * provenance array. A Responses opaque message envelope keeps its
+ * `id`/`role` and gets only its matching `output_text` part rewritten.
+ */
+function replaceMarkerWithContinuation(
+  message: GatewayMessage,
+  visibleIndex: number,
+  continuation: string,
+): void {
+  detachAliasedProvenance(message);
+  const block = message.content[visibleIndex];
+  if (block.type !== "text") throw new Error("recall marker is not text");
+  message.content[visibleIndex] = withReplacedText(block, continuation);
+  const provenanceIndex = message.provenancePositions?.[visibleIndex];
+  if (!message.provenanceContent || provenanceIndex === undefined) return;
+  const provBlock = message.provenanceContent[provenanceIndex];
+  if (provBlock.type === "text") {
+    message.provenanceContent[provenanceIndex] = withReplacedText(
+      provBlock,
+      continuation,
+    );
+    return;
+  }
+  if (
+    provBlock.type !== "opaque" ||
+    provBlock.responsesItem !== true ||
+    provBlock.raw.type !== "message" ||
+    !Array.isArray(provBlock.raw.content)
+  ) {
+    return;
+  }
+  // Rewrite only the output_text part holding the marker; the opaque
+  // Responses envelope (id, role, other parts) survives.
+  const content = provBlock.raw.content.map((part: unknown) => {
+    if (
+      !isRecord(part) ||
+      part.type !== "output_text" ||
+      typeof part.text !== "string" ||
+      !part.text.includes(block.text)
+    ) {
+      return part;
+    }
+    return { ...part, text: part.text.replace(block.text, continuation) };
+  });
+  message.provenanceContent[provenanceIndex] = {
+    ...provBlock,
+    raw: { ...provBlock.raw, content },
+  };
+}
+
 function replaceVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
   block: GatewayContentBlock,
 ): void {
+  detachAliasedProvenance(message);
   message.content[visibleIndex] = block;
   if (!message.provenanceContent || !message.provenancePositions) return;
   const provenanceIndex = message.provenancePositions[visibleIndex];
@@ -377,6 +470,9 @@ function truncateVisibleContent(
   message: GatewayMessage,
   visibleLength: number,
 ): void {
+  // Detach first: with an aliased array, shortening `content` would also
+  // shrink `provenanceContent` before the provenance length is computed.
+  detachAliasedProvenance(message);
   message.content.length = visibleLength;
   if (!message.provenanceContent || !message.provenancePositions) return;
   const provenanceLength =
@@ -391,16 +487,7 @@ function removeVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
 ): GatewayContentBlock {
-  // Parsed Chat text parts with metadata (e.g. cache_control) carry
-  // provenanceContent aliased to the SAME array as content
-  // (translate/openai.ts chatMessageWithTextProvenance). Splicing both would
-  // remove every block twice; copy the provenance array on first mutation.
-  if (
-    message.provenanceContent === message.content &&
-    message.provenancePositions
-  ) {
-    message.provenanceContent = [...message.content];
-  }
+  detachAliasedProvenance(message);
   const provenanceIndex = message.provenancePositions?.[visibleIndex];
   if (
     message.provenanceContent &&
@@ -431,6 +518,7 @@ function insertVisibleContentBlocks(
   blocks: GatewayContentBlock[],
 ): void {
   if (blocks.length === 0) return;
+  detachAliasedProvenance(message);
   message.content.splice(visibleIndex, 0, ...blocks);
   if (!message.provenanceContent || !message.provenancePositions) return;
   const provenanceIndex =
@@ -466,6 +554,7 @@ function insertCompanionBundle(
     message.provenanceContent = [...message.content];
     message.provenancePositions = message.content.map((_block, index) => index);
   }
+  detachAliasedProvenance(message);
   message.content.splice(visibleIndex, 0, ...bundle.content);
   const provenanceIndex =
     message.provenancePositions[visibleIndex] ??
@@ -559,11 +648,15 @@ function suppressRecallProvenance(
   store: RecallStore,
 ): boolean {
   let changed = false;
-  for (const block of message.provenanceContent ?? []) {
+  const provenance = message.provenanceContent ?? [];
+  for (let i = 0; i < provenance.length; i++) {
+    const block = provenance[i];
     if (block.type === "text") {
       const continuation = suppressedRecallContinuation(block.text, store);
       if (continuation !== undefined) {
-        block.text = continuation;
+        // Replace rather than mutate in place: the parsed caller object must
+        // never be mutated, and `raw.text` must follow the visible text.
+        provenance[i] = withReplacedText(block, continuation);
         changed = true;
       }
       continue;
@@ -594,7 +687,9 @@ function suppressRecallProvenance(
     if (itemChanged) {
       // Retain each native item and its index: provenancePositions addresses
       // these blocks, and the envelope may carry protocol-required metadata.
-      block.raw = { ...block.raw, content };
+      // Replace the block rather than mutating `raw` in place: the parsed
+      // caller object must never be mutated.
+      provenance[i] = { ...block, raw: { ...block.raw, content } };
       changed = true;
     }
   }
@@ -1043,31 +1138,44 @@ export function recallStoreKey(
  *
  * Mutates the request in-place. Returns true if any expansion was performed.
  */
+/**
+ * Suppress (strip or empty-out) recall markers visible to the caller when
+ * gateway recall is disabled (a caller-owned tool collides). Used by both
+ * expandRecallMarkers and cleanupRecallStore.
+ */
+function suppressGatewayRecallMarkers(
+  req: GatewayRequest,
+  store: RecallStore,
+): boolean {
+  // A caller-owned colliding tool cannot receive Lore's synthetic replay,
+  // but its internal anchor must not leak as ordinary provider-visible text.
+  // Keep the stored result intact so a later request with the canonical
+  // gateway-owned tool can still replay it.
+  let suppressed = false;
+  for (const message of req.messages) {
+    if (message.role !== "assistant") continue;
+    for (let index = 0; index < message.content.length; index++) {
+      const block = message.content[index];
+      if (block.type !== "text") continue;
+      const continuation = suppressedRecallContinuation(block.text, store);
+      if (continuation === undefined) continue;
+      if (continuation)
+        replaceMarkerWithContinuation(message, index, continuation);
+      else removeVisibleContentBlock(message, index--);
+      suppressed = true;
+    }
+    suppressed = suppressRecallProvenance(message, store) || suppressed;
+  }
+  return suppressed;
+}
+
 export function expandRecallMarkers(
   req: GatewayRequest,
   store: RecallStore,
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
   if (options.gatewayRecallEnabled === false) {
-    // A caller-owned colliding tool cannot receive Lore's synthetic replay,
-    // but its internal anchor must not leak as ordinary provider-visible text.
-    // Keep the stored result intact so a later request with the canonical
-    // gateway-owned tool can still replay it.
-    let suppressed = false;
-    for (const message of req.messages) {
-      if (message.role !== "assistant") continue;
-      for (let index = 0; index < message.content.length; index++) {
-        const block = message.content[index];
-        if (block.type !== "text") continue;
-        const continuation = suppressedRecallContinuation(block.text, store);
-        if (continuation === undefined) continue;
-        if (continuation) block.text = continuation;
-        else removeVisibleContentBlock(message, index--);
-        suppressed = true;
-      }
-      suppressed = suppressRecallProvenance(message, store) || suppressed;
-    }
-    return suppressed;
+    return suppressGatewayRecallMarkers(req, store);
   }
   let expanded = false;
   const anchorValidity = new Map<
@@ -1159,7 +1267,7 @@ export function expandRecallMarkers(
         ? recallAnchorContinuation(block.text, anchorId)
         : recallMarkerContinuation(block.text);
       if (continuation) {
-        block.text = continuation;
+        replaceMarkerWithContinuation(msg, markerIdx, continuation);
       } else {
         removeVisibleContentBlock(msg, markerIdx);
       }
@@ -1178,7 +1286,7 @@ export function expandRecallMarkers(
           )
         : recallMarkerContinuation(block.text);
       if (continuation) {
-        block.text = continuation;
+        replaceMarkerWithContinuation(msg, markerIdx, continuation);
       } else {
         removeVisibleContentBlock(msg, markerIdx);
       }
@@ -1471,21 +1579,7 @@ export function cleanupRecallStore(
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
   if (options.gatewayRecallEnabled === false) {
-    let changed = false;
-    for (const message of req.messages) {
-      if (message.role !== "assistant") continue;
-      for (let index = 0; index < message.content.length; index++) {
-        const block = message.content[index];
-        if (block.type !== "text") continue;
-        const continuation = suppressedRecallContinuation(block.text, store);
-        if (continuation === undefined) continue;
-        if (continuation) block.text = continuation;
-        else removeVisibleContentBlock(message, index--);
-        changed = true;
-      }
-      changed = suppressRecallProvenance(message, store) || changed;
-    }
-    return changed;
+    return suppressGatewayRecallMarkers(req, store);
   }
   if (store.size === 0) return false;
 
@@ -2483,6 +2577,20 @@ async function ensureSSEResponse(
  * valid rejection into `body=json_invalid`), and a smaller, human-readable
  * detail for capture/log paths.
  */
+/**
+ * Slice a string to at most `maxUnits` UTF-16 code units without leaving a
+ * lone lead surrogate at the cut point (the continuation would be a lone
+ * trail surrogate in the discarded remainder).
+ */
+function sliceValidUtf16Prefix(value: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (value.length <= maxUnits) return value;
+  const code = value.charCodeAt(maxUnits - 1);
+  return code >= 0xd800 && code <= 0xdbff
+    ? value.slice(0, maxUnits - 1)
+    : value.slice(0, maxUnits);
+}
+
 async function readRecallErrorBody(
   response: Response,
   detailBytes = 500,
@@ -2515,10 +2623,16 @@ async function readRecallErrorBody(
         stream: readBytes < diagnosticBytes,
       });
     }
+    // The loop exits on `done` before `diagnosticBytes` is reached with the
+    // decoder still in streaming mode; flush so a multi-byte sequence split
+    // across the final chunk boundary is finalized instead of dropped.
+    if (readBytes < diagnosticBytes) {
+      diagnostic += decoder.decode();
+    }
   } finally {
     cancelAndReleaseReader(reader, diagnosticSignal.reason);
   }
-  return { detail: diagnostic.slice(0, detailBytes), diagnostic };
+  return { detail: sliceValidUtf16Prefix(diagnostic, detailBytes), diagnostic };
 }
 
 /**

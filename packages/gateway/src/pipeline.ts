@@ -9884,7 +9884,9 @@ export function buildStreamingResponse(
                 );
                 captureToolPairing400({
                   status: streamingFollowUp.status ?? 0,
-                  errorBody: streamingFollowUp.detail,
+                  errorBody:
+                    streamingFollowUp.diagnosticBody ??
+                    streamingFollowUp.detail,
                   messages: currentModifiedReq.messages,
                   // Layer is not in scope on the streaming recall continuation;
                   // -1 signals "unknown" while still tagging the error class.
@@ -24701,7 +24703,7 @@ async function handleConversationTurnPrepared(
         );
         captureToolPairing400({
           status: jsonFollowUp.status ?? 0,
-          errorBody: jsonFollowUp.detail,
+          errorBody: jsonFollowUp.diagnosticBody ?? jsonFollowUp.detail,
           messages: currentModifiedReq.messages,
           // `result` here is the recall string (shadowed); the transform layer
           // is not in scope on the recall continuation. -1 signals "unknown".

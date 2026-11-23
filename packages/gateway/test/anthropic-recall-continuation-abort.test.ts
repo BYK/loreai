@@ -6,6 +6,20 @@ vi.mock("../src/recall", async (importOriginal) => {
   return { ...actual, executeRecall: vi.fn() };
 });
 
+const sentryMocks = vi.hoisted(() => ({
+  isInitialized: vi.fn(() => false),
+  captureException: vi.fn(() => "event-id"),
+}));
+
+vi.mock("@sentry/bun", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@sentry/bun")>();
+  return {
+    ...actual,
+    isInitialized: sentryMocks.isInitialized,
+    captureException: sentryMocks.captureException,
+  };
+});
+
 import { loadConfig } from "../src/config";
 import {
   buildStreamingResponse,
@@ -207,6 +221,8 @@ afterEach(() => {
   setRecallContinuationFailureHook(undefined);
   setUpstreamInterceptor(undefined);
   mockedRecall.mockReset();
+  sentryMocks.isInitialized.mockReset().mockReturnValue(false);
+  sentryMocks.captureException.mockReset().mockReturnValue("event-id");
 });
 
 /** Consume the real response, bounding a regression that strands its reader. */
@@ -600,6 +616,86 @@ test.each([
       expect(messages).toContain('recall-chain {"outcome":"failed"');
       expect(messages).not.toContain('recall-chain {"outcome":"completed"');
     }
+  },
+);
+
+test.each(["verified", "final"] as const)(
+  "a streaming follow-up 400 on a %s round keeps its full JSON diagnostics",
+  async (mode) => {
+    installProductiveRecallMock();
+    const sink = vi.spyOn(log, "error").mockImplementation(() => {});
+    const failures: RecallContinuationFailureCategory[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    sentryMocks.isInitialized.mockReturnValue(true);
+    const secret = "PRIVATE_SECRET_KEY";
+    // A valid JSON rejection whose marker phrase AND `code`/`param` all sit
+    // beyond the 500-byte detail slice; only the wider diagnostic body can
+    // classify this 400 as a tool-pairing error.
+    const rejection = JSON.stringify({
+      error: {
+        message: `${secret} ${"x".repeat(600)} tool_use ids were found without tool_result blocks immediately after`,
+        code: "invalid_request_error",
+        param: "messages",
+      },
+    });
+    expect(rejection.length).toBeGreaterThan(500);
+    expect(rejection.slice(0, 500)).not.toContain("without");
+    let follows = 0;
+    setUpstreamInterceptor(async () => {
+      follows++;
+      // Verified principals fail fast on round 1; final rounds are the
+      // budget-exhausted request forced to a terminal answer.
+      if (mode === "verified" || follows >= MAX_RECALL_DEPTH) {
+        return new Response(rejection, {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return recallOnlyResponse();
+    });
+    const req = request();
+    const state = sessionState();
+    const downstream = buildStreamingResponse(
+      recallOnlyResponse(70_000),
+      () => {},
+      {
+        clientMessages: req.messages,
+        modifiedReq: req,
+        config: loadLocalConfig(),
+        sessionState: state,
+        cacheOptions: { cacheConversation: false },
+        clientSpeaksAnthropic: true,
+        modelContextTokens: 200_000,
+        allowExpandedContext: true,
+        expectedPrincipalModel: req.model,
+      },
+    );
+
+    await expect(downstream.text()).rejects.toThrow("SSE stream read failed");
+    expect(failures).toEqual(["follow_up_failed"]);
+    const diagnostic = sink.mock.calls
+      .map(([message]) => String(message))
+      .join("\n");
+    // The fail-fast guard must not bypass the diagnostic, and the JSON
+    // classification must come from the untruncated body (the error code sits
+    // beyond the 500-byte detail slice).
+    expect(diagnostic).toContain(
+      "recall follow-up upstream error: 400 (category=invalid_request_error body=json code=invalid_request_error",
+    );
+    expect(diagnostic).not.toContain(secret);
+    expect(state.recallStore.size).toBe(0);
+    // buildStreamingResponse itself reached captureToolPairing400 with the
+    // UNTRUNCATED diagnostic body before throwing: the marker phrase sits
+    // beyond the 500-byte detail slice, so only `diagnosticBody ?? detail`
+    // can classify this 400.
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "tool-pairing 400 (tool_use/tool_result concurrency)",
+      }),
+      expect.objectContaining({
+        tags: expect.objectContaining({ error_class: "tool_pairing_400" }),
+      }),
+    );
   },
 );
 

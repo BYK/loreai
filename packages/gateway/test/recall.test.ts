@@ -72,6 +72,10 @@ import {
   parseOpenAIResponsesRequest,
 } from "../src/translate/openai-responses";
 import {
+  buildOpenAIUpstreamRequest,
+  parseOpenAIRequest,
+} from "../src/translate/openai";
+import {
   gatewayMessagesToLore,
   resolveToolResults,
 } from "../src/temporal-adapter";
@@ -5205,6 +5209,45 @@ test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(
   },
 );
 
+test("parseOpenAIRequest never aliases provenanceContent to content", () => {
+  const req = parseOpenAIRequest(
+    {
+      model: "gemini-4-argon",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "looking",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+          tool_calls: [
+            {
+              id: "call_glob_1",
+              type: "function",
+              function: {
+                name: "glob",
+                arguments: JSON.stringify({ pattern: "**/config.json" }),
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {},
+  );
+  const msg = req.messages[0];
+  expect(msg.provenanceContent).toBeDefined();
+  // The provenance array must be an independent copy: recall's
+  // provenance-aware mutators splice BOTH arrays, so a shared reference would
+  // apply every edit twice.
+  expect(msg.provenanceContent).not.toBe(msg.content);
+  expect(msg.provenanceContent).toEqual(msg.content);
+  expect(msg.provenancePositions).toEqual([0, 1]);
+});
+
 test("marker expansion with metadata-aliased provenance keeps companions on both sides", () => {
   const anchorId = "b5f1a2c3-4d5e-4f60-8192-a3b4c5d6e7f8";
   const userMsg = {
@@ -5267,8 +5310,9 @@ test("marker expansion with metadata-aliased provenance keeps companions on both
 
   // Parsed Chat messages whose text parts carry metadata (cache_control)
   // alias provenanceContent to the SAME array as content
-  // (translate/openai.ts chatMessageWithTextProvenance). Companions sit on
-  // both sides of the marker in that single array.
+  // (translate/openai.ts chatMessageWithTextProvenance). Chat Completions
+  // emits the marker text first and `tool_calls` after it, so the before-side
+  // companion TRAILS the marker in this single aliased array.
   const markerText = `${buildRecallMarker("config layout", "all")}\n${buildRecallAnchor(anchorId)}`;
   const markerPart = {
     type: "text" as const,
@@ -5280,8 +5324,8 @@ test("marker expansion with metadata-aliased provenance keeps companions on both
     },
   };
   const assistantParts: GatewayContentBlock[] = [
-    globBlock,
     markerPart,
+    globBlock,
     writeBlock,
   ];
   const req = makeRequest([
@@ -5345,7 +5389,258 @@ test("marker expansion with metadata-aliased provenance keeps companions on both
       content: [{ type: "text", text: "written" }],
     },
   ]);
+  // The aliased input must be detached, not spliced twice: content and
+  // provenance stay aligned through expansion.
+  const expanded = req.messages[1];
+  expect(expanded.provenanceContent).not.toBe(expanded.content);
+  expect(expanded.provenanceContent).toEqual(expanded.content);
+  expect(expanded.provenancePositions).toEqual(
+    expanded.content.map((_block, index) => index),
+  );
 });
+
+test("an aliased assistant message built by parseOpenAIRequest round-trips marker expansion", () => {
+  // OpenAI Chat places `content` first and `tool_calls` after it, so a
+  // metadata-carrying marker text part lands at index 0 with companions
+  // trailing on BOTH sides — the aliasing path this test drives end to end.
+  const anchorId = "a1b2c3d4-e5f6-4708-91a2-b3c4d5e6f7a8";
+  const markerText = `${buildRecallMarker("config layout", "all")}\n${buildRecallAnchor(anchorId)}`;
+  const chatReq = parseOpenAIRequest(
+    {
+      model: "gemini-4-argon",
+      messages: [
+        { role: "user", content: "list and read config" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: markerText,
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+          tool_calls: [
+            {
+              id: "call_glob_1",
+              type: "function",
+              function: {
+                name: "glob",
+                arguments: JSON.stringify({ pattern: "**/config.json" }),
+              },
+            },
+            {
+              id: "call_write_1",
+              type: "function",
+              function: {
+                name: "write",
+                arguments: JSON.stringify({ filePath: "out.txt" }),
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_glob_1",
+          content: "config.json",
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_write_1",
+          content: "written",
+        },
+      ],
+    },
+    {},
+  );
+  const assistantMsg = chatReq.messages[1];
+  expect(assistantMsg.content.map((block) => block.type)).toEqual([
+    "text",
+    "tool_use",
+    "tool_use",
+  ]);
+  expect(assistantMsg.provenanceContent).not.toBe(assistantMsg.content);
+
+  const store: RecallStore = new Map([
+    [
+      `anchor:${anchorId}`,
+      makeStoredRecall({
+        toolUseId: "call_recall_1",
+        anchorId,
+        anchorContextId: responsesAnchorContext(
+          [
+            {
+              role: "user",
+              content: [{ type: "text", text: "list and read config" }],
+            },
+          ],
+          [],
+          makeResponse([
+            {
+              type: "tool_use",
+              id: "call_glob_1",
+              name: "glob",
+              input: { pattern: "**/config.json" },
+            },
+            {
+              type: "tool_use",
+              id: "call_recall_1",
+              name: RECALL_TOOL_NAME,
+              input: { query: "config layout", scope: "all" },
+            },
+            {
+              type: "tool_use",
+              id: "call_write_1",
+              name: "write",
+              input: { filePath: "out.txt" },
+            },
+          ]),
+          "call_recall_1",
+        ),
+        input: { query: "config layout", scope: "all" },
+        position: 1,
+        result: "Config layout notes",
+        companionToolUses: [
+          {
+            id: "call_glob_1",
+            name: "glob",
+            input: { pattern: "**/config.json" },
+            side: "before",
+          },
+          {
+            id: "call_write_1",
+            name: "write",
+            input: { filePath: "out.txt" },
+            side: "after",
+          },
+        ],
+      }),
+    ],
+  ]);
+
+  expect(
+    cleanupRecallStore(chatReq, store, { gatewayRecallEnabled: true }),
+  ).toBe(false);
+  expect(
+    expandRecallMarkers(chatReq, store, { gatewayRecallEnabled: true }),
+  ).toBe(true);
+  // The trailing before-companion moves ahead of the expanded recall call;
+  // the after-companion stays behind it.
+  expect(
+    chatReq.messages[1].content.map((block) =>
+      block.type === "tool_use" ? block.id : block.type,
+    ),
+  ).toEqual(["call_glob_1", "call_recall_1", "call_write_1"]);
+  // Provenance and positions stay aligned with the visible content so the
+  // rebuilt upstream request pairs every tool_use with its tool_result.
+  const expanded = chatReq.messages[1];
+  expect(expanded.provenanceContent).not.toBe(expanded.content);
+  expect(expanded.provenancePositions).toHaveLength(expanded.content.length);
+
+  const upstream = buildOpenAIUpstreamRequest(
+    chatReq,
+    "https://api.openai.com",
+  );
+  const wire = (upstream.body as { messages: Array<Record<string, unknown>> })
+    .messages;
+  const assistant = wire.find((m) => m.role === "assistant");
+  expect(assistant).toBeDefined();
+  expect(
+    (assistant?.tool_calls as Array<{ id: string }> | undefined)?.map(
+      (call) => call.id,
+    ),
+  ).toEqual(["call_glob_1", "call_recall_1", "call_write_1"]);
+  const toolIds = wire
+    .filter((m) => m.role === "tool")
+    .map((m) => m.tool_call_id);
+  expect(toolIds).toEqual(["call_glob_1", "call_recall_1", "call_write_1"]);
+});
+
+test.each([
+  {
+    name: "an unmatched (evicted) marker",
+    store: (): RecallStore => new Map(),
+    cleanup: false,
+  },
+  {
+    name: "a caller-owned tool collision",
+    store: (anchorId: string, query: string): RecallStore =>
+      new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({ anchorId, input: { query, scope: "all" } }),
+        ],
+      ]),
+    cleanup: true,
+  },
+])(
+  "stripping $name keeps raw.text, provenance and the wire in sync",
+  ({ store: makeStore, cleanup }) => {
+    const anchorId = "d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a";
+    const query = "config layout";
+    const markerText = `${buildRecallMarker(query, "all")}\n${buildRecallAnchor(anchorId)}`;
+    const fullText = `${markerText}\nReal continuation`;
+    const chatReq = parseOpenAIRequest(
+      {
+        model: "gemini-4-argon",
+        messages: [
+          { role: "user", content: "question" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: fullText,
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const store = makeStore(anchorId, query);
+    if (cleanup) {
+      expect(
+        cleanupRecallStore(chatReq, store, { gatewayRecallEnabled: false }),
+      ).toBe(true);
+      expect(
+        expandRecallMarkers(chatReq, store, { gatewayRecallEnabled: false }),
+      ).toBe(false);
+    } else {
+      expect(
+        expandRecallMarkers(chatReq, store, { gatewayRecallEnabled: true }),
+      ).toBe(true);
+    }
+
+    const block = chatReq.messages[1].content[0];
+    expect(block.type).toBe("text");
+    if (block.type !== "text") return;
+    expect(block.text).toBe("Real continuation");
+    // The raw envelope follows the visible text — no marker/anchor leak.
+    expect(block.raw).toEqual({
+      type: "text",
+      text: "Real continuation",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(chatReq.messages[1].provenanceContent?.[0]).toEqual(block);
+
+    const upstream = buildOpenAIUpstreamRequest(
+      chatReq,
+      "https://api.openai.com",
+    );
+    const wire = (
+      upstream.body as { messages: Array<Record<string, unknown>> }
+    ).messages.find((m) => m.role === "assistant");
+    expect(wire?.content).toEqual([
+      {
+        type: "text",
+        text: "Real continuation",
+        cache_control: { type: "ephemeral" },
+      },
+    ]);
+    expect(JSON.stringify(wire)).not.toContain("lore-recall");
+  },
+);
 
 test("rejection bodies longer than 500 bytes keep their JSON diagnostics", async () => {
   const recallBlock = makeRecallToolUse();
@@ -5391,6 +5686,99 @@ test("rejection bodies longer than 500 bytes keep their JSON diagnostics", async
     expect(JSON.parse(result.diagnosticBody as string)).toEqual(
       JSON.parse(body),
     );
+  }
+});
+
+test("a multi-byte rejection body shorter than the diagnostic cap flushes its decoder at EOF", async () => {
+  const recallBlock = makeRecallToolUse();
+  const resp = makeResponse([recallBlock], "tool_use");
+  // Ends in a 3-byte character so a chunk split or a short final chunk leaves
+  // the TextDecoder holding pending bytes when the stream reports `done`.
+  const body = JSON.stringify({
+    error: {
+      message: "request rejected — €",
+      code: "invalid_request_error",
+      param: "messages",
+    },
+  });
+  const encoded = new TextEncoder().encode(body);
+  const split = encoded.length - 2; // inside the trailing 3-byte character
+  const ctx: RecallFollowUpCtx = {
+    forward: async () => ({
+      response: new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoded.subarray(0, split));
+            controller.enqueue(encoded.subarray(split));
+            controller.close();
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+      effectiveProtocol: "anthropic",
+    }),
+    parseJSON: () => {
+      throw new Error("should not be called");
+    },
+  };
+
+  const result = await runRecallFollowUpJSON(
+    ctx,
+    makeRequest(),
+    resp,
+    "recall results",
+    recallBlock,
+  );
+
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.diagnosticBody).toBe(body);
+    expect(result.diagnosticBody).toContain("€");
+    expect(result.diagnosticBody).not.toContain("\uFFFD");
+  }
+});
+
+test("the human-readable detail never ends in a lone lead surrogate", async () => {
+  const recallBlock = makeRecallToolUse();
+  const resp = makeResponse([recallBlock], "tool_use");
+  // A 4-byte emoji (UTF-16: 🚀) straddles UTF-16 offset 499–500 of
+  // the decoded diagnostic; the 500-unit detail slice must drop the lead
+  // half instead of ending in a lone surrogate.
+  const body = JSON.stringify({
+    error: {
+      message: `rejected: ${"x".repeat(489)}🚀 tail`,
+      code: "invalid_request_error",
+    },
+  });
+  const ctx: RecallFollowUpCtx = {
+    forward: async () => ({
+      response: new Response(body, {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+      effectiveProtocol: "anthropic",
+    }),
+    parseJSON: () => {
+      throw new Error("should not be called");
+    },
+  };
+
+  const result = await runRecallFollowUpJSON(
+    ctx,
+    makeRequest(),
+    resp,
+    "recall results",
+    recallBlock,
+  );
+
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.detail.isWellFormed()).toBe(true);
+    expect(JSON.stringify(result.detail)).not.toContain("\\ud83d");
+    expect(JSON.stringify(result.detail)).not.toContain("\\ufffd");
+    expect(result.detail.length).toBeLessThanOrEqual(500);
+    // The full diagnostic keeps the emoji intact — only the detail is cut.
+    expect(result.diagnosticBody).toContain("🚀");
   }
 });
 
