@@ -3893,6 +3893,219 @@ describe("onIdleResume", () => {
 
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
+
+  test("assistant-leading history: pinned turn keeps the leading assistant and no prefix when nothing is evicted", () => {
+    const SID = "assistant-leading-sess";
+    const PROJECT = "/test/assistant-leading-pin";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of earlier work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // Assistant-LEADING raw history (e.g. resumed tool chain): the fresh Layer-1
+    // turn must fit intact with no prefix shipped and nothing dropped.
+    const messages = [
+      makeMsg("al-a1", "assistant", "Working on the first step", SID),
+      makeMsg("al-u1", "user", "ok", SID),
+    ];
+    setForceMinLayer(1, SID);
+    const r1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual(["al-a1", "al-u1"]);
+
+    // Pinned turn: appending messages must not advance past the leading
+    // assistant just because a prefix exists — nothing was evicted, so the
+    // prefix stays omitted and every raw message survives.
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("al-a2", "assistant", "Step two done", SID),
+        makeMsg("al-u2", "user", "continue", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(1);
+    expect(r2.distilledTokens).toBe(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2.messages.map((m) => m.info.id)).toEqual([
+      "al-a1",
+      "al-u1",
+      "al-a2",
+      "al-u2",
+    ]);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("tool-stripping layers keep the distilled prefix even when cutoff === 0", () => {
+    const SID = "strip-prefix-sess";
+    const PROJECT = "/test/strip-prefix-suppression";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the earlier tool work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // 6 old messages so layer 2's protectedTurns (last 2 turns) do not shield
+    // the leading assistant's tool output from stripping.
+    const messages = [
+      makeMsgWithTool(
+        "sp-a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/a.ts"}',
+        "x".repeat(2_000),
+        SID,
+      ),
+      makeMsg("sp-u0", "user", "thanks", SID),
+      makeMsg("sp-a2", "assistant", "working on it", SID),
+      makeMsg("sp-u0b", "user", "and?", SID),
+      makeMsg("sp-a3", "assistant", "still on it", SID),
+      makeMsg("sp-u0c", "user", "go on", SID),
+      makeMsg("sp-u1", "user", "Now summarize", SID),
+    ];
+
+    setForceMinLayer(2, SID);
+    const r = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r.layer).toBe(2);
+    // Layer 2 strips old tool outputs — the summary must ship or that work is lost.
+    expect(r.distilledTokens).toBeGreaterThan(0);
+    expect(r.messages.some((m) => m.info.id.startsWith("lore-distilled"))).toBe(
+      true,
+    );
+    // No back-to-back assistants across the prefix/raw boundary (#424): the
+    // prefix ends with an assistant, so the first raw message must be a user.
+    const firstRaw = r.messages.find(
+      (m) => !m.info.id.startsWith("lore-distilled"),
+    );
+    expect(firstRaw?.info.role).toBe("user");
+    // The leading assistant is evicted past the boundary (role alternation) —
+    // its summary survives only via the shipped prefix.
+    expect(r.messages.some((m) => m.info.id === "sp-a1")).toBe(false);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("tool-stripping layers keep the distilled prefix for user-leading history (cutoff === 0, nothing evicted)", () => {
+    const SID = "strip-prefix-user-leading-sess";
+    const PROJECT = "/test/strip-prefix-user-leading";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the earlier tool work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // User-LEADING, strictly alternating history ending on a user message.
+    // The tool-bearing assistant sits at index 1 — fromEnd ≈ 7, outside layer
+    // 2's protectedTurns*2 window — so its output is stripped, not evicted.
+    const messages = [
+      makeMsg("su-u1", "user", "read the file", SID),
+      makeMsgWithTool(
+        "su-a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/a.ts"}',
+        "x".repeat(2_000),
+        SID,
+      ),
+      makeMsg("su-u2", "user", "thanks", SID),
+      makeMsg("su-a2", "assistant", "working on it", SID),
+      makeMsg("su-u3", "user", "and?", SID),
+      makeMsg("su-a3", "assistant", "still on it", SID),
+      makeMsg("su-u4", "user", "go on", SID),
+      makeMsg("su-a4", "assistant", "nearly there", SID),
+      makeMsg("su-u5", "user", "Now summarize", SID),
+    ];
+
+    setForceMinLayer(2, SID);
+    const r = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r.layer).toBe(2);
+    // cutoff === 0 (nothing evicted) yet old tool output was stripped — the
+    // stripped content survives only in the summary, so the prefix must ship.
+    expect(r.distilledTokens).toBeGreaterThan(0);
+    expect(r.messages.some((m) => m.info.id.startsWith("lore-distilled"))).toBe(
+      true,
+    );
+    const firstRaw = r.messages.find(
+      (m) => !m.info.id.startsWith("lore-distilled"),
+    );
+    expect(firstRaw?.info.role).toBe("user");
+    // Nothing was evicted: every raw message id is still present, in order.
+    expect(
+      r.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(messages.map((m) => m.info.id));
+    // The tool output really was stripped — replaced by the strip annotation.
+    const toolMsg = r.messages.find((m) => m.info.id === "su-a1");
+    const output = toolMsg?.parts[0] ? getToolOutput(toolMsg.parts[0]) : "?";
+    expect(output).toBeDefined();
+    expect(output).not.toContain("x".repeat(2_000));
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
 });
 
 describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {

@@ -3097,6 +3097,22 @@ export function resetRawWindowCache(sessionID?: string) {
 }
 
 /**
+ * True when the session previously shipped the distilled prefix or observed a
+ * larger raw history (host-side front-trimming) — i.e. raw content has been
+ * lost from the caller's view and the prefix must ship to cover it.
+ */
+function priorEvictionSeen(
+  sessState: SessionState,
+  totalRawSeen: number,
+): boolean {
+  return (
+    sessState.priorPrefixShipped ||
+    sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
+    totalRawSeen < sessState.maxSeenMessageCount
+  );
+}
+
+/**
  * Layer-1 tryFit with lazy eviction.
  * Uses per-session rawWindowCache from sessState (no module-level cache).
  *
@@ -3119,19 +3135,10 @@ function tryFitStable(input: {
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
 > | null {
-  // If the prefix overflows its budget there is normally no point trying —
-  // but not when it would be omitted anyway. The omission rule drops the
-  // prefix whenever nothing was evicted, so a prefix that only overflows
-  // because zero-eviction suppression applies must not escalate the layer.
-  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0) {
-    // Probe with an empty prefix: when the raw window fits on its own and no
-    // eviction state says otherwise, this returns a prefix-less result and
-    // proves the omission applies. On any other outcome the oversized prefix
-    // is genuinely required and we fail this layer.
-    const probe = tryFitStable({ ...input, prefix: [], prefixTokens: 0 });
-    if (probe && probe.messages.length === input.messages.length) return probe;
+  // The only caller passes the trim-budgeted prefix, so an over-budget prefix
+  // here is genuinely too big for this layer.
+  if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
-  }
 
   const rawWindowCache = input.sessState.rawWindowCache;
   const cacheValid =
@@ -3153,12 +3160,21 @@ function tryFitStable(input: {
     if (input.sourceWindow?.offset && windowSize > input.messages.length)
       throw new FullSourceRequired("window_exhausted");
     const pinnedIdx = Math.max(0, input.messages.length - windowSize);
+    const totalRawSeen =
+      input.messages.length + (input.sourceWindow?.offset ?? 0);
 
-    // Ensure the pinned window starts with a user message when a prefix is
-    // present — the prefix ends with assistant so a leading assistant in the
-    // raw window would create back-to-back assistants (#424).
+    // Ensure the pinned window starts with a user message when a prefix will
+    // actually ship — the prefix ends with assistant so a leading assistant in
+    // the raw window would create back-to-back assistants (#424). Skip the
+    // advance when nothing was evicted: the prefix is omitted then, so moving
+    // the boundary would only drop a raw message and re-introduce the summary.
     let adjustedPinnedIdx = pinnedIdx;
-    if (input.prefix.length > 0) {
+    if (
+      input.prefix.length > 0 &&
+      (pinnedIdx > 0 ||
+        (input.sourceWindow?.offset ?? 0) > 0 ||
+        priorEvictionSeen(input.sessState, totalRawSeen))
+    ) {
       while (
         adjustedPinnedIdx < input.messages.length &&
         input.messages[adjustedPinnedIdx].info.role === "assistant"
@@ -3209,14 +3225,10 @@ function tryFitStable(input: {
       // host sourceWindow offset, no prior prefix shipped, and no host-side
       // front-trimming), omit the distilled prefix so summary and raw turns
       // are not duplicated in context.
-      const totalRawSeen =
-        input.messages.length + (input.sourceWindow?.offset ?? 0);
       const evictedAny =
         adjustedPinnedIdx > 0 ||
         (input.sourceWindow?.offset ?? 0) > 0 ||
-        input.sessState.priorPrefixShipped ||
-        input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
-        totalRawSeen < input.sessState.maxSeenMessageCount;
+        priorEvictionSeen(input.sessState, totalRawSeen);
       const effectivePrefix = evictedAny ? input.prefix : [];
       const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
       const total = effectivePrefixTokens + pinnedTokens;
@@ -3250,10 +3262,7 @@ function tryFitStable(input: {
   // take over when even the current turn doesn't fit the full rawBudget.
   const totalRawSeen =
     input.messages.length + (input.sourceWindow?.offset ?? 0);
-  const priorEvicted =
-    input.sessState.priorPrefixShipped ||
-    input.sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
-    totalRawSeen < input.sessState.maxSeenMessageCount;
+  const priorEvicted = priorEvictionSeen(input.sessState, totalRawSeen);
   const result = tryFit({
     sourceWindow: input.sourceWindow,
     messages: input.messages,
@@ -4081,10 +4090,7 @@ function transformInner(input: {
       sessState.distilledBudgetHighWater = 0;
       const totalRawSeen =
         dedupMessages.length + (input.sourceWindow?.offset ?? 0);
-      const priorEvicted =
-        sessState.priorPrefixShipped ||
-        sessState.lastWindowMessageIDs.has("lore-distilled-user") ||
-        totalRawSeen < sessState.maxSeenMessageCount;
+      const priorEvicted = priorEvictionSeen(sessState, totalRawSeen);
       result = tryFit({
         sourceWindow: input.sourceWindow,
         messages: dedupMessages,
@@ -4553,7 +4559,10 @@ function tryFit(input: {
   // because the distilled prefix is omitted when 0 raw messages are evicted.
   if (
     input.prefix.length > 0 &&
-    (cutoff > 0 || (input.sourceWindow?.offset ?? 0) > 0 || input.priorEvicted)
+    (cutoff > 0 ||
+      (input.sourceWindow?.offset ?? 0) > 0 ||
+      input.priorEvicted ||
+      input.strip !== "none")
   ) {
     while (
       cutoff < olderMessages.length &&
@@ -4620,10 +4629,14 @@ function tryFit(input: {
   // When tryFit retained every raw message (cutoff === 0, no host sourceWindow
   // offset, and no prior eviction / host front-trimming), omit the distilled
   // prefix so summary and raw turns are not duplicated in context.
+  // shortcut: strip mode alone counts as eviction even when no tool part was
+  // actually stripped; ships a redundant summary on Layer 2-3, upgrade if that
+  // duplication shows up.
   const evictedAny =
     cutoff > 0 ||
     (input.sourceWindow?.offset ?? 0) > 0 ||
-    Boolean(input.priorEvicted);
+    Boolean(input.priorEvicted) ||
+    input.strip !== "none";
   const effectivePrefix = evictedAny ? input.prefix : [];
   const effectivePrefixTokens = evictedAny ? input.prefixTokens : 0;
   const total = effectivePrefixTokens + rawTokens;
