@@ -3894,6 +3894,98 @@ describe("onIdleResume", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
+  test("post-restart replay at the persisted sent count still ships a newly available summary", () => {
+    const pid = ensureProject("/test/maxseen-summary-emit");
+    // context=6_000, output=2_000 -> rawBudget=952 (chars/3-era units):
+    // The oversized leading pair forces Layer 1 to evict it, leaving a
+    // suffix that fits on its own after restart.
+    setModelLimits({ context: 6_000, output: 2_000 });
+    calibrate(0);
+    setForceMinLayer(1, SID);
+
+    const messages = [
+      makeMsg("ms-u1", "user", "a".repeat(2_000), SID),
+      makeMsg("ms-a1", "assistant", "b".repeat(3_000), SID),
+      makeMsg("ms-u2", "user", "What next?", SID),
+    ];
+
+    // No summary exists yet: Layer 1 truly evicts the leading user+assistant
+    // pair (the backward fill targets 75% of rawBudget) and no prefix ships.
+    const r1 = transform({
+      messages,
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual(["ms-u2"]);
+
+    // Turn 2 (still no summary): the raw scan re-runs and the older pair is
+    // evicted again — eviction without a prior prefix ships no prefix.
+    const messagesTurn2 = [
+      ...messages,
+      makeMsg("ms-a2", "assistant", "Keep going.", SID),
+    ];
+    const r2a = transform({
+      messages: messagesTurn2,
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(
+      r2a.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2a.messages.map((m) => m.info.id)).toEqual(["ms-u2", "ms-a2"]);
+
+    // Calibrate with the count actually sent (2), insert the summary, save
+    // state and evict the in-memory session to simulate a process restart.
+    calibrate(1_000, SID, r2a.messages.length);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Newly available summary of the evicted turns",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    // The host replays the surviving short suffix (length 2 == the persisted
+    // sent count 2) with no front-trim offset: the suffix fits raw, yet the
+    // newly available summary must still ship alongside every replayed raw id.
+    const r2 = transform({
+      messages: messagesTurn2.slice(2),
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(r2.messages.length).toBeGreaterThanOrEqual(r2a.messages.length);
+    expect(
+      r2.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(["ms-u2", "ms-a2"]);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
+    expect(r2.distilledTokens).toBeGreaterThan(0);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
   test("assistant-leading history: pinned turn keeps the leading assistant and no prefix when nothing is evicted", () => {
     const SID = "assistant-leading-sess";
     const PROJECT = "/test/assistant-leading-pin";

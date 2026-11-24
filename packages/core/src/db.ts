@@ -2611,6 +2611,16 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- Existing root rows are unclassified, not evidence of an adapter lookup.
   ALTER TABLE session_state ADD COLUMN parent_session_primary INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 109: persist the raw-message high-water count separately from
+  -- last_known_message_count (the compressed SENT count). On restart the
+  -- gradient used the sent count as the front-trim watermark, so a host
+  -- replay whose length only had to exceed that smaller count looked
+  -- un-trimmed and wrongly omitted a newly available distilled summary.
+  -- NULL (legacy / never-persisted) falls back to last_known_message_count
+  -- on restore, preserving the pre-v109 approximation for old rows.
+  ALTER TABLE session_state ADD COLUMN max_seen_message_count INTEGER;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -5261,6 +5271,12 @@ function recoverMissingObjects(database: Database) {
         "ALTER TABLE session_state ADD COLUMN last_known_message_count INTEGER NOT NULL DEFAULT 0;",
       );
     }
+    // Version 109: raw-message high-water watermark (NULL = legacy fallback).
+    if (!scols.some((c) => c.name === "max_seen_message_count")) {
+      database.exec(
+        "ALTER TABLE session_state ADD COLUMN max_seen_message_count INTEGER;",
+      );
+    }
   }
   // Version 53: tool_calls.verifier (outcome-reward, #497). Recover the column
   // independently — the CREATE TABLE IF NOT EXISTS above is a no-op on an
@@ -7627,6 +7643,8 @@ export type SessionTrackingState = {
   lastKnownInput?: number;
   /** v43: messages sent last turn — for restart-proof calibrated-delta estimation. */
   lastKnownMessageCount?: number;
+  /** v109: raw-message high-water count ever observed (host front-trim watermark). */
+  maxSeenMessageCount?: number;
   lastTurnAt?: number;
   lastBustAt?: number;
   // v89: last layer whose request was accepted by the upstream provider.
@@ -7774,6 +7792,10 @@ export function saveSessionTracking(
     sets.push("last_known_message_count = ?");
     vals.push(state.lastKnownMessageCount);
   }
+  if (state.maxSeenMessageCount !== undefined) {
+    sets.push("max_seen_message_count = ?");
+    vals.push(state.maxSeenMessageCount);
+  }
   if (state.lastTurnAt !== undefined) {
     sets.push("last_turn_at = ?");
     vals.push(state.lastTurnAt);
@@ -7867,6 +7889,8 @@ export type LoadedSessionTracking = {
   lastKnownInput: number;
   /** v43: messages sent last turn (0 for pre-v43 / never-calibrated rows). */
   lastKnownMessageCount: number;
+  /** v109: raw-message high-water count; NULL for pre-v109 / never-persisted rows. */
+  maxSeenMessageCount: number | null;
   lastTurnAt: number;
   lastBustAt: number;
   // v89: accepted upstream provenance boundary; -1 means no accepted turn.
@@ -8227,6 +8251,7 @@ export function loadSessionTracking(
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
+              max_seen_message_count,
               last_turn_at, last_bust_at, last_accepted_provenance_layer,
                parent_session_id, is_subagent, parent_session_pending, parent_session_primary,
               project_path, project_path_provisional,
@@ -8261,6 +8286,7 @@ export function loadSessionTracking(
     last_layer: number;
     last_known_input: number;
     last_known_message_count: number;
+    max_seen_message_count: number | null;
     last_turn_at: number;
     last_bust_at: number;
     last_accepted_provenance_layer: number;
@@ -8302,6 +8328,7 @@ export function loadSessionTracking(
     lastLayer: row.last_layer,
     lastKnownInput: row.last_known_input,
     lastKnownMessageCount: row.last_known_message_count,
+    maxSeenMessageCount: row.max_seen_message_count,
     lastTurnAt: row.last_turn_at,
     lastBustAt: row.last_bust_at,
     lastAcceptedProvenanceLayer: row.last_accepted_provenance_layer,

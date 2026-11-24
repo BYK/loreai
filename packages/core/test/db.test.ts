@@ -4557,6 +4557,7 @@ describe("db", () => {
       amnesia: true,
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
+      maxSeenMessageCount: 142,
       lastAcceptedProvenanceLayer: 1,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
       parentSessionId: "parent-session",
@@ -4582,6 +4583,8 @@ describe("db", () => {
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
+    // v109: raw high-water count, persisted independently of the sent count.
+    expect(loaded?.maxSeenMessageCount).toBe(142);
     expect(loaded?.lastAcceptedProvenanceLayer).toBe(1);
     expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
     expect(loaded?.parentSessionId).toBe("parent-session");
@@ -5228,6 +5231,35 @@ describe("db", () => {
             name: string;
           }>
         ).some((c) => c.name === "last_known_message_count"),
+      ).toBe(true);
+    });
+
+    test("session_state has max_seen_message_count column", () => {
+      const cols = db()
+        .query("PRAGMA table_info(session_state)")
+        .all() as Array<{ name: string }>;
+      expect(cols.map((c) => c.name)).toContain("max_seen_message_count");
+    });
+
+    test("recoverMissingObjects re-adds max_seen_message_count when missing", () => {
+      const d = db();
+      d.exec("ALTER TABLE session_state DROP COLUMN max_seen_message_count");
+      expect(
+        (
+          d.query("PRAGMA table_info(session_state)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "max_seen_message_count"),
+      ).toBe(false);
+
+      close();
+      const fresh = db();
+      expect(
+        (
+          fresh.query("PRAGMA table_info(session_state)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "max_seen_message_count"),
       ).toBe(true);
     });
 

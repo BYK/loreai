@@ -1085,7 +1085,13 @@ function getSessionState(sessionID: string): SessionState {
       // estimate identifies only genuinely-new messages on the resume turn
       // (without it, the whole conversation looks new → over-escalation). (#796)
       state.lastKnownMessageCount = persisted.lastKnownMessageCount;
-      state.maxSeenMessageCount = persisted.lastKnownMessageCount;
+      // v109: the front-trim watermark is the RAW high-water count, which can
+      // exceed the compressed sent count — restoring the sent count made a
+      // no-offset replay whose length merely exceeded that smaller count look
+      // un-trimmed and wrongly omitted a newly available summary. Legacy rows
+      // (NULL) fall back to the sent count, the pre-v109 approximation.
+      state.maxSeenMessageCount =
+        persisted.maxSeenMessageCount ?? persisted.lastKnownMessageCount;
       state.lastTurnAt = persisted.lastTurnAt;
       // Don't restore consecutiveBusts from DB — it's a short-term rolling
       // signal that must rebuild from live API responses in the current process.
@@ -2076,6 +2082,7 @@ export function saveGradientState(sessionID: string): void {
     lastLayer: state.lastLayer,
     lastKnownInput: state.lastKnownInput,
     lastKnownMessageCount: state.lastKnownMessageCount,
+    maxSeenMessageCount: state.maxSeenMessageCount,
     lastTurnAt: state.lastTurnAt,
     // Repurpose the dead dynamicContextCap column (v24, always 0 now)
     // to persist consecutiveBusts — avoids a new DB migration.
