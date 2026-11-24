@@ -140,6 +140,8 @@ describe("management middleware runs before every route", () => {
     ["GET", "/api"],
     ["GET", "/api/"],
     ["GET", "/api/v1/projects"],
+    ["GET", "/api/v1/projects%0A"],
+    ["GET", "/api/v1/projects%0D"],
     ["POST", "/api/v1/projects"],
     ["DELETE", "/api/v1/knowledge/x"],
     ["GET", "/api/v1/does-not-exist"],
