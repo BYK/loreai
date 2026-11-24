@@ -201,7 +201,10 @@ function chatMessageWithTextProvenance(
     ? {
         role,
         content,
-        provenanceContent: content,
+        // Copy so downstream provenance-aware mutations (visible-block
+        // replacement/truncation) never splice `content` twice through a
+        // shared array reference.
+        provenanceContent: [...content],
         provenancePositions: content.map((_block, index) => index),
       }
     : { role, content };
@@ -1296,7 +1299,9 @@ function buildOpenAIMessages(
       if (block.type === "text") {
         contentParts.push(
           source === "openai" && block.raw
-            ? { ...block.raw }
+            ? // Defense in depth: keep the native envelope (cache_control)
+              // but emit the current visible text, never a stale raw.text.
+              { ...block.raw, text: block.text }
             : { type: "text", text: block.text },
         );
       } else if (block.type === "tool_use") {
