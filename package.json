@@ -47,7 +47,7 @@
     "@stryker-mutator/vitest-runner": "9.6.1",
     "@types/node": "24.13.1",
     "@types/pg": "^8.11.10",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "binpatch": "^0.3.1",
     "esbuild": "^0.28.1",
     "fast-check": "^4.5.3",
@@ -58,7 +58,7 @@
     "pg": "^8.13.1",
     "tsx": "^4.22.3",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "vitest-evals": "^0.10.0"
   },
   "repository": {
