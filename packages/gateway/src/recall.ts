@@ -394,7 +394,9 @@ function withReplacedText(
  * Strip a recall marker from the visible text block at `visibleIndex`,
  * replacing it with `continuation` in BOTH the visible content and the
  * provenance array. A Responses opaque message envelope keeps its
- * `id`/`role` and gets only its matching `output_text` part rewritten.
+ * `id`/`role` and gets only its matching text rewritten. The Responses
+ * parser also accepts items with an omitted `type`, a string `content`,
+ * and `type: "text"` parts, so every accepted shape is covered here.
  */
 function replaceMarkerWithContinuation(
   message: GatewayMessage,
@@ -418,23 +420,38 @@ function replaceMarkerWithContinuation(
   if (
     provBlock.type !== "opaque" ||
     provBlock.responsesItem !== true ||
-    provBlock.raw.type !== "message" ||
-    !Array.isArray(provBlock.raw.content)
+    (provBlock.raw.type !== "message" && provBlock.raw.type !== undefined)
   ) {
     return;
   }
-  // Rewrite only the output_text part holding the marker; the opaque
+  if (typeof provBlock.raw.content === "string") {
+    // String-content items replay verbatim; the continuation must be
+    // inserted literally, never through `String.replace` substitution
+    // tokens ($$, $&, $`, $').
+    message.provenanceContent[provenanceIndex] = {
+      ...provBlock,
+      raw: {
+        ...provBlock.raw,
+        content: provBlock.raw.content.replace(block.text, () => continuation),
+      },
+    };
+    return;
+  }
+  if (!Array.isArray(provBlock.raw.content)) {
+    return;
+  }
+  // Rewrite only the text part holding the marker; the opaque
   // Responses envelope (id, role, other parts) survives.
   const content = provBlock.raw.content.map((part: unknown) => {
     if (
       !isRecord(part) ||
-      part.type !== "output_text" ||
+      (part.type !== "output_text" && part.type !== "text") ||
       typeof part.text !== "string" ||
       !part.text.includes(block.text)
     ) {
       return part;
     }
-    return { ...part, text: part.text.replace(block.text, continuation) };
+    return { ...part, text: part.text.replace(block.text, () => continuation) };
   });
   message.provenanceContent[provenanceIndex] = {
     ...provBlock,

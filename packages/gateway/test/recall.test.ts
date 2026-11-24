@@ -5642,6 +5642,173 @@ test.each([
   },
 );
 
+describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
+  // An unmatched marker with the given continuation, run through the
+  // Responses-native parse -> strip -> native replay path.
+  const runUnmatchedStrip = (assistantItem: Record<string, unknown>) => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "question" }],
+          },
+          assistantItem,
+        ],
+      },
+      {},
+    );
+    const message = req.messages.find((m) => m.role === "assistant");
+    if (!message)
+      throw new Error("Responses parse dropped the assistant message");
+    expect(
+      expandRecallMarkers(req, new Map(), { gatewayRecallEnabled: true }),
+    ).toBe(true);
+    const wire = JSON.stringify(
+      (
+        buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com")
+          .body as { input: unknown[] }
+      ).input,
+    );
+    return { req, message, wire };
+  };
+
+  test.each([
+    { name: "$& must not re-insert the marker", continuation: "cost $& more" },
+    { name: "$$ must stay doubled", continuation: "a $$ b" },
+    { name: "$` must stay literal", continuation: "x $` y" },
+    { name: "$' must stay literal", continuation: "x $' y" },
+    { name: "a plain $1 stays literal", continuation: "x $1 y" },
+  ])(
+    "substitution tokens in the continuation stay literal: $name",
+    ({ continuation }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740aa";
+      const query = "literal token query";
+      const text = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\n${continuation}`;
+      const { wire } = runUnmatchedStrip({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      });
+      expect(wire).toContain(continuation);
+      expect(wire).not.toContain(buildRecallMarker(query));
+      expect(wire).not.toContain(buildRecallAnchor(anchorId));
+    },
+  );
+
+  test.each([
+    {
+      name: "an omitted type with output_text parts",
+      makeItem: (text: string): Record<string, unknown> => ({
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      }),
+    },
+    {
+      name: "an omitted type with string content",
+      makeItem: (text: string): Record<string, unknown> => ({
+        role: "assistant",
+        content: text,
+      }),
+    },
+    {
+      name: "a message type with string content",
+      makeItem: (text: string): Record<string, unknown> => ({
+        type: "message",
+        role: "assistant",
+        content: text,
+      }),
+    },
+    {
+      name: "array content with type:text parts",
+      makeItem: (text: string): Record<string, unknown> => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text }],
+      }),
+    },
+  ])("strips the marker from provenance for $name", ({ makeItem }) => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740bb";
+    const query = "shape query";
+    const text = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\nvisible continuation`;
+    const { req, message, wire } = runUnmatchedStrip(makeItem(text));
+    const visible = message.content[0];
+    expect(visible.type).toBe("text");
+    if (visible.type !== "text") return;
+    expect(visible.text).toBe("visible continuation");
+    expect(wire).toContain("visible continuation");
+    expect(wire).not.toContain(buildRecallMarker(query));
+    expect(wire).not.toContain(buildRecallAnchor(anchorId));
+    expect(JSON.stringify(req.messages)).not.toContain(
+      buildRecallAnchor(anchorId),
+    );
+  });
+
+  test("copy-on-write: the parsed source item and unrelated envelope fields survive", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740cc";
+    const query = "copy-on-write query";
+    const text = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\nafter`;
+    const unrelatedPart = { type: "refusal", refusal: "declined" };
+    const markerPart = { type: "output_text", text, annotations: [] };
+    const item = {
+      type: "message",
+      id: "msg_copy_on_write",
+      role: "assistant",
+      status: "completed",
+      content: [markerPart, unrelatedPart],
+    };
+    const { req, message, wire } = runUnmatchedStrip(item);
+    // The parsed caller object must never be mutated.
+    expect(item.content[0]).toBe(markerPart);
+    expect(markerPart.text).toBe(text);
+    const prov = message.provenanceContent?.[0];
+    expect(prov?.type).toBe("opaque");
+    if (prov?.type !== "opaque") return;
+    const raw = prov.raw;
+    // Envelope metadata and unrelated parts are preserved; the raw array was
+    // copied, not mutated.
+    expect(raw.id).toBe("msg_copy_on_write");
+    expect(raw.status).toBe("completed");
+    expect(raw.content).not.toBe(item.content);
+    const parts = raw.content as Array<Record<string, unknown>>;
+    expect(parts[1]).toBe(unrelatedPart);
+    expect(parts[0].text).toBe("after");
+    expect(wire).toContain("msg_copy_on_write");
+    expect(wire).toContain("after");
+    expect(wire).not.toContain(buildRecallAnchor(anchorId));
+    expect(JSON.stringify(req.messages)).not.toContain(
+      buildRecallAnchor(anchorId),
+    );
+  });
+
+  test("copy-on-write: the source item with string content is copied, not mutated", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740cd";
+    const query = "string copy query";
+    const text = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\nafter`;
+    const item = {
+      type: "message",
+      id: "msg_string_copy",
+      role: "assistant",
+      status: "completed",
+      content: text,
+    };
+    const { message, wire } = runUnmatchedStrip(item);
+    expect(item.content).toBe(text);
+    const prov = message.provenanceContent?.[0];
+    expect(prov?.type).toBe("opaque");
+    if (prov?.type !== "opaque") return;
+    const raw = prov.raw;
+    expect(raw).not.toBe(item);
+    expect(raw.id).toBe("msg_string_copy");
+    expect(raw.status).toBe("completed");
+    expect(raw.content).toBe("after");
+    expect(wire).toContain("msg_string_copy");
+    expect(wire).not.toContain(buildRecallAnchor(anchorId));
+  });
+});
+
 test("rejection bodies longer than 500 bytes keep their JSON diagnostics", async () => {
   const recallBlock = makeRecallToolUse();
   const resp = makeResponse([recallBlock], "tool_use");
