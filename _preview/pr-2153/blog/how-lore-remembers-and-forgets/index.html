@@ -1,0 +1,286 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><script>// Shared by every page, including Starlight. Run in the head before paint.
+// Reuse Starlight's storage key so existing documentation preferences survive.
+(() => {
+  const key = "starlight-theme";
+  const root = document.documentElement;
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const parse = (value) =>
+    value === "light" || value === "dark" ? value : "auto";
+  let choice = "auto";
+  try {
+    choice = parse(window.localStorage.getItem(key));
+  } catch {
+    // Storage can be disabled. Choices still work for this page.
+  }
+
+  function apply() {
+    root.dataset.themeChoice = choice;
+    root.dataset.theme =
+      choice === "auto" ? (media.matches ? "dark" : "light") : choice;
+    document.querySelectorAll("button[data-theme-choice]").forEach((button) => {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.themeChoice === choice),
+      );
+    });
+  }
+
+  apply();
+  media.addEventListener("change", () => {
+    if (choice === "auto") apply();
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key === key || event.key === null) {
+      choice = parse(event.newValue);
+      apply();
+    }
+  });
+
+  function connect() {
+    document.querySelectorAll("button[data-theme-choice]").forEach((button) => {
+      button.addEventListener("click", () => {
+        choice = parse(button.dataset.themeChoice);
+        try {
+          if (choice === "auto") window.localStorage.removeItem(key);
+          else window.localStorage.setItem(key, choice);
+        } catch {
+          // Preserve the in-memory choice even when persistence is unavailable.
+        }
+        apply();
+      });
+    });
+    apply();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", connect, { once: true });
+  } else {
+    connect();
+  }
+})();
+</script><noscript><style>.theme-toggle, .mobile-theme-preferences, [data-copy-install] { display: none !important; }</style></noscript><title>How Lore remembers, forgets, and changes its mind | Lore</title><meta name="description" content="Most memory tools now ship a set of principles for how an agent should manage its context. Lore's principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on."><!-- Open Graph --><meta property="og:title" content="How Lore remembers, forgets, and changes its mind | Lore"><meta property="og:description" content="Most memory tools now ship a set of principles for how an agent should manage its context. Lore's principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on."><meta property="og:image" content="https://withlore.ai/_preview/pr-2153/og-image-c43f89de.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Lore.AI — Shared Context for AI Agents"><meta property="og:url" content="https://withlore.ai/_preview/pr-2153/blog/how-lore-remembers-and-forgets/"><meta property="og:type" content="article"><meta property="og:site_name" content="Lore.AI"><!-- Twitter Card --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="How Lore remembers, forgets, and changes its mind | Lore"><meta name="twitter:description" content="Most memory tools now ship a set of principles for how an agent should manage its context. Lore's principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on."><meta name="twitter:image" content="https://withlore.ai/_preview/pr-2153/og-image-c43f89de.png"><meta name="twitter:site" content="@withLoreAI"><!-- RSS feed autodiscovery --><link rel="alternate" type="application/rss+xml" title="Lore Blog" href="https://withlore.ai/_preview/pr-2153/rss.xml"><!--
+  standard.site publication discovery hint. This is a hint only; the
+  authoritative check is the /.well-known/site.standard.publication endpoint.
+--><link rel="site.standard.publication" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self"><link rel="site.standard.document" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/how-lore-remembers-and-forgets"><link rel="icon" type="image/svg+xml" href="/_preview/pr-2153/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/_preview/pr-2153/favicon-32.png"><link rel="apple-touch-icon" sizes="180x180" href="/_preview/pr-2153/apple-touch-icon.png"><link rel="stylesheet" href="/_preview/pr-2153/theme.css"><link rel="stylesheet" href="/_preview/pr-2153/_astro/blog-kind.NK1LZpU1.css"><link rel="stylesheet" href="/_preview/pr-2153/_astro/ThemeProvider.d4g0HwtL.css"><script type="module" src="/_preview/pr-2153/_astro/page.DAhzwGqk.js"></script></head><body class="blog-body"><a class="skip-link" href="#main-content">Skip to content</a><header class="top-nav field-guide-header"><div class="header-brand"><a href="/_preview/pr-2153/" class="logo" data-theme="auto" aria-label="Lore.AI — home"><img src="/_preview/pr-2153/_astro/loreai.BYyO8ZaX.svg" class="logo-img logo-img-light" alt="" width="30" height="30" style="height: 30px; width: 30px;"><img src="/_preview/pr-2153/_astro/loreai-dark.BoECdKok.svg" class="logo-img logo-img-dark" alt="" width="30" height="30" style="height: 30px; width: 30px;"><span class="logo-text">Lore<span class="logo-suffix"><span class="logo-dot">.</span>AI</span></span></a><div class="desktop-nav"><nav class="primary-nav guide-navigation" aria-label="Primary navigation"><ul class="guide-triggers"><li><a class="guide-trigger" href="/_preview/pr-2153/docs/">Docs</a></li><li><details class="guide-menu" data-menu name="field-guide"><summary class="guide-trigger">Product<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></summary><div class="guide-panel"><div class="guide-list"><p class="guide-label">Meet your project memory</p><a class="guide-destination" href="/_preview/pr-2153/tour/?view=knowledge#product"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 3h18v18H3z M3 8h18 M9 8v13"></path></svg><span><strong>View app tour</strong><small>See saved sessions, rules and their sources.</small></span></a><a class="guide-destination" href="/_preview/pr-2153/docs/memory/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m12 3 9 5-9 5-9-5 9-5 M3 12l9 5 9-5 M3 16l9 5 9-5"></path></svg><span><strong>How memory works</strong><small>What stays stored. What reaches your agent.</small></span></a><a class="guide-destination" href="/_preview/pr-2153/docs/install/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 3v5 M16 3v5 M5 8h14v3a7 7 0 0 1-14 0V8 M12 18v3"></path></svg><span><strong>Connect your coding agent</strong><small>Keep the client you already work with.</small></span></a></div><a class="guide-feature" href="/_preview/pr-2153/#journal"><img class="journal-art art-for-dark" src="/_preview/pr-2153/journal-art/journal.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/_preview/pr-2153/journal-art/journal-light.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><span class="guide-label">An interactive field guide</span><strong>One decision. Remembered.</strong><small>Follow a useful rule from conversation to your next task.</small><span class="guide-feature-action">Open the quest journal<span aria-hidden="true">→</span></span></a><div class="guide-bottom"><span>Local history. Reviewable knowledge.</span><a href="/_preview/pr-2153/docs/data-and-costs/">Data &amp; costs<span aria-hidden="true">↗</span></a></div></div></details></li><li><details class="guide-menu" data-menu name="field-guide"><summary class="guide-trigger guide-current">Resources<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"></path></svg></summary><div class="guide-panel"><div class="guide-list"><p class="guide-label">Learn and build</p><a class="guide-destination" href="/_preview/pr-2153/docs/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5c-3-2-6-2-10-1v15c4-1 7-1 10 1 3-2 6-2 10-1V4c-4-1-7-1-10 1v15"></path></svg><span><strong>Documentation</strong><small>Setup, everyday use and configuration.</small></span></a><a class="guide-destination" href="/_preview/pr-2153/blog/" aria-current="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h10l4 4v14H5V3 M14 3v5h5 M8 12h8 M8 16h5"></path></svg><span><strong>Blog</strong><small>Product ideas and engineering from Lore.</small></span></a><a class="guide-destination" href="/_preview/pr-2153/docs/troubleshooting/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M9 8a3 3 0 0 1 6 0c0 2-3 2-3 5 M12 17h.01"></path></svg><span><strong>Troubleshooting</strong><small>Find a missing session or check your setup.</small></span></a></div><a class="guide-feature" href="/_preview/pr-2153/docs/first-session/"><img class="journal-art art-for-dark" src="/_preview/pr-2153/journal-art/field-tools.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/_preview/pr-2153/journal-art/field-tools-light.svg" width="118" height="118" loading="eager" decoding="async" alt="" aria-hidden="true"><span class="guide-label">Your first session</span><strong>A result you can check.</strong><small>Connect your agent and find its first recorded conversation.</small><span class="guide-feature-action">Follow the setup guide<span aria-hidden="true">→</span></span></a><div class="guide-bottom"><span>Decisions worth keeping.</span><a href="https://github.com/BYK/loreai/releases" target="_blank" rel="noopener noreferrer">Release notes<span aria-hidden="true">↗</span></a></div></div></details></li><li><a class="guide-trigger" href="/_preview/pr-2153/different/">Why Lore</a></li></ul></nav></div></div><div class="header-actions"><div class="header-utilities"><a class="header-github" href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer" title="GitHub"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7M15 22v-3.4c0-1 .1-1.6-.5-2.2 3.3-.4 6.7-1.6 6.7-7.3 0-1.6-.5-2.8-1.5-3.9.2-.4.6-1.9-.1-3.8 0 0-1.3-.4-4.1 1.5a14.3 14.3 0 0 0-7 0C5.7 1 4.4 1.4 4.4 1.4c-.7 1.9-.3 3.4-.1 3.8a5.5 5.5 0 0 0-1.5 3.9c0 5.7 3.4 6.9 6.7 7.3-.5.5-.6 1.1-.5 2.2V22"></path></svg><span class="visually-hidden">GitHub</span></a><div class="theme-toggle" role="group" aria-label="Colour theme"><button type="button" data-theme-choice="light" aria-label="Light theme" aria-pressed="false" title="Light theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v1m0 16v1M3 12h1m16 0h1M5.64 5.64l.7.7m11.32 11.32.7.7M5.64 18.36l.7-.7M17.66 6.34l.7-.7"></path><circle cx="12" cy="12" r="4"></circle></svg></button><button type="button" data-theme-choice="auto" aria-label="System theme" aria-pressed="false" title="System theme — follow your device"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 21h8m-4-4v4"></path><rect x="3" y="3" width="18" height="14" rx="2"></rect></svg></button><button type="button" data-theme-choice="dark" aria-label="Dark theme" aria-pressed="false" title="Dark theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.9 13.1A9 9 0 0 1 10.9 3.1 9 9 0 1 0 20.9 13.1Z"></path></svg></button></div><a class="header-start" href="/_preview/pr-2153/docs/install/">Get started <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"></path></svg></a></div><details class="nav-mobile astro-k6c7o3mi" data-menu><summary class="nav-burger astro-k6c7o3mi" aria-label="Toggle navigation menu"><span data-menu-icon="open" aria-hidden="true" class="astro-k6c7o3mi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 6h16 M4 12h16 M4 18h16"></path></svg></span><span data-menu-icon="close" aria-hidden="true" class="astro-k6c7o3mi"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12 M6 18 18 6"></path></svg></span><span class="visually-hidden astro-k6c7o3mi">Navigation</span></summary><div class="nav-mobile-panel astro-k6c7o3mi"><div class="mobile-theme-preferences"><span>Appearance</span><div class="theme-toggle" role="group" aria-label="Colour theme"><button type="button" data-theme-choice="light" aria-label="Light theme" aria-pressed="false" title="Light theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v1m0 16v1M3 12h1m16 0h1M5.64 5.64l.7.7m11.32 11.32.7.7M5.64 18.36l.7-.7M17.66 6.34l.7-.7"></path><circle cx="12" cy="12" r="4"></circle></svg></button><button type="button" data-theme-choice="auto" aria-label="System theme" aria-pressed="false" title="System theme — follow your device"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 21h8m-4-4v4"></path><rect x="3" y="3" width="18" height="14" rx="2"></rect></svg></button><button type="button" data-theme-choice="dark" aria-label="Dark theme" aria-pressed="false" title="Dark theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.9 13.1A9 9 0 0 1 10.9 3.1 9 9 0 1 0 20.9 13.1Z"></path></svg></button></div></div><nav aria-label="Primary navigation" class="primary-nav primary-nav-mobile"><div class="mobile-nav-group"><p class="guide-label">Product</p><ul><li><a href="/_preview/pr-2153/tour/?view=knowledge#product">View app tour</a></li><li><a href="/_preview/pr-2153/docs/memory/">How memory works</a></li><li><a href="/_preview/pr-2153/#journal">The quest journal</a></li><li><a href="/_preview/pr-2153/different/">Why Lore</a></li><li><a href="/_preview/pr-2153/#how">Day-to-day workflow</a></li></ul></div><div class="mobile-nav-group"><p class="guide-label">Resources</p><ul><li><a href="/_preview/pr-2153/docs/">Documentation</a></li><li><a href="/_preview/pr-2153/blog/" aria-current="true">Blog</a></li><li><a href="/_preview/pr-2153/docs/troubleshooting/">Get help</a></li><li><a href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer">GitHub<span aria-hidden="true"> ↗</span></a></li></ul></div><a class="nav-start" href="/_preview/pr-2153/docs/install/">Get started <span aria-hidden="true">↗</span></a></nav></div></details></div></header><main id="main-content"><article class="blog-post"><a class="blog-back icon-link" href="/_preview/pr-2153/blog/"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 12H4 m7-7-7 7 7 7"></path></svg><span class="link-label">Back to blog</span></a><header><div class="article-field-label"><p class="eyebrow field-marker"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m8 6-6 6 6 6 m8-12 6 6-6 6 m-3-15-2 18"></path></svg>Engineering</p><img class="journal-art art-for-dark" src="/_preview/pr-2153/journal-art/memory-satchel.svg" width="48" height="48" loading="eager" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/_preview/pr-2153/journal-art/memory-satchel-light.svg" width="48" height="48" loading="eager" decoding="async" alt="" aria-hidden="true"></div><h1>How Lore remembers, forgets, and changes its mind</h1><p class="blog-subtitle">The principles behind memory that manages itself</p><div class="article-meta"><span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M17 3a4 4 0 0 1 0 8 M18 15a4 4 0 0 1 4 4v2"></path></svg>Lore Team</span><time datetime="2026-07-02T00:00:00.000Z"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 5h16v16H4V5 M8 2v6 M16 2v6 M4 11h16"></path></svg>July 2, 2026</time></div><p>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&#39;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</p></header><aside class="article-takeaway" aria-label="Practical takeaway"><strong class="takeaway-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h14v18l-7-4-7 4V3 M9 7h6"></path></svg>In practice</strong><p>Stored history, active knowledge, and the material supplied to a request have different lifecycles. Review inaccurate knowledge and check its source.</p></aside><figure class="article-diagram" aria-label="Memory stages explained"><figcaption class="field-marker">Three different things to inspect</figcaption><ol><li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 4h16v12H9l-5 4V4 M8 8h8 M8 12h5"></path></svg><strong>Stored history</strong><span>Original conversations you can search.</span></li><li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 3h14v18l-7-4-7 4V3 M9 7h6"></path></svg><strong>Curated knowledge</strong><span>Reviewable rules with their own lifecycle.</span></li><li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 m4-14-2 6-6 2 2-6 6-2"></path></svg><strong>Current request</strong><span>Eligible material selected within scope and budget.</span></li></ol><p>Recording a conversation does not mean sending all of it on every request.</p></figure><details data-slot="accordion-item" class="article-outline"><summary data-slot="accordion-trigger"><span>On this page</span><span class="article-current" aria-hidden="true">Contents</span></summary><nav data-slot="accordion-content" aria-label="Article sections"><ul><li><a href="#you-never-have-to-remember-to-remember">You never have to remember to remember</a></li><li><a href="#being-surfaced-is-not-being-right">Being surfaced is not being right</a></li><li><a href="#confidence-is-earned-and-it-decays">Confidence is earned, and it decays</a></li><li><a href="#when-two-things-disagree-you-get-told-not-overruled">When two things disagree, you get told, not overruled</a></li><li><a href="#changes-leave-a-reviewable-history">Changes leave a reviewable history</a></li><li><a href="#the-current-request-has-a-context-limit">The current request has a context limit</a></li><li><a href="#whats-learned-lives-in-tokens-not-weights">What’s learned lives in tokens, not weights</a></li><li><a href="#boring-on-purpose">Boring on purpose</a></li></ul></nav></details><div class="blog-prose"><p>Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
+self-improving memory, a model that reads back its own transcript, rewrites its own
+instructions, and prunes whatever it decides has gone stale. There is real energy here, and
+some of it genuinely works.</p>
+<p>Here is the catch, and it is an old one. Self-correction is the hardest kind. Whatever made a
+mistake is usually the worst-placed thing to catch it, because from the inside the mistake
+still looks like a reasonable call. People hit this constantly, which is why we lean on
+outside help: an editor for the draft you have read too many times, a reviewer for the code
+you are sure is fine, a colleague who remembers you already tried that back in March. The
+whole value is that they are not you. A model sits in the same spot. Once it has written a
+shaky assumption into its own memory, it is not the thing you can count on to go back and
+find the error.</p>
+<p>Lore puts capture and context management in a layer outside the agent. Once your
+client is connected, that layer can record conversations, distill older context,
+and select stored knowledge for a request. The model does not have to remember
+to maintain every part of that record itself.</p>
+<p>That does not make the resulting memory infallible. Distillation is lossy,
+curation can produce an incomplete rule, and selection depends on the current
+task, scope, confidence and context budget. Review what Lore keeps, especially
+before turning it into a shared project convention.</p>
+<p>A model change can leave the local record available to another supported client.
+Whether a particular request receives the useful part of that record still needs
+to be checked. Here are the principles behind that workflow, with its limits.</p>
+<h2 id="you-never-have-to-remember-to-remember">You never have to remember to remember</h2>
+<p>Capture is automatic. Lore sits between your agent and the model, and it distills your work
+as it happens. You do not tag a message, save a decision, or file anything away for later.</p>
+<p>This is the whole reason capture lives in the layer. Memory you have to reach for is memory
+you will forget to reach for, right at the moment you are heads-down on the actual problem.
+The filing was never the hard part, and it should never be your job. If a rule for managing
+memory depends on you (or the agent) remembering to invoke it, it is already broken.</p>
+<p>Getting it back works the same way. When memory only returns because the agent thought to
+call a search tool, the knowledge can be sitting right there and never reach the model,
+because nobody went looking. Lore surfaces what is relevant on its own, and keeps a recall
+tool for when the agent wants to dig deeper, so recall does not hang on the agent’s
+discipline on any given turn either.</p>
+<h2 id="being-surfaced-is-not-being-right">Being surfaced is not being right</h2>
+<p>When Lore pulls a memory into your context, that is a bet about what might be relevant this
+turn. It is not a vote on whether the memory is true. Selecting an entry never raises its
+confidence.</p>
+<p>That separation keeps the store honest. A note that keeps getting surfaced but never actually
+helps does not get more entrenched just for being loud. Confidence is earned somewhere else,
+by whether the knowledge holds up in practice, and the act of showing it to the model is kept
+strictly out of that accounting.</p>
+<h2 id="confidence-is-earned-and-it-decays">Confidence is earned, and it decays</h2>
+<p>Every entry carries a confidence score. It rises when the knowledge proves useful across
+sessions and drifts down when it sits untouched. Fall below the floor and the entry is
+evicted. The store stays bounded by usefulness rather than by a fixed timer that forgets
+things on a schedule, whether or not you still need them.</p>
+<p>There is one deliberate exception. Some explicitly stated preferences receive different treatment from inferred knowledge.
+Inspect scope and configuration before assuming an entry applies across projects.</p>
+<h2 id="when-two-things-disagree-you-get-told-not-overruled">When two things disagree, you get told, not overruled</h2>
+<p>Conflicting rules deserve a review rather than a silent assumption. When Lore
+flags a contradiction, inspect both entries and their sources in the knowledge
+dashboard or with <code>lore data contradictions</code>. Correct an outdated rule, retire
+it, or keep both if they apply in different circumstances.</p>
+<p>Detection is not a guarantee that every conflict has been found. Curation,
+confidence changes and consolidation can also change the active set. Review
+consequential rules and the exported diff as the project evolves.</p>
+<h2 id="changes-leave-a-reviewable-history">Changes leave a reviewable history</h2>
+<p>Ordinary knowledge edits append a revision. Deleting an entry marks it deleted
+rather than immediately erasing its version history. Those revisions help you
+inspect what changed; they do not mean all data is retained forever.</p>
+<p>Bulk deletion and purge operations have different effects. Uninstall normally
+preserves memory; the explicit purge option can remove the default local data
+directory. Neither operation removes copies already committed to Git or data
+already sent to a provider. Read the <a href="/_preview/pr-2153/docs/data-and-costs/#undo-or-remove-lore">data lifecycle and cleanup boundaries</a>
+before choosing an operation.</p>
+<p>Curated knowledge can be exported to a plain <code>.lore.md</code> file. Review that diff,
+and keep identity markers when correcting an entry. Version history and a Git
+review help you inspect a rule; neither proves that it is correct.</p>
+<h2 id="the-current-request-has-a-context-limit">The current request has a context limit</h2>
+<p>Lore aims to retain recent working material while distilling older context. Under
+pressure it can compress tool output and use more aggressive context layers.
+A stored detail is not necessarily present verbatim in the current prompt.
+Use recall and the recorded conversation when exact wording matters; see
+<a href="/_preview/pr-2153/docs/memory/">stored history and active context</a>.</p>
+<h2 id="whats-learned-lives-in-tokens-not-weights">What’s learned lives in tokens, not weights</h2>
+<p>Lore learns by writing durable text, not by fine-tuning the model. That is a deliberate
+choice. Text is something you can read, carry across providers and across model generations,
+and undo a line at a time. Knowledge baked into weights is none of those things: you cannot
+inspect it, it does not move to the next model, and you lose it on the upgrade. The model is
+the part you replace. The knowledge is the part you keep.</p>
+<h2 id="boring-on-purpose">Boring on purpose</h2>
+<p>Making a model better at checking itself is worth doing, and we hope it keeps improving. But
+the corrections you can lean on are the ones that do not wait for the model to notice, this
+turn, that it was wrong. Those come from outside it.</p>
+<p>Lore’s bet is that capture, review and retrieval belong in an inspectable layer,
+with rules you can test and correct. That reduces the housekeeping asked of the
+agent, while leaving you responsible for checking consequential knowledge.</p>
+<p>And because a layer that sees every token is a lot to ask you to trust, the rules above are
+not a description you take on faith. Lore is <a href="https://fair.io">Fair Source</a>
+(FSL-1.1-Apache-2.0), so the code that decides what your agent remembers and forgets is right
+there for you to read, and it turns into Apache 2.0 on a timer. Principles you can enforce are
+better than principles you have to believe.</p></div><nav class="article-next" aria-label="Put this into practice"><img class="journal-art art-for-dark" src="/_preview/pr-2153/journal-art/decision-note.svg" width="56" height="56" loading="lazy" decoding="async" alt="" aria-hidden="true"><img class="journal-art art-for-light" src="/_preview/pr-2153/journal-art/decision-note-light.svg" width="56" height="56" loading="lazy" decoding="async" alt="" aria-hidden="true"><p class="field-marker">Continue in the field guide</p><h2>Put this into practice</h2><a href="/_preview/pr-2153/docs/using-lore/#review-knowledge" class="icon-link"><span class="link-label">Review and correct knowledge</span> <span aria-hidden="true">→</span></a><a href="/_preview/pr-2153/docs/troubleshooting/">Get help with your setup</a></nav></article></main><footer class="site-footer astro-3vl646bl"><div class="footer-main astro-3vl646bl"><div class="footer-identity astro-3vl646bl"><a href="/_preview/pr-2153/" class="logo" data-theme="auto" aria-label="Lore.AI — home"><img src="/_preview/pr-2153/_astro/loreai.BYyO8ZaX.svg" class="logo-img logo-img-light" alt="" width="42" height="42" style="height: 42px; width: 42px;"><img src="/_preview/pr-2153/_astro/loreai-dark.BoECdKok.svg" class="logo-img logo-img-dark" alt="" width="42" height="42" style="height: 42px; width: 42px;"><span class="logo-text">Lore<span class="logo-suffix"><span class="logo-dot">.</span>AI</span></span></a><p class="astro-3vl646bl">Local memory.<br class="astro-3vl646bl">Reviewable knowledge.</p></div><div class="footer-group astro-3vl646bl"><h2 class="astro-3vl646bl">Start your journey</h2><nav class="footer-links astro-3vl646bl" aria-label="Use Lore"><a href="/_preview/pr-2153/docs/install/" class="astro-3vl646bl">Get started</a><a href="/_preview/pr-2153/docs/using-lore/" class="astro-3vl646bl">Using Lore</a></nav></div><div class="footer-group astro-3vl646bl"><h2 class="astro-3vl646bl">Find your bearings</h2><nav class="footer-links astro-3vl646bl" aria-label="Lore help"><a href="/_preview/pr-2153/docs/troubleshooting/" class="astro-3vl646bl">Troubleshooting</a><a href="/_preview/pr-2153/docs/data-and-costs/" class="astro-3vl646bl">Data &amp; costs</a></nav></div></div><div class="footer-bottom astro-3vl646bl"><small class="astro-3vl646bl">© 2026 Lore.AI <span aria-hidden="true" class="astro-3vl646bl">·</span> FSL-1.1-Apache-2.0</small><nav class="footer-links footer-community astro-3vl646bl" aria-label="Community links"><a class="social-icon astro-3vl646bl" href="https://github.com/BYK/loreai" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="astro-3vl646bl"><path d="M9 19c-4.3 1.3-4.3-2.2-6-2.7M15 22v-3.4c0-1 .1-1.6-.5-2.2 3.3-.4 6.7-1.6 6.7-7.3 0-1.6-.5-2.8-1.5-3.9.2-.4.6-1.9-.1-3.8 0 0-1.3-.4-4.1 1.5a14.3 14.3 0 0 0-7 0C5.7 1 4.4 1.4 4.4 1.4c-.7 1.9-.3 3.4-.1 3.8a5.5 5.5 0 0 0-1.5 3.9c0 5.7 3.4 6.9 6.7 7.3-.5.5-.6 1.1-.5 2.2V22" class="astro-3vl646bl"></path></svg></a><a class="social-icon astro-3vl646bl" href="https://x.com/withLoreAI" target="_blank" rel="noopener noreferrer" aria-label="Follow on X" title="Follow on X"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false" class="astro-3vl646bl"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.982 21.75H1.672l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231ZM17.083 19.77h1.833L7.084 4.126H5.117L17.083 19.77Z" class="astro-3vl646bl"></path></svg></a><a class="social-icon astro-3vl646bl" href="/_preview/pr-2153/rss.xml" aria-label="RSS" title="RSS feed"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false" class="astro-3vl646bl"><path d="M4 4a16 16 0 0 1 16 16M4 11a9 9 0 0 1 9 9" class="astro-3vl646bl"></path><circle cx="5" cy="19" r="1.5" fill="currentColor" stroke="none" class="astro-3vl646bl"></circle></svg></a><a class="release-link astro-3vl646bl" href="https://github.com/BYK/loreai/releases/latest" target="_blank" rel="noopener noreferrer">Releases</a></nav></div></footer><script>// Public-page interactions. Commands and destination URLs remain static markup.
+const releaseLinks = document.querySelectorAll(".release-link");
+if (releaseLinks.length) {
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(
+        "https://api.github.com/repos/BYK/loreai/releases/latest",
+        { signal: controller.signal },
+      );
+      if (!response.ok) return;
+      const data = await response.json();
+      if (
+        typeof data?.tag_name !== "string" ||
+        !/^v?\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(data.tag_name)
+      )
+        return;
+      const version = data.tag_name.replace(/^v/, "");
+      releaseLinks.forEach((link) => {
+        link.textContent = `Latest: v${version}`;
+      });
+    } catch {
+      // The existing Releases link remains useful without a version lookup.
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+}
+
+const form = document.getElementById("waitlist-form");
+const email = document.getElementById("waitlist-email");
+const button = document.getElementById("waitlist-btn");
+const formView = document.getElementById("waitlist-form-view");
+const successView = document.getElementById("waitlist-success");
+const errorView = document.getElementById("waitlist-error");
+const errorMessage = document.getElementById("waitlist-error-msg");
+const rateKey = "loops-form-timestamp";
+let submitting = false;
+let failed = false;
+
+function clearError() {
+  errorView?.classList.remove("show");
+  email?.removeAttribute("aria-describedby");
+}
+function showSuccess() {
+  clearError();
+  formView?.classList.remove("show");
+  successView?.classList.add("show");
+  successView?.focus();
+}
+function showError(message) {
+  failed = true;
+  if (errorMessage) errorMessage.textContent = message;
+  errorView?.classList.add("show");
+  email?.setAttribute("aria-describedby", "waitlist-error-msg");
+  if (button) button.textContent = "Try again";
+  errorView?.focus();
+}
+
+// oxlint-disable-next-line typescript/no-misused-promises -- DOM event callbacks ignore the returned promise
+form?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (
+    !(email instanceof HTMLInputElement) ||
+    !(button instanceof HTMLButtonElement) ||
+    submitting
+  )
+    return;
+  const value = email.value.trim();
+  if (!value || !email.checkValidity()) return;
+  let last = 0;
+  try {
+    last = Number.parseInt(localStorage.getItem(rateKey) || "0", 10);
+  } catch {
+    /* Storage is optional. */
+  }
+  if (Date.now() - last < 60_000) {
+    showError(
+      "You recently joined this list. Wait a minute before trying again.",
+    );
+    return;
+  }
+  submitting = true;
+  failed = false;
+  clearError();
+  button.disabled = true;
+  button.textContent = "Joining…";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(form.action, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ email: value }),
+      signal: controller.signal,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      /* A successful response need not contain JSON. */
+    }
+    if (response.ok || data?.message === "Email already on list.") {
+      try {
+        localStorage.setItem(rateKey, String(Date.now()));
+      } catch {
+        /* The server accepted the signup. */
+      }
+      email.value = "";
+      showSuccess();
+    } else {
+      showError(
+        "We couldn’t add your email. Your address has been kept so you can try again.",
+      );
+    }
+  } catch {
+    showError(
+      controller.signal.aborted
+        ? "The request timed out. Try again when your connection is ready."
+        : "We couldn’t reach the signup service. Check your connection and try again.",
+    );
+  } finally {
+    clearTimeout(timer);
+    submitting = false;
+    button.disabled = false;
+    button.textContent = failed ? "Try again" : "Join early access list";
+  }
+});
+</script><script type="module" src="/_preview/pr-2153/_astro/PublicLayout.astro_astro_type_script_index_0_lang.CwJ9maPu.js"></script></body></html><script type="module">var e=document.querySelector(`.article-outline`);if(e){e.dataset.enhanced=`true`;let t=[...e.querySelectorAll(`a[href^="#"]`)].flatMap(e=>{let t=decodeURIComponent(e.hash.slice(1)),n=document.getElementById(t);return n?[{link:e,heading:n}]:[]}),n=e.querySelector(`.article-current`),r=!1;function i(){r=!1;let i=(e?.querySelector(`summary`)?.getBoundingClientRect().bottom??140)+32,a=t[0];for(let e of t)if(e.heading.getBoundingClientRect().top<=i)a=e;else break;for(let e of t)e===a?e.link.setAttribute(`aria-current`,`location`):e.link.removeAttribute(`aria-current`);n&&a&&(n.textContent=a.link.textContent)}function a(){r||(r=!0,requestAnimationFrame(i))}e.addEventListener(`click`,n=>{if(n.defaultPrevented||n.metaKey||n.ctrlKey||n.shiftKey||n.altKey||n.button!==0||!(n.target instanceof Element))return;let r=n.target.closest(`a[href]`);r&&(e.open=!1,a(),requestAnimationFrame(()=>{let e=t.find(e=>e.link===r)?.heading;e&&(e.tabIndex=-1,e.focus({preventScroll:!0}))}))}),document.addEventListener(`scroll`,a,{passive:!0}),window.addEventListener(`resize`,a),window.addEventListener(`hashchange`,a),window.addEventListener(`load`,a),i()}</script>

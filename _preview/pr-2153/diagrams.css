@@ -1,0 +1,21 @@
+.mermaid { position:relative;text-align:center;max-width:100%;margin:1.5rem auto;padding-top:44px; }
+.mermaid > svg { display:block;max-width:100%;height:auto;margin:auto; }
+.diagram-expand { position:absolute;inset-block-start:0;inset-inline-end:0;margin:0; }
+.media-dialog { position:fixed;inset:0;margin:auto;box-sizing:border-box;width:calc(100vw - 2rem);max-width:1440px;max-height:calc(100dvh - 2rem);padding:1rem;border:1px solid var(--line);border-radius:var(--radius-card,12px);background:var(--bg);color:var(--text); }
+.media-dialog::backdrop { background:rgb(0 0 0 / .7); }
+.media-toolbar { display:flex;flex-wrap:wrap;align-items:center;gap:.25rem; }
+.media-toolbar button { display:grid;place-items:center;min-width:44px;min-height:44px;margin:0;border:1px solid var(--line);border-radius:var(--radius-control,6px);background:var(--surface,var(--bg));color:var(--text);font:500 .875rem/1 var(--sans,system-ui);cursor:pointer; }
+.media-toolbar button:disabled { opacity:.45;cursor:default; }
+.media-toolbar button:focus-visible,.media-canvas:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
+.media-toolbar output { min-width:3.5rem;text-align:center;font:.8125rem/1.5 var(--sans,system-ui); }
+.media-toolbar > .media-close { margin-inline-start:auto; }
+.media-hint { color:var(--muted);font:400 .8125rem/1.5 var(--sans,system-ui);margin:.75rem 0; }
+.media-canvas { overflow:auto;overscroll-behavior:contain;height:min(70dvh,900px);width:100%;max-height:calc(100dvh - 13rem);min-height:100px;align-content:safe center;cursor:grab; }
+.media-canvas.is-panning { cursor:grabbing;user-select:none; }
+.media-canvas > :is(svg,img) { display:block;max-width:none!important;margin:auto;object-fit:contain; }
+a[data-media-viewer] { cursor:zoom-in; }
+a[data-media-viewer]:focus-visible { outline-offset:-4px; }
+.media-affordance { display:flex;align-items:center;gap:.5rem;margin:.5rem 0;color:var(--muted);font:.75rem/1.5 var(--sans,system-ui); }
+/* Mermaid's generic paragraph color must inherit each authored class color. */
+:is(.mermaid,.diagram-canvas) .nodeLabel p { color:inherit!important; }
+@media(max-width:640px) { .media-dialog { width:calc(100vw - 1rem);padding:.75rem; }.media-hint { font-size:.75rem; }.media-canvas { max-height:calc(100dvh - 14rem); } }
