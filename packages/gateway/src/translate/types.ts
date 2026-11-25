@@ -112,6 +112,12 @@ export type GatewayContentBlock = (
 ) & {
   /** Original native Responses item ordinal, kept only in request provenance. */
   responsesSourceIndex?: number;
+  /**
+   * Index of this block's part inside the raw `content` array of its
+   * Responses provenance envelope. The visible content drops empty text
+   * parts, so a visible index cannot be used to address raw parts.
+   */
+  responsesContentIndex?: number;
 };
 
 /**

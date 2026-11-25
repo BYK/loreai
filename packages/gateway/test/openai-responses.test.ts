@@ -610,7 +610,9 @@ describe("parseOpenAIResponsesRequest", () => {
       headers,
     );
 
-    expect(req.messages[1].content).toEqual([{ type: "text", text: "answer" }]);
+    expect(req.messages[1].content).toEqual([
+      { type: "text", text: "answer", responsesContentIndex: 0 },
+    ]);
     const assistantProvenance = req.messages
       .filter((message) => message.role === "assistant")
       .flatMap((message) => message.provenanceContent ?? message.content);
@@ -651,7 +653,9 @@ describe("parseOpenAIResponsesRequest", () => {
       headers,
     );
 
-    expect(req.messages[1].content).toEqual([{ type: "text", text: "answer" }]);
+    expect(req.messages[1].content).toEqual([
+      { type: "text", text: "answer", responsesContentIndex: 0 },
+    ]);
     const assistantProvenance = req.messages
       .filter((message) => message.role === "assistant")
       .flatMap((message) => message.provenanceContent ?? message.content);
@@ -1388,7 +1392,7 @@ describe("parseOpenAIResponsesRequest", () => {
       "user",
     ]);
     expect(req.messages[1].content).toEqual([
-      { type: "text", text: "Let me check." },
+      { type: "text", text: "Let me check.", responsesContentIndex: 0 },
     ]);
     expect(
       (req.messages[2].content as GatewayToolUseBlock[]).map((b) => b.id),

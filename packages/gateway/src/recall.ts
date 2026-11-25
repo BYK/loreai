@@ -440,19 +440,32 @@ function replaceMarkerWithContinuation(
   if (!Array.isArray(provBlock.raw.content)) {
     return;
   }
-  // Rewrite only the text part holding the marker; the opaque
-  // Responses envelope (id, role, other parts) survives.
-  const content = provBlock.raw.content.map((part: unknown) => {
-    if (
-      !isRecord(part) ||
-      (part.type !== "output_text" && part.type !== "text") ||
-      typeof part.text !== "string" ||
-      !part.text.includes(block.text)
-    ) {
-      return part;
-    }
-    return { ...part, text: part.text.replace(block.text, () => continuation) };
-  });
+  // Rewrite only the raw part the parser projected the visible block from;
+  // the opaque Responses envelope (id, role, other parts) survives. Visible
+  // indices cannot address raw parts because the parser drops empty text
+  // parts, and text matching rewrites identical earlier quotes instead.
+  const contentIndex = block.responsesContentIndex;
+  if (
+    contentIndex === undefined ||
+    contentIndex < 0 ||
+    contentIndex >= provBlock.raw.content.length
+  ) {
+    return;
+  }
+  const part = provBlock.raw.content[contentIndex];
+  if (
+    !isRecord(part) ||
+    (part.type !== "output_text" && part.type !== "text") ||
+    typeof part.text !== "string" ||
+    !part.text.includes(block.text)
+  ) {
+    return;
+  }
+  const content = provBlock.raw.content.slice();
+  content[contentIndex] = {
+    ...part,
+    text: part.text.replace(block.text, () => continuation),
+  };
   message.provenanceContent[provenanceIndex] = {
     ...provBlock,
     raw: { ...provBlock.raw, content },

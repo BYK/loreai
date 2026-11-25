@@ -82,6 +82,7 @@ import {
 import type {
   GatewayContentBlock,
   GatewayResponse,
+  GatewayMessage,
   GatewayRequest,
   GatewayTool,
   GatewayToolUseBlock,
@@ -5645,7 +5646,10 @@ test.each([
 describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
   // An unmatched marker with the given continuation, run through the
   // Responses-native parse -> strip -> native replay path.
-  const runUnmatchedStrip = (assistantItem: Record<string, unknown>) => {
+  const runUnmatchedStrip = (
+    assistantItem: Record<string, unknown>,
+    beforeStrip?: (message: GatewayMessage) => void,
+  ) => {
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-test",
@@ -5663,16 +5667,15 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     const message = req.messages.find((m) => m.role === "assistant");
     if (!message)
       throw new Error("Responses parse dropped the assistant message");
+    beforeStrip?.(message);
     expect(
       expandRecallMarkers(req, new Map(), { gatewayRecallEnabled: true }),
     ).toBe(true);
-    const wire = JSON.stringify(
-      (
-        buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com")
-          .body as { input: unknown[] }
-      ).input,
-    );
-    return { req, message, wire };
+    const { input } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    return { req, message, input, wire: JSON.stringify(input) };
   };
 
   test.each([
@@ -5781,6 +5784,45 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     expect(JSON.stringify(req.messages)).not.toContain(
       buildRecallAnchor(anchorId),
     );
+  });
+
+  test("rewrites only the raw part holding the marker, not an identical earlier quote", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740ce";
+    const query = "part targeting query";
+    const marked = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\nvisible continuation`;
+    const quotePart = { type: "output_text", text: `Earlier quote: ${marked}` };
+    const emptyPart = {
+      type: "output_text",
+      text: "",
+      annotations: [
+        { type: "url_citation", url: "https://example.com", title: "x" },
+      ],
+    };
+    const markerPart = { type: "output_text", text: marked };
+    const item = {
+      type: "message",
+      id: "msg_part_targeting",
+      role: "assistant",
+      status: "completed",
+      content: [quotePart, emptyPart, markerPart],
+    };
+    const original = structuredClone(item);
+    const { input, message } = runUnmatchedStrip(item, (before) => {
+      expect(before.content).toMatchObject([
+        { type: "text", text: quotePart.text },
+        { type: "text", text: marked },
+      ]);
+    });
+    expect(message.content[1]).toMatchObject({ text: "visible continuation" });
+    expect(item).toEqual(original);
+    expect(input.find((entry) => entry.id === item.id)).toEqual({
+      ...original,
+      content: [
+        original.content[0],
+        original.content[1],
+        { ...original.content[2], text: "visible continuation" },
+      ],
+    });
   });
 
   test("copy-on-write: the source item with string content is copied, not mutated", () => {

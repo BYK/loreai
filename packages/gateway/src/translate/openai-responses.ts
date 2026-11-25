@@ -1037,7 +1037,8 @@ function parseAssistantMessageContent(item: Record<string, unknown>): {
   if (!Array.isArray(item.content)) {
     return { content, provenanceContent, provenancePositions };
   }
-  for (const part of item.content as Array<Record<string, unknown>>) {
+  const parts = item.content as Array<Record<string, unknown>>;
+  for (const [partIndex, part] of parts.entries()) {
     if (!part || typeof part !== "object" || Array.isArray(part)) {
       throw new InvalidCrossProviderRequestError();
     }
@@ -1050,7 +1051,7 @@ function parseAssistantMessageContent(item: Record<string, unknown>): {
     }
     const text = isText ? asString(part.text) : "";
     const visible: GatewayContentBlock | undefined = text
-      ? { type: "text", text }
+      ? { type: "text", text, responsesContentIndex: partIndex }
       : !isText
         ? { type: "opaque", raw: part }
         : undefined;

@@ -97,6 +97,34 @@ describe("current Codex native Responses compatibility", () => {
     expect(wire(req).input).toEqual(input);
     expect(JSON.stringify(lore)).not.toContain("private-thinking");
   });
+  test("keeps native provenance when the assistant replays an empty cited part", () => {
+    const assistant = {
+      type: "message",
+      id: "msg_cited",
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text: "",
+          annotations: [
+            { type: "url_citation", url: "https://example.com", title: "x" },
+          ],
+        },
+        { type: "output_text", text: "Done" },
+      ],
+    };
+    const input = [user("first", "Question"), assistant, user("latest", "Go")];
+    const req = parseOpenAIResponsesRequest(build(input), {});
+    expect(wire(req).input).toEqual(input);
+    const lore = gatewayMessagesToLore(req.messages, "empty-cited-part");
+    const provenance = responsesProvenanceByMessageId(req.messages, lore);
+    req.messages = loreMessagesToGateway(lore, provenance, true, true);
+    // The reconstructed text omits responsesContentIndex; unchanged-content
+    // comparison must not drop the native envelope (id, status, empty cited
+    // part) because of it.
+    expect(wire(req).input).toEqual(input);
+  });
   test.each(
     ["function", "custom"].flatMap((kind) =>
       ["calls", "results", "reversed results", "reasoning"].flatMap((seam) =>

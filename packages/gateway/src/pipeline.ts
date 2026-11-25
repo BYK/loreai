@@ -25511,6 +25511,24 @@ export function canReplayRequestProvenance(
 // ---------------------------------------------------------------------------
 
 /**
+ * Comparison view for unchanged-content checks: the parser stamps
+ * `responsesContentIndex` on source blocks, but reconstructed content omits
+ * it (temporal parts do not retain raw part indices). Strip only that field
+ * so an otherwise-identical block sequence still compares equal.
+ */
+function stripResponsesContentIndex(
+  blocks: GatewayContentBlock[],
+): GatewayContentBlock[] {
+  return blocks.some((block) => block.responsesContentIndex !== undefined)
+    ? blocks.map((block) => {
+        if (block.responsesContentIndex === undefined) return block;
+        const { responsesContentIndex: _ignored, ...rest } = block;
+        return rest;
+      })
+    : blocks;
+}
+
+/**
  * Convert transformed Lore messages back to gateway message format.
  *
  * This reverses `gatewayMessagesToLore` after gradient transform has
@@ -25703,7 +25721,8 @@ export function loreMessagesToGateway(
     // source provenance, including reasoning between parallel tool calls.
     const nativeContentUnchanged =
       candidate?.responsesSourceRange !== undefined &&
-      JSON.stringify(content) === JSON.stringify(candidate.content);
+      JSON.stringify(content) ===
+        JSON.stringify(stripResponsesContentIndex(candidate.content));
     if (candidate?.responsesSourceRange) {
       message.responsesSourceRange = candidate.responsesSourceRange;
       restoreNativeResponsesToolEnvelopes(message, candidate);
@@ -25836,7 +25855,8 @@ export function loreMessagesToGateway(
     if (
       provenance?.provenanceContent &&
       (nativeContentUnchanged ||
-        JSON.stringify(content) === JSON.stringify(provenance.content) ||
+        JSON.stringify(content) ===
+          JSON.stringify(stripResponsesContentIndex(provenance.content)) ||
         chatNativeTextProvenance ||
         toolResultsUnchanged)
     ) {
