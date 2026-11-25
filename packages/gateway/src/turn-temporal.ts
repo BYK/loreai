@@ -38,6 +38,7 @@ export interface TurnTemporalInput {
   /** Absolute request length, even when only one message is retained. */
   readonly assistantIndex: number;
   readonly checkpoint?: { claim(): boolean; publish(): void };
+  readonly calibrationKey?: symbol;
   /** Accepted transform stats for this turn, persisted into the assistant
    *  message's metadata for the session-context API. */
   readonly gradient?: {

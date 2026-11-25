@@ -111,11 +111,19 @@ export class SemanticTokenCache {
     }
   }
 
-  count(visibleJson: string, provenanceJson: string): number {
+  count(
+    visibleJson: string,
+    provenanceJson: string,
+    encoding: EncodingName = "cl100k_base",
+  ): number {
     this.load();
     // Length framing prevents (a, bc) colliding with (ab, c). Existing source
     // IDs intentionally omit some fields and are unsuitable for cache keys.
-    const key = createHash("sha256")
+    const hash = createHash("sha256");
+    // Preserve the cl100k key for previously accepted checkpoints and cache
+    // rows. Other policies use a namespace disjoint from length framing.
+    if (encoding !== "cl100k_base") hash.update(`hidden:${encoding}:`);
+    const key = hash
       .update(`${visibleJson.length}:`)
       .update(visibleJson)
       .update(provenanceJson)
@@ -129,7 +137,8 @@ export class SemanticTokenCache {
       const started = performance.now();
       value = Math.max(
         0,
-        estimateTokens(provenanceJson) - estimateTokens(visibleJson),
+        estimateTokens(provenanceJson, { encoding }) -
+          estimateTokens(visibleJson, { encoding }),
       );
       this.stats.bpe_ms += performance.now() - started;
     } else this.stats.hits++;

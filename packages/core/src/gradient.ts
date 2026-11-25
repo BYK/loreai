@@ -18,7 +18,7 @@ import { normalize } from "./markdown";
 import { offloadAllOrTimeout, requireReadRows } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import * as log from "./log";
-import { estimateTokens } from "./tokenize";
+import { estimateTokens, type EncodingName } from "./tokenize";
 import { SemanticTokenCache } from "./semantic-token-cache";
 
 type MessageWithParts = LoreMessageWithParts;
@@ -45,25 +45,12 @@ export class FullSourceRequired extends Error {
   }
 }
 
-// Token estimate using the shared ai-tokenizer-backed helper (cl100k_base by
-// default — gradient.ts intentionally does NOT thread the active provider/model
-// through all 21 internal call sites; per-encoding selection would balloon the
-// surface area without proportional accuracy gain for the budget decisions that
-// this file drives). The legacy chars/3 heuristic is gone.
-//
-// NB: with the BPE-backed estimator the per-message cost is now much closer to
-// the model's real provider tokens than chars/3 was (BPE undercounts by ~1% on
-// natural prose vs chars/3's ~33% undercount). This changes calibrate() math
-// — see BODY_TOKEN_RATIO comment below and the inline note at the bodyUsable
-// derivation (line ~3420) for the deferred per-encoding calibration work. The
-// "calibratedOverhead absorbs the residual" framing is no longer accurate: with
-// BPE + 1.68 inflate, calibratedOverhead clamps to 0 once body_real exceeds
-// ~overhead_real / 0.68.
-function estimate(text: string): number {
-  return estimateTokens(text);
-}
+type MessageEstimator = (message: MessageWithParts) => number;
 
-function estimateParts(parts: LorePart[]): number {
+function estimateParts(
+  parts: LorePart[],
+  estimate: (text: string) => number,
+): number {
   let total = 0;
   for (const part of parts) {
     if (isTextPart(part)) total += estimate(part.text);
@@ -77,8 +64,15 @@ function estimateParts(parts: LorePart[]): number {
   return total;
 }
 
-function estimateMessage(msg: MessageWithParts): number {
-  return estimateParts(msg.parts) + (msg.hiddenInputTokens ?? 0) + 20;
+function messageEstimator(
+  encoding: EncodingName | undefined,
+): MessageEstimator {
+  const options = { encoding };
+  const estimate = (text: string) => estimateTokens(text, options);
+  return (message) =>
+    estimateParts(message.parts, estimate) +
+    (message.hiddenInputTokens ?? 0) +
+    20;
 }
 
 // Cached model context limit — set by system transform hook, used by message transform
@@ -472,42 +466,6 @@ const FREE_WRITE_LAYER0_FRACTION = 0.65;
 export const UNCALIBRATED_SAFETY = 1.5;
 
 /**
- * Multiplier used in two places:
- *
- *   1. bodyUsable = usable / BODY_TOKEN_RATIO  (line ~3420) — converts the
- *      REAL-token usable budget to the bodyEstimate scale so cfg.budget.*
- *      fractions remain meaningful when compared against BPE estimates.
- *   2. calibrate() (line ~1553) — inflates the per-message bodyEstimate
- *      before subtracting from actualInput: overhead = max(0, actualInput
- *      − messageEstimate × RATIO − ltm).
- *
- * Historical value (validated against the chars/3 heuristic which
- * undercounted by ~1.68x): 1.68. With the BPE-backed estimator the gap
- * between bodyEstimate and body_real shrunk from ~33% (chars/3) to ~1%
- * (matched-encoding BPE), so the inflate-factor in (2) is now a known
- * over-correction: it drives `overhead` toward 0 (clamped at 0) once
- * body_real exceeds ~overhead_real / 0.68, which under-reports true
- * system+tools overhead for non-trivial sessions and leads to an
- * over-sized `usable` that softens compression triggers.
- *
- * The constant is KEPT at 1.68 to preserve the historical budget semantics
- * (cfg.budget.* fractions) through the chars/3 → BPE migration. A separate
- * per-encoding calibration pass is tracked as a follow-up: it should
- * replace the hardcoded 1.68 with a per-session fitted ratio (initial seed
- * 1.0 for matched encodings, ~1.3 for mismatched). Until that ships, the
- * known over-estimate bias in `overhead` is a production behavior change
- * vs. the chars/3 era — flagged here so future readers don't misinterpret
- * the calibrate math.
- *
- * (See also the inline note at the bodyUsable derivation, line ~3420,
- *  for the cross-reference to this deferred-calibration debt.)
- *
- *  - fitsWithSafetyMargin(): the acceptance gate inflates the body estimate
- *    back to real and adds overhead+ltm before comparing to maxInput.
- */
-export const BODY_TOKEN_RATIO = 1.68;
-
-/**
  * True when the session's upstream has reported zero cache_creation_input_tokens
  * for at least {@link NO_CACHE_WRITE_THRESHOLD} consecutive turns.  Covers both
  * free-write-cache providers (e.g. MiniMax passive caching) and non-caching
@@ -857,11 +815,15 @@ type SessionState = {
    */
   maxSustainedLayer: SafetyLayer;
   /** Message IDs in the most recent transform() output — ID-based delta estimation */
-  lastWindowMessageIDs: Set<string>;
+  lastWindowMessageIDs: ReadonlySet<string>;
+  /** Window paired with the last accepted provider usage. */
+  lastKnownWindowMessageIDs: ReadonlySet<string>;
   /** One-shot force escalation: skip layers below this on the next transform() */
   forceMinLayer: SafetyLayer;
   /** Token estimate from the most recent transform() output (compressed window) */
   lastTransformEstimate: number;
+  modelKey?: string;
+  calibrationKey?: symbol;
   /** LTM tokens injected for this session's current turn (per-session isolation) */
   ltmTokens: number;
   /**
@@ -1003,6 +965,7 @@ function makeSessionState(): SessionState {
     lastLayer: 0,
     maxSustainedLayer: 0,
     lastWindowMessageIDs: new Set(),
+    lastKnownWindowMessageIDs: new Set(),
     forceMinLayer: 0,
     lastTransformEstimate: 0,
     ltmTokens: 0,
@@ -1073,6 +1036,20 @@ function getSessionState(sessionID: string): SessionState {
         state.maxSustainedLayer = 1;
       }
       state.lastKnownInput = persisted.lastKnownInput;
+      const modelReceipt = persisted.lastKnownInputModelReceipt;
+      const usageStamp = `${persisted.lastKnownInput}:${persisted.lastKnownMessageCount}:${persisted.lastTurnAt}:`;
+      // Older binaries can still update the usage columns after downgrade.
+      if (modelReceipt?.startsWith(usageStamp)) {
+        const baseline = modelReceipt.slice(usageStamp.length);
+        const seam = baseline.indexOf(":");
+        if (seam > 0) {
+          const ltm = Number(baseline.slice(0, seam));
+          if (Number.isSafeInteger(ltm) && ltm >= 0) {
+            state.lastKnownLtm = ltm;
+            state.modelKey = baseline.slice(seam + 1);
+          }
+        }
+      }
       // v43: restore the last-sent message count so the calibrated-delta
       // estimate identifies only genuinely-new messages on the resume turn
       // (without it, the whole conversation looks new → over-escalation). (#796)
@@ -1387,6 +1364,9 @@ let ltmTokensFallback = 0;
  * The setters remain for tests and legacy callers.
  */
 export type ModelBudget = {
+  encoding?: EncodingName;
+  /** Provider-qualified model identity for the previous usage baseline. */
+  modelKey?: string;
   contextLimit: number;
   outputReserved: number;
   maxLayer0Tokens: number;
@@ -1493,9 +1473,9 @@ export function getLtmTokens(sessionID?: string): number {
 export function getLtmBudget(
   ltmFraction: number,
   sessionID?: string,
-  opts?: { isSubagent?: boolean },
+  opts?: { isSubagent?: boolean; modelKey?: string },
 ): number {
-  const overhead = getOverhead(sessionID);
+  const overhead = getOverhead(sessionID, opts?.modelKey);
   const usable = Math.max(0, contextLimit - outputReserved - overhead);
   // Snap usable DOWN to the LTM_BUDGET_STEP grid before deriving anything.
   // Bucketing absorbs the per-turn overhead-EMA wobble so the budget — and thus
@@ -1561,8 +1541,11 @@ export function calibrate(
   actualInput: number,
   sessionID?: string,
   messageCount?: number,
+  calibrationKey?: symbol,
 ) {
   const state = sessionID !== undefined ? getSessionState(sessionID) : null;
+  if (calibrationKey !== undefined && state?.calibrationKey !== calibrationKey)
+    return;
 
   // Use the transform's own estimate for the compressed window it produced.
   // This is the correct baseline: it estimates the same messages the model saw.
@@ -1580,17 +1563,7 @@ export function calibrate(
   // to compare against). Allow when both are 0 (test setup to zero overhead) or
   // when we have a real transform estimate.
   if (messageEstimate > 0 || actualInput === 0) {
-    // Scale fix: `actualInput` is REAL provider tokens but `messageEstimate`
-    // (lastTransformEstimate) is the chars/3 body estimate, which undercounts by
-    // ~BODY_TOKEN_RATIO. Subtracting the un-inflated estimate leaked
-    // ~0.40·body_real into `overhead`, so for large/growing sessions overhead
-    // ballooned (~125K on a 200K model), `usable` collapsed (~25K), the session
-    // was forced to Layer 4, and the distilled prefix re-rendered every turn
-    // (the messages[1] cache bust). Inflate the body estimate to the real scale
-    // first so `overhead` is TRUE system+tools only and stays stable as the body
-    // grows. (messageEstimate===0 ⇒ overhead = actualInput − ltm, unchanged.)
-    const realMessageEstimate = Math.round(messageEstimate * BODY_TOKEN_RATIO);
-    const overhead = Math.max(0, actualInput - realMessageEstimate - ltm);
+    const overhead = Math.max(0, actualInput - messageEstimate - ltm);
     // Lever 2 (Bug 1): the per-session EMA is authoritative — getOverhead()
     // prefers it. The module-global EMA is still updated, but only serves as
     // the first-turn seed / no-session fallback. A single shared global blended
@@ -1599,13 +1572,15 @@ export function calibrate(
     // the distilled prefix. Both use the same 0.7/0.3 smoothing.
     const blend = (prev: number | null) =>
       prev === null ? overhead : Math.round(prev * 0.7 + overhead * 0.3);
-    calibratedOverhead = blend(calibratedOverhead);
+    if (state?.modelKey === undefined)
+      calibratedOverhead = blend(calibratedOverhead);
     if (state) state.overheadEma = blend(state.overheadEma);
   }
 
   // Store per-session exact counts for the proactive layer 0 decision.
   if (state) {
     state.lastKnownInput = actualInput;
+    state.lastKnownWindowMessageIDs = state.lastWindowMessageIDs;
     state.lastKnownLtm = state.ltmTokens;
     if (messageCount !== undefined) state.lastKnownMessageCount = messageCount;
   }
@@ -1618,12 +1593,16 @@ export function calibrate(
  * FIRST_TURN_OVERHEAD before any calibration. Uses a non-creating Map lookup so
  * read-only callers never spawn a phantom SessionState.
  */
-export function getOverhead(sessionID?: string): number {
-  if (sessionID !== undefined) {
-    const ema = sessionStates.get(sessionID)?.overheadEma;
-    if (ema != null) return ema;
-  }
-  return calibratedOverhead ?? FIRST_TURN_OVERHEAD;
+export function getOverhead(sessionID?: string, modelKey?: string): number {
+  const state =
+    sessionID === undefined ? undefined : sessionStates.get(sessionID);
+  if (modelKey !== undefined && state?.modelKey !== modelKey)
+    return FIRST_TURN_OVERHEAD;
+  return (
+    state?.overheadEma ??
+    (modelKey === undefined ? calibratedOverhead : null) ??
+    FIRST_TURN_OVERHEAD
+  );
 }
 
 /**
@@ -2066,6 +2045,10 @@ export function saveGradientState(sessionID: string): void {
   saveSessionTracking(sessionID, {
     lastLayer: state.lastLayer,
     lastKnownInput: state.lastKnownInput,
+    lastKnownInputModelReceipt:
+      state.modelKey === undefined
+        ? null
+        : `${state.lastKnownInput}:${state.lastKnownMessageCount}:${state.lastTurnAt}:${state.lastKnownLtm}:${state.modelKey}`,
     lastKnownMessageCount: state.lastKnownMessageCount,
     lastTurnAt: state.lastTurnAt,
     // Repurpose the dead dynamicContextCap column (v24, always 0 now)
@@ -2283,6 +2266,11 @@ function cleanParts(parts: LorePart[]): LorePart[] {
       return [{ ...first, text: "..." }];
     }
   }
+  if (
+    filtered.length === parts.length &&
+    filtered.every((part, i) => part === parts[i])
+  )
+    return parts;
   return filtered.length > 0 ? filtered : parts;
 }
 
@@ -2664,9 +2652,11 @@ function sanitizeToolParts(messages: MessageWithParts[]): MessageWithParts[] {
 }
 
 function stripToolOutputs(parts: LorePart[]): LorePart[] {
-  return parts.map((part) => {
+  let changed = false;
+  const stripped = parts.map((part) => {
     if (!isToolPart(part)) return part;
     if (part.state.status === "completed") {
+      changed = true;
       // Replace native array parts with one annotation part when stripping.
       const output = toolStripAnnotation(part.tool, part.state.output);
       return {
@@ -2684,6 +2674,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
     // aggressive (Layer 2) compression — otherwise failure-heavy turns evade
     // the strip entirely and can overflow the context.
     if (part.state.status === "error") {
+      changed = true;
       const error = toolStripAnnotation(part.tool, part.state.error);
       return {
         ...part,
@@ -2698,6 +2689,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
     }
     return part;
   });
+  return changed ? stripped : parts;
 }
 
 function _stripToTextOnly(parts: LorePart[]): LorePart[] {
@@ -2896,6 +2888,7 @@ function distilledPrefixCached(
   distillations: Distillation[],
   sessionID: string,
   sessState: SessionState,
+  estimateMessage: MessageEstimator,
 ): { messages: MessageWithParts[]; tokens: number } {
   if (!distillations.length) {
     // Freeze the *absence* of a prefix too. If the first gen-0 distillation
@@ -3097,6 +3090,7 @@ export function resetRawWindowCache(sessionID?: string) {
  * updates the cache.
  */
 function tryFitStable(input: {
+  estimateMessage: MessageEstimator;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   prefix: MessageWithParts[];
@@ -3109,6 +3103,7 @@ function tryFitStable(input: {
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
 > | null {
+  const { estimateMessage } = input;
   // If the prefix already overflows its budget there's no point trying.
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -3181,15 +3176,19 @@ function tryFitStable(input: {
       }
       // Apply system-reminder cleanup only (strip:"none" is the layer-1 mode),
       // returning the same message object references wherever nothing changed.
+      let rawTokens = pinnedTokens;
       const processed = pinnedWindow.map((msg) => {
         const parts = cleanParts(msg.parts);
-        return parts !== msg.parts ? { info: msg.info, parts } : msg;
+        if (parts === msg.parts) return msg;
+        const cleaned = { ...msg, parts };
+        rawTokens += estimateMessage(cleaned) - estimateMessage(msg);
+        return cleaned;
       });
-      const total = input.prefixTokens + pinnedTokens;
+      const total = input.prefixTokens + rawTokens;
       return {
         messages: [...input.prefix, ...processed],
         distilledTokens: input.prefixTokens,
-        rawTokens: pinnedTokens,
+        rawTokens,
         totalTokens: total,
         capFit: false,
       };
@@ -3215,6 +3214,7 @@ function tryFitStable(input: {
   // also degraded, just at the 100% boundary); higher layers (tool stripping)
   // take over when even the current turn doesn't fit the full rawBudget.
   const result = tryFit({
+    estimateMessage,
     sourceWindow: input.sourceWindow,
     messages: input.messages,
     prefix: input.prefix,
@@ -3289,6 +3289,8 @@ const COMPRESSION_STAGES: CompressionStage[] = [
 ];
 
 export type TransformResult = {
+  /** Binds provider usage to this transform even if another turn overlaps. */
+  calibrationKey?: symbol;
   messages: MessageWithParts[];
   layer: SafetyLayer;
   distilledTokens: number;
@@ -3388,6 +3390,7 @@ function layer0Bounds(
  * tested here — no decision-vs-compression drift band. (#796)
  */
 export function isLargeColdStart(input: {
+  sourceTokens?: number;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   sessionID?: string;
@@ -3407,12 +3410,15 @@ export function isLargeColdStart(input: {
   if (input.budget) applyModelBudget(input.budget);
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
-  if (sessState.lastKnownInput > 0) return false;
-  const overhead = getOverhead(sid);
+  const modelKey = input.budget?.modelKey ?? input.budget?.encoding;
+  if (sessState.modelKey === modelKey && sessState.lastKnownInput > 0)
+    return false;
+  const overhead = getOverhead(sid, modelKey);
   const sessLtmTokens =
     input.ltmTokens ?? (sid ? sessState.ltmTokens : ltmTokensFallback);
   const expectedInput =
-    estimateMessages(input.messages) +
+    (input.sourceTokens ??
+      estimateMessages(input.messages, input.budget?.encoding)) +
     (input.sourceWindow?.omittedTokens ?? 0) +
     overhead +
     sessLtmTokens;
@@ -3428,20 +3434,41 @@ export function isLargeColdStart(input: {
 }
 
 function transformInner(input: {
+  sourceTokens?: number;
+  skipUncachedBodyRecount?: boolean;
+  budget?: ModelBudget;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   projectPath: string;
   sessionID?: string;
-}): TransformResult {
+}): TransformResult & { skipOverheadCalibration?: boolean } {
   const cfg = config();
 
   // --- Session state (must precede budget computation) ---
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
 
-  // Per-session overhead (Bug 1, lever 2): a session's own calibrated overhead,
-  // not a global EMA blended across heterogeneous concurrent sessions.
-  const overhead = getOverhead(sid);
+  const modelKey = input.budget?.modelKey ?? input.budget?.encoding;
+  if (sessState.modelKey !== modelKey) {
+    // Persisted legacy usage has no model identity. Start a fresh baseline
+    // without discarding the session's compaction floor or force escalation.
+    sessState.modelKey = modelKey;
+    sessState.lastKnownInput = 0;
+    sessState.lastKnownWindowMessageIDs = new Set();
+    sessState.overheadEma = null;
+    sessState.prefixCache = null;
+    sessState.rawWindowCache = null;
+    sessState.distilledBudgetHighWater = 0;
+  }
+  const overhead = getOverhead(sid, modelKey);
+  const encoding = input.budget?.encoding;
+  const estimateMessage = messageEstimator(encoding);
+  let sourceTokens = input.sourceTokens;
+  const estimateSource = () =>
+    (sourceTokens ??= input.messages.reduce(
+      (sum, message) => sum + estimateMessage(message),
+      0,
+    ));
 
   // Usable = full context minus output reservation minus fixed overhead (system + tools)
   // minus LTM tokens already injected into the system prompt this turn.
@@ -3471,29 +3498,9 @@ function transformInner(input: {
   // at quality boundaries.
   const usable = usableRaw;
 
-  // `usable` is REAL provider tokens (contextLimit/overhead/ltm are all real,
-  // and `overhead` is now TRUE system+tools). The body budgets below are
-  // compared against the BPE-backed body estimates (estimateMessage →
-  // estimateTokens, see tokenize.ts). For cl100k_base / claude encodings the
-  // BPE estimate is close to real provider tokens (within ~1% on natural
-  // prose), so the BODY_TOKEN_RATIO = 1.68 multiplier is now an OVER-estimate
-  // rather than the chars/3-era correction factor. The body-budget math still
-  // divides usable by BODY_TOKEN_RATIO so the cfg.budget.* fractions honor the
-  // "fraction × usable REAL tokens" semantics, then the body-size math uses
-  // the BPE estimate as-is. NOTE: calibrate() (see line ~1544) inflates the
-  // per-message estimate by BODY_TOKEN_RATIO before subtracting from real
-  // actualInput to compute `overhead` — under BPE this inflate factor is now
-  // a known over-correction that drives `overhead` toward 0 (clamped at 0)
-  // for any non-trivial body. A separate per-encoding calibration pass is
-  // tracked as a follow-up; until then calibratedOverhead will under-report
-  // for large sessions (oversized usable → softer compression triggers). The
-  // PR keeps the 1.68 constant to preserve budget semantics across the
-  // chars/3 → BPE migration window.
-  const bodyUsable = Math.floor(usable / BODY_TOKEN_RATIO);
-
-  const distilledBudget = Math.floor(bodyUsable * cfg.budget.distilled);
+  const distilledBudget = Math.floor(usable * cfg.budget.distilled);
   // Base raw budget. May be overridden below for post-idle compact mode.
-  let rawBudget = Math.floor(bodyUsable * cfg.budget.raw);
+  let rawBudget = Math.floor(usable * cfg.budget.raw);
 
   // --- Escalated-stage budget ceiling (layers 2-3 only) ---
   // The ESCALATED compression stages (layer 2: rawFrac 0.5; layer 3: rawFrac
@@ -3531,56 +3538,19 @@ function transformInner(input: {
   if (sid && effectiveMinLayer > 0 && !input.sourceWindow?.offset)
     saveForceMinLayer(sid, 0);
 
-  // --- Approach A: Cache-preserving passthrough ---
-  // Use exact token count from the previous API response when available.
-  // Only the delta (messages added since last call) uses chars/3 estimation,
-  // making the layer-0 decision highly accurate from the API's own tokenizer.
-  // maxInput = absolute ceiling the API enforces: input_tokens + max_tokens <= context
+  // Anchor passthrough sizing to the last provider count when available.
   const maxInput = contextLimit - outputReserved;
-
-  // True when we have real API token data from a previous turn in this session.
-  // When false (first turn / session change), chars/3 estimates may still diverge
-  // from the real tokenizer — so tryFit output must be validated with a safety
-  // multiplier before being used.
   const calibrated = sessState.lastKnownInput > 0;
 
-  // Returns true if a rebuilt compression-stage window is safe to ship.
-  //
-  // A rebuilt window's `totalTokens` is a FRESH chars/3 estimate of the WHOLE
-  // window — it is NOT anchored to the API's last real count the way the
-  // layer-0 delta path (expectedInput = lastKnownInput + delta) is. So being
-  // "calibrated" does NOT make a rebuilt window exact: chars/3 undercounts the
-  // real tokenizer ~1.5-3x. Previously this returned `true` unconditionally for
-  // calibrated sessions, so a stage whose real size exceeded the model's
-  // context window was shipped anyway → unrecoverable "prompt is too long"
-  // (this, with the unclamped budgets, wedged session 0AVWKugtmhBKqLOX9).
-  //
-  // Validate every rebuilt window — calibrated or not — against the hard API
-  // ceiling with the same undercount safety multiplier. Rejecting an
-  // over-ceiling stage makes the loop escalate to a tighter layer (ultimately
-  // the always-returns emergency tail) instead of overflowing the model. This
-  // is only the stage-loop acceptance gate (the layer-0 / tier-gate paths use
-  // their own `maxInput * HARD_CEILING_MARGIN` checks against expectedInput).
-  //
-  // Scale-correct check: inflate the chars/3 body (result.totalTokens) back to
-  // REAL tokens via BODY_TOKEN_RATIO and add the real overhead + LTM (which are
-  // NOT in result.totalTokens — it is the message body only). Compare to
-  // maxInput. This is exact: it is the same quantity the API counts. Body
-  // budgets are now sized as fractions of `usable` REAL tokens (bodyUsable =
-  // usable/RATIO chars/3), so the layer-1 window real-total is
-  // 0.65*(maxInput−overhead−ltm) + overhead + ltm = 0.65*maxInput +
-  // 0.35*(overhead+ltm) < maxInput — never falsely rejected in the normal
-  // regime, even with the 1.15x stable-window hysteresis (~0.71). The old check
-  // (`totalTokens * 1.5 <= maxInput`) ignored overhead+ltm; with the bigger
-  // post-fix budgets it would have under-counted and risked shipping an
-  // over-ceiling window.
+  // Rebuilt windows use local estimates even on calibrated turns. Leave the
+  // same headroom as layer 0 for framing and tokenizer approximation.
   function fitsWithSafetyMargin(
     result: { totalTokens: number } | null,
   ): boolean {
-    if (!result) return false;
     return (
-      result.totalTokens * BODY_TOKEN_RATIO + overhead + sessLtmTokens <=
-      maxInput
+      result !== null &&
+      result.totalTokens + overhead + sessLtmTokens <=
+        maxInput * HARD_CEILING_MARGIN
     );
   }
 
@@ -3623,12 +3593,11 @@ function transformInner(input: {
     sessState.postIdleCompact = false;
     // Skip layer 0 — don't pass through all raw messages on a cold cache.
     effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
-    // Use a tighter raw budget on cold cache to limit write cost. chars/3 scale
-    // (bodyUsable) to match the body estimates, same as the base rawBudget.
-    rawBudget = Math.floor(bodyUsable * 0.2);
+    // Use a tighter raw budget on cold cache to limit write cost.
+    rawBudget = Math.floor(usable * 0.2);
     log.info(
       `post-idle compact: session=${sid} rawBudget=${rawBudget}` +
-        ` (${Math.floor(bodyUsable * cfg.budget.raw)}→${rawBudget})`,
+        ` (${Math.floor(usable * cfg.budget.raw)}→${rawBudget})`,
     );
   }
 
@@ -3638,23 +3607,19 @@ function transformInner(input: {
     // Use message ID tracking (Option B) to identify new messages accurately.
     // After compression, the "last window" is a subset of the full message array —
     // counting by index would treat evicted messages as new (off-by-250 error).
-    // Safety multiplier for the delta portion of the calibrated estimate.
-    // The base (lastKnownInput) is exact from the API, but new messages use
-    // chars/3 which undercounts by ~1.68x.  Calibrated overhead captures most
-    // of the structural gap, but the per-message content gap remains ~20-30%.
-    // 1.3 covers this without triggering unnecessary compression.
+    // Preserve headroom for changes in framing and approximate tokenizers.
     const CALIBRATED_DELTA_SAFETY = 1.3;
 
     let newMessages: MessageWithParts[];
     let omittedNewTokens = input.sourceWindow?.omittedTokens ?? 0;
-    if (sessState.lastWindowMessageIDs.size > 0) {
+    if (sessState.lastKnownWindowMessageIDs.size > 0) {
       if (input.sourceWindow?.offset) {
         const prior = new Set(input.sourceWindow.previousWindowIDs);
-        for (const id of sessState.lastWindowMessageIDs)
+        for (const id of sessState.lastKnownWindowMessageIDs)
           if (!prior.has(id)) throw new FullSourceRequired("calibration");
       }
       newMessages = input.messages.filter(
-        (m) => !sessState.lastWindowMessageIDs.has(m.info.id),
+        (m) => !sessState.lastKnownWindowMessageIDs.has(m.info.id),
       );
     } else if (input.sourceWindow?.offset) {
       const sourceCount = input.sourceWindow.offset + input.messages.length;
@@ -3681,13 +3646,25 @@ function transformInner(input: {
     const ltmDelta = sessLtmTokens - sessState.lastKnownLtm;
     expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
   } else {
-    // First turn or session change: fall back to chars/3 estimate + overhead.
-    const messageTokens = input.messages.reduce(
-      (s, m) => s + estimateMessage(m),
-      input.sourceWindow?.omittedTokens ?? 0,
-    );
-    expectedInput = messageTokens + overhead + sessLtmTokens;
+    expectedInput =
+      estimateSource() +
+      (input.sourceWindow?.omittedTokens ?? 0) +
+      overhead +
+      sessLtmTokens;
   }
+
+  // A full replay for native or no-store traffic has no reusable aggregate.
+  // Keep warm passthrough proportional to new content and refresh overhead
+  // when a complete body count is available (cold start or rebuilt windows).
+  const skipOverheadCalibration =
+    calibrated &&
+    sessState.overheadEma !== null &&
+    input.skipUncachedBodyRecount &&
+    sourceTokens === undefined;
+  const passthroughBody = () =>
+    skipOverheadCalibration
+      ? Math.max(0, expectedInput - overhead - sessLtmTokens)
+      : estimateSource();
 
   // Layer-0 sizing (input estimate + ceiling). Extracted to layer0Bounds() so
   // the pipeline's turn-1 LTM decision (isLargeColdStart) shares ONE definition
@@ -3752,10 +3729,9 @@ function transformInner(input: {
     // first (expensive-cache / small target$) this clause is inert and the
     // graduated multiplier governs instead. Re-compression cannot loop: after
     // one compression layer0Input drops below 0.8 fill. (#961)
-    const messageTokens = calibrated
-      ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm) // approximate raw portion
-      : expectedInput - overhead - sessLtmTokens;
+    const messageTokens = passthroughBody();
     return {
+      skipOverheadCalibration,
       messages: input.messages,
       layer: 0,
       distilledTokens: 0,
@@ -3820,15 +3796,14 @@ function transformInner(input: {
     ) {
       if (input.sourceWindow?.offset)
         throw new FullSourceRequired("passthrough");
-      const messageTokens = calibrated
-        ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
-        : expectedInput - overhead - sessLtmTokens;
+      const messageTokens = passthroughBody();
       log.info(
         `tier gate: session=${sid} skipping compression — bustCost not justified` +
           ` (input=${Math.round(layer0Input)} compressed=${compressedEstimate} busts=${busts})`,
       );
       return {
         messages: input.messages,
+        skipOverheadCalibration,
         layer: 0,
         distilledTokens: 0,
         rawTokens: Math.max(0, messageTokens),
@@ -3870,7 +3845,7 @@ function transformInner(input: {
   // the prompt cache. Layers 2+ already cause full cache invalidation via
   // tool stripping / message restructuring, so they use the non-cached path.
   const cached = sid
-    ? distilledPrefixCached(distillations, sid, sessState)
+    ? distilledPrefixCached(distillations, sid, sessState, estimateMessage)
     : (() => {
         const msgs = distilledPrefix(distillations);
         return {
@@ -3905,22 +3880,12 @@ function transformInner(input: {
     //     actually shrink toward the cap. A null fraction on an escalated stage
     //     (e.g. layer 2's distFrac) falls back to the configured base fraction,
     //     still clamped to the ceiling.
-    // `stageBudgetUsable` is REAL tokens (min of real usable and the real cost
-    // ceiling); divide by BODY_TOKEN_RATIO so the escalated body budgets land on
-    // the same chars/3 scale as the body estimates (matching distilledBudget/
-    // rawBudget above).
     const isEscalated = stageLayer > 1;
     const stageRawBudget = isEscalated
-      ? Math.floor(
-          (stageBudgetUsable * (stage.rawFrac ?? cfg.budget.raw)) /
-            BODY_TOKEN_RATIO,
-        )
+      ? Math.floor(stageBudgetUsable * (stage.rawFrac ?? cfg.budget.raw))
       : rawBudget;
     const stageDistBudget = isEscalated
-      ? Math.floor(
-          (stageBudgetUsable * (stage.distFrac ?? cfg.budget.distilled)) /
-            BODY_TOKEN_RATIO,
-        )
+      ? Math.floor(stageBudgetUsable * (stage.distFrac ?? cfg.budget.distilled))
       : distilledBudget;
 
     // Determine prefix: if distLimit is finite, re-render with trimmed distillations.
@@ -4003,6 +3968,7 @@ function transformInner(input: {
       // prefix the trim gate kept — otherwise tryFitStable's own
       // `prefixTokens > distilledBudget` guard would reject it and escalate.
       result = tryFitStable({
+        estimateMessage,
         sourceWindow: input.sourceWindow,
         messages: dedupMessages,
         prefix: stagePrefix,
@@ -4021,6 +3987,7 @@ function transformInner(input: {
       sessState.rawWindowCache = null;
       sessState.distilledBudgetHighWater = 0;
       result = tryFit({
+        estimateMessage,
         sourceWindow: input.sourceWindow,
         messages: dedupMessages,
         prefix: stagePrefix,
@@ -4086,12 +4053,11 @@ function transformInner(input: {
     0,
   );
 
-  // Token budget for the raw tail. clamp(bodyUsable * 0.25, 2K, 8K) — chars/3
-  // scale (bodyUsable) to match estimateMessage; the 2K/8K clamp dominates
+  // Token budget for the raw tail. The 2K/8K clamp dominates
   // except on very small contexts.
   const tailBudget = Math.max(
     2_000,
-    Math.min(8_000, Math.floor(bodyUsable * 0.25)),
+    Math.min(8_000, Math.floor(usable * 0.25)),
   );
 
   // Current turn is always included (non-negotiable — dropping it causes
@@ -4115,13 +4081,10 @@ function transformInner(input: {
   const remaining = Math.max(0, tailBudget - currentTurnTokens);
   for (let i = nuclearTurnStart - 1; i >= 0 && olderTokens < remaining; i--) {
     const msg = input.messages[i];
-    const est = estimateMessage(msg);
+    const cleaned = { ...msg, parts: cleanParts(msg.parts) };
+    const est = estimateMessage(cleaned);
     if (olderTokens + est > remaining) break;
-    olderMessages.unshift({
-      info: msg.info,
-      parts: cleanParts(msg.parts),
-      hiddenInputTokens: msg.hiddenInputTokens,
-    });
+    olderMessages.unshift(cleaned);
     olderTokens += est;
   }
 
@@ -4172,6 +4135,12 @@ function transformInner(input: {
 // count but the "new messages" delta is computed against the full DB count,
 // making newMsgCount ≈ 0 and causing layer 0 passthrough on an overflowing session.
 export function transform(input: {
+  /** Resolved token total for the supplied messages, in budget.encoding. */
+  sourceTokens?: number;
+  /** Allow warm passthrough without scanning the full body again. */
+  skipUncachedBodyRecount?: boolean;
+  /** Apply the gateway prefill rule before recording the sent window. */
+  dropTrailingAssistantPrefill?: boolean;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   projectPath: string;
@@ -4200,6 +4169,9 @@ export function transform(input: {
 }
 
 function transformWithCounts(input: {
+  sourceTokens?: number;
+  skipUncachedBodyRecount?: boolean;
+  dropTrailingAssistantPrefill?: boolean;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   projectPath: string;
@@ -4239,9 +4211,9 @@ function transformWithCounts(input: {
   const coldStartSid = input.sessionID ?? input.messages[0]?.info.sessionID;
   if (coldStartSid) getSessionState(coldStartSid).transformCount++;
 
-  let result: TransformResult;
+  let candidate: ReturnType<typeof transformInner>;
   try {
-    result = transformInner(input);
+    candidate = transformInner(input);
   } catch (error) {
     if (original && attemptSid) {
       sessionStates.set(attemptSid, original);
@@ -4262,13 +4234,36 @@ function transformWithCounts(input: {
   // Sanitize non-terminal tool parts before the window reaches the SDK.
   // Must run after transformInner (covers all layers 0-4) and before the
   // trailing-drop loop in index.ts sees the messages.
-  result.messages = sanitizeToolParts(result.messages);
+  const { skipOverheadCalibration, ...result } = candidate;
+  let sent = sanitizeToolParts(result.messages);
+  const sanitizedTools = sent !== result.messages;
+  if (input.dropTrailingAssistantPrefill) {
+    const end =
+      sent.findLastIndex(
+        (message) =>
+          message.info.role === "user" || message.parts.some(isToolPart),
+      ) + 1;
+    if (end < sent.length) {
+      const removed = estimateMessages(sent.slice(end), input.budget?.encoding);
+      result.rawTokens = Math.max(0, result.rawTokens - removed);
+      result.totalTokens = result.distilledTokens + result.rawTokens;
+      sent = sent.slice(0, end);
+    }
+  }
 
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   if (sid) {
     const state = getSessionState(sid);
-    state.lastTransformedCount = result.messages.length;
-    state.lastTransformEstimate = result.totalTokens;
+    state.lastTransformedCount = sent.length;
+    state.lastTransformEstimate = skipOverheadCalibration
+      ? 0
+      : sanitizedTools
+        ? estimateMessages(sent, input.budget?.encoding)
+        : result.totalTokens;
+    state.calibrationKey = Symbol();
+    Object.defineProperty(result, "calibrationKey", {
+      value: state.calibrationKey,
+    });
     state.lastLayer = result.layer;
     // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
     // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
@@ -4280,7 +4275,7 @@ function transformWithCounts(input: {
     ) {
       state.maxSustainedLayer = result.layer;
     }
-    state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
+    state.lastWindowMessageIDs = new Set(sent.map((m) => m.info.id));
 
     // Source the shared cache-economics compressed size from the ACTUAL rebuilt
     // window (issue #881), lifted onto the same INPUT scale as cacheSizeFull
@@ -4334,11 +4329,16 @@ function transformWithCounts(input: {
         ` usable=${result.usable} tier=${getTier(result.totalTokens)} l0cap=${maxLayer0Tokens || "off"}`,
     );
   }
+  result.messages = sent;
   return result;
 }
 
 // Compute our message-only estimate for a set of messages (for calibration use)
-export function estimateMessages(messages: MessageWithParts[]): number {
+export function estimateMessages(
+  messages: MessageWithParts[],
+  encoding?: EncodingName,
+): number {
+  const estimateMessage = messageEstimator(encoding);
   return messages.reduce((sum, m) => sum + estimateMessage(m), 0);
 }
 
@@ -4393,6 +4393,7 @@ function currentTurnStart(messages: MessageWithParts[]): number {
 }
 
 function tryFit(input: {
+  estimateMessage: MessageEstimator;
   sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   prefix: MessageWithParts[];
@@ -4415,6 +4416,7 @@ function tryFit(input: {
   TransformResult,
   "layer" | "usable" | "distilledBudget" | "rawBudget" | "refreshLtm"
 > | null {
+  const { estimateMessage } = input;
   // If distilled prefix exceeds its budget, fail this layer
   if (input.prefixTokens > input.distilledBudget && input.prefix.length > 0)
     return null;
@@ -4510,7 +4512,7 @@ function tryFit(input: {
   }
 
   const rawMessages = [...olderMessages.slice(cutoff), ...currentTurn];
-  const rawTokens = olderTokens + currentTurnTokens;
+  let rawTokens = olderTokens + currentTurnTokens;
 
   // Apply system-reminder stripping + optional tool output stripping.
   // The current turn (end of rawMessages) is always "protected" — never stripped.
@@ -4522,15 +4524,13 @@ function tryFit(input: {
       isCurrentTurn ||
       input.strip === "none" ||
       (input.strip === "old-tools" && fromEnd <= protectedTurns * 2);
-    const parts = isProtected
-      ? cleanParts(msg.parts)
-      : cleanParts(
-          input.strip === "all-tools"
-            ? stripToolOutputs(msg.parts)
-            : stripToolOutputs(msg.parts),
-        );
-    const changed = parts !== msg.parts;
-    return changed ? { info: msg.info, parts } : msg;
+    const parts = cleanParts(
+      isProtected ? msg.parts : stripToolOutputs(msg.parts),
+    );
+    if (parts === msg.parts) return msg;
+    const cleaned = { ...msg, parts };
+    rawTokens += estimateMessage(cleaned) - estimateMessage(msg);
+    return cleaned;
   });
 
   const total = input.prefixTokens + rawTokens;

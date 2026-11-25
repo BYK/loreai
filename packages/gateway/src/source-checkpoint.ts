@@ -4,6 +4,7 @@ import {
   SourceWindowStore,
   TOKEN_ESTIMATE_CACHE_VERSION,
   estimateMessages,
+  type EncodingName,
   isToolPart,
   type LoreMessageWithParts,
   type SourceWindow,
@@ -113,11 +114,22 @@ class ToolIds {
   }
 }
 
-function valid(value: unknown, sessionID: string): value is Payload {
+function versionFor(base: string, encoding: EncodingName): string {
+  // Preserve existing cl100k checkpoints, while making other versions
+  // incompatible with older builds that assume every count uses cl100k.
+  return encoding === "cl100k_base" ? base : `${base}:${encoding}`;
+}
+
+function valid(
+  value: unknown,
+  sessionID: string,
+  encoding: EncodingName,
+): value is Payload {
   if (!value || typeof value !== "object") return false;
   const v = value as Payload;
   return (
-    (v.version === LEGACY_VERSION || v.version === CONTEXT_VERSION) &&
+    (v.version === versionFor(LEGACY_VERSION, encoding) ||
+      v.version === versionFor(CONTEXT_VERSION, encoding)) &&
     typeof v.protocol === "string" &&
     Number.isSafeInteger(v.sourceCount) &&
     v.sourceCount > 0 &&
@@ -179,7 +191,8 @@ function valid(value: unknown, sessionID: string): value is Payload {
     ) &&
     typeof v.toolIds === "string" &&
     Buffer.from(v.toolIds, "base64").length === BLOOM_BYTES &&
-    (v.version !== CONTEXT_VERSION || typeof v.boundarySafe === "boolean")
+    (v.version !== versionFor(CONTEXT_VERSION, encoding) ||
+      typeof v.boundarySafe === "boolean")
   );
 }
 
@@ -256,6 +269,7 @@ export class SourceCheckpoint {
     boundarySafe?: boolean;
   };
   private readonly version: string;
+  private readonly encoding: EncodingName;
 
   constructor(input: {
     messages: GatewayMessage[];
@@ -263,6 +277,7 @@ export class SourceCheckpoint {
     projectPath: string;
     noStore: boolean;
     protocol: string;
+    encoding?: EncodingName;
     forceFull?: boolean;
     boundarySafe?: boolean;
     sourcePrefix?: {
@@ -273,7 +288,11 @@ export class SourceCheckpoint {
     timing: PreparationTiming;
   }) {
     const contextProtocol = isContextCheckpointProtocol(input.protocol);
-    this.version = contextProtocol ? CONTEXT_VERSION : LEGACY_VERSION;
+    this.encoding = input.encoding ?? "cl100k_base";
+    this.version = versionFor(
+      contextProtocol ? CONTEXT_VERSION : LEGACY_VERSION,
+      this.encoding,
+    );
     const sourcePrefixCount = input.sourcePrefix?.sourceCount ?? 0;
     this.scope = {
       protocol: input.protocol,
@@ -284,7 +303,9 @@ export class SourceCheckpoint {
     };
     this.store = new SourceWindowStore(input);
     const loaded = this.store.load();
-    const candidate = valid(loaded, input.sessionID) ? loaded : undefined;
+    const candidate = valid(loaded, input.sessionID, this.encoding)
+      ? loaded
+      : undefined;
 
     if (input.sourcePrefix) {
       if (!contextProtocol) {
@@ -397,6 +418,10 @@ export class SourceCheckpoint {
     return this.next !== undefined;
   }
 
+  get resolvedTokenTotal(): number {
+    return this.resolvedTokens.reduce((sum, tokens) => sum + tokens, 0);
+  }
+
   get capturedResolvedTokens(): number[] {
     return this.resolvedTokens.slice();
   }
@@ -433,7 +458,7 @@ export class SourceCheckpoint {
       )
         return cached;
       estimated++;
-      return estimateMessages([m]);
+      return estimateMessages([m], this.encoding);
     });
     this.scope.timing.metric("source_estimated_messages", estimated);
     this.ids = ids;
@@ -516,7 +541,7 @@ export class SourceCheckpoint {
         previousWindowIDs: [...selected],
       },
       toolIds: toolIds.bits.toString("base64"),
-      ...(this.version === CONTEXT_VERSION
+      ...(isContextCheckpointProtocol(this.scope.protocol)
         ? { boundarySafe: this.scope.boundarySafe === true }
         : {}),
     };

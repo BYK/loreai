@@ -132,6 +132,7 @@ import {
   evictSession,
   calibrate,
   getLastTransformedCount,
+  encodingForModel,
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
@@ -9231,7 +9232,10 @@ export function buildStreamingResponse(
     : undefined;
   if (recallPersistence) recallContext?.onTransactionReady?.(recallPersistence);
   let sourceSucceeded = false;
+  let principalInputTokens: number | undefined;
   const complete = (response: GatewayResponse): void => {
+    if (principalInputTokens !== undefined)
+      response.principalInputTokens = principalInputTokens;
     onComplete(response);
     sourceSucceeded = true;
   };
@@ -9487,6 +9491,7 @@ export function buildStreamingResponse(
           if (recallAccum?.hasRecall() && recallContext) {
             let currentAccum: RecallAwareAccumulator = recallAccum;
             let currentResp = recallAccum.getResponse();
+            principalInputTokens = providerInputTokens(currentResp.usage);
             let currentBlockOffset = warningOffset; // accumulates across iterations
             let currentModifiedReq = recallContext.modifiedReq;
             let recallDepth = 0;
@@ -12730,11 +12735,14 @@ export function streamResponsesRecallAware(
     return { chunk: encoder.encode(output), sequenceCount: sequence.count };
   };
 
+  let principalInputTokens: number | undefined;
   const finish = (resp: GatewayResponse, successful: boolean): boolean => {
     if (completionAttempted) return completed;
     completionAttempted = true;
     recallDiagnostics.finish(successful ? "completed" : "failed");
     try {
+      if (principalInputTokens !== undefined)
+        resp.principalInputTokens = principalInputTokens;
       opts.onComplete(resp, successful);
       completed = true;
       return true;
@@ -14483,6 +14491,7 @@ export function streamResponsesRecallAware(
               transactionProviderUsage = { ...ZERO_USAGE };
               // The principal stream is sunk work. Bound its validated size,
               // then charge each additional continuation against its own cap.
+              principalInputTokens = providerInputTokens(state.usage);
               recallBudget.recordPrincipalUsage(
                 state.usage,
                 {
@@ -17757,6 +17766,14 @@ function accountConversationUsage(
   return usageForSentry;
 }
 
+function providerInputTokens(usage: GatewayUsage | undefined): number {
+  return (
+    (usage?.inputTokens ?? 0) +
+    (usage?.cacheReadInputTokens ?? 0) +
+    (usage?.cacheCreationInputTokens ?? 0)
+  );
+}
+
 /**
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
@@ -17786,11 +17803,18 @@ function postResponseForTenant(
     confirmKnownSessionHeader(req, sessionState, config);
 
     // --- Calibrate overhead from real token counts ---
-    const actualInput =
-      (usage.inputTokens ?? 0) +
-      (usage.cacheReadInputTokens ?? 0) +
-      (usage.cacheCreationInputTokens ?? 0);
-    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
+    const actualInput = resp.principalInputTokens ?? providerInputTokens(usage);
+    if (
+      Number.isSafeInteger(actualInput) &&
+      actualInput > 0 &&
+      temporalInput.calibrationKey !== undefined
+    )
+      calibrate(
+        actualInput,
+        sessionID,
+        getLastTransformedCount(sessionID),
+        temporalInput.calibrationKey,
+      );
 
     // --- Sentry cache context + cost metric ---
     const usageForSentry = accountConversationUsage(
@@ -22397,7 +22421,29 @@ async function handleConversationTurnPrepared(
     cacheReadCostPerToken = modelSpec.cacheReadCost;
   }
 
+  const tokenProvider =
+    recallProviderID ??
+    requestUpstreamRoute.providerID ??
+    (requestUpstreamRoute.effectiveProtocol === "anthropic"
+      ? "anthropic"
+      : undefined);
+  const encoding = encodingForModel({
+    providerID: tokenProvider,
+    modelID: req.model,
+  });
   const modelBudget = {
+    encoding,
+    modelKey: createHash("sha256")
+      .update(
+        JSON.stringify([
+          requestUpstreamRoute.effectiveUpstreamBase,
+          requestUpstreamRoute.effectiveProtocol,
+          tokenProvider,
+          req.model,
+          encoding,
+        ]),
+      )
+      .digest("hex"),
     contextLimit: modelSpec.context,
     outputReserved: modelSpec.output,
     maxLayer0Tokens: layer0Cap,
@@ -22562,6 +22608,7 @@ async function handleConversationTurnPrepared(
     noStore: suppressTemporalStorage,
     protocol: req.protocol,
     checkpointProtocol: requestCheckpointProtocol(req),
+    encoding: modelBudget.encoding,
     checkpointBoundarySafe: req.sourceInput?.boundarySafe,
     sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
@@ -22630,7 +22677,10 @@ async function handleConversationTurnPrepared(
       // calibrated overhead, not a global EMA blended across sessions.
       // Sub-agent sessions get a smaller, needs-based LTM budget so injected
       // knowledge doesn't crowd out a short focused task's own context/output.
-      const ltmBudgetOpts = { isSubagent: !!sessionState.isSubagent };
+      const ltmBudgetOpts = {
+        isSubagent: !!sessionState.isSubagent,
+        modelKey: modelBudget.modelKey,
+      };
       const ltmBudget = getLtmBudget(
         ltmFraction,
         sessionID ?? undefined,
@@ -22713,6 +22763,7 @@ async function handleConversationTurnPrepared(
           // the module globals were set (ltm/entity fetches above) could have
           // let a concurrent request for a different model clobber them. (#1401)
           budget: modelBudget,
+          sourceTokens: checkpoint?.resolvedTokenTotal,
         });
 
       // --- Context-bound LTM (non-preference entries; rides the durable prompt
@@ -23236,6 +23287,9 @@ async function handleConversationTurnPrepared(
       projectPath,
       sessionID,
       budget: modelBudget,
+      sourceTokens: checkpoint?.resolvedTokenTotal,
+      skipUncachedBodyRecount: true,
+      dropTrailingAssistantPrefill: true,
       sourceWindow,
       noStore: suppressTemporalStorage,
     });
@@ -23256,6 +23310,7 @@ async function handleConversationTurnPrepared(
       noStore: suppressTemporalStorage,
       protocol: req.protocol,
       checkpointProtocol: requestCheckpointProtocol(req),
+      encoding: modelBudget.encoding,
       checkpointBoundarySafe: req.sourceInput?.boundarySafe,
       forceFull: true,
       sourcePrefix: requestSourcePrefix(req),
@@ -23268,6 +23323,9 @@ async function handleConversationTurnPrepared(
       projectPath,
       sessionID,
       budget: modelBudget,
+      sourceTokens: checkpoint?.resolvedTokenTotal,
+      skipUncachedBodyRecount: true,
+      dropTrailingAssistantPrefill: true,
       noStore: suppressTemporalStorage,
     });
   }
@@ -23275,6 +23333,7 @@ async function handleConversationTurnPrepared(
   // assistant turn's temporal metadata.
   temporalInput = Object.freeze({
     ...temporalInput,
+    calibrationKey: result.calibrationKey,
     gradient: {
       layer: result.layer,
       rawTokens: result.rawTokens,
@@ -23307,15 +23366,6 @@ async function handleConversationTurnPrepared(
         })
       : undefined;
 
-  // Drop trailing pure-text assistant messages to prevent prefill errors
-  for (;;) {
-    const last = result.messages.at(-1);
-    if (!last || last.info.role === "user") break;
-    const hasToolParts = last.parts.some((p) => p.type === "tool");
-    if (hasToolParts) break;
-    result.messages.pop();
-  }
-
   // Persist the cross-turn dedup decision memo when it changed, so the stable
   // full/collapsed form of each tool output survives a gateway restart (v41).
   // Cheap change-guard avoids a DB write on turns where dedup didn't run.
@@ -23346,6 +23396,7 @@ async function handleConversationTurnPrepared(
       // Per-session overhead (Bug 1, lever 2). Sub-agents keep the smaller
       // needs-based budget on the emergency-refresh path too.
       const ltmBudget = getLtmBudget(ltmFraction, sessionID, {
+        modelKey: modelBudget.modelKey,
         isSubagent: !!sessionState.isSubagent,
       });
       // Preferences have their own dedicated budget and remain pinned.
@@ -24284,6 +24335,7 @@ async function handleConversationTurnPrepared(
     // into t:<id> source citations). Resource, progress, and time budgets
     // normally end the chain before its configured emergency ceiling.
     let currentResp = resp;
+    const principalInputTokens = providerInputTokens(resp.usage);
     let recallDepth = 0;
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
@@ -24315,6 +24367,7 @@ async function handleConversationTurnPrepared(
       suppressTemporalStorage,
     );
     const finishBufferedResponse = (response: GatewayResponse): void => {
+      response.principalInputTokens = principalInputTokens;
       if (req.stream || recallDepth > 0) {
         // Recall state and successful-turn storage share the existing atomic
         // finalizer, after downstream EOF, for buffered clients as well.

@@ -440,6 +440,7 @@ export { distillLimiter, curatorLimiter } from "./session-limiter";
 export {
   estimateTokens,
   encodingForModel,
+  type EncodingName,
   TOKEN_ESTIMATE_CACHE_VERSION,
 } from "./tokenize";
 export { SemanticTokenCache } from "./semantic-token-cache";
