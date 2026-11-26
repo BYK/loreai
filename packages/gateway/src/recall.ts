@@ -1808,7 +1808,11 @@ export function expandRecallMarkers(
           : {}),
       });
       if (sharedSplit?.inlineContinuationInSuffix && msg.provenancePositions) {
-        msg.provenancePositions.splice(markerIdx + 1, 0, 0);
+        msg.provenancePositions.splice(
+          markerIdx + 1,
+          0,
+          msg.provenancePositions[markerIdx],
+        );
       }
     }
 
@@ -1818,6 +1822,20 @@ export function expandRecallMarkers(
     // the marker are from the same turn (mixed tools) and stay together.
     const afterMarker = msg.content.slice(markerIdx + 1);
     const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
+    const markerProvenanceIndex = msg.provenancePositions?.[markerIdx];
+    const continuationProvenance =
+      suffixProvenance.length > 0 && markerProvenanceIndex !== undefined
+        ? {
+            provenanceContent: [
+              ...suffixProvenance,
+              ...(msg.provenanceContent?.slice(markerProvenanceIndex + 1) ??
+                []),
+            ],
+            provenancePositions: msg.provenancePositions
+              ?.slice(markerIdx + 1)
+              .map((position) => position - markerProvenanceIndex),
+          }
+        : undefined;
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {
@@ -1890,9 +1908,8 @@ export function expandRecallMarkers(
         role: "assistant",
         content: afterMarker,
       };
-      if (suffixProvenance.length > 0) {
-        continuationMsg.provenanceContent = suffixProvenance;
-        continuationMsg.provenancePositions = afterMarker.map(() => 0);
+      if (continuationProvenance) {
+        Object.assign(continuationMsg, continuationProvenance);
       }
       req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
       // Advance to `toolResultMsg` (`i + 1`) so the next `i++` inspects

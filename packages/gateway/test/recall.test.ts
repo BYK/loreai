@@ -6346,6 +6346,129 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     expect(item.content[4]).toBe(afterPart);
   });
 
+  test.each([
+    { inline: false, prefix: false },
+    { inline: true, prefix: false },
+    { inline: false, prefix: true },
+    { inline: true, prefix: true },
+  ])(
+    "preserves native companion calls after a shared recall suffix ($inline, prefix: $prefix)",
+    ({ inline, prefix }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740d5";
+      const query = "shared suffix companion";
+      const marker = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}${inline ? "\ninline" : ""}`;
+      const earlier = { type: "output_text", text: "earlier" };
+      const beforeReasoning = {
+        type: "reasoning",
+        id: "rs_before",
+        encrypted_content: "before",
+      };
+      const item = {
+        type: "message",
+        id: "msg_shared_companion",
+        role: "assistant",
+        status: "completed",
+        content: [
+          ...(prefix ? [earlier] : []),
+          { type: "output_text", text: marker },
+          { type: "output_text", text: "trailing" },
+        ],
+      };
+      const reasoning = {
+        type: "reasoning",
+        id: "rs_companion",
+        encrypted_content: "encrypted",
+      };
+      const call = {
+        type: "function_call",
+        id: "fc_read",
+        call_id: "call_read",
+        name: "read",
+        arguments: "{}",
+        status: "completed",
+      };
+      const output = {
+        type: "function_call_output",
+        call_id: "call_read",
+        output: "file contents",
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [
+            {
+              role: "developer",
+              id: "msg_native_instructions",
+              content: [{ type: "input_text", text: "be concise" }],
+            },
+            { type: "message", role: "user", content: "question" },
+            ...(prefix ? [beforeReasoning] : []),
+            item,
+            reasoning,
+            call,
+            output,
+          ],
+        },
+        {},
+      );
+      const store: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            anchorContextId: recallAnchorContext(
+              req.messages,
+              1,
+              prefix
+                ? [
+                    ...(req.messages[1].provenanceContent?.slice(0, 1) ?? []),
+                    {
+                      type: "opaque",
+                      raw: { ...item, content: [earlier] },
+                      responsesItem: true,
+                    },
+                  ]
+                : [],
+            ),
+            input: { query, scope: "all" },
+            companionToolUses: [
+              { id: "call_read", name: "read", input: {}, side: "after" },
+            ],
+          }),
+        ],
+      ]);
+
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      expect(req.messages[3].provenancePositions).toEqual(
+        inline ? [0, 0, 2] : [0, 2],
+      );
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input.map((entry) => entry.type)).toEqual([
+        undefined,
+        "message",
+        ...(prefix ? ["reasoning"] : []),
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+      ]);
+      expect(input[prefix ? 6 : 5]).toMatchObject({
+        content: [
+          ...(inline ? [{ type: "output_text", text: "inline" }] : []),
+          { type: "output_text", text: "trailing" },
+        ],
+      });
+      expect(input.slice(prefix ? 7 : 6)).toEqual([reasoning, call, output]);
+      expect(item.content[prefix ? 1 : 0].text).toBe(marker);
+    },
+  );
+
   test("a matched marker in part 1 of a shared item matches production per-part anchorContextId and keeps native SourceRange", () => {
     const anchorId = "123e4567-e89b-42d3-a456-4266141740d3";
     const query = "production anchor context query";
