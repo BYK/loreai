@@ -193,6 +193,7 @@ import {
   looksLikeSSE,
   providerRoutingValue,
   requestTargetsOpenRouter,
+  stripResponsesContentIndex,
   ZERO_USAGE,
 } from "./translate/types";
 import { GEMINI_DEFAULT_UPSTREAM, type GatewayConfig } from "./config";
@@ -25703,7 +25704,8 @@ export function loreMessagesToGateway(
     // source provenance, including reasoning between parallel tool calls.
     const nativeContentUnchanged =
       candidate?.responsesSourceRange !== undefined &&
-      JSON.stringify(content) === JSON.stringify(candidate.content);
+      JSON.stringify(content) ===
+        JSON.stringify(stripResponsesContentIndex(candidate.content));
     if (candidate?.responsesSourceRange) {
       message.responsesSourceRange = candidate.responsesSourceRange;
       restoreNativeResponsesToolEnvelopes(message, candidate);
@@ -25836,7 +25838,8 @@ export function loreMessagesToGateway(
     if (
       provenance?.provenanceContent &&
       (nativeContentUnchanged ||
-        JSON.stringify(content) === JSON.stringify(provenance.content) ||
+        JSON.stringify(content) ===
+          JSON.stringify(stripResponsesContentIndex(provenance.content)) ||
         chatNativeTextProvenance ||
         toolResultsUnchanged)
     ) {

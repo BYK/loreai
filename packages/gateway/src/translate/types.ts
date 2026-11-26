@@ -112,7 +112,30 @@ export type GatewayContentBlock = (
 ) & {
   /** Original native Responses item ordinal, kept only in request provenance. */
   responsesSourceIndex?: number;
+  /**
+   * Index of this block's part inside the raw `content` array of its
+   * Responses provenance envelope. The visible content drops empty text
+   * parts, so a visible index cannot be used to address raw parts.
+   */
+  responsesContentIndex?: number;
 };
+
+/**
+ * Strip the parser-only `responsesContentIndex` field before unchanged-content
+ * comparisons or hidden-token accounting: temporal parts do not retain raw part
+ * indices, and `responsesContentIndex` is never serialized upstream.
+ */
+export function stripResponsesContentIndex(
+  blocks: GatewayContentBlock[],
+): GatewayContentBlock[] {
+  return blocks.some((block) => block.responsesContentIndex !== undefined)
+    ? blocks.map((block) => {
+        if (block.responsesContentIndex === undefined) return block;
+        const { responsesContentIndex: _ignored, ...rest } = block;
+        return rest;
+      })
+    : blocks;
+}
 
 /**
  * Project a content-block array down to a plain-text representation.

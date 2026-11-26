@@ -291,7 +291,37 @@ function recallMessagePrefix(
     visibleBlocks < message.provenancePositions.length
       ? message.provenancePositions[visibleBlocks]
       : message.provenanceContent.length;
-  return message.provenanceContent.slice(0, end);
+  const prefix = message.provenanceContent.slice(0, end);
+  // A multi-part Responses message stores all raw parts inside one shared
+  // envelope at `end`, so `slice(0, end)` omits preceding parts of that item.
+  // Reconstruct the 1-part-per-envelope prefix that `responsesProvenanceContent`
+  // hashed when the anchor was bound on response capture.
+  const target = message.content[visibleBlocks];
+  const shared =
+    visibleBlocks < message.provenancePositions.length &&
+    target?.responsesContentIndex !== undefined &&
+    target.responsesContentIndex > 0
+      ? sharedResponsesEnvelope(message, visibleBlocks)
+      : undefined;
+  if (shared) {
+    const envelope = message.provenanceContent[shared.provenanceIndex];
+    if (envelope?.type === "opaque") {
+      // Response-time anchor capture (`responsesProvenanceContent`) emits one
+      // `{ type: "opaque", raw: { ...raw, content: [part] }, responsesItem: true }`
+      // envelope per preceding raw part without request-only ordinals.
+      for (const part of (shared.raw.content as unknown[]).slice(
+        0,
+        target.responsesContentIndex,
+      )) {
+        prefix.push({
+          type: "opaque",
+          raw: { ...shared.raw, content: [part] },
+          responsesItem: true,
+        });
+      }
+    }
+  }
+  return prefix;
 }
 
 /**
@@ -440,22 +470,213 @@ function replaceMarkerWithContinuation(
   if (!Array.isArray(provBlock.raw.content)) {
     return;
   }
-  // Rewrite only the text part holding the marker; the opaque
-  // Responses envelope (id, role, other parts) survives.
-  const content = provBlock.raw.content.map((part: unknown) => {
-    if (
-      !isRecord(part) ||
-      (part.type !== "output_text" && part.type !== "text") ||
-      typeof part.text !== "string" ||
-      !part.text.includes(block.text)
-    ) {
-      return part;
-    }
-    return { ...part, text: part.text.replace(block.text, () => continuation) };
-  });
+  // Rewrite only the raw part the parser projected the visible block from;
+  // the opaque Responses envelope (id, role, other parts) survives. Visible
+  // indices cannot address raw parts because the parser drops empty text
+  // parts, and text matching rewrites identical earlier quotes instead.
+  const contentIndex = block.responsesContentIndex;
+  if (
+    contentIndex === undefined ||
+    contentIndex < 0 ||
+    contentIndex >= provBlock.raw.content.length
+  ) {
+    return;
+  }
+  const part = provBlock.raw.content[contentIndex];
+  if (
+    !isRecord(part) ||
+    (part.type !== "output_text" && part.type !== "text") ||
+    typeof part.text !== "string" ||
+    !part.text.includes(block.text)
+  ) {
+    return;
+  }
+  const content = provBlock.raw.content.slice();
+  content[contentIndex] = {
+    ...part,
+    text: part.text.replace(block.text, () => continuation),
+  };
   message.provenanceContent[provenanceIndex] = {
     ...provBlock,
     raw: { ...provBlock.raw, content },
+  };
+}
+
+/**
+ * The Responses parser projects every visible part of one raw message item
+ * with provenance position 0: many visible blocks share one raw item. For
+ * those, `provenancePositions` maps visible indices to per-block opaque
+ * parts of the shared raw envelope instead (the parser stamps each part's
+ * index into `raw.content` as `responsesContentIndex`). The envelope itself
+ * may sit anywhere in the provenance array (pending reasoning/companion
+ * items precede it) and the item `type` may be omitted.
+ */
+function sharedResponsesEnvelope(
+  message: GatewayMessage,
+  visibleIndex: number,
+): { provenanceIndex: number; raw: Record<string, unknown> } | undefined {
+  const prov = message.provenanceContent;
+  const positions = message.provenancePositions;
+  if (!prov || !positions) return undefined;
+  // Only the envelope actually mapped to THIS visible index is shared: a
+  // companion block's provenance must never be treated as the shared item.
+  // The shared envelope is the unique opaque Responses message envelope in
+  // the mapped provenance range — companion parts may occupy other slots.
+  const index = positions[visibleIndex];
+  if (index === undefined) return undefined;
+  const block = prov[index];
+  if (
+    block?.type !== "opaque" ||
+    block.responsesItem !== true ||
+    !Array.isArray(block.raw.content) ||
+    (block.raw.type !== "message" && block.raw.type !== undefined)
+  ) {
+    return undefined;
+  }
+  // Keep the shared path for hidden parts or other native metadata.
+  const part = block.raw.content[0];
+  if (
+    block.raw.content.length === 1 &&
+    message.content[visibleIndex]?.responsesContentIndex === 0 &&
+    !positions.some(
+      (position, sibling) => sibling !== visibleIndex && position === index,
+    ) &&
+    Object.keys(block.raw).every((key) =>
+      ["type", "role", "id", "status", "content"].includes(key),
+    ) &&
+    isRecord(part) &&
+    Object.keys(part).every(
+      (key) =>
+        key === "type" ||
+        key === "text" ||
+        (key === "annotations" &&
+          Array.isArray(part.annotations) &&
+          part.annotations.length === 0),
+    )
+  ) {
+    return undefined;
+  }
+  return { provenanceIndex: index, raw: block.raw };
+}
+
+/**
+ * Copy a shared-item provenance envelope with the part at `contentIndex`
+ * replaced; the parsed client object is never mutated.
+ */
+function withReplacedSharedPart(
+  message: GatewayMessage,
+  mapping: { provenanceIndex: number; raw: Record<string, unknown> },
+  contentIndex: number,
+  part: unknown,
+): void {
+  const provenance = message.provenanceContent;
+  if (!provenance) return;
+  const content = (mapping.raw.content as unknown[]).slice();
+  content[contentIndex] = part;
+  const envelope = provenance[mapping.provenanceIndex];
+  if (envelope?.type !== "opaque") return;
+  provenance[mapping.provenanceIndex] = {
+    ...envelope,
+    raw: { ...mapping.raw, content },
+  };
+}
+
+/**
+ * Shared-item split result when replacing a visible block inside a multi-part
+ * Responses message envelope with a non-text block (e.g. a restored `tool_use`).
+ * Prefix retains the original `id`/`status` and preceding raw parts (plus the
+ * cleared target part when `prefixPartCount > 0` or annotations survive);
+ * suffix carries `inlineContinuation` and trailing raw parts without reusing `id`.
+ */
+type SharedResponsesSplitResult = {
+  suffixProvenance?: GatewayContentBlock;
+  inlineContinuationInSuffix: boolean;
+  rebasedTrailingIndices: Array<number | undefined>;
+};
+
+function replaceVisibleContentBlockInSharedItem(
+  message: GatewayMessage,
+  visibleIndex: number,
+  block: GatewayContentBlock,
+  inlineContinuation = "",
+): SharedResponsesSplitResult | undefined {
+  const shared = sharedResponsesEnvelope(message, visibleIndex);
+  const targetBlock = message.content[visibleIndex];
+  if (
+    !shared ||
+    !message.provenanceContent ||
+    !message.provenancePositions ||
+    targetBlock?.responsesContentIndex === undefined
+  ) {
+    replaceVisibleContentBlock(message, visibleIndex, block);
+    return undefined;
+  }
+  detachAliasedProvenance(message);
+  const original = message.provenanceContent[shared.provenanceIndex];
+  if (original?.type !== "opaque") {
+    replaceVisibleContentBlock(message, visibleIndex, block);
+    return undefined;
+  }
+  const rawIndex = targetBlock.responsesContentIndex;
+  const rawContent = shared.raw.content as unknown[];
+  const trailingRaw = rawContent.slice(rawIndex + 1);
+  const inlineOffset = inlineContinuation ? 1 : 0;
+  let suffixProvenance: GatewayContentBlock | undefined;
+  if (inlineContinuation || trailingRaw.length > 0) {
+    const suffixRaw: Record<string, unknown> = { ...shared.raw };
+    delete suffixRaw.id;
+    suffixRaw.content = [
+      ...(inlineContinuation
+        ? [{ type: "output_text", text: inlineContinuation }]
+        : []),
+      ...trailingRaw,
+    ];
+    // Strip `responsesSourceIndex` from the detached suffix fragment: the
+    // prefix fragment keeps the original source item ordinal, and carrying the
+    // same ordinal onto a post-result message breaks range monotonicity.
+    const { responsesSourceIndex: _droppedIndex, ...suffixEnvelope } = original;
+    suffixProvenance = { ...suffixEnvelope, raw: suffixRaw };
+  }
+  const prefixRaw: Record<string, unknown> = { ...shared.raw };
+  prefixRaw.content = rawContent
+    .slice(0, rawIndex + 1)
+    .map((part, partIndex) =>
+      partIndex === rawIndex &&
+      isRecord(part) &&
+      (part.type === "output_text" || part.type === "text") &&
+      typeof part.text === "string"
+        ? { ...part, text: "" }
+        : part,
+    );
+  message.provenanceContent.splice(
+    shared.provenanceIndex,
+    1,
+    { ...original, raw: prefixRaw },
+    block,
+  );
+  message.content[visibleIndex] = block;
+  const positions = message.provenancePositions;
+  positions[visibleIndex] = shared.provenanceIndex + 1;
+  const rebasedTrailingIndices: Array<number | undefined> = [];
+  for (let k = visibleIndex + 1; k < positions.length; k++) {
+    const trailingBlock = message.content[k];
+    if (
+      positions[k] === shared.provenanceIndex &&
+      trailingBlock?.responsesContentIndex !== undefined &&
+      trailingBlock.responsesContentIndex > rawIndex
+    ) {
+      rebasedTrailingIndices.push(
+        trailingBlock.responsesContentIndex - (rawIndex + 1) + inlineOffset,
+      );
+    } else {
+      rebasedTrailingIndices.push(trailingBlock?.responsesContentIndex);
+    }
+    positions[k] += 1;
+  }
+  return {
+    suffixProvenance,
+    inlineContinuationInSuffix: Boolean(inlineContinuation && suffixProvenance),
+    rebasedTrailingIndices,
   };
 }
 
@@ -464,6 +685,33 @@ function replaceVisibleContentBlock(
   visibleIndex: number,
   block: GatewayContentBlock,
 ): void {
+  const shared = sharedResponsesEnvelope(message, visibleIndex);
+  const targetBlock = message.content[visibleIndex];
+  if (
+    shared &&
+    block.type === "text" &&
+    targetBlock?.responsesContentIndex !== undefined
+  ) {
+    detachAliasedProvenance(message);
+    const rawContent = shared.raw.content as unknown[];
+    const part = rawContent[targetBlock.responsesContentIndex];
+    message.content[visibleIndex] = {
+      ...block,
+      responsesContentIndex: targetBlock.responsesContentIndex,
+    };
+    if (
+      isRecord(part) &&
+      (part.type === "output_text" || part.type === "text")
+    ) {
+      withReplacedSharedPart(
+        message,
+        shared,
+        targetBlock.responsesContentIndex,
+        { ...part, text: block.text },
+      );
+    }
+    return;
+  }
   detachAliasedProvenance(message);
   message.content[visibleIndex] = block;
   if (!message.provenanceContent || !message.provenancePositions) return;
@@ -490,12 +738,29 @@ function truncateVisibleContent(
   // Detach first: with an aliased array, shortening `content` would also
   // shrink `provenanceContent` before the provenance length is computed.
   detachAliasedProvenance(message);
-  message.content.length = visibleLength;
-  if (!message.provenanceContent || !message.provenancePositions) return;
+  if (!message.provenanceContent || !message.provenancePositions) {
+    message.content.length = visibleLength;
+    return;
+  }
+  // Never truncate below a provenance slot still referenced by a retained
+  // visible block (e.g. when trailing blocks shared an earlier Responses
+  // envelope whose position sits before an inserted `tool_use` slot).
+  let minRetainedLength = 0;
+  for (
+    let i = 0;
+    i < visibleLength && i < message.provenancePositions.length;
+    i++
+  ) {
+    const pos = message.provenancePositions[i];
+    if (pos !== undefined && pos + 1 > minRetainedLength) {
+      minRetainedLength = pos + 1;
+    }
+  }
   const provenanceLength =
     visibleLength < message.provenancePositions.length
-      ? message.provenancePositions[visibleLength]
+      ? Math.max(minRetainedLength, message.provenancePositions[visibleLength])
       : message.provenanceContent.length;
+  message.content.length = visibleLength;
   message.provenanceContent.length = provenanceLength;
   message.provenancePositions.length = visibleLength;
 }
@@ -504,6 +769,32 @@ function removeVisibleContentBlock(
   message: GatewayMessage,
   visibleIndex: number,
 ): GatewayContentBlock {
+  const shared = sharedResponsesEnvelope(message, visibleIndex);
+  if (shared && message.provenancePositions) {
+    detachAliasedProvenance(message);
+    const [block] = message.content.splice(visibleIndex, 1);
+    if (!block) throw new Error("visible content block not found");
+    message.provenancePositions.splice(visibleIndex, 1);
+    // Sibling parts still reference the shared raw item; clear only the
+    // removed block's raw part (copy-on-write) instead of dropping the
+    // envelope — its id/status/sibling parts must survive replay.
+    const contentIndex = block.responsesContentIndex;
+    if (contentIndex !== undefined) {
+      const rawContent = shared.raw.content as unknown[];
+      const part = rawContent[contentIndex];
+      if (
+        isRecord(part) &&
+        (part.type === "output_text" || part.type === "text") &&
+        typeof part.text === "string"
+      ) {
+        withReplacedSharedPart(message, shared, contentIndex, {
+          ...part,
+          text: "",
+        });
+      }
+    }
+    return block;
+  }
   detachAliasedProvenance(message);
   const provenanceIndex = message.provenancePositions?.[visibleIndex];
   if (
@@ -1289,6 +1580,8 @@ export function expandRecallMarkers(
         removeVisibleContentBlock(msg, markerIdx);
       }
       expanded = true;
+      // Revisit `msg` in case a later part in the same message holds another marker.
+      i -= 1;
       continue;
     }
     const { stored, key: matchedKey } = match;
@@ -1308,6 +1601,8 @@ export function expandRecallMarkers(
         removeVisibleContentBlock(msg, markerIdx);
       }
       expanded = true;
+      // Revisit `msg` in case a later part in the same message holds another marker.
+      i -= 1;
       continue;
     }
 
@@ -1469,18 +1764,56 @@ export function expandRecallMarkers(
       markerIdx += moved.length;
     }
 
-    // Replace marker with tool_use
-    replaceVisibleContentBlock(msg, markerIdx, {
+    // Replace marker with tool_use. On a shared Responses item (several
+    // visible parts mapped to one raw envelope), split the envelope at the
+    // marker's recorded part index via `replaceVisibleContentBlockInSharedItem`:
+    // prefix keeps the original id/status, the restored call sits in its own
+    // slot, and the suffix fragment carries `match.continuation` + trailing raw
+    // parts without reusing the original id or `responsesSourceIndex`.
+    const replacedBlock: GatewayContentBlock = {
       type: "tool_use",
       id: stored.toolUseId,
       name: RECALL_TOOL_NAME,
       input: stored.input,
-    });
+    };
+    const sharedSplit = replaceVisibleContentBlockInSharedItem(
+      msg,
+      markerIdx,
+      replacedBlock,
+      match.continuation,
+    );
+    const suffixProvenance = sharedSplit?.suffixProvenance
+      ? [sharedSplit.suffixProvenance]
+      : [];
+    if (sharedSplit) {
+      // Rebase trailing visible blocks' raw-part indices onto the suffix
+      // fragment before inserting any visible inline-continuation block.
+      for (let k = 0; k < sharedSplit.rebasedTrailingIndices.length; k++) {
+        const rebased = sharedSplit.rebasedTrailingIndices[k];
+        const trailing = msg.content[markerIdx + 1 + k];
+        if (trailing && rebased !== undefined) {
+          msg.content[markerIdx + 1 + k] = {
+            ...trailing,
+            responsesContentIndex: rebased,
+          };
+        }
+      }
+    }
     if (match.continuation) {
       msg.content.splice(markerIdx + 1, 0, {
         type: "text",
         text: match.continuation,
+        ...(sharedSplit?.inlineContinuationInSuffix
+          ? { responsesContentIndex: 0 }
+          : {}),
       });
+      if (sharedSplit?.inlineContinuationInSuffix && msg.provenancePositions) {
+        msg.provenancePositions.splice(
+          markerIdx + 1,
+          0,
+          msg.provenancePositions[markerIdx],
+        );
+      }
     }
 
     // Check if there's non-tool content AFTER the marker in this message.
@@ -1489,12 +1822,25 @@ export function expandRecallMarkers(
     // the marker are from the same turn (mixed tools) and stay together.
     const afterMarker = msg.content.slice(markerIdx + 1);
     const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
+    const markerProvenanceIndex = msg.provenancePositions?.[markerIdx];
+    const continuationProvenance =
+      suffixProvenance.length > 0 && markerProvenanceIndex !== undefined
+        ? {
+            provenanceContent: [
+              ...suffixProvenance,
+              ...(msg.provenanceContent?.slice(markerProvenanceIndex + 1) ??
+                []),
+            ],
+            provenancePositions: msg.provenancePositions
+              ?.slice(markerIdx + 1)
+              .map((position) => position - markerProvenanceIndex),
+          }
+        : undefined;
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {
       truncateVisibleContent(msg, markerIdx + 1);
     }
-
     // Build synthetic tool_result user message
     const toolResultMsg: GatewayMessage = {
       role: "user",
@@ -1555,13 +1901,40 @@ export function expandRecallMarkers(
 
     if (hasContinuationAfter) {
       // Split: insert tool_result user message + continuation assistant
-      // message after the current assistant message.
+      // message after the current assistant message. The continuation keeps
+      // the suffix fragment captured before the split, rebased onto its own
+      // visible indices.
       const continuationMsg: GatewayMessage = {
         role: "assistant",
         content: afterMarker,
       };
+      if (continuationProvenance) {
+        Object.assign(continuationMsg, continuationProvenance);
+      }
       req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
-      // Skip past the two newly inserted messages
+      // Advance to `toolResultMsg` (`i + 1`) so the next `i++` inspects
+      // `continuationMsg` (`i + 2`) in case it carries another recall marker.
+      i += 1;
+    } else if (suffixProvenance.length > 0) {
+      // The suffix fragment still carries raw parts (the marker continuation
+      // and/or empty cited parts), so it must replay as its own message
+      // after the synthetic result — never before it.
+      const continuationMsg: GatewayMessage = {
+        role: "assistant",
+        content: [],
+        provenanceContent: suffixProvenance,
+        provenancePositions: [],
+      };
+      const nextMsg = req.messages[i + 1];
+      if (nextMsg?.role === "user") {
+        const resultIndex = msg.content
+          .slice(0, markerIdx)
+          .filter((block) => block.type === "tool_use").length;
+        insertVisibleContentBlocks(nextMsg, resultIndex, toolResultMsg.content);
+        req.messages.splice(i + 2, 0, continuationMsg);
+      } else {
+        req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
+      }
       i += 2;
     } else {
       // No split needed — insert tool_result into the following user message.
@@ -1576,8 +1949,10 @@ export function expandRecallMarkers(
       } else {
         // No following user message — insert a synthetic one
         req.messages.splice(i + 1, 0, toolResultMsg);
-        i += 1;
       }
+      // Revisit `msg` in case a trailing `tool_use` turn also holds a marker;
+      // if none remains, `msg` is skipped and the loop advances cleanly.
+      i -= 1;
     }
 
     expanded = true;

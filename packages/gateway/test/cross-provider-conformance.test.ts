@@ -3566,6 +3566,48 @@ describe("cross-provider request conformance through real forwarding", () => {
     );
   });
 
+  it("rewrites only the marked part of a quoted empty-cited assistant item through the full upstream forward", async () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740ce";
+    const marked =
+      '📚 Searching all archives for "part targeting query"…\n' +
+      `<!-- lore-recall:${anchorId} -->\n` +
+      "visible continuation";
+    const quotePart = {
+      type: "output_text",
+      text: `Earlier quote: ${marked}`,
+    };
+    const emptyPart = {
+      type: "output_text",
+      text: "",
+      annotations: [
+        { type: "url_citation", url: "https://example.test/hidden" },
+      ],
+    };
+    const markerPart = { type: "output_text", text: marked };
+    const assistant = {
+      type: "message",
+      id: "msg_conformance_part_targeting",
+      role: "assistant",
+      status: "completed",
+      content: [quotePart, emptyPart, markerPart],
+    };
+    const { upstream } = await forward("/v1/responses", "openai", {
+      model: "gpt-6-sol",
+      input: [assistant, { role: "user", content: "continue" }],
+    });
+    // The quote's anchor sits mid-string, so it is not a marker: only the
+    // real marked part is rewritten; the empty cited part, id, and status
+    // survive the Lore round trip onto the actual forwarded payload.
+    expect(upstream.input).toContainEqual({
+      ...assistant,
+      content: [
+        quotePart,
+        emptyPart,
+        { type: "output_text", text: "visible continuation" },
+      ],
+    });
+  });
+
   it.each([
     { name: "empty text", content: [{ type: "output_text", text: "" }] },
     { name: "empty parts", content: [] },

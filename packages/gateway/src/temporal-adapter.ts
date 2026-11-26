@@ -26,7 +26,7 @@ import type {
   GatewayMessage,
   GatewayUsage,
 } from "./translate/types";
-import { blocksToText } from "./translate/types";
+import { blocksToText, stripResponsesContentIndex } from "./translate/types";
 import { geminiPartToBlock } from "./translate/gemini";
 
 // ---------------------------------------------------------------------------
@@ -359,7 +359,10 @@ export function gatewayMessagesToLore(
               coreEstimateTokens(provenanceJson) -
                 coreEstimateTokens(visibleJson),
             ))
-        )(JSON.stringify(visibleContent), JSON.stringify(m.provenanceContent))
+        )(
+          JSON.stringify(stripResponsesContentIndex(visibleContent)),
+          JSON.stringify(m.provenanceContent),
+        )
       : 0;
 
     if (m.role === "user") {

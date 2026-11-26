@@ -82,6 +82,7 @@ import {
 import type {
   GatewayContentBlock,
   GatewayResponse,
+  GatewayMessage,
   GatewayRequest,
   GatewayTool,
   GatewayToolUseBlock,
@@ -5645,7 +5646,10 @@ test.each([
 describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
   // An unmatched marker with the given continuation, run through the
   // Responses-native parse -> strip -> native replay path.
-  const runUnmatchedStrip = (assistantItem: Record<string, unknown>) => {
+  const runUnmatchedStrip = (
+    assistantItem: Record<string, unknown>,
+    beforeStrip?: (message: GatewayMessage) => void,
+  ) => {
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-test",
@@ -5663,16 +5667,15 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     const message = req.messages.find((m) => m.role === "assistant");
     if (!message)
       throw new Error("Responses parse dropped the assistant message");
+    beforeStrip?.(message);
     expect(
       expandRecallMarkers(req, new Map(), { gatewayRecallEnabled: true }),
     ).toBe(true);
-    const wire = JSON.stringify(
-      (
-        buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com")
-          .body as { input: unknown[] }
-      ).input,
-    );
-    return { req, message, wire };
+    const { input } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    return { req, message, input, wire: JSON.stringify(input) };
   };
 
   test.each([
@@ -5780,6 +5783,874 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     expect(wire).not.toContain(buildRecallAnchor(anchorId));
     expect(JSON.stringify(req.messages)).not.toContain(
       buildRecallAnchor(anchorId),
+    );
+  });
+
+  test("rewrites only the raw part holding the marker, not an identical earlier quote", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740ce";
+    const query = "part targeting query";
+    const marked = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\nvisible continuation`;
+    const quotePart = { type: "output_text", text: `Earlier quote: ${marked}` };
+    const emptyPart = {
+      type: "output_text",
+      text: "",
+      annotations: [
+        { type: "url_citation", url: "https://example.com", title: "x" },
+      ],
+    };
+    const markerPart = { type: "output_text", text: marked };
+    const item = {
+      type: "message",
+      id: "msg_part_targeting",
+      role: "assistant",
+      status: "completed",
+      content: [quotePart, emptyPart, markerPart],
+    };
+    const original = structuredClone(item);
+    const { input, message } = runUnmatchedStrip(item, (before) => {
+      expect(before.content).toMatchObject([
+        { type: "text", text: quotePart.text },
+        { type: "text", text: marked },
+      ]);
+    });
+    expect(message.content[1]).toMatchObject({ text: "visible continuation" });
+    expect(item).toEqual(original);
+    expect(input.find((entry) => entry.id === item.id)).toEqual({
+      ...original,
+      content: [
+        original.content[0],
+        original.content[1],
+        { ...original.content[2], text: "visible continuation" },
+      ],
+    });
+  });
+
+  test("an unmatched marker with no continuation keeps sibling parts of a shared item", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740d0";
+    const query = "unmatched sibling query";
+    const siblingPart = { type: "output_text", text: "Earlier answer" };
+    const markerPart = {
+      type: "output_text",
+      text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+    };
+    const item = {
+      type: "message",
+      id: "msg_unmatched_shared",
+      role: "assistant",
+      status: "completed",
+      content: [siblingPart, markerPart],
+    };
+    const { req, message, input } = runUnmatchedStrip(item);
+    // Premise: the whole marker part is suppressed — nothing follows it.
+    expect(message.content).toHaveLength(1);
+    expect(message.content[0]).toEqual({
+      type: "text",
+      text: "Earlier answer",
+      responsesContentIndex: 0,
+    });
+    // The sibling must not disappear with the shared raw item: the outgoing
+    // item keeps its id/status and the cleared marked part.
+    const prov = message.provenanceContent?.[0];
+    expect(prov?.type).toBe("opaque");
+    if (prov?.type !== "opaque") return;
+    expect(prov.raw.id).toBe("msg_unmatched_shared");
+    expect(prov.raw.status).toBe("completed");
+    expect(prov.raw.content).toEqual([
+      siblingPart,
+      { type: "output_text", text: "" },
+    ]);
+    expect(input).toHaveLength(2);
+    expect(input[1]).toEqual({
+      type: "message",
+      id: "msg_unmatched_shared",
+      role: "assistant",
+      status: "completed",
+      content: [siblingPart, { type: "output_text", text: "" }],
+    });
+    // The parsed client object is never mutated.
+    expect(item.content[0]).toBe(siblingPart);
+    expect(item.content[1]).toBe(markerPart);
+    expect(JSON.stringify(req.messages)).not.toContain(
+      buildRecallAnchor(anchorId),
+    );
+  });
+
+  test.each(
+    ["unmatched", "disabled", "matched", "matched continuation"].flatMap(
+      (mode) => [false, true].map((annotations) => ({ mode, annotations })),
+    ),
+  )(
+    "single-part Responses marker removal and expansion: $mode, empty annotations=$annotations",
+    ({ mode, annotations }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e0";
+      const query = "single part query";
+      const continuation =
+        mode === "matched continuation" ? "after recall" : "";
+      const item = {
+        type: "message",
+        id: "msg_single_marker",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}${continuation ? `\n${continuation}` : ""}`,
+            ...(annotations ? { annotations: [] } : {}),
+          },
+        ],
+      };
+      const original = structuredClone(item);
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ type: "message", role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const matched = mode.startsWith("matched");
+      const store: RecallStore = matched
+        ? new Map([
+            [
+              `anchor:${anchorId}`,
+              makeStoredRecall({
+                anchorId,
+                anchorContextId: recallAnchorContext(req.messages, 1),
+                input: { query, scope: "all" },
+              }),
+            ],
+          ])
+        : new Map();
+      expect(
+        expandRecallMarkers(req, store, {
+          gatewayRecallEnabled: mode !== "disabled",
+        }),
+      ).toBe(true);
+      const assistant = req.messages[1];
+      expect(assistant.provenanceContent).toEqual(
+        matched
+          ? [
+              {
+                type: "tool_use",
+                id: "toolu_recall_1",
+                name: RECALL_TOOL_NAME,
+                input: { query, scope: "all" },
+              },
+            ]
+          : [],
+      );
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input.map((entry) => entry.type)).toEqual([
+        "message",
+        ...(matched ? ["function_call", "function_call_output"] : []),
+        ...(continuation ? ["message"] : []),
+      ]);
+      expect(JSON.stringify(input)).not.toContain('"text":""');
+      if (continuation) expect(JSON.stringify(input)).toContain(continuation);
+      expect(item).toEqual(original);
+    },
+  );
+
+  test.each(["unmatched", "matched"])(
+    "single marker retains its native citation when %s",
+    (mode) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e1";
+      const query = "cited marker";
+      const annotations = [
+        { type: "url_citation", url: "https://example.com" },
+      ];
+      const item = {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+            annotations,
+          },
+        ],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const store: RecallStore =
+        mode === "matched"
+          ? new Map([
+              [
+                `anchor:${anchorId}`,
+                makeStoredRecall({
+                  anchorId,
+                  anchorContextId: recallAnchorContext(req.messages, 1),
+                  input: { query, scope: "all" },
+                }),
+              ],
+            ])
+          : new Map();
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input[1]).toEqual({
+        ...item,
+        content: [{ type: "output_text", text: "", annotations }],
+      });
+      expect(item.content[0].text).toContain(buildRecallAnchor(anchorId));
+    },
+  );
+
+  test.each(["unmatched", "matched"])(
+    "single visible marker preserves a preceding hidden Responses part when %s",
+    (mode) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e2";
+      const query = "hidden part";
+      const hidden = {
+        type: "output_text",
+        text: "",
+        annotations: [{ type: "url_citation", url: "https://example.com" }],
+      };
+      const item = {
+        type: "message",
+        role: "assistant",
+        content: [
+          hidden,
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+          },
+        ],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const store: RecallStore =
+        mode === "matched"
+          ? new Map([
+              [
+                `anchor:${anchorId}`,
+                makeStoredRecall({
+                  anchorId,
+                  anchorContextId: recallAnchorContext(req.messages, 1, [
+                    {
+                      type: "opaque",
+                      raw: { ...item, content: [hidden] },
+                      responsesItem: true,
+                    },
+                  ]),
+                  input: { query, scope: "all" },
+                }),
+              ],
+            ])
+          : new Map();
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input[1]).toEqual({
+        ...item,
+        content: [hidden, { type: "output_text", text: "" }],
+      });
+      if (mode === "matched")
+        expect(input[2]).toMatchObject({
+          type: "function_call",
+          name: RECALL_TOOL_NAME,
+        });
+    },
+  );
+
+  test("client-tool collision suppresses one of two markers without crashing or losing the other part", () => {
+    const anchorIdA = "123e4567-e89b-42d3-a456-4266141740d1";
+    const anchorIdB = "123e4567-e89b-42d3-a456-4266141740d5";
+    const queryA = "collision query a";
+    const queryB = "collision query b";
+    const markerPartA = {
+      type: "output_text",
+      text: `${buildRecallMarker(queryA)}\n${buildRecallAnchor(anchorIdA)}`,
+    };
+    const markerPartB = {
+      type: "output_text",
+      text: `${buildRecallMarker(queryB)}\n${buildRecallAnchor(anchorIdB)}\nkept text`,
+    };
+    const item = {
+      type: "message",
+      id: "msg_collision_shared",
+      role: "assistant",
+      status: "completed",
+      content: [markerPartA, markerPartB],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "question" }],
+          },
+          item,
+        ],
+      },
+      {},
+    );
+    const message = req.messages.find((m) => m.role === "assistant");
+    if (!message) throw new Error("Responses parse dropped the assistant");
+    const store: RecallStore = new Map([
+      [
+        `anchor:${anchorIdA}`,
+        makeStoredRecall({
+          anchorId: anchorIdA,
+          input: { query: queryA, scope: "all" },
+        }),
+      ],
+      [
+        `anchor:${anchorIdB}`,
+        makeStoredRecall({
+          anchorId: anchorIdB,
+          input: { query: queryB, scope: "all" },
+        }),
+      ],
+    ]);
+    // Premise: with gateway recall disabled, part 0 leaves no text behind and
+    // part 1 leaves "kept text" — positions must stay non-negative (never -1)
+    // and the stored results must not be consumed.
+    expect(
+      cleanupRecallStore(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(true);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(false);
+    expect(store.size).toBe(2);
+    expect(message.content).toEqual([
+      { type: "text", text: "kept text", responsesContentIndex: 1 },
+    ]);
+    expect(message.provenancePositions).toEqual([0]);
+    const prov = message.provenanceContent?.[0];
+    expect(prov?.type).toBe("opaque");
+    if (prov?.type !== "opaque") return;
+    expect(prov.raw.id).toBe("msg_collision_shared");
+    expect(prov.raw.status).toBe("completed");
+    expect(prov.raw.content).toEqual([
+      { type: "output_text", text: "" },
+      { type: "output_text", text: "kept text" },
+    ]);
+    const { input } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    expect(input[1]).toEqual({
+      type: "message",
+      id: "msg_collision_shared",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: "" },
+        { type: "output_text", text: "kept text" },
+      ],
+    });
+    expect(item.content[0]).toBe(markerPartA);
+    expect(item.content[1]).toBe(markerPartB);
+    expect(JSON.stringify(req.messages)).not.toContain(
+      buildRecallAnchor(anchorIdA),
+    );
+    expect(JSON.stringify(req.messages)).not.toContain(
+      buildRecallAnchor(anchorIdB),
+    );
+  });
+
+  test("a matched marker split at its part index keeps sibling parts and native metadata", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740d2";
+    const query = "matched split query";
+    const siblingPart = { type: "output_text", text: "Earlier answer" };
+    const emptyCited = {
+      type: "output_text",
+      text: "",
+      annotations: [
+        { type: "url_citation", url: "https://example.com", title: "x" },
+      ],
+    };
+    const markerPart = {
+      type: "output_text",
+      text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+      annotations: [{ type: "url_citation", url: "https://example.com/m" }],
+    };
+    const continuationPart = { type: "output_text", text: "mid continuation" };
+    const afterPart = { type: "output_text", text: "After text" };
+    const item = {
+      type: "message",
+      id: "msg_matched_split",
+      role: "assistant",
+      status: "completed",
+      content: [
+        siblingPart,
+        emptyCited,
+        markerPart,
+        continuationPart,
+        afterPart,
+      ],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "question" }],
+          },
+          item,
+        ],
+      },
+      {},
+    );
+    const message = req.messages.find((m) => m.role === "assistant");
+    if (!message) throw new Error("Responses parse dropped the assistant");
+    const store: RecallStore = new Map([
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({ anchorId, input: { query, scope: "all" } }),
+      ],
+    ]);
+    // Premise: the marker matches a stored recall bound to this transcript
+    // and is expanded. Bind `anchorContextId` via the same 1-part-per-raw-part
+    // provenance prefix that `responsesProvenanceContent` produces on capture.
+    const stored = store.get(`anchor:${anchorId}`);
+    if (!stored) throw new Error("missing stored recall fixture");
+    stored.anchorContextId = recallAnchorContext(req.messages, 1, [
+      {
+        type: "opaque",
+        raw: { ...item, content: [siblingPart] },
+        responsesItem: true,
+      },
+      {
+        type: "opaque",
+        raw: { ...item, content: [emptyCited] },
+        responsesItem: true,
+      },
+    ]);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: true }),
+    ).toBe(true);
+    // Visible replay: sibling text + the restored recall call, then the
+    // synthetic result, then the trailing continuation as its own assistant
+    // message carrying the suffix fragment (no trailing id on the fragment).
+    const expandedRoles = req.messages.map((m) => m.role);
+    if (expandedRoles.length === 2) {
+      throw new Error(
+        `premise failed: marker was not expanded as a stored recall (roles=${expandedRoles.join(",")})`,
+      );
+    }
+    expect(expandedRoles).toEqual(["user", "assistant", "user", "assistant"]);
+    const assistant = req.messages[1];
+    expect(assistant.role).toBe("assistant");
+    expect(assistant.content).toEqual([
+      { type: "text", text: "Earlier answer", responsesContentIndex: 0 },
+      {
+        type: "tool_use",
+        id: "toolu_recall_1",
+        name: RECALL_TOOL_NAME,
+        input: { query, scope: "all" },
+      },
+    ]);
+    const result = req.messages[2];
+    expect(result.role).toBe("user");
+    expect(result.content[0]).toMatchObject({
+      type: "tool_result",
+      toolUseId: "toolu_recall_1",
+    });
+    expect(req.messages[3].role).toBe("assistant");
+    expect(req.messages[3].content).toEqual([
+      { type: "text", text: "mid continuation", responsesContentIndex: 0 },
+      { type: "text", text: "After text", responsesContentIndex: 1 },
+    ]);
+    // The suffix fragment: trailing parts without the original id, carried
+    // by the continuation assistant message only.
+    const continuationProv = req.messages[3].provenanceContent;
+    expect(continuationProv).toHaveLength(1);
+    const suffixItem = continuationProv?.[0];
+    expect(suffixItem).toMatchObject({
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          { type: "output_text", text: "mid continuation" },
+          { type: "output_text", text: "After text" },
+        ],
+      },
+    });
+    expect(
+      (suffixItem as { raw: Record<string, unknown> } | undefined)?.raw.id,
+    ).toBeUndefined();
+    // The replayed wire keeps the original envelope (id/status/sibling and
+    // empty cited parts) before the call and result, then the trailing
+    // continuation WITHOUT reusing the original id — no duplicate ids, no
+    // marker text, native metadata on both fragments.
+    const { input } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    expect(input).toHaveLength(5);
+    expect(input[1]).toEqual({
+      type: "message",
+      id: "msg_matched_split",
+      role: "assistant",
+      status: "completed",
+      content: [
+        siblingPart,
+        emptyCited,
+        {
+          type: "output_text",
+          text: "",
+          annotations: [{ type: "url_citation", url: "https://example.com/m" }],
+        },
+      ],
+    });
+    expect(input[2]).toMatchObject({
+      type: "function_call",
+      call_id: "toolu_recall_1",
+      name: RECALL_TOOL_NAME,
+    });
+    expect(input[3]).toMatchObject({
+      type: "function_call_output",
+      call_id: "toolu_recall_1",
+    });
+    expect(input[4]).toEqual({
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: "mid continuation" },
+        { type: "output_text", text: "After text" },
+      ],
+    });
+    expect(input[4].id).toBeUndefined();
+    const ids = input.flatMap((i) => (typeof i.id === "string" ? [i.id] : []));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(JSON.stringify(input)).toContain("Earlier answer");
+    expect(JSON.stringify(input)).not.toContain(buildRecallAnchor(anchorId));
+    expect(item.content[2]).toBe(markerPart);
+    expect(item.content[3]).toBe(continuationPart);
+    expect(item.content[4]).toBe(afterPart);
+  });
+
+  test.each([
+    { inline: false, prefix: false },
+    { inline: true, prefix: false },
+    { inline: false, prefix: true },
+    { inline: true, prefix: true },
+  ])(
+    "preserves native companion calls after a shared recall suffix ($inline, prefix: $prefix)",
+    ({ inline, prefix }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740d5";
+      const query = "shared suffix companion";
+      const marker = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}${inline ? "\ninline" : ""}`;
+      const earlier = { type: "output_text", text: "earlier" };
+      const beforeReasoning = {
+        type: "reasoning",
+        id: "rs_before",
+        encrypted_content: "before",
+      };
+      const item = {
+        type: "message",
+        id: "msg_shared_companion",
+        role: "assistant",
+        status: "completed",
+        content: [
+          ...(prefix ? [earlier] : []),
+          { type: "output_text", text: marker },
+          { type: "output_text", text: "trailing" },
+        ],
+      };
+      const reasoning = {
+        type: "reasoning",
+        id: "rs_companion",
+        encrypted_content: "encrypted",
+      };
+      const call = {
+        type: "function_call",
+        id: "fc_read",
+        call_id: "call_read",
+        name: "read",
+        arguments: "{}",
+        status: "completed",
+      };
+      const output = {
+        type: "function_call_output",
+        call_id: "call_read",
+        output: "file contents",
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [
+            {
+              role: "developer",
+              id: "msg_native_instructions",
+              content: [{ type: "input_text", text: "be concise" }],
+            },
+            { type: "message", role: "user", content: "question" },
+            ...(prefix ? [beforeReasoning] : []),
+            item,
+            reasoning,
+            call,
+            output,
+          ],
+        },
+        {},
+      );
+      const store: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            anchorContextId: recallAnchorContext(
+              req.messages,
+              1,
+              prefix
+                ? [
+                    ...(req.messages[1].provenanceContent?.slice(0, 1) ?? []),
+                    {
+                      type: "opaque",
+                      raw: { ...item, content: [earlier] },
+                      responsesItem: true,
+                    },
+                  ]
+                : [],
+            ),
+            input: { query, scope: "all" },
+            companionToolUses: [
+              { id: "call_read", name: "read", input: {}, side: "after" },
+            ],
+          }),
+        ],
+      ]);
+
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      expect(req.messages[3].provenancePositions).toEqual(
+        inline ? [0, 0, 2] : [0, 2],
+      );
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input.map((entry) => entry.type)).toEqual([
+        undefined,
+        "message",
+        ...(prefix ? ["reasoning"] : []),
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+      ]);
+      expect(input[prefix ? 6 : 5]).toMatchObject({
+        content: [
+          ...(inline ? [{ type: "output_text", text: "inline" }] : []),
+          { type: "output_text", text: "trailing" },
+        ],
+      });
+      expect(input.slice(prefix ? 7 : 6)).toEqual([reasoning, call, output]);
+      expect(item.content[prefix ? 1 : 0].text).toBe(marker);
+    },
+  );
+
+  test("a matched marker in part 1 of a shared item matches production per-part anchorContextId and keeps native SourceRange", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-4266141740d3";
+    const query = "production anchor context query";
+    const siblingPart = { type: "output_text", text: "Earlier answer" };
+    const markerText = `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}\ninline continuation`;
+    const markerPart = {
+      type: "output_text",
+      text: markerText,
+    };
+    const afterPart = { type: "output_text", text: "After text" };
+    const devItem = {
+      role: "developer",
+      id: "msg_dev_native",
+      content: [{ type: "input_text", text: "be concise" }],
+    };
+    const item = {
+      type: "message",
+      id: "msg_prod_anchor_split",
+      role: "assistant",
+      status: "completed",
+      content: [siblingPart, markerPart, afterPart],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          devItem,
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "question" }],
+          },
+          item,
+        ],
+      },
+      {},
+    );
+    // Bind anchorContextId the exact way responsesAnchorContext / responsesProvenanceContent
+    // binds it during production response capture: one 1-part envelope per preceding raw part.
+    const productionBoundAnchorContextId = recallAnchorContext(
+      req.messages,
+      1,
+      [
+        {
+          type: "opaque",
+          raw: {
+            type: "message",
+            id: "msg_prod_anchor_split",
+            role: "assistant",
+            status: "completed",
+            content: [siblingPart],
+          },
+          responsesItem: true,
+        },
+      ],
+    );
+    const store: RecallStore = new Map([
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({
+          anchorId,
+          anchorContextId: productionBoundAnchorContextId,
+          input: { query, scope: "all" },
+        }),
+      ],
+    ]);
+    // cleanupRecallStore must retain the entry and expandRecallMarkers must expand it,
+    // without tripping native responsesSourceRange monotonicity on egress.
+    expect(cleanupRecallStore(req, store, { gatewayRecallEnabled: true })).toBe(
+      false,
+    );
+    expect(store.size).toBe(1);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: true }),
+    ).toBe(true);
+    const { input } = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    expect(input.map((entry) => entry.type ?? entry.role)).toEqual([
+      "developer",
+      "message",
+      "message",
+      "function_call",
+      "function_call_output",
+      "message",
+    ]);
+    expect(input[2]).toEqual({
+      type: "message",
+      id: "msg_prod_anchor_split",
+      role: "assistant",
+      status: "completed",
+      content: [siblingPart, { type: "output_text", text: "" }],
+    });
+    expect(input[5]).toEqual({
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: "inline continuation" },
+        afterPart,
+      ],
+    });
+    // Visible content on the continuation assistant message also keeps inline continuation
+    // so non-Responses / Layer-compacted paths never drop it.
+    expect(
+      req.messages[3]?.content.map((b) => (b.type === "text" ? b.text : "")),
+    ).toEqual(["inline continuation", "After text"]);
+
+    // A second marker in a trailing part must still address the right part of
+    // the rebased suffix fragment when the outer expansion loop revisits it.
+    const secondAnchorId = "123e4567-e89b-42d3-a456-4266141740d4";
+    const secondMarkerText = `${buildRecallMarker("second trailing marker")}\n${buildRecallAnchor(secondAnchorId)}\nkept after second`;
+    const middlePart = { type: "output_text", text: "middle sibling" };
+    const chainedReq = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "question" }],
+          },
+          {
+            type: "message",
+            id: "msg_chained_split",
+            role: "assistant",
+            status: "completed",
+            content: [
+              siblingPart,
+              markerPart,
+              middlePart,
+              { type: "output_text", text: secondMarkerText },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const chainedStore: RecallStore = new Map([
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({
+          anchorId,
+          anchorContextId: recallAnchorContext(chainedReq.messages, 1, [
+            {
+              type: "opaque",
+              raw: {
+                type: "message",
+                id: "msg_chained_split",
+                role: "assistant",
+                status: "completed",
+                content: [siblingPart],
+              },
+              responsesItem: true,
+            },
+          ]),
+          input: { query, scope: "all" },
+        }),
+      ],
+    ]);
+    expect(
+      expandRecallMarkers(chainedReq, chainedStore, {
+        gatewayRecallEnabled: true,
+      }),
+    ).toBe(true);
+    const chainedWire = buildOpenAIResponsesUpstreamRequest(
+      chainedReq,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    expect(chainedWire.input[4]).toEqual({
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: "inline continuation" },
+        middlePart,
+        { type: "output_text", text: "kept after second" },
+      ],
+    });
+    expect(JSON.stringify(chainedWire.input)).not.toContain(
+      buildRecallAnchor(secondAnchorId),
     );
   });
 
