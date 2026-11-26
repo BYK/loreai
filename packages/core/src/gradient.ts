@@ -838,7 +838,7 @@ type SessionState = {
   lastKnownMessageCount: number;
   /** High-water raw message count ever observed for this session — detects host front-trimming */
   maxSeenMessageCount: number;
-  /** True once a compressed turn shipped the distilled prefix or restored from persisted Layer >= 1 */
+  /** True once raw history left the caller's view: a compressed turn shipped the distilled prefix, the host front-trimmed, or restored from persisted Layer >= 1 */
   priorPrefixShipped: boolean;
   /** Number of messages in the most recent transform() output */
   lastTransformedCount: number;
@@ -4349,13 +4349,16 @@ function transformWithCounts(input: {
     state.lastTransformedCount = result.messages.length;
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
+    const totalRawSeen =
+      input.messages.length + (input.sourceWindow?.offset ?? 0);
+    // A host front-trim loses raw history for good; latch it like a shipped
+    // prefix because the watermark comparison forgets once the count regrows.
+    if (result.distilledTokens > 0 || totalRawSeen < state.maxSeenMessageCount)
+      state.priorPrefixShipped = true;
     state.maxSeenMessageCount = Math.max(
       state.maxSeenMessageCount,
-      input.messages.length + (input.sourceWindow?.offset ?? 0),
+      totalRawSeen,
     );
-    if (result.distilledTokens > 0) {
-      state.priorPrefixShipped = true;
-    }
     // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
     // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
     // the session at emergency — after recovery it settles back to this floor.

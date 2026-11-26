@@ -3895,10 +3895,14 @@ describe("onIdleResume", () => {
   });
 
   test("post-restart replay at the persisted sent count still ships a newly available summary", () => {
+    // Own session: the describe-level SID carries a persisted prior-prefix flag
+    // from the previous test, which would ship the summary without the watermark.
+    const SID = "maxseen-summary-sess";
     const pid = ensureProject("/test/maxseen-summary-emit");
     // context=6_000, output=2_000 -> rawBudget=952 (chars/3-era units):
     // The oversized leading pair forces Layer 1 to evict it, leaving a
     // suffix that fits on its own after restart.
+    resetCalibration(SID);
     setModelLimits({ context: 6_000, output: 2_000 });
     calibrate(0);
     setForceMinLayer(1, SID);
@@ -3982,6 +3986,84 @@ describe("onIdleResume", () => {
       r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
     ).toBe(true);
     expect(r2.distilledTokens).toBeGreaterThan(0);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("front-trim seen before any summary still ships it after the count catches up", () => {
+    const SID = "trim-latch-sess";
+    const PROJECT = "/test/trim-latch";
+    const pid = ensureProject(PROJECT);
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+    setForceMinLayer(1, SID);
+
+    const full = Array.from({ length: 8 }, (_, i) =>
+      makeMsg(`tl-${i}`, i % 2 === 0 ? "user" : "assistant", `turn ${i}`, SID),
+    );
+    transform({ messages: full, projectPath: PROJECT, sessionID: SID });
+
+    // Host front-trims 8 -> 4 while no summary exists: nothing can ship yet.
+    const trimmed = transform({
+      messages: full.slice(4),
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(trimmed.layer).toBe(1);
+    expect(trimmed.distilledTokens).toBe(0);
+
+    // Host appends 4 more, so the raw count is back at the 8-message watermark.
+    const caughtUp = [
+      ...full.slice(4),
+      ...Array.from({ length: 4 }, (_, i) =>
+        makeMsg(
+          `tl-n${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          `new ${i}`,
+          SID,
+        ),
+      ),
+    ];
+    transform({ messages: caughtUp, projectPath: PROJECT, sessionID: SID });
+
+    // The summary of the trimmed turns becomes available.
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the host-trimmed turns",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+    // Cold resume after a restart, before any prefix ever shipped: the earlier
+    // trim must survive in memory and persistence although the raw count caught up.
+    const nextTurn = [...caughtUp, makeMsg("tl-next", "user", "next", SID)];
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+    const resumed = transform({
+      messages: nextTurn,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(resumed.layer).toBe(1);
+    expect(resumed.distilledTokens).toBeGreaterThan(0);
+    expect(
+      resumed.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(nextTurn.map((m) => m.info.id));
 
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
