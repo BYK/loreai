@@ -5875,6 +5875,200 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     );
   });
 
+  test.each(
+    ["unmatched", "disabled", "matched", "matched continuation"].flatMap(
+      (mode) => [false, true].map((annotations) => ({ mode, annotations })),
+    ),
+  )(
+    "single-part Responses marker removal and expansion: $mode, empty annotations=$annotations",
+    ({ mode, annotations }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e0";
+      const query = "single part query";
+      const continuation =
+        mode === "matched continuation" ? "after recall" : "";
+      const item = {
+        type: "message",
+        id: "msg_single_marker",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}${continuation ? `\n${continuation}` : ""}`,
+            ...(annotations ? { annotations: [] } : {}),
+          },
+        ],
+      };
+      const original = structuredClone(item);
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ type: "message", role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const matched = mode.startsWith("matched");
+      const store: RecallStore = matched
+        ? new Map([
+            [
+              `anchor:${anchorId}`,
+              makeStoredRecall({
+                anchorId,
+                anchorContextId: recallAnchorContext(req.messages, 1),
+                input: { query, scope: "all" },
+              }),
+            ],
+          ])
+        : new Map();
+      expect(
+        expandRecallMarkers(req, store, {
+          gatewayRecallEnabled: mode !== "disabled",
+        }),
+      ).toBe(true);
+      const assistant = req.messages[1];
+      expect(assistant.provenanceContent).toEqual(
+        matched
+          ? [
+              {
+                type: "tool_use",
+                id: "toolu_recall_1",
+                name: RECALL_TOOL_NAME,
+                input: { query, scope: "all" },
+              },
+            ]
+          : [],
+      );
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input.map((entry) => entry.type)).toEqual([
+        "message",
+        ...(matched ? ["function_call", "function_call_output"] : []),
+        ...(continuation ? ["message"] : []),
+      ]);
+      expect(JSON.stringify(input)).not.toContain('"text":""');
+      if (continuation) expect(JSON.stringify(input)).toContain(continuation);
+      expect(item).toEqual(original);
+    },
+  );
+
+  test.each(["unmatched", "matched"])(
+    "single marker retains its native citation when %s",
+    (mode) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e1";
+      const query = "cited marker";
+      const annotations = [
+        { type: "url_citation", url: "https://example.com" },
+      ];
+      const item = {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+            annotations,
+          },
+        ],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const store: RecallStore =
+        mode === "matched"
+          ? new Map([
+              [
+                `anchor:${anchorId}`,
+                makeStoredRecall({
+                  anchorId,
+                  anchorContextId: recallAnchorContext(req.messages, 1),
+                  input: { query, scope: "all" },
+                }),
+              ],
+            ])
+          : new Map();
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input[1]).toEqual({
+        ...item,
+        content: [{ type: "output_text", text: "", annotations }],
+      });
+      expect(item.content[0].text).toContain(buildRecallAnchor(anchorId));
+    },
+  );
+
+  test.each(["unmatched", "matched"])(
+    "single visible marker preserves a preceding hidden Responses part when %s",
+    (mode) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740e2";
+      const query = "hidden part";
+      const hidden = {
+        type: "output_text",
+        text: "",
+        annotations: [{ type: "url_citation", url: "https://example.com" }],
+      };
+      const item = {
+        type: "message",
+        role: "assistant",
+        content: [
+          hidden,
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+          },
+        ],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [{ role: "user", content: "question" }, item],
+        },
+        {},
+      );
+      const store: RecallStore =
+        mode === "matched"
+          ? new Map([
+              [
+                `anchor:${anchorId}`,
+                makeStoredRecall({
+                  anchorId,
+                  anchorContextId: recallAnchorContext(req.messages, 1, [
+                    {
+                      type: "opaque",
+                      raw: { ...item, content: [hidden] },
+                      responsesItem: true,
+                    },
+                  ]),
+                  input: { query, scope: "all" },
+                }),
+              ],
+            ])
+          : new Map();
+      expect(expandRecallMarkers(req, store)).toBe(true);
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input[1]).toEqual({
+        ...item,
+        content: [hidden, { type: "output_text", text: "" }],
+      });
+      if (mode === "matched")
+        expect(input[2]).toMatchObject({
+          type: "function_call",
+          name: RECALL_TOOL_NAME,
+        });
+    },
+  );
+
   test("client-tool collision suppresses one of two markers without crashing or losing the other part", () => {
     const anchorIdA = "123e4567-e89b-42d3-a456-4266141740d1";
     const anchorIdB = "123e4567-e89b-42d3-a456-4266141740d5";

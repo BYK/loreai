@@ -533,6 +533,29 @@ function sharedResponsesEnvelope(
   ) {
     return undefined;
   }
+  // Keep the shared path for hidden parts or other native metadata.
+  const part = block.raw.content[0];
+  if (
+    block.raw.content.length === 1 &&
+    message.content[visibleIndex]?.responsesContentIndex === 0 &&
+    !positions.some(
+      (position, sibling) => sibling !== visibleIndex && position === index,
+    ) &&
+    Object.keys(block.raw).every((key) =>
+      ["type", "role", "id", "status", "content"].includes(key),
+    ) &&
+    isRecord(part) &&
+    Object.keys(part).every(
+      (key) =>
+        key === "type" ||
+        key === "text" ||
+        (key === "annotations" &&
+          Array.isArray(part.annotations) &&
+          part.annotations.length === 0),
+    )
+  ) {
+    return undefined;
+  }
   return { provenanceIndex: index, raw: block.raw };
 }
 
