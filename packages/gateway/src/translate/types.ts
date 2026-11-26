@@ -121,6 +121,23 @@ export type GatewayContentBlock = (
 };
 
 /**
+ * Strip the parser-only `responsesContentIndex` field before unchanged-content
+ * comparisons or hidden-token accounting: temporal parts do not retain raw part
+ * indices, and `responsesContentIndex` is never serialized upstream.
+ */
+export function stripResponsesContentIndex(
+  blocks: GatewayContentBlock[],
+): GatewayContentBlock[] {
+  return blocks.some((block) => block.responsesContentIndex !== undefined)
+    ? blocks.map((block) => {
+        if (block.responsesContentIndex === undefined) return block;
+        const { responsesContentIndex: _ignored, ...rest } = block;
+        return rest;
+      })
+    : blocks;
+}
+
+/**
  * Project a content-block array down to a plain-text representation.
  *
  * Used wherever a string is required: memory/FTS storage, deterministic

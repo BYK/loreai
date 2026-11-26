@@ -193,6 +193,7 @@ import {
   looksLikeSSE,
   providerRoutingValue,
   requestTargetsOpenRouter,
+  stripResponsesContentIndex,
   ZERO_USAGE,
 } from "./translate/types";
 import { GEMINI_DEFAULT_UPSTREAM, type GatewayConfig } from "./config";
@@ -25509,24 +25510,6 @@ export function canReplayRequestProvenance(
 // ---------------------------------------------------------------------------
 // Lore message → Gateway message conversion
 // ---------------------------------------------------------------------------
-
-/**
- * Comparison view for unchanged-content checks: the parser stamps
- * `responsesContentIndex` on source blocks, but reconstructed content omits
- * it (temporal parts do not retain raw part indices). Strip only that field
- * so an otherwise-identical block sequence still compares equal.
- */
-function stripResponsesContentIndex(
-  blocks: GatewayContentBlock[],
-): GatewayContentBlock[] {
-  return blocks.some((block) => block.responsesContentIndex !== undefined)
-    ? blocks.map((block) => {
-        if (block.responsesContentIndex === undefined) return block;
-        const { responsesContentIndex: _ignored, ...rest } = block;
-        return rest;
-      })
-    : blocks;
-}
 
 /**
  * Convert transformed Lore messages back to gateway message format.

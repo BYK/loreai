@@ -15,6 +15,7 @@ import {
   buildGeminiUpstreamRequest,
   parseGeminiRequest,
 } from "../src/translate/gemini";
+import { parseOpenAIResponsesRequest } from "../src/translate/openai-responses";
 
 // Test-local view of a tool part's state covering all status variants.
 type TestToolState = {
@@ -437,6 +438,43 @@ describe("resolveToolResults", () => {
       false,
     );
     expect(messages[0]?.hiddenInputTokens).toBeGreaterThan(1_000);
+  });
+
+  test("excludes parser-only responsesContentIndex from hidden token accounting", () => {
+    const parsed = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-test",
+        input: [
+          {
+            type: "message",
+            id: "msg_hidden_accounting",
+            role: "assistant",
+            status: "completed",
+            content: [
+              { type: "output_text", text: "first part" },
+              { type: "output_text", text: "second part" },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const assistant = parsed.messages[0];
+    if (!assistant) throw new Error("missing parsed Responses assistant");
+    const stripped: GatewayMessage = {
+      ...assistant,
+      content: assistant.content.map((block) => {
+        const { responsesContentIndex: _ignored, ...rest } = block;
+        return rest;
+      }),
+    };
+    const withIndex = gatewayMessagesToLore([assistant], "sess-hidden-idx");
+    const withoutIndex = gatewayMessagesToLore([stripped], "sess-hidden-idx");
+
+    expect(withIndex[0]?.hiddenInputTokens).toBeGreaterThan(0);
+    expect(withIndex[0]?.hiddenInputTokens).toBe(
+      withoutIndex[0]?.hiddenInputTokens,
+    );
   });
 
   test("replays Gemini thought provenance only on a stable layer", () => {
