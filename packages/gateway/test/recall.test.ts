@@ -6469,6 +6469,139 @@ describe("replaceMarkerWithContinuation Responses opaque provenance", () => {
     },
   );
 
+  // A marker followed only by hidden (empty, annotation-only) raw parts leaves
+  // a suffix fragment with no visible continuation. That fragment must replay
+  // right after the synthetic result, never after the client's next user turn.
+  test.each([{ companion: false }, { companion: true }])(
+    "a hidden-only shared recall suffix replays before the next user turn (companion: $companion)",
+    ({ companion }) => {
+      const anchorId = "123e4567-e89b-42d3-a456-4266141740d6";
+      const query = "hidden suffix before next user turn";
+      const siblingPart = { type: "output_text", text: "Earlier answer" };
+      const hiddenPart = {
+        type: "output_text",
+        text: "",
+        annotations: [{ type: "url_citation", url: "https://example.com/t" }],
+      };
+      const item = {
+        type: "message",
+        id: "msg_hidden_suffix",
+        role: "assistant",
+        status: "completed",
+        content: [
+          siblingPart,
+          {
+            type: "output_text",
+            text: `${buildRecallMarker(query)}\n${buildRecallAnchor(anchorId)}`,
+          },
+          hiddenPart,
+        ],
+      };
+      const reasoning = {
+        type: "reasoning",
+        id: "rs_hidden_companion",
+        encrypted_content: "encrypted",
+      };
+      const call = {
+        type: "function_call",
+        id: "fc_read",
+        call_id: "call_read",
+        name: "read",
+        arguments: "{}",
+        status: "completed",
+      };
+      const output = {
+        type: "function_call_output",
+        call_id: "call_read",
+        output: "file contents",
+      };
+      const nextTurn = {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "next question" }],
+      };
+      const req = parseOpenAIResponsesRequest(
+        {
+          model: "gpt-test",
+          input: [
+            { type: "message", role: "user", content: "question" },
+            item,
+            ...(companion ? [reasoning, call, output] : []),
+            nextTurn,
+          ],
+        },
+        {},
+      );
+      const store: RecallStore = new Map([
+        [
+          `anchor:${anchorId}`,
+          makeStoredRecall({
+            anchorId,
+            input: { query, scope: "all" },
+            anchorContextId: recallAnchorContext(req.messages, 1, [
+              {
+                type: "opaque",
+                raw: { ...item, content: [siblingPart] },
+                responsesItem: true,
+              },
+            ]),
+            ...(companion
+              ? {
+                  companionToolUses: [
+                    {
+                      id: "call_read",
+                      name: "read",
+                      input: {},
+                      side: "after" as const,
+                    },
+                  ],
+                }
+              : {}),
+          }),
+        ],
+      ]);
+
+      expect(
+        expandRecallMarkers(req, store, { gatewayRecallEnabled: true }),
+      ).toBe(true);
+
+      // The synthetic result turn and the detached suffix both precede the
+      // client's real next turn, which stays last and untouched.
+      const last = req.messages[req.messages.length - 1];
+      expect(last.role).toBe("user");
+      expect(last.content).toMatchObject([
+        { type: "text", text: "next question" },
+      ]);
+      const { input } = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as { input: Array<Record<string, unknown>> };
+      expect(input.map((entry) => entry.type)).toEqual([
+        "message",
+        "message",
+        "function_call",
+        ...(companion ? ["reasoning", "function_call"] : []),
+        "function_call_output",
+        ...(companion ? ["function_call_output"] : []),
+        "message",
+        "message",
+      ]);
+      const suffixAt = input.length - 2;
+      expect(input[suffixAt]).toEqual({
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [hiddenPart],
+      });
+      expect(input[suffixAt].id).toBeUndefined();
+      expect(input[input.length - 1]).toMatchObject({
+        role: "user",
+        content: [{ type: "input_text", text: "next question" }],
+      });
+      expect(JSON.stringify(input)).not.toContain(buildRecallAnchor(anchorId));
+    },
+  );
+
   test("a matched marker in part 1 of a shared item matches production per-part anchorContextId and keeps native SourceRange", () => {
     const anchorId = "123e4567-e89b-42d3-a456-4266141740d3";
     const query = "production anchor context query";
