@@ -1854,7 +1854,11 @@ export function expandRecallMarkers(
       ],
     };
 
-    if (hasContinuationAfter || req.messages[i + 1]?.role !== "user") {
+    if (
+      hasContinuationAfter ||
+      suffixProvenance.length > 0 ||
+      req.messages[i + 1]?.role !== "user"
+    ) {
       // A legacy following group stays independent. Its shared result turn may
       // also contain outputs for calls now preceding Lore's synthetic result.
       // Move those real outputs with their exact native envelopes; resolving
@@ -1918,23 +1922,15 @@ export function expandRecallMarkers(
     } else if (suffixProvenance.length > 0) {
       // The suffix fragment still carries raw parts (the marker continuation
       // and/or empty cited parts), so it must replay as its own message
-      // after the synthetic result — never before it.
+      // directly after the synthetic result and before whatever the client
+      // sent next — never merged into, or placed after, the following turn.
       const continuationMsg: GatewayMessage = {
         role: "assistant",
         content: [],
         provenanceContent: suffixProvenance,
         provenancePositions: [],
       };
-      const nextMsg = req.messages[i + 1];
-      if (nextMsg?.role === "user") {
-        const resultIndex = msg.content
-          .slice(0, markerIdx)
-          .filter((block) => block.type === "tool_use").length;
-        insertVisibleContentBlocks(nextMsg, resultIndex, toolResultMsg.content);
-        req.messages.splice(i + 2, 0, continuationMsg);
-      } else {
-        req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
-      }
+      req.messages.splice(i + 1, 0, toolResultMsg, continuationMsg);
       i += 2;
     } else {
       // No split needed — insert tool_result into the following user message.
