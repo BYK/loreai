@@ -2275,6 +2275,10 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
       sessionID: SID,
     });
     expect(r2.layer).toBeGreaterThanOrEqual(1);
+    expect(r2.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
   });
 });
 
@@ -2443,10 +2447,11 @@ describe("gradient — usable/overhead oscillation (Bug 1)", () => {
       setModelLimits({ context: 100_000, output: 4_000 });
       calibrate(0);
       // ~15K-token prefix: fits turn-1 budget (distilledBudget 24K) but exceeds
-      // the dipped turn-2 budget (10K). Small raw so the pin leaves headroom.
+      // the dipped turn-2 budget (10K). Enough raw messages so post-idle
+      // compaction is needed and the raw window pins with headroom.
       seed(10, 4_500);
       const conv = [
-        ...Array.from({ length: 20 }, (_, i) =>
+        ...Array.from({ length: 48 }, (_, i) =>
           makeMsg(
             `h-${i}`,
             i % 2 === 0 ? "user" : "assistant",
@@ -3642,6 +3647,639 @@ describe("onIdleResume", () => {
     expect(state?.postIdleCompact).toBe(true);
     expect(state?.cameOutOfIdle).toBe(true);
   });
+
+  test("postIdleCompact does NOT latch a small Layer-0 session into Layer 1 when raw body fits post-idle budget", () => {
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    const messages = [
+      makeMsg("small-u1", "user", "First question", SID),
+      makeMsg("small-a1", "assistant", "First answer", SID),
+      makeMsg("small-u2", "user", "Follow-up after 10 min break", SID),
+    ];
+
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    const idle = onIdleResume(SID, 5 * 60_000);
+    expect(idle.triggered).toBe(true);
+    expect(inspectSessionState(SID)?.postIdleCompact).toBe(true);
+
+    const r1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r1.layer).toBe(0);
+    expect(r1.distilledTokens).toBe(0);
+    expect(r1.messages).toBe(messages);
+    expect(inspectSessionState(SID)?.postIdleCompact).toBe(false);
+
+    // Subsequent turn also stays at Layer 0 (maxSustainedLayer was not ratcheted).
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("small-a2", "assistant", "Second answer", SID),
+        makeMsg("small-u3", "user", "Third question", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(0);
+
+    // Post-idle resume on a CALIBRATED Layer-0 session whose real API token
+    // count is ~1.68x higher than chars/3: when raw messages still fit
+    // postIdleRawBudget on the chars/3 scale, it must NOT be latched into
+    // Layer 1 by a scale mismatch between expectedInput and postIdleRawBudget.
+    // Set context=10_000, output=2_000 -> usable=8_000, bodyUsable=4_761,
+    // postIdleRawBudget=952 (chars/3). Give ~600 chars/3 tokens of messages,
+    // but calibrate with 1_200 real API tokens (> 952).
+    setModelLimits({ context: 10_000, output: 2_000 });
+    const calibratedMsgs = [
+      makeMsg("cal-u1", "user", "a".repeat(900), SID),
+      makeMsg("cal-a1", "assistant", "b".repeat(900), SID),
+    ];
+    const rCal0 = transform({
+      messages: calibratedMsgs,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(rCal0.layer).toBe(0);
+    calibrate(1_200, SID, calibratedMsgs.length); // 1,200 real API tokens > 952 postIdleRawBudget
+
+    setLastTurnAtForTest(SID, Date.now() - 10 * 60_000);
+    onIdleResume(SID, 5 * 60_000);
+    const rCalIdle = transform({
+      messages: [
+        ...calibratedMsgs,
+        makeMsg("cal-u2", "user", "short follow-up", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(rCalIdle.layer).toBe(0);
+  });
+
+  test("forced Layer 1 omits redundant distilled prefix when tryFit evicts 0 raw messages (cutoff === 0)", () => {
+    const pid = ensureProject("/test/no-evict-prefix-suppression");
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Redundant summary of raw messages still in window",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    const messages = [
+      makeMsg("ne-u1", "user", "Hello", SID),
+      makeMsg("ne-a1", "assistant", "Hi there", SID),
+      makeMsg("ne-u2", "user", "What next?", SID),
+    ];
+
+    setForceMinLayer(1, SID);
+    const r1 = transform({
+      messages,
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual([
+      "ne-u1",
+      "ne-a1",
+      "ne-u2",
+    ]);
+
+    // Pinned-window hit on the next turn also omits the prefix while 0 messages
+    // are evicted and keeps pinnedRawCount equal to the raw message count.
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(1);
+    expect(r2.distilledTokens).toBe(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2.messages.length).toBe(5);
+
+    // Restart after a zero-eviction Layer-1 turn: persisted bustRateEMA === 0
+    // records that the prefix was NOT shipped, so restoring lastLayer = 1 does
+    // not flip priorPrefixShipped to true and duplicate the prefix on resume.
+    calibrate(500, SID, 5);
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    const r2Restart = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2Restart.layer).toBe(1);
+    expect(r2Restart.distilledTokens).toBe(0);
+    expect(
+      r2Restart.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+
+    // Same session, but the rendered prefix now EXCEEDS its distilled budget:
+    // an over-budget prefix that would be omitted anyway (nothing evicted)
+    // must not escalate the layer. context=10_000 → distilledBudget = 2_000;
+    // a ~9_000-char distillation (~3_000 tokens) exceeds it while the raw
+    // messages still fit. Note: transform() prefers the LIVE distillation set
+    // when the prefix cache is cold, so no snapshot reset is needed for the
+    // prefix change to be visible to tryFitStable.
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Over-budget summary: " + "z".repeat(9_000),
+        "[]",
+        0,
+        3_000,
+        0,
+        Date.now(),
+      );
+
+    const r2Big = transform({
+      messages: [
+        ...messages,
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+        makeMsg("ne-a3", "assistant", "Carried on", SID),
+        makeMsg("ne-u4", "user", "Keep going", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r2Big.layer).toBe(1);
+    expect(r2Big.distilledTokens).toBe(0);
+    expect(
+      r2Big.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2Big.messages.length).toBe(7);
+
+    // Host front-trimming: if the host drops older messages so the input array
+    // shrinks below maxSeenMessageCount (even without setting sourceWindow.offset
+    // and with cutoff === 0 on the remaining slice), the distilled prefix IS
+    // injected so the summarized history is not lost.
+    const r3 = transform({
+      messages: [
+        makeMsg("ne-u2", "user", "What next?", SID),
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r3.layer).toBe(1);
+    expect(r3.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r3.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
+
+    // Post-restart host front-trimming: if the process restarts (evictSession)
+    // and the host sends a front-trimmed slice whose length (4) is ABOVE the
+    // persisted compressed count (lastKnownMessageCount = 2) yet fits rawBudget
+    // (cutoff === 0), the restored compressed state still preserves the
+    // distilled prefix on the first post-restart turn.
+    calibrate(1_000, SID, 2); // persisted compressed count = 2
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    const r4 = transform({
+      messages: [
+        makeMsg("ne-u2", "user", "What next?", SID),
+        makeMsg("ne-a2", "assistant", "Next answer", SID),
+        makeMsg("ne-u3", "user", "Continue", SID),
+        makeMsg("ne-a3", "assistant", "Done", SID),
+      ],
+      projectPath: "/test/no-evict-prefix-suppression",
+      sessionID: SID,
+    });
+    expect(r4.layer).toBe(1);
+    expect(r4.distilledTokens).toBeGreaterThan(0);
+    expect(
+      r4.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("post-restart replay at the persisted sent count still ships a newly available summary", () => {
+    // Own session: the describe-level SID carries a persisted prior-prefix flag
+    // from the previous test, which would ship the summary without the watermark.
+    const SID = "maxseen-summary-sess";
+    const pid = ensureProject("/test/maxseen-summary-emit");
+    // context=6_000, output=2_000 -> rawBudget=952 (chars/3-era units):
+    // The oversized leading pair forces Layer 1 to evict it, leaving a
+    // suffix that fits on its own after restart.
+    resetCalibration(SID);
+    setModelLimits({ context: 6_000, output: 2_000 });
+    calibrate(0);
+    setForceMinLayer(1, SID);
+
+    const messages = [
+      makeMsg("ms-u1", "user", "a".repeat(2_000), SID),
+      makeMsg("ms-a1", "assistant", "b".repeat(3_000), SID),
+      makeMsg("ms-u2", "user", "What next?", SID),
+    ];
+
+    // No summary exists yet: Layer 1 truly evicts the leading user+assistant
+    // pair (the backward fill targets 75% of rawBudget) and no prefix ships.
+    const r1 = transform({
+      messages,
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual(["ms-u2"]);
+
+    // Turn 2 (still no summary): the raw scan re-runs and the older pair is
+    // evicted again — eviction without a prior prefix ships no prefix.
+    const messagesTurn2 = [
+      ...messages,
+      makeMsg("ms-a2", "assistant", "Keep going.", SID),
+    ];
+    const r2a = transform({
+      messages: messagesTurn2,
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(
+      r2a.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2a.messages.map((m) => m.info.id)).toEqual(["ms-u2", "ms-a2"]);
+
+    // Calibrate with the count actually sent (2), insert the summary, save
+    // state and evict the in-memory session to simulate a process restart.
+    calibrate(1_000, SID, r2a.messages.length);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Newly available summary of the evicted turns",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+
+    // The host replays the surviving short suffix (length 2 == the persisted
+    // sent count 2) with no front-trim offset: the suffix fits raw, yet the
+    // newly available summary must still ship alongside every replayed raw id.
+    const r2 = transform({
+      messages: messagesTurn2.slice(2),
+      projectPath: "/test/maxseen-summary-emit",
+      sessionID: SID,
+    });
+    expect(r2.messages.length).toBeGreaterThanOrEqual(r2a.messages.length);
+    expect(
+      r2.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(["ms-u2", "ms-a2"]);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(true);
+    expect(r2.distilledTokens).toBeGreaterThan(0);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("front-trim seen before any summary still ships it after the count catches up", () => {
+    const SID = "trim-latch-sess";
+    const PROJECT = "/test/trim-latch";
+    const pid = ensureProject(PROJECT);
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+    setForceMinLayer(1, SID);
+
+    const full = Array.from({ length: 8 }, (_, i) =>
+      makeMsg(`tl-${i}`, i % 2 === 0 ? "user" : "assistant", `turn ${i}`, SID),
+    );
+    transform({ messages: full, projectPath: PROJECT, sessionID: SID });
+
+    // Host front-trims 8 -> 4 while no summary exists: nothing can ship yet.
+    const trimmed = transform({
+      messages: full.slice(4),
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(trimmed.layer).toBe(1);
+    expect(trimmed.distilledTokens).toBe(0);
+
+    // Host appends 4 more, so the raw count is back at the 8-message watermark.
+    const caughtUp = [
+      ...full.slice(4),
+      ...Array.from({ length: 4 }, (_, i) =>
+        makeMsg(
+          `tl-n${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          `new ${i}`,
+          SID,
+        ),
+      ),
+    ];
+    transform({ messages: caughtUp, projectPath: PROJECT, sessionID: SID });
+
+    // The summary of the trimmed turns becomes available.
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the host-trimmed turns",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+    // Cold resume after a restart, before any prefix ever shipped: the earlier
+    // trim must survive in memory and persistence although the raw count caught up.
+    const nextTurn = [...caughtUp, makeMsg("tl-next", "user", "next", SID)];
+    setLastTurnAtForTest(SID, Date.now());
+    saveGradientState(SID);
+    evictSession(SID);
+    const resumed = transform({
+      messages: nextTurn,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(resumed.layer).toBe(1);
+    expect(resumed.distilledTokens).toBeGreaterThan(0);
+    expect(
+      resumed.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(nextTurn.map((m) => m.info.id));
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("assistant-leading history: pinned turn keeps the leading assistant and no prefix when nothing is evicted", () => {
+    const SID = "assistant-leading-sess";
+    const PROJECT = "/test/assistant-leading-pin";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of earlier work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // Assistant-LEADING raw history (e.g. resumed tool chain): the fresh Layer-1
+    // turn must fit intact with no prefix shipped and nothing dropped.
+    const messages = [
+      makeMsg("al-a1", "assistant", "Working on the first step", SID),
+      makeMsg("al-u1", "user", "ok", SID),
+    ];
+    setForceMinLayer(1, SID);
+    const r1 = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r1.layer).toBe(1);
+    expect(r1.distilledTokens).toBe(0);
+    expect(
+      r1.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r1.messages.map((m) => m.info.id)).toEqual(["al-a1", "al-u1"]);
+
+    // Pinned turn: appending messages must not advance past the leading
+    // assistant just because a prefix exists — nothing was evicted, so the
+    // prefix stays omitted and every raw message survives.
+    const r2 = transform({
+      messages: [
+        ...messages,
+        makeMsg("al-a2", "assistant", "Step two done", SID),
+        makeMsg("al-u2", "user", "continue", SID),
+      ],
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    expect(r2.layer).toBe(1);
+    expect(r2.distilledTokens).toBe(0);
+    expect(
+      r2.messages.some((m) => m.info.id.startsWith("lore-distilled")),
+    ).toBe(false);
+    expect(r2.messages.map((m) => m.info.id)).toEqual([
+      "al-a1",
+      "al-u1",
+      "al-a2",
+      "al-u2",
+    ]);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("tool-stripping layers keep the distilled prefix even when cutoff === 0", () => {
+    const SID = "strip-prefix-sess";
+    const PROJECT = "/test/strip-prefix-suppression";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the earlier tool work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // 6 old messages so layer 2's protectedTurns (last 2 turns) do not shield
+    // the leading assistant's tool output from stripping.
+    const messages = [
+      makeMsgWithTool(
+        "sp-a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/a.ts"}',
+        "x".repeat(2_000),
+        SID,
+      ),
+      makeMsg("sp-u0", "user", "thanks", SID),
+      makeMsg("sp-a2", "assistant", "working on it", SID),
+      makeMsg("sp-u0b", "user", "and?", SID),
+      makeMsg("sp-a3", "assistant", "still on it", SID),
+      makeMsg("sp-u0c", "user", "go on", SID),
+      makeMsg("sp-u1", "user", "Now summarize", SID),
+    ];
+
+    setForceMinLayer(2, SID);
+    const r = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r.layer).toBe(2);
+    // Layer 2 strips old tool outputs — the summary must ship or that work is lost.
+    expect(r.distilledTokens).toBeGreaterThan(0);
+    expect(r.messages.some((m) => m.info.id.startsWith("lore-distilled"))).toBe(
+      true,
+    );
+    // No back-to-back assistants across the prefix/raw boundary (#424): the
+    // prefix ends with an assistant, so the first raw message must be a user.
+    const firstRaw = r.messages.find(
+      (m) => !m.info.id.startsWith("lore-distilled"),
+    );
+    expect(firstRaw?.info.role).toBe("user");
+    // The leading assistant is evicted past the boundary (role alternation) —
+    // its summary survives only via the shipped prefix.
+    expect(r.messages.some((m) => m.info.id === "sp-a1")).toBe(false);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
+
+  test("tool-stripping layers keep the distilled prefix for user-leading history (cutoff === 0, nothing evicted)", () => {
+    const SID = "strip-prefix-user-leading-sess";
+    const PROJECT = "/test/strip-prefix-user-leading";
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        pid,
+        SID,
+        "",
+        "[]",
+        "- Summary of the earlier tool work",
+        "[]",
+        0,
+        50,
+        0,
+        Date.now(),
+      );
+
+    resetCalibration(SID);
+    setModelLimits({ context: 100_000, output: 4_000 });
+    calibrate(0);
+
+    // User-LEADING, strictly alternating history ending on a user message.
+    // The tool-bearing assistant sits at index 1 — fromEnd ≈ 7, outside layer
+    // 2's protectedTurns*2 window — so its output is stripped, not evicted.
+    const messages = [
+      makeMsg("su-u1", "user", "read the file", SID),
+      makeMsgWithTool(
+        "su-a1",
+        "assistant",
+        "read_file",
+        '{"path":"src/a.ts"}',
+        "x".repeat(2_000),
+        SID,
+      ),
+      makeMsg("su-u2", "user", "thanks", SID),
+      makeMsg("su-a2", "assistant", "working on it", SID),
+      makeMsg("su-u3", "user", "and?", SID),
+      makeMsg("su-a3", "assistant", "still on it", SID),
+      makeMsg("su-u4", "user", "go on", SID),
+      makeMsg("su-a4", "assistant", "nearly there", SID),
+      makeMsg("su-u5", "user", "Now summarize", SID),
+    ];
+
+    setForceMinLayer(2, SID);
+    const r = transform({ messages, projectPath: PROJECT, sessionID: SID });
+    expect(r.layer).toBe(2);
+    // cutoff === 0 (nothing evicted) yet old tool output was stripped — the
+    // stripped content survives only in the summary, so the prefix must ship.
+    expect(r.distilledTokens).toBeGreaterThan(0);
+    expect(r.messages.some((m) => m.info.id.startsWith("lore-distilled"))).toBe(
+      true,
+    );
+    const firstRaw = r.messages.find(
+      (m) => !m.info.id.startsWith("lore-distilled"),
+    );
+    expect(firstRaw?.info.role).toBe("user");
+    // Nothing was evicted: every raw message id is still present, in order.
+    expect(
+      r.messages
+        .filter((m) => !m.info.id.startsWith("lore-distilled"))
+        .map((m) => m.info.id),
+    ).toEqual(messages.map((m) => m.info.id));
+    // The tool output really was stripped — replaced by the strip annotation.
+    const toolMsg = r.messages.find((m) => m.info.id === "su-a1");
+    const output = toolMsg?.parts[0] ? getToolOutput(toolMsg.parts[0]) : "?";
+    expect(output).toBeDefined();
+    expect(output).not.toContain("x".repeat(2_000));
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
+  });
 });
 
 describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
@@ -3751,9 +4389,10 @@ describe("gradient — distillation snapshot caching", () => {
 
   beforeAll(() => {
     projectId = ensureProject(`/test/${PID_KEY}`);
-    // Wide enough to avoid emergency Layer 4; tests explicitly force Layer 1
-    // where the warm distilled-prefix cache is used.
-    setModelLimits({ context: 50_000, output: 1_000 });
+    // Wide enough to avoid emergency Layer 4 while 16 × ~350-token messages
+    // (~5,600 raw tokens) exceed the Layer-1 rawFillBudget so tryFit evicts
+    // older messages and includes the distilled prefix.
+    setModelLimits({ context: 20_000, output: 1_000 });
     calibrate(0);
   });
 
