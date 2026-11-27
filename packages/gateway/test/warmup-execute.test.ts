@@ -23,14 +23,26 @@ vi.mock("../src/fetch", () => ({
 
 import {
   executeWarmup,
+  beginWarmingTurn,
+  finishWarmingTurn,
+  isWarmupAuthDisabled,
+  clearWarmupAuthDisabled,
   buildAnthropicProfile,
+  resolveProfileForSession,
   isCircuitBreakerTripped,
   warmupBucketKey,
   resetCircuitBreaker,
 } from "../src/cache-warmer";
 import { setSessionAuth, _resetAuthForTest } from "../src/auth";
-import { clearAllCosts } from "../src/cost-tracker";
+import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import { compressBody } from "../src/cache-analytics";
+import {
+  OPENAI_CACHE_TTL_MS,
+  OPENAI_RESPONSES_URL,
+  openAIWarmupScope,
+  prepareOpenAIWarmupReplay,
+} from "../src/openai-cache-warming";
+import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { loadConfig } from "../src/config";
 import type { SessionState, CacheAnalytics } from "../src/translate/types";
 
@@ -57,7 +69,6 @@ function makeState(): SessionState {
     projectPath: "/tmp/test-project",
     fingerprint: "abc123",
     lastRequestTime: Date.now() - 270_000,
-    lastUserTurnTime: Date.now() - 270_000,
     messageCount: 20,
     turnsSinceCuration: 2,
     consecutiveTextOnlyTurns: 0,
@@ -92,6 +103,7 @@ let originalFetch: typeof globalThis.fetch;
 beforeEach(() => {
   originalFetch = globalThis.fetch;
   _resetAuthForTest();
+  clearWarmupAuthDisabled(SESSION_ID);
   clearAllCosts();
   setSessionAuth(SESSION_ID, { scheme: "bearer", value: "test-token" });
 });
@@ -102,6 +114,93 @@ afterEach(() => {
 });
 
 describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
+  test.each([200, 401])(
+    "a late warmup (%s) cannot modify the next turn or its credential",
+    async (status) => {
+      const state = makeState();
+      const original = state.lastRequestTime;
+      beginWarmingTurn(state, [], 1, original, false);
+      finishWarmingTurn(state, 1, original, original + 1, "end_turn", false);
+      let complete: (response: Response) => void = () => {};
+      const fetchMock = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            complete = resolve;
+          }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const warmup = executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+      expect(fetchMock).toHaveBeenCalledOnce();
+
+      const current = Date.now();
+      beginWarmingTurn(state, [], 2, current, false);
+      state.lastRequestTime = current;
+      finishWarmingTurn(state, 2, current, current + 1, "end_turn", false);
+      setSessionAuth(SESSION_ID, { scheme: "bearer", value: "fresh-token" });
+
+      complete(
+        new Response(
+          JSON.stringify({ usage: { cache_read_input_tokens: 100_000 } }),
+          { status },
+        ),
+      );
+      await warmup;
+      expect(state.warmup).toBeUndefined();
+      expect(isWarmupAuthDisabled(SESSION_ID)).toBe(false);
+    },
+  );
+
+  test("manual thinking is skipped before dispatch", async () => {
+    const fetchMock = fetchReturningUsage({ cache_read_input_tokens: 100_000 });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const state = makeState();
+    state.cacheAnalytics.lastRequestBody = compressBody(
+      JSON.stringify({
+        thinking: { type: "enabled", budget_tokens: 10_000 },
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    );
+    expect(
+      (await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"))).ok,
+    ).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("an under-sized read stops warming the current reply", async () => {
+    const fetchMock = fetchReturningUsage({ cache_read_input_tokens: 2_000 });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const state = makeState();
+    const requestedAt = state.lastRequestTime;
+    beginWarmingTurn(state, [], 1, requestedAt, false);
+    finishWarmingTurn(
+      state,
+      1,
+      requestedAt,
+      requestedAt + 1,
+      "end_turn",
+      false,
+    );
+
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(state.warmingTurn?.warmupMissed).toBe(true);
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  test("a slow successful warmup measures expiry from dispatch", async () => {
+    const state = makeState();
+    state.resolvedConversationTTL = "1h";
+    const sentAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(sentAt);
+    globalThis.fetch = vi.fn(async () => {
+      clock.mockReturnValue(sentAt + 60_000);
+      return Response.json({ usage: { cache_read_input_tokens: 100_000 } });
+    }) as unknown as typeof fetch;
+    await executeWarmup(state, buildAnthropicProfile(MODEL, "5m"));
+    expect(state.warmup?.lastWarmupAt).toBe(sentAt);
+    expect(state.warmup?.lastWarmupTTL).toBe("5m");
+  });
+
   test("a full refresh persists the warmup's cache_read tokens", async () => {
     globalThis.fetch = fetchReturningUsage({
       input_tokens: 5,
@@ -399,5 +498,125 @@ describe("executeWarmup → all-or-nothing circuit breaker (partial-while-alive 
     await executeWarmup(state, profile);
     // Only 2 failures since the clear → not tripped.
     expect(isCircuitBreakerTripped(bucket)).toBe(false);
+  });
+});
+
+describe("OpenAI native prewarm", () => {
+  afterEach(() => clearModelDataCache());
+
+  function openAIState() {
+    const state = makeState();
+    const model = "gpt-6.1-sol";
+    const entry = { id: model, cost: { input: 2, output: 10 } };
+    _setModelDataForTest({ [model]: entry }, { [`openai/${model}`]: entry });
+    const requestedAt = Date.now() - OPENAI_CACHE_TTL_MS + 45_000;
+    state.lastRequestTime = requestedAt;
+    state.lastUpstream = {
+      url: "https://api.openai.com/v1",
+      protocol: "openai-responses",
+      providerID: "openai",
+      model,
+      headers: {},
+    };
+    state.cacheAnalytics.lastRequestBody = null;
+    setSessionAuth(
+      SESSION_ID,
+      { scheme: "bearer", value: "test-token" },
+      "openai",
+    );
+    const route = openAIWarmupScope(
+      { authorization: "Bearer test-token", "openai-project": "proj_example" },
+      model,
+      "prefix-key",
+    );
+    if (!route) throw new Error("missing scope");
+    beginWarmingTurn(state, [], 1, requestedAt, false);
+    state._upstreamRequestOrder = 1;
+    finishWarmingTurn(state, 1, requestedAt, requestedAt + 1, "stop", false);
+    state.warmingTurn!.openAIReplay = prepareOpenAIWarmupReplay(
+      JSON.stringify({
+        model,
+        store: false,
+        stream: true,
+        max_output_tokens: 500,
+        input: [{ role: "user", content: "hello" }],
+        prompt_cache_key: "prefix-key",
+      }),
+      route,
+      { inputTokens: 100, outputTokens: 1, cacheReadInputTokens: 60_000 },
+      50_000,
+    );
+    const profile = resolveProfileForSession(state);
+    if (!profile) throw new Error("missing OpenAI profile");
+    return { state, profile };
+  }
+
+  test.each([
+    { read: 60_000, write: 0, output: 0, verified: true },
+    { read: 30_000, write: 30_000, output: 0, verified: false },
+    { read: 60_000, write: 0, output: 1, verified: false },
+    { read: 55_000, write: 0, output: 0, verified: false },
+  ])(
+    "meters prewarm usage and credits only a verified refresh ($read/$write/$output)",
+    async ({ read, write, output, verified }) => {
+      const { state, profile } = openAIState();
+      const fetchMock = vi.fn(
+        async (_url: RequestInfo | URL, _init?: RequestInit) =>
+          Response.json({
+            status: "completed",
+            output: [],
+            usage: {
+              input_tokens: read + write + 100,
+              output_tokens: output,
+              input_tokens_details: {
+                cached_tokens: read,
+                cache_write_tokens: write,
+              },
+            },
+          }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      await executeWarmup(state, profile);
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+        OPENAI_RESPONSES_URL,
+        expect.objectContaining({
+          redirect: "error",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+            "openai-project": "proj_example",
+          }),
+        }),
+      );
+      const serialized = fetchMock.mock.calls[0]?.[1]?.body;
+      if (typeof serialized !== "string")
+        throw new Error("missing prewarm JSON");
+      const body = JSON.parse(serialized);
+      expect(body).toMatchObject({
+        stream: false,
+        store: false,
+        prompt_cache_key: "prefix-key",
+        prompt_cache_options: { prewarm: true },
+      });
+      expect(body).not.toHaveProperty("max_output_tokens");
+      expect(state.warmup?.lastWarmupTTL).toBe(verified ? "30m" : undefined);
+      expect(state.warmingTurn?.warmupMissed).toBe(verified ? undefined : true);
+      expect(getSessionCosts(SESSION_ID)?.workers.warmup.cost).toBeCloseTo(
+        (read * 0.1 + write * 2.5 + 100 * 2 + output * 10) / 1_000_000,
+        9,
+      );
+    },
+  );
+
+  test("rejects a replay after the session credential changes", async () => {
+    const { state, profile } = openAIState();
+    setSessionAuth(
+      SESSION_ID,
+      { scheme: "bearer", value: "rotated-token" },
+      "openai",
+    );
+    const fetchMock = vi.fn<typeof fetch>();
+    globalThis.fetch = fetchMock;
+    expect((await executeWarmup(state, profile)).ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import { setUpstreamFetchOverrideForTest } from "../src/fetch";
 /**
  * Pipeline streaming-response coverage (Anthropic conversation turns).
  *
@@ -2740,6 +2741,166 @@ describe("Pipeline — streaming responses", () => {
   afterEach(() => harness?.teardown());
   afterEach(() => vi.mocked(getDegradationWarning).mockReset());
   afterEach(() => vi.mocked(Sentry.startInactiveSpan).mockReset());
+
+  it.each([
+    ["30-minute cache", { ttl: "30m" }, false, true, true],
+    ["buffered 30-minute cache", { ttl: "30m" }, false, true, true],
+    ["12-hour cache", { ttl: "12h" }, false, true, false],
+    ["no-store", { ttl: "30m" }, true, true, false],
+    ["synthetic upstream response", { ttl: "30m" }, false, false, false],
+  ] as const)(
+    "captures only an eligible Responses replay after EOF (%s)",
+    async (label, options, noStore, direct, eligible) => {
+      const model = "gpt-5.6-sol";
+      const entry = { id: model, cost: { input: 4, output: 20 } };
+      _setModelDataForTest({ [model]: entry }, { [`openai/${model}`]: entry });
+      const request = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": `openai-warmup-${label}`,
+          ...(noStore ? { "x-lore-no-store": "true" } : {}),
+        },
+      });
+      if (label === "buffered 30-minute cache") request.stream = false;
+      request.extras = {
+        prompt_cache_key: "project-key",
+        prompt_cache_options: options,
+      };
+      let sent: unknown;
+      const makeReply = () =>
+        new Response(
+          validResponsesSSE("openai_warmup", "Done", {
+            input_tokens: 55_200,
+            output_tokens: 1,
+            input_tokens_details: {
+              cached_tokens: 55_000,
+              cache_write_tokens: 0,
+            },
+          }),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      const previousFetch = setUpstreamFetchOverrideForTest(
+        async (input, init) => {
+          if (input !== "https://api.openai.com/v1/responses")
+            return previousFetch?.(input, init);
+          if (typeof init?.body !== "string")
+            throw new Error("missing request JSON");
+          sent = JSON.parse(init.body);
+          return makeReply();
+        },
+      );
+      if (!direct) {
+        setUpstreamInterceptor(async (body) => {
+          sent = body;
+          return makeReply();
+        });
+      }
+      try {
+        const response = await handleRequest(request, loadLocalConfig());
+        expect(response.status).toBe(200);
+        expect(sent).toMatchObject({
+          prompt_cache_key: "project-key",
+          prompt_cache_options: options,
+        });
+        await response.text();
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === `openai-warmup-${label}`,
+        );
+        expect(state).toBeDefined();
+        await vi.waitFor(() =>
+          expect(state?.warmingTurn?.accepted).toBeDefined(),
+        );
+        expect(state?.cacheAnalytics.lastRequestBody).toBeNull();
+        if (!eligible) {
+          expect(state?.warmingTurn?.openAIReplay).toBeUndefined();
+          return;
+        }
+        await vi.waitFor(() =>
+          expect(state?.warmingTurn?.openAIReplay).toBeDefined(),
+        );
+        const replay = state?.warmingTurn?.openAIReplay;
+        expect(replay?.prefixTokens).toBe(55_000);
+        expect(replay?.uncachedTokens).toBe(200);
+        const { decompressBody } = await import("../src/cache-analytics");
+        if (!replay) throw new Error("missing replay");
+        const { max_output_tokens, ...expected } = sent as Record<
+          string,
+          unknown
+        >;
+        expect(max_output_tokens).toBeDefined();
+        expect(JSON.parse(decompressBody(replay.body))).toEqual({
+          ...expected,
+          prompt_cache_options: { ...options, prewarm: true },
+          stream: false,
+        });
+      } finally {
+        setUpstreamInterceptor(undefined);
+        setUpstreamFetchOverrideForTest(previousFetch);
+        clearModelDataCache();
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it("settles a streamed reply gap on request arrival even when the next upstream turn fails", async () => {
+    const sessionHeaders = {
+      "x-lore-session-id": "warming-observes-arrival",
+      "x-lore-project": "/tmp/lore-warming-stream-arrival",
+    };
+    const first = makeResponsesRequest({ sessionHeaders });
+    const clock = vi.spyOn(Date, "now");
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("warming_idle_first", "Done"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    try {
+      const response = await handleRequest(first, loadLocalConfig());
+      expect(response.status).toBe(200);
+      await response.text();
+      const state = [...getActiveSessions().values()].find(
+        (item) => item.projectPath === sessionHeaders["x-lore-project"],
+      );
+      expect(state).toBeDefined();
+      if (!state) throw new Error("session was not created");
+      const pending = () =>
+        db()
+          .query(
+            "SELECT replied_at FROM warmup_pending_observations WHERE session_id = ?",
+          )
+          .get(state.sessionID);
+      await vi.waitFor(() => expect(pending()).not.toBeNull());
+
+      const replyTime = pending()?.replied_at;
+      if (typeof replyTime !== "number") throw new Error("missing reply time");
+      clock.mockReturnValue(replyTime + 60_000);
+      setUpstreamInterceptor(
+        async () => new Response("unavailable", { status: 502 }),
+      );
+      const second = makeResponsesRequest({
+        sessionHeaders,
+        messages: [
+          ...first.messages,
+          { role: "assistant", content: [{ type: "text", text: "Done" }] },
+          { role: "user", content: [{ type: "text", text: "next" }] },
+        ],
+      });
+      const failed = await handleRequest(second, loadLocalConfig());
+      expect(failed.status).toBe(502);
+      await failed.text();
+      expect(pending()).toBeNull();
+      const hist = state.warmingHistograms?.get("return:human:1");
+      expect(hist?.total).toBe(1);
+      expect(hist?.counts[5]).toBe(1);
+      expect(state.warmingTurn?.accepted).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
 
   it("bounds a stalled stable-memory selection before upstream with one preparation deadline", async () => {
     const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
@@ -7423,6 +7584,8 @@ describe("Pipeline — streaming responses", () => {
         )!;
         expect(state.projectPath).toBe(projectA);
         expect(state.projectPathProvisional).toBe(true);
+        const originalReplayBody = state.cacheAnalytics.lastRequestBody;
+        expect(originalReplayBody).not.toBeNull();
         expect(JSON.stringify([...state.recallStore.values()])).toContain(
           secret,
         );
@@ -7495,6 +7658,9 @@ describe("Pipeline — streaming responses", () => {
         expect(state.projectPath).toBe(rolledBack ? projectA : projectB);
         expect(loadSessionTracking(state.sessionID)?.projectPath).toBe(
           rolledBack ? projectA : projectB,
+        );
+        expect(state.cacheAnalytics.lastRequestBody).toBe(
+          rolledBack ? originalReplayBody : null,
         );
         if (rolledBack) expect(state.recallStore.size).toBe(1);
         expect(getActiveSessions().get(state.sessionID)).toBe(state);

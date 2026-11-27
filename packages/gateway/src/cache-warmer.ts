@@ -1,6 +1,5 @@
 /**
- * Speculative cache warming — sends keepalive requests to refresh
- * Anthropic's prompt cache before it expires.
+ * Speculative cache warming refreshes a provider prompt cache before expiry.
  *
  * Uses survival analysis on inter-turn gaps to predict whether the user
  * will return before the cache TTL expires. If the expected value of
@@ -29,14 +28,15 @@ import {
   db,
   databaseInTransaction,
   canonicalProjectId,
+  currentTenantId,
+  withSavepoint,
+  withTenant,
   projectId,
   getKV,
   setKV,
   evaluateCacheStrategy,
   strategyWantsWarming,
-  getCacheSizeSnapshot,
   getLastTransformLayer,
-  getCacheStrategy,
   estimateMetaDistillCostPerCall,
   getPrefixChurnRate,
   PREFIX_CHURN_WARM_BLOCK,
@@ -49,9 +49,12 @@ import {
 import {
   applyUpstreamExtraHeaders,
   type InterTurnHistogram,
+  type GatewayMessage,
+  type WarmingSegment,
   type WarmupResult,
   type SessionState,
   type WarmupState,
+  type WarmupTTL,
 } from "./translate/types";
 import {
   cacheSegmentDigest,
@@ -59,7 +62,7 @@ import {
   decompressBody,
   isWarmupProbeEnabled,
 } from "./cache-analytics";
-import { resolveAuth, authHeaders, markAuthStale } from "./auth";
+import { resolveAuth, authHeaders, extractAuth, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
 import {
@@ -87,6 +90,14 @@ import { recordWarmupCost } from "./cost-tracker";
 import { resolveCostAttribution } from "./cost-attribution";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
+import {
+  OPENAI_CACHE_TTL_MS,
+  OPENAI_RESPONSES_URL,
+  openAIWarmupScope,
+  parseOpenAIWarmupUsage,
+  openAIWarmupHeadersAllowed,
+  type OpenAIWarmupReplay,
+} from "./openai-cache-warming";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -125,12 +136,8 @@ const BIN_COUNT = HISTOGRAM_BINS.length + 1;
 /** Pseudocount for Bayesian blending of session vs global histograms. */
 export const BLEND_PSEUDOCOUNT = 20;
 
-/** Survival probability below which a session is marked dead. */
-export const DEAD_SESSION_THRESHOLD = 0.02;
-
-/** Minimum completed turns before warming is eligible. Filters out one-shot
- *  sessions and ensures the survival model has ≥4 gap observations. */
-export const MIN_TURNS_FOR_WARMING = 5;
+/** Minimum history for the separate tool-wait probing path. */
+const MIN_TURNS_FOR_TOOL_WARMING = 5;
 
 /** Maximum duration (ms) to keep warming during a tool call before
  *  falling back to normal survival analysis. 10 min ≈ 2 cycles at 5m TTL. */
@@ -211,11 +218,6 @@ export function setWarmingEnabled(enabled: boolean): void {
   setKV(WARMING_ENABLED_KV_KEY, enabled ? "1" : "0");
 }
 
-/** Gap duration floor (ms) separating "active coding turns" from "breaks".
- *  3 minutes is well past typical agent think time (10s–60s) but before
- *  the 5m TTL warmup window (4:15–5:00). */
-export const BREAK_FLOOR_MS = 180_000;
-
 /** Minimum total warmups before session-level hit-rate ROI check kicks in. */
 export const MIN_WARMUPS_FOR_ROI_CHECK = 5;
 
@@ -251,12 +253,6 @@ export const SHADOW_FUTURE_TURNS_CAP = 50;
  *  are too small to justify the risk of wasted warmups. At 50K tokens with
  *  Opus 5m, a hit saves ~$0.29 and a warmup costs ~$0.025. */
 export const MIN_INPUT_TOKENS_FOR_WARMING = 50_000;
-
-/** Minimum P(returns) floor for the initial warming commitment. The
- *  break-even threshold read/(write-read) is often very low (4–9%),
- *  which causes nearly every non-dead session to get warmed. This floor
- *  ensures at least 30% return probability before the first warmup. */
-export const MIN_RETURN_PROBABILITY_FLOOR = 0.3;
 
 /** Size-proportional warmup-margin scaling (5m TTL only). The headroom a prefix
  *  needs to clear its largest block's per-block TTL boundary is ABSOLUTE (a
@@ -669,6 +665,9 @@ export function survivalFunction(
   if (histogram.total === 0) return 1.0;
 
   const idx = binIndex(tMs);
+  // The overflow bin includes censored no-replies. It contributes no return
+  // probability in any finite window, including one crossing the last edge.
+  if (idx === BIN_COUNT - 1) return histogram.counts[idx] / histogram.total;
   // Sum counts in bins > idx (gaps strictly larger than tMs)
   let surviving = 0;
   for (let i = idx + 1; i < BIN_COUNT; i++) {
@@ -677,12 +676,9 @@ export function survivalFunction(
   // Include a fraction of the current bin proportionally
   // (linear interpolation within the bin)
   const binStart = idx > 0 ? HISTOGRAM_BINS[idx - 1] : 0;
-  const binEnd = idx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[idx] : Infinity;
-  const binWidth = binEnd - binStart;
-  if (binWidth > 0 && Number.isFinite(binWidth)) {
-    const fractionPast = Math.min(1, Math.max(0, (tMs - binStart) / binWidth));
-    surviving += histogram.counts[idx] * (1 - fractionPast);
-  }
+  const binWidth = HISTOGRAM_BINS[idx] - binStart;
+  const fractionPast = Math.min(1, Math.max(0, (tMs - binStart) / binWidth));
+  surviving += histogram.counts[idx] * (1 - fractionPast);
 
   return surviving / histogram.total;
 }
@@ -691,33 +687,35 @@ export function survivalFunction(
  * Conditional return probability: P(return within [idle, idle+window] | idle for `idleMs`).
  *
  * Uses the survival function:
- *   P = (S(idleMs) - S(idleMs + windowMs)) / S(idleMs)
+ *   P = (S(idleMs + alreadyCoveredMs) - S(idleMs + windowMs)) / S(idleMs)
  *
- * Returns 0 if survival at idleMs is already ~0 (dead session).
+ * Returns 0 when no observed gaps survive to idleMs.
  */
 export function conditionalReturnProbability(
   histogram: InterTurnHistogram,
   idleMs: number,
   windowMs: number,
+  alreadyCoveredMs = 0,
 ): number {
   const sNow = survivalFunction(histogram, idleMs);
-  if (sNow < 0.001) return 0; // effectively dead
+  if (sNow <= 0) return 0;
   const sFuture = survivalFunction(histogram, idleMs + windowMs);
-  return Math.max(0, (sNow - sFuture) / sNow);
+  const sAtExpiry =
+    alreadyCoveredMs > 0
+      ? survivalFunction(histogram, idleMs + alreadyCoveredMs)
+      : sNow;
+  return Math.max(0, (sAtExpiry - sFuture) / sNow);
 }
 
 // ---------------------------------------------------------------------------
 // Survival model helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Get (or create) the session-level histogram.
- */
-export function getSessionHistogram(state: SessionState): InterTurnHistogram {
-  if (!state.survivalModel) {
-    state.survivalModel = createHistogram();
-  }
-  return state.survivalModel;
+function sessionHistogramForWarming(state: SessionState): InterTurnHistogram {
+  const segment = state.warmingTurn?.segment;
+  return (
+    (segment && state.warmingHistograms?.get(segment)) || createHistogram()
+  );
 }
 
 /**
@@ -726,23 +724,24 @@ export function getSessionHistogram(state: SessionState): InterTurnHistogram {
  * When the session has few observations, lean on the global prior.
  * As the session accumulates data, its own distribution dominates.
  *
- * effective_count[i] = session_weight × session[i] + global_weight × global[i]
- * where session_weight = min(session.total / PSEUDOCOUNT, 1.0)
+ * Blend normalized shares so the absolute size of the project history
+ * cannot silently override the session weight.
  */
 export function blendHistograms(
   session: InterTurnHistogram,
   global: InterTurnHistogram,
 ): InterTurnHistogram {
-  const sessionWeight = Math.min(session.total / BLEND_PSEUDOCOUNT, 1.0);
-  const globalWeight = 1.0 - sessionWeight;
-
-  const blended = createHistogram();
-  for (let i = 0; i < BIN_COUNT; i++) {
-    blended.counts[i] =
-      sessionWeight * session.counts[i] + globalWeight * global.counts[i];
-  }
-  blended.total = sessionWeight * session.total + globalWeight * global.total;
-  return blended;
+  if (session.total === 0) return global;
+  if (global.total === 0) return session;
+  const weight = Math.min(session.total / BLEND_PSEUDOCOUNT, 1);
+  return {
+    counts: session.counts.map(
+      (count, i) =>
+        (weight * count) / session.total +
+        ((1 - weight) * global.counts[i]) / global.total,
+    ),
+    total: 1,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -770,160 +769,323 @@ export function getGlobalHistogram(pid: string): InterTurnHistogram {
   return hist;
 }
 
-/** Get blended histogram for a session (session + global). */
 export function blendedHistogramForSession(
   state: SessionState,
 ): InterTurnHistogram {
-  const sessionHist = getSessionHistogram(state);
-  const pid = projectId(state.projectPath);
-  if (!pid) return sessionHist; // no project in DB yet — session-only
-  const globalHist = getGlobalHistogram(pid);
-  return blendHistograms(sessionHist, globalHist);
+  const session = sessionHistogramForWarming(state);
+  const global = globalHistogramForWarmingSnapshot(state);
+  return blendHistograms(session, global);
 }
 
-// ---------------------------------------------------------------------------
-// Break-commitment model helpers
-// ---------------------------------------------------------------------------
+/** The last finite histogram boundary. A non-return goes in the overflow
+ * bin so it stays in the risk set for every modeled warming window. */
+export const WARMING_OBSERVATION_HORIZON_MS =
+  HISTOGRAM_BINS[HISTOGRAM_BINS.length - 1];
 
-/**
- * Fraction of observed inter-turn gaps that are "breaks" (≥ BREAK_FLOOR_MS).
- *
- * Logically splits the histogram at query time — no structural changes to
- * the histogram itself. Uses linear interpolation within the floor bin,
- * same technique as survivalFunction().
- *
- * For an empty histogram, returns 0.3 (prior: ~30% of gaps are breaks).
- */
-export function breakFraction(hist: InterTurnHistogram): number {
-  if (hist.total === 0) return 0.3;
-
-  const floorIdx = binIndex(BREAK_FLOOR_MS);
-
-  // Sum all observations in bins strictly above the floor bin
-  let breakCount = 0;
-  for (let i = floorIdx + 1; i < BIN_COUNT; i++) {
-    breakCount += hist.counts[i];
-  }
-
-  // Fractional inclusion of the floor bin via linear interpolation
-  const binStart = floorIdx > 0 ? HISTOGRAM_BINS[floorIdx - 1] : 0;
-  const binEnd =
-    floorIdx < HISTOGRAM_BINS.length ? HISTOGRAM_BINS[floorIdx] : Infinity;
-  const binWidth = binEnd - binStart;
-  if (binWidth > 0 && Number.isFinite(binWidth)) {
-    const fractionAbove = Math.max(
-      0,
-      Math.min(1, (binEnd - BREAK_FLOOR_MS) / binWidth),
-    );
-    breakCount += hist.counts[floorIdx] * fractionAbove;
-  }
-
-  return breakCount / hist.total;
-}
-
-/**
- * Signals used by the session-finished estimator.
- */
-export type SessionEndSignals = {
-  /** Survival function value S(elapsed) from the blended histogram. */
-  survivalAtIdle: number;
-  /** Consecutive assistant turns ending with text-only (no tool calls). */
-  consecutiveTextOnlyTurns: number;
-  /** Fraction of all observed gaps that are breaks (≥ BREAK_FLOOR_MS). */
-  breakFraction: number;
-  /** Total completed turns (messageCount / 2). */
-  totalTurns: number;
-  /** Last stop reason from the assistant response. "tool_use" means the
-   *  agent is actively executing a tool and will return with the result. */
-  lastStopReason?: string;
+type PendingWarmingObservation = {
+  session_id: string;
+  project_id: string;
+  segment: WarmingSegment;
+  replied_at: number;
 };
 
-/**
- * Estimate P(session is finished | signals).
- *
- * Log-linear model combining four independent signals into a probability
- * via sigmoid(logOdds). Conservative bias (low base rate) because the cost
- * of a false positive (one unnecessary warmup, ~$0.01) is much smaller
- * than the cost of a false negative (cache miss, ~$0.70 at 200K tokens).
- */
-export function pSessionFinished(signals: SessionEndSignals): number {
-  // Base rate: ~12% — most checks happen when the session is NOT finished
-  let logOdds = -2.0;
-
-  // Signal 1: Survival function — low survival = unprecedented idle
-  //   S ≈ 0    → +4.0 (almost certainly done)
-  //   S ≈ 0.5  → +0.5
-  //   S ≈ 1.0  → -0.5 (no evidence of end)
-  if (signals.survivalAtIdle < 0.01) {
-    logOdds += 4.0;
-  } else {
-    logOdds += 2.0 * (1.0 - signals.survivalAtIdle) - 0.5;
+function isHumanWarmingText(text: string): boolean {
+  // Only skip complete harness annotations at the start of a block. Each
+  // search consumes its closing tag, keeping repeated markup linear.
+  const tag = /\s*<(system-reminder|task-notification|local-command-[\w-]+)>/iy;
+  let offset = 0;
+  while (offset < text.length) {
+    tag.lastIndex = offset;
+    const match = tag.exec(text);
+    if (!match) return text.slice(offset).trim().length > 0;
+    const closing = "</" + match[1] + ">";
+    const end = text.indexOf(closing, tag.lastIndex);
+    if (end < 0) return true;
+    offset = end + closing.length;
   }
-
-  // Signal 2: Consecutive text-only turns — task wrapping up
-  //   0 runs → 0, 1 run → +0.5, capped at +3.5
-  //   At 5 runs: +2.5, at 7 runs: +3.5 (strong signal — model finished with text repeatedly)
-  logOdds += Math.min(3.5, signals.consecutiveTextOnlyTurns * 0.5);
-
-  // Signal 3: Break fraction from histogram
-  //   If breaks are rare for this user/project, a long idle is more
-  //   likely a session end than a break.
-  //   breakFraction = 0   → +1.5 (no breaks ever observed — very likely session end)
-  //   breakFraction = 5%  → +0.85
-  //   breakFraction = 40% → -0.2
-  logOdds += 1.5 - 3.0 * Math.min(signals.breakFraction, 0.5);
-
-  // Signal 4: Very short sessions are more likely one-shots
-  if (signals.totalTurns <= 2) {
-    logOdds += 1.0;
-  } else if (signals.totalTurns <= 5) {
-    logOdds += 0.3;
-  }
-
-  // Signal 5: Active tool call — strong evidence session is NOT finished.
-  // The agent is executing a tool and will return with the result.
-  if (signals.lastStopReason === "tool_use") {
-    logOdds -= 4.0;
-  }
-
-  // Sigmoid: p = 1 / (1 + exp(-logOdds))
-  return 1.0 / (1.0 + Math.exp(-logOdds));
+  return false;
 }
 
-/**
- * Expected number of warmup cycles during a break, given elapsed idle time.
- *
- * Uses the survival function conditioned on the current idle time to walk
- * forward through TTL windows and accumulate the expected cycle count.
- * Stops when P(still idle) drops below 1% or maxCycles is reached.
- */
-export function expectedWarmupCycles(
-  hist: InterTurnHistogram,
-  elapsedMs: number,
-  ttlMs: number,
-  maxCycles: number,
-): number {
-  // S(elapsed) — probability of still being idle at current time
-  const sNow = survivalFunction(hist, elapsedMs);
-  if (sNow < 0.001) return maxCycles + 1; // essentially dead — exceeds budget to trigger cap
+function warmingMessageOrigin(
+  message: GatewayMessage | undefined,
+): "human" | "system" | "tool" {
+  if (message?.role !== "user") return "system";
+  if (
+    message.content.some((block) =>
+      block.type === "text"
+        ? isHumanWarmingText(block.text)
+        : block.type === "opaque" && !block.responsesItem,
+    )
+  )
+    return "human";
+  return message.content.some((block) => block.type === "tool_result")
+    ? "tool"
+    : "system";
+}
 
-  let expected = 0;
+function writeWarmingGap(
+  observation: PendingWarmingObservation,
+  gapMs: number,
+  now: number,
+  count = 1,
+): void {
+  const { project_id: pid, segment } = observation;
+  const database = db();
+  const stored = database
+    .query(
+      "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ? AND time_slot = ?",
+    )
+    .get(pid, segment) as { counts: string; total: string } | null;
+  const counts =
+    (stored && decodeWarmupHistogram(stored.counts, stored.total)) ??
+    emptyWarmupHistogramCounts();
+  counts[binIndex(gapMs)] += BigInt(count);
+  const encoded = encodeWarmupHistogram(counts);
+  database
+    .query(`
+    INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (project_id, time_slot) DO UPDATE SET
+      counts = excluded.counts, total = excluded.total, updated_at = excluded.updated_at
+  `)
+    .run(pid, segment, encoded.counts, encoded.total, now);
+}
 
-  for (let k = 1; k <= maxCycles; k++) {
-    const futureMs = elapsedMs + k * ttlMs;
-    const sFuture = survivalFunction(hist, futureMs);
+function recordSessionWarmingGap(
+  state: SessionState,
+  segment: WarmingSegment,
+  gapMs: number,
+): void {
+  state.warmingHistograms ??= new Map();
+  const histogram = state.warmingHistograms.get(segment) ?? createHistogram();
+  recordGap(histogram, gapMs);
+  state.warmingHistograms.set(segment, histogram);
+}
 
-    // P(still idle at window k | idle at elapsed) = S(futureMs) / S(elapsedMs)
-    const pStillIdle = sFuture / sNow;
-
-    // We pay for this cycle if we're still idle when it fires
-    expected += pStillIdle;
-
-    // Negligible probability of reaching further windows
-    if (pStillIdle < 0.01) break;
+export function beginWarmingTurn(
+  state: SessionState,
+  messages: readonly GatewayMessage[],
+  requestOrder: number,
+  requestStartedAt: number,
+  noStore: boolean,
+  sourcePrefixCount = 0,
+): void {
+  const previousTurn = state.warmingTurn;
+  if (previousTurn && previousTurn.order >= requestOrder) return;
+  const origin = warmingMessageOrigin(messages.at(-1));
+  if (!state.isSubagent) {
+    try {
+      const hasPending = db()
+        .query(
+          "SELECT 1 FROM warmup_pending_observations WHERE session_id = ? AND replied_at <= ?",
+        )
+        .get(state.sessionID, requestStartedAt);
+      const settled =
+        hasPending &&
+        withSavepoint("observe_warming_return", () => {
+          // Consume only an idle period which already began when this request
+          // arrived. The first write takes SQLite's write lock before reading
+          // or updating the histogram, so retries cannot double-count it.
+          const pending = db()
+            .query(`
+          DELETE FROM warmup_pending_observations
+          WHERE session_id = ? AND replied_at <= ?
+            AND project_id IN (SELECT id FROM projects WHERE tenant_id = ?)
+          RETURNING session_id, project_id, segment, replied_at
+        `)
+            .get(
+              state.sessionID,
+              requestStartedAt,
+              state.storageTenantId ?? "",
+            ) as PendingWarmingObservation | null;
+          if (
+            !pending ||
+            noStore ||
+            db()
+              .query("SELECT amnesia FROM session_state WHERE session_id = ?")
+              .get(state.sessionID)?.amnesia === 1
+          )
+            return;
+          const gapMs =
+            origin === "human"
+              ? requestStartedAt - pending.replied_at
+              : Infinity;
+          writeWarmingGap(pending, gapMs, requestStartedAt);
+          return { segment: pending.segment, gapMs };
+        });
+      if (settled)
+        recordSessionWarmingGap(state, settled.segment, settled.gapMs);
+    } catch (error) {
+      log.warn("cache-warmer: failed to record reply gap:", error);
+    }
+  }
+  // Tool-result continuations inherit the initiating request's origin/depth.
+  if (origin === "tool" && previousTurn) {
+    state.warmingTurn = {
+      depth: previousTurn.depth,
+      segment: previousTurn.segment,
+      lastHumanIndex: previousTurn.lastHumanIndex,
+      noStore: noStore || previousTurn.noStore,
+      order: requestOrder,
+    };
+    return;
   }
 
-  return Math.min(expected, maxCycles);
+  // Count human prompts, up to the deepest bucket. Calls made by the model
+  // can inflate messageCount without moving the human conversation forward.
+  let depth =
+    previousTurn?.depth === 4 || sourcePrefixCount > 0
+      ? (previousTurn?.depth ?? 0)
+      : 0;
+  const lastCountedIndex =
+    sourcePrefixCount > 0 ? (previousTurn?.lastHumanIndex ?? -1) : -1;
+  let lastHumanIndex = lastCountedIndex;
+  for (let i = messages.length - 1; i >= 0 && depth < 4; i--) {
+    const index = sourcePrefixCount + i;
+    if (index <= lastCountedIndex) break;
+    if (
+      (i === messages.length - 1
+        ? origin
+        : warmingMessageOrigin(messages[i])) === "human"
+    ) {
+      depth++;
+      lastHumanIndex = Math.max(lastHumanIndex, index);
+    }
+  }
+  depth = Math.max(depth, previousTurn?.depth ?? 0);
+  const band = depth <= 1 ? "1" : depth <= 3 ? "2-3" : "4+";
+  state.warmingTurn = {
+    order: requestOrder,
+    depth,
+    lastHumanIndex,
+    noStore,
+    segment:
+      origin === "human" ? `return:human:${band}` : `return:system:${band}`,
+  };
+}
+
+export function finishWarmingTurn(
+  state: SessionState,
+  requestOrder: number,
+  requestStartedAt: number,
+  repliedAt: number,
+  stopReason: string,
+  noStore: boolean,
+): void {
+  const turn = state.warmingTurn;
+  if (!turn || turn.order !== requestOrder) return;
+  turn.accepted = { requestedAt: requestStartedAt, repliedAt };
+  if (
+    stopReason === "tool_use" ||
+    state.isSubagent ||
+    noStore ||
+    turn.noStore ||
+    state.amnesia
+  )
+    return;
+
+  try {
+    const pid = withTenant(state.storageTenantId ?? "", () =>
+      projectId(state.projectPath),
+    );
+    if (!pid) return;
+    db()
+      .query(`
+      INSERT INTO warmup_pending_observations (session_id, project_id, segment, replied_at)
+      SELECT session_state.session_id, projects.id, ?, ?
+      FROM projects
+      JOIN session_state_owners ON session_state_owners.tenant_id = projects.tenant_id
+      JOIN session_state ON session_state.session_id = session_state_owners.session_id
+      WHERE projects.id = ? AND projects.tenant_id = ?
+        AND session_state.session_id = ? AND session_state.amnesia = 0
+      ON CONFLICT (session_id) DO UPDATE SET
+        project_id = excluded.project_id, segment = excluded.segment, replied_at = excluded.replied_at
+      WHERE excluded.replied_at > warmup_pending_observations.replied_at
+        AND warmup_pending_observations.project_id IN (SELECT id FROM projects WHERE tenant_id = ?)
+    `)
+      .run(
+        turn.segment,
+        repliedAt,
+        pid,
+        state.storageTenantId ?? "",
+        state.sessionID,
+        state.storageTenantId ?? "",
+      );
+  } catch (error) {
+    log.warn("cache-warmer: failed to open reply observation:", error);
+  }
+}
+
+export function discardPendingWarmingObservation(state: SessionState): void {
+  try {
+    db()
+      .query(`
+        DELETE FROM warmup_pending_observations
+        WHERE session_id = ?
+          AND project_id IN (SELECT id FROM projects WHERE tenant_id = ?)
+      `)
+      .run(state.sessionID, state.storageTenantId ?? "");
+  } catch (error) {
+    log.warn("cache-warmer: failed to discard reply observation:", error);
+  }
+}
+
+const WARMING_EXPIRY_BATCH_SIZE = 128;
+
+export function expireWarmingObservations(
+  now: number,
+  sessions: ReadonlyMap<string, SessionState>,
+  isActive?: (id: string) => boolean,
+): void {
+  try {
+    const cutoff = now - WARMING_OBSERVATION_HORIZON_MS;
+    // This maintenance job is deliberately DB-wide. A pending row points to
+    // the original project's UUID and can only write that project's segment.
+    const due = db()
+      .query(
+        "SELECT session_id FROM warmup_pending_observations WHERE replied_at <= ? ORDER BY replied_at LIMIT ?",
+      )
+      .all(cutoff, WARMING_EXPIRY_BATCH_SIZE) as Array<{ session_id: string }>;
+    if (!due.length) return;
+    const expired = withSavepoint("expire_warming_observations", () => {
+      const result: PendingWarmingObservation[] = [];
+      const groups = new Map<
+        string,
+        { observation: PendingWarmingObservation; count: number }
+      >();
+      const amnesia = db().query(
+        "SELECT amnesia FROM session_state WHERE session_id = ?",
+      );
+      const consume = db().query(`
+        DELETE FROM warmup_pending_observations WHERE session_id = ? AND replied_at <= ?
+        RETURNING session_id, project_id, segment, replied_at
+      `);
+      for (const { session_id: id } of due) {
+        if (isActive?.(id)) continue;
+        const pending = consume.get(
+          id,
+          cutoff,
+        ) as PendingWarmingObservation | null;
+        if (!pending) continue;
+        if (amnesia.get(id)?.amnesia === 1) continue;
+        const key = warmingHistogramKey(pending.project_id, pending.segment);
+        const group = groups.get(key);
+        if (group) group.count++;
+        else groups.set(key, { observation: pending, count: 1 });
+        result.push(pending);
+      }
+      for (const { observation, count } of groups.values()) {
+        writeWarmingGap(observation, Infinity, now, count);
+      }
+      return result;
+    });
+    for (const { session_id, segment } of expired) {
+      const state = sessions.get(session_id);
+      if (state) recordSessionWarmingGap(state, segment, Infinity);
+    }
+  } catch (error) {
+    log.warn("cache-warmer: failed to expire reply observations:", error);
+  }
 }
 
 /**
@@ -940,32 +1102,6 @@ export function costThreshold(
   const denominator = cacheMissCostPerMTok - cacheReadCostPerMTok;
   if (denominator <= 0) return 1.0; // degenerate — never warm
   return cacheReadCostPerMTok / denominator;
-}
-
-/**
- * Rising cost threshold that accounts for accumulated warmup costs.
- *
- * After k warmup cycles, the total cost is k × read. A hit saves
- * (write - read). Break-even: P × (write - read) ≥ k × read, so:
- *   P(returns) > k × read / (write - read)
- *
- * This rises linearly with k — the more cycles spent, the higher
- * P(returns) must be to justify the next warmup. For Opus 5m TTL
- * (read=$0.50, write=$6.25):
- *   k=1: 8.7%,  k=3: 26%,  k=5: 43%,  k=6: 52%,  k=11: 96%
- *
- * At k=1 this matches costThreshold() exactly.
- * Clamped to 1.0 so we never require > 100% probability.
- */
-export function cumulativeCostThreshold(
-  cyclesSpent: number,
-  cacheReadCostPerMTok: number,
-  cacheMissCostPerMTok: number,
-): number {
-  const k = Math.max(cyclesSpent, 1);
-  const denominator = cacheMissCostPerMTok - cacheReadCostPerMTok;
-  if (denominator <= 0) return 1.0;
-  return Math.min((k * cacheReadCostPerMTok) / denominator, 1.0);
 }
 
 /**
@@ -1007,6 +1143,7 @@ export type CacheWarmingProfile = {
   /** Auth/transport mode. Default (undefined) = Anthropic: session credential +
    *  cch re-sign. "vertex" = GCP OAuth2 bearer (ADC), no cch, rawPredict URL. */
   authMode?: "vertex";
+  openAIReplay?: OpenAIWarmupReplay;
 };
 
 /**
@@ -1179,9 +1316,8 @@ export function buildAnthropicProfile(
  * stored `upstreamUrl` is the region base — executeWarmup rebuilds the
  * per-model `:rawPredict` URL and attaches the OAuth2 bearer.
  */
-export function buildVertexProfile(
+function buildVertexProfile(
   model: string,
-  ttl: "5m" | "1h",
   upstreamBase: string,
   prefixTokens = 0,
 ): CacheWarmingProfile {
@@ -1189,7 +1325,7 @@ export function buildVertexProfile(
   // Vertex Claude uses Anthropic prompt caching, so it is exposed to the same
   // large-prefix TTL-race partial — thread prefixTokens so the 5m margin scales
   // (computeWarmupMargin), matching the first-party/proxied/bedrock paths.
-  const base = buildAnthropicProfile(model, ttl, undefined, prefixTokens);
+  const base = buildAnthropicProfile(model, "5m", undefined, prefixTokens);
   return {
     ...base,
     upstreamUrl: `https://${vertexHost(region)}`,
@@ -1257,11 +1393,10 @@ export function resolveProfile(
     const vRoute = resolveUpstreamRoute(model);
     const vHost = upstreamBase || vRoute?.url;
     if (!vHost || !isVertexHost(vHost)) return null;
-    return buildVertexProfile(model, ttl ?? "5m", vHost, prefixTokens);
+    return buildVertexProfile(model, vHost, prefixTokens);
   }
 
-  // Only Anthropic protocol for now — OpenAI has automatic prefix caching with
-  // no explicit warming API. (Bedrock rides the anthropic protocol via mantle.)
+  // Bedrock rides the Anthropic protocol via mantle.
   if (protocol !== "anthropic") return null;
 
   // 🔴 Gate on Anthropic IDENTITY, not just the wire protocol. Anthropic-compat
@@ -1298,7 +1433,7 @@ export function resolveProfile(
   if (isBedrockMantle) {
     return buildAnthropicProfile(
       model,
-      ttl ?? "5m",
+      "5m",
       upstreamBase,
       prefixTokens,
       providerID,
@@ -1312,7 +1447,7 @@ export function resolveProfile(
 
   return buildAnthropicProfile(
     model,
-    ttl ?? "5m",
+    warmupHost === "https://api.anthropic.com" ? (ttl ?? "5m") : "5m",
     upstreamBase,
     prefixTokens,
     providerID,
@@ -1329,6 +1464,26 @@ export function resolveProfile(
 export function resolveProfileForSession(
   state: SessionState,
 ): CacheWarmingProfile | null {
+  const replay = state.warmingTurn?.openAIReplay;
+  if (
+    replay &&
+    state.lastUpstream?.protocol === "openai-responses" &&
+    state.lastUpstream.model === replay.model &&
+    state._upstreamRequestOrder === state.warmingTurn?.order
+  ) {
+    return {
+      ttlMs: OPENAI_CACHE_TTL_MS,
+      cacheReadCostPerMTok: replay.pricing.cache_read,
+      cacheMissCostPerMTok: replay.pricing.cache_write,
+      warmupMarginMs: computeWarmupMargin(
+        OPENAI_CACHE_TTL_MS,
+        replay.prefixTokens,
+      ),
+      prepareWarmupBody: (body) => body,
+      upstreamUrl: OPENAI_RESPONSES_URL,
+      openAIReplay: replay,
+    };
+  }
   return resolveProfile(
     state.lastUpstream?.model,
     state.lastUpstream?.protocol,
@@ -1350,19 +1505,42 @@ export function resolveProfileForSession(
 // Decision function
 // ---------------------------------------------------------------------------
 
+function toolWarmupHistory(warmup: WarmupState | undefined): {
+  total: number;
+  hits: number;
+  hitRate: number;
+} {
+  // Preserve existing lifetime counters and exclude new human-wait samples
+  // from the evidence required to fund a separate tool-wait probe.
+  const total = (warmup?.totalWarmups ?? 0) - (warmup?.automaticWarmups ?? 0);
+  const hits = (warmup?.warmupHits ?? 0) - (warmup?.automaticWarmupHits ?? 0);
+  return { total, hits, hitRate: total > 0 ? hits / total : 0 };
+}
+
+// A request sent right at the expiry can arrive upstream as a cold write.
+const WARMUP_DISPATCH_HEADROOM_MS = 10_000;
+
+function lastWarmingCacheTouch(state: SessionState): number {
+  return Math.max(
+    state.warmingTurn?.accepted?.requestedAt ?? state.lastRequestTime,
+    state.warmup?.lastWarmupAt ?? 0,
+  );
+}
+
+function warmingPrefixTokens(state: SessionState): number {
+  const replay = state.warmingTurn?.openAIReplay;
+  if (replay) return replay.prefixTokens;
+  const analytics = state.cacheAnalytics;
+  return analytics.turnCount > 0
+    ? analytics.lastCacheRead + analytics.lastCacheCreation
+    : (state.lastInputTokens ?? 0);
+}
+
 /**
- * Determine whether to warm a session's cache right now.
+ * Decide whether to refresh the cache for this session now.
  *
- * Uses a commitment-based model instead of per-window survival analysis:
- *  1. Asks "Is this session finished?" via signal fusion (pSessionFinished)
- *  2. Computes expected warming cost across a potential break
- *  3. Compares P(returns) against the corrected cost threshold
- *
- * Gate checks (circuit breaker, config, body, /lore:warm:keep, cooldown) are unchanged.
- *
- * Two phases for the normal path:
- *  - Initial commitment (first TTL window): full ROI analysis
- *  - Continuation (subsequent windows): check break-even cap + re-evaluate
+ * For user-wait warming, compare the incremental cost of each refresh to
+ * the probability that it preserves a hit for the next human request.
  */
 export function shouldWarm(
   state: SessionState,
@@ -1393,7 +1571,15 @@ export function shouldWarm(
   if (!warmingEnabled) return false;
 
   // No stored body to replay — nothing to warm
-  if (!state.cacheAnalytics.lastRequestBody) return false;
+  if (profile.openAIReplay) {
+    if (
+      state.amnesia ||
+      state.warmingTurn?.openAIReplay !== profile.openAIReplay
+    )
+      return false;
+  } else if (!state.cacheAnalytics.lastRequestBody) {
+    return false;
+  }
 
   // Explicit operator stops survive the response path's reset of the
   // survival-model `disabled` flag when a user returns to the session.
@@ -1438,59 +1624,54 @@ export function shouldWarm(
     return false;
   }
 
-  const elapsed = now - state.lastRequestTime;
+  const elapsed =
+    now - (state.warmingTurn?.accepted?.requestedAt ?? state.lastRequestTime);
   const { ttlMs, warmupMarginMs, cacheReadCostPerMTok, cacheMissCostPerMTok } =
     profile;
   const forced = state.warmup?.forceKeepWarm === true;
   const toolCallActive = state.lastStopReason === "tool_use";
+  const cacheAgeMs = now - lastWarmingCacheTouch(state);
+  if (cacheAgeMs >= ttlMs - WARMUP_DISPATCH_HEADROOM_MS) return false;
+  const inWarmupMargin = cacheAgeMs >= ttlMs - warmupMarginMs;
 
-  // Already warmed recently — prevent double-warming.
-  // Cooldown = ttlMs - warmupMarginMs so the next warmup fires while the
-  // previous cache is still alive. Using the full ttlMs as cooldown causes
-  // each continuation warmup to arrive right as the cache expires, turning
-  // every warmup into a cold write (~$1.25 for Opus 200K) instead of a
-  // cheap refresh (~$0.10). This was the dominant cost driver: 65 warmups
-  // at cold-write pricing = ~$65 vs ~$6.50 with correct timing.
-  const cooldownMs = Math.max(ttlMs - warmupMarginMs, 0);
+  // A failed or interrupted request cannot refresh the previous cached body.
   if (
-    state.warmup?.lastWarmupAt &&
-    now - state.warmup.lastWarmupAt < cooldownMs
-  ) {
+    state.warmingTurn &&
+    (!state.warmingTurn.accepted || state.warmingTurn.warmupMissed)
+  )
     return false;
-  }
 
   if (forced) {
     // /lore:warm:keep mode: skip survival/signal analysis but still respect
     // the break-even cap — warming beyond maxCycles is always unprofitable,
     // even when the user explicitly asked for /lore:warm:keep.
+    const suffixCost = warmupSuffixCostPerMTok(profile);
     const maxCycles = maxProfitableCycles(
-      cacheReadCostPerMTok,
-      cacheMissCostPerMTok,
+      cacheReadCostPerMTok + suffixCost,
+      cacheMissCostPerMTok + suffixCost,
     );
     const cyclesSpent = state.warmup?.warmupCount ?? 0;
     if (cyclesSpent >= maxCycles) return false;
 
-    // Check we're in the warmup margin of *some* TTL window.
-    const intoWindow = elapsed % ttlMs;
-    if (intoWindow < ttlMs - warmupMarginMs) return false;
-    return true;
+    return inWarmupMargin;
   }
+
+  if (state.warmup?.disabled) return false;
+  if (warmingPrefixTokens(state) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
 
   // --- Tool-call fast path ---
   // When lastStopReason is "tool_use", the agent is executing a tool and
   // WILL return with the result. Bypass survival analysis (return probability
   // is ~1.0) but respect break-even cap, session ROI guard, and a maximum
   // duration to handle agent crashes gracefully.
-  if (toolCallActive && !state.warmup?.disabled) {
+  if (toolCallActive) {
     // Cap: don't warm indefinitely if the agent crashed mid-tool-call
     if (elapsed > MAX_TOOL_CALL_WARMING_MS) return false;
 
     // Session-level ROI guard applies even during tool calls
-    const lifetime = state.warmup?.totalWarmups ?? 0;
-    if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
-      const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
-      if (hitRate < MIN_SESSION_HIT_RATE) return false;
-    }
+    const { total, hits, hitRate } = toolWarmupHistory(state.warmup);
+    if (total >= MIN_WARMUPS_FOR_ROI_CHECK && hitRate < MIN_SESSION_HIT_RATE)
+      return false;
 
     const maxCycles = maxProfitableCycles(
       cacheReadCostPerMTok,
@@ -1514,10 +1695,7 @@ export function shouldWarm(
     // session that has ever landed a hit keeps full TOOL_CALL_MAX_CYCLES
     // coverage. cyclesSpent (warmupCount) is per-break (reset on return in
     // pipeline.ts), so the first probe of every new break is always funded.
-    if (
-      cyclesSpent >= 1 &&
-      (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
-    ) {
+    if (cyclesSpent >= 1 && hits < TOOL_CALL_MIN_HITS_FOR_CONTINUATION) {
       return false;
     }
 
@@ -1526,282 +1704,109 @@ export function shouldWarm(
     if (cyclesSpent >= effectiveMax) return false;
 
     // Still require some history to have a stored body worth warming
-    if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
+    if (state.messageCount < MIN_TURNS_FOR_TOOL_WARMING * 2) return false;
 
-    // Context too small — absolute savings per hit don't justify risk
-    if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING)
-      return false;
-
-    // Only warm in the margin window of the current TTL cycle
-    const intoWindow = elapsed % ttlMs;
-    if (intoWindow < ttlMs - warmupMarginMs) return false;
-
-    return true;
+    return inWarmupMargin;
   }
 
-  // --- Normal (non-forced) commitment-based path ---
-
-  // Not enough turns — survival model has insufficient data and the
-  // session may be a one-shot question not worth warming ($0.30 per
-  // wasted warmup at 200K Opus tokens).
-  if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) return false;
-
-  // Context too small — absolute savings per hit don't justify risk
-  if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) return false;
-
-  // Session marked dead
-  if (state.warmup?.disabled) return false;
-
-  // NOTE: the survival computation + the shared cache-economics SHADOW eval are
-  // intentionally hoisted ABOVE the ROI and write-efficiency guards below. Those
-  // guards stop warming exactly the large/growing sessions the shared model is
-  // meant to reclassify as cool-bust, so evaluating after them would make the
-  // shadow blind to the population it exists to measure. The hoist is purely
-  // additive (survival fns are pure; only a log is emitted) — the returned
-  // decision is unchanged because the guards still run, just after the eval.
-
-  // Compute commitment model signals
-  const survivalAtIdle = survivalFunction(blendedHist, elapsed);
-  const breakFrac = breakFraction(blendedHist);
-  const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
-  const totalTurns = Math.floor(state.messageCount / 2);
-
-  const pFinished = pSessionFinished({
-    survivalAtIdle,
-    consecutiveTextOnlyTurns: textOnlyRuns,
-    breakFraction: breakFrac,
-    totalTurns,
-    lastStopReason: state.lastStopReason,
-  });
-  const pReturns = 1.0 - pFinished;
-
-  // Corrected cost threshold: read / (write - read), with a floor to prevent
-  // warming sessions with trivially low return probability (8.7% for 5m TTL).
-  // NOTE: an explicit minReturnProbability config override intentionally
-  // bypasses the floor — it's a user-controlled knob for tuning.
-  const autoThreshold = costThreshold(
-    cacheReadCostPerMTok,
-    cacheMissCostPerMTok,
-  );
-  const threshold =
-    cfg.cache.warming.minReturnProbability ??
-    Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
-
-  // Max cycles before warming becomes unprofitable
-  const maxCycles = maxProfitableCycles(
-    cacheReadCostPerMTok,
-    cacheMissCostPerMTok,
+  const { pReturn, threshold } = automaticWarmingInputs(
+    state,
+    profile,
+    blendedHist,
+    now,
   );
 
-  // --- Shared cache-economics: PRIMARY evaluation (PR2b flip) ---
-  // The unified strategy is now the PRIMARY warm/no-warm decision (legacy
-  // pReturns/threshold is the fallback for non-confident cases — no snapshot,
-  // non-finite inputs). evaluateCacheStrategy stores the result on the core
-  // session state; the Phase A/B block below reads it via getCacheStrategy.
-  // The LOG is still gated to the warmup margin for volume; the decision reads
-  // the stored strategy regardless of when it was last logged.
-  let evaluatedStrategy: ReturnType<typeof evaluateCacheStrategy> = null;
-  {
-    const expectedCycles = expectedWarmupCycles(
-      blendedHist,
-      elapsed,
-      ttlMs,
-      maxCycles,
-    );
-    const expectedFutureTurns = Math.min(totalTurns, SHADOW_FUTURE_TURNS_CAP);
-    // #947 — meta-aware cost model. Source the meta threshold from config
-    // and pre-compute the per-call LLM cost from the worker model rates. The
-    // pure function falls back to "no adjustment" (byte-identical to pre-#947)
-    // when either is missing — so the cost model flip is opt-in by config.
-    const metaThreshold = cfg.distillation.metaThreshold;
-    // Seer finding (medium severity): price meta-distillation with the
-    // WORKER model's rates, not the session model's. Meta-distillation is
-    // performed by a worker LLM (typically cheaper than the session model —
-    // e.g. Sonnet for a Sonnet session, MiniMax-MiniMax for an Opus session).
-    // Using `state.lastUpstream?.model` would price the meta call at the
-    // session model rate (Opus), inflating the cost and biasing the
-    // strategy toward hold-warm when warming is the wrong call. The same
-    // `getWorkerModel(...)` pattern is used by idle.ts and pipeline.ts for
-    // analogous cost calculations.
-    const workerModelID = getWorkerModel(state.lastUpstream)?.modelID;
-    const workerModel = workerModelID
-      ? getModelEntrySync(workerModelID)
-      : undefined;
-    const metaDistillCostPerCall = estimateMetaDistillCostPerCall(
-      workerModel,
+  // Price exactly one refresh. Past warmups are sunk and future refreshes
+  // will each be evaluated again if the user is still idle.
+  const metaThreshold = cfg.distillation.metaThreshold;
+  const workerModelID = getWorkerModel(state.lastUpstream)?.modelID;
+  const workerModel = workerModelID
+    ? getModelEntrySync(workerModelID)
+    : undefined;
+  const strategy = evaluateCacheStrategy(
+    state.sessionID,
+    {
+      pReturn,
+      expectedCycles: 1,
+      expectedFutureTurns: Math.min(
+        Math.floor(state.messageCount / 2),
+        SHADOW_FUTURE_TURNS_CAP,
+      ),
       metaThreshold,
-    );
-    const result = evaluateCacheStrategy(
-      state.sessionID,
-      {
-        pReturn: pReturns,
-        expectedCycles,
-        expectedFutureTurns,
+      metaDistillCostPerCall: estimateMetaDistillCostPerCall(
+        workerModel,
         metaThreshold,
-        metaDistillCostPerCall,
-      },
-      {
-        readPerToken: cacheReadCostPerMTok / 1_000_000,
-        writePerToken: cacheMissCostPerMTok / 1_000_000,
-      },
-      now,
-      { updateState: !readOnly },
-    );
-    evaluatedStrategy = result;
-    const inWarmupMargin = elapsed % ttlMs >= ttlMs - warmupMarginMs;
-    if (result?.confident && inWarmupMargin && !readOnly) {
-      const snap = getCacheSizeSnapshot(state.sessionID);
-      const apiActual =
-        (state.cacheAnalytics?.lastCacheRead ?? 0) +
-        (state.cacheAnalytics?.lastCacheCreation ?? 0);
-      log.info(
-        `cache-economics: session=${state.sessionID.slice(0, 16)} ` +
-          `strategy=${result.strategy} wouldWarm=${strategyWantsWarming(result.strategy)} ` +
-          `gradFull=${snap?.full ?? "?"} gradCompressed=${snap?.compressed ?? "?"} ` +
-          `apiActual=${apiActual} pReturn=${pReturns.toFixed(2)} ` +
-          `cycles=${expectedCycles.toFixed(1)} futureTurns=${expectedFutureTurns} ` +
-          `meta[threshold=${metaThreshold} expectedBusts=${result.expectedMetaBusts.toFixed(3)} ` +
-          `bustCost=${result.metaBustCost.toFixed(4)}] ` +
-          `costs[hold=${result.holdWarmCost.toFixed(4)} ` +
-          `coolBust=${result.coolBustCost.toFixed(4)} ` +
-          `coolFull=${result.coolFullWriteCost.toFixed(4)}]`,
-      );
-    }
-  }
-
-  // Session-level ROI guard: after enough warmups, if the observed hit
-  // rate is chronically low, stop warming. This prevents unlimited
-  // spending across many short breaks where each individual break passes
-  // the per-break checks but the aggregate ROI is deeply negative.
-  // (Runs after the shadow eval above so large sessions are still measured.)
-  const lifetime = state.warmup?.totalWarmups ?? 0;
-  if (lifetime >= MIN_WARMUPS_FOR_ROI_CHECK) {
-    const hitRate = (state.warmup?.warmupHits ?? 0) / lifetime;
-    if (hitRate < MIN_SESSION_HIT_RATE) return false;
-  }
-  // (Write-efficiency averaging guard removed — superseded by the prefix-churn
-  // gate at the top of shouldWarm. See note in the tool-call path above.)
-
-  // Read the unified strategy (stored by the eval block above). When confident,
-  // this is the PRIMARY warm/no-warm decision (PR2b flip): `hold-warm` → warm,
-  // `cool-bust`/`cool-full-write` → don't. Non-confident (no snapshot, non-finite
-  // inputs) falls back to the legacy pReturns/threshold mechanics.
-  const econResult =
-    evaluatedStrategy ?? getCacheStrategy(state.sessionID)?.result;
-  const econConfident = econResult?.confident === true;
+      ),
+    },
+    {
+      readPerToken: cacheReadCostPerMTok / 1_000_000,
+      writePerToken: cacheMissCostPerMTok / 1_000_000,
+    },
+    now,
+    { updateState: !readOnly },
+  );
   if (decisionDetails) {
-    decisionDetails.strategy = econResult?.strategy ?? null;
-    decisionDetails.confident = econConfident;
+    decisionDetails.strategy = strategy?.strategy ?? null;
+    decisionDetails.confident = strategy?.confident === true;
   }
-  const econWantsWarming =
-    econResult != null &&
-    econConfident &&
-    strategyWantsWarming(econResult.strategy);
-
-  // Determine if this is the initial commitment or a continuation
-  const cyclesSpent = state.warmup?.warmupCount ?? 0;
-  const isFirstWindow = elapsed < ttlMs;
-
-  if (isFirstWindow) {
-    // --- Phase A: Initial commitment ---
-    // Cache is about to expire for the first time.
-
-    // Cache still fresh — no warmup needed yet
-    if (elapsed < ttlMs - warmupMarginMs) return false;
-
-    // PRIMARY: unified strategy says don't warm (cool-bust or cool-full-write).
-    if (econConfident && !econWantsWarming) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    // FALLBACK (no confident strategy): legacy pReturns/threshold gate.
-    if (!econConfident && pReturns <= threshold) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    return true;
-  } else {
-    // --- Phase B: Continuation ---
-    // Cache already expired at least once. We're maintaining warmth
-    // across a longer break. Check if still profitable.
-
-    // Hard break-even cap: stop if we've spent too many cycles
-    if (cyclesSpent >= maxCycles) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    // Session almost certainly finished — stop warming
-    if (pFinished > 0.95) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    // PRIMARY: unified strategy no longer wants warming (flipped from hold-warm
-    // to cool-bust/full-write mid-break, e.g. after recalibration). Stop.
-    if (econConfident && !econWantsWarming) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    // FALLBACK: rising cost threshold (only when no confident strategy).
-    if (!econConfident) {
-      const risingThreshold = cumulativeCostThreshold(
-        cyclesSpent + 1, // +1 because we're deciding whether to do the NEXT cycle
-        cacheReadCostPerMTok,
-        cacheMissCostPerMTok,
-      );
-      if (pReturns <= risingThreshold) {
-        markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-        return false;
-      }
-    }
-
-    // Re-evaluate: expected remaining cycles must keep total under maxCycles
-    const remaining = expectedWarmupCycles(
-      blendedHist,
-      elapsed,
-      ttlMs,
-      maxCycles - cyclesSpent,
+  if (strategy?.confident && inWarmupMargin && !readOnly) {
+    log.info(
+      `cache-economics: session=${state.sessionID.slice(0, 16)} ` +
+        `strategy=${strategy.strategy} pReturn=${pReturn.toFixed(3)} ` +
+        `costs[hold=${strategy.holdWarmCost.toFixed(4)} ` +
+        `coolBust=${strategy.coolBustCost.toFixed(4)} ` +
+        `coolFull=${strategy.coolFullWriteCost.toFixed(4)}]`,
     );
-    if (cyclesSpent + remaining > maxCycles) {
-      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
-      return false;
-    }
-
-    // Check we're in the warmup margin of the current TTL window
-    const intoWindow = elapsed % ttlMs;
-    if (intoWindow < ttlMs - warmupMarginMs) return false;
-
-    return true;
   }
+
+  return (
+    inWarmupMargin &&
+    pReturn > threshold &&
+    (!strategy?.confident || strategyWantsWarming(strategy.strategy))
+  );
 }
 
-/** Mark session dead if survival is below the dead session threshold. */
-function markDeadIfSurvivalLow(
+function warmupSuffixCostPerMTok(profile: CacheWarmingProfile): number {
+  const replay = profile.openAIReplay;
+  return replay
+    ? (replay.uncachedTokens / replay.prefixTokens) * replay.pricing.input
+    : 0;
+}
+
+function automaticWarmingInputs(
   state: SessionState,
-  survivalAtIdle: number,
-  applyStateChange = true,
-): void {
-  if (applyStateChange && survivalAtIdle < DEAD_SESSION_THRESHOLD) {
-    if (!state.warmup) {
-      state.warmup = {
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: 0,
-        warmupHits: 0,
-        disabled: true,
-      };
-    } else {
-      state.warmup.disabled = true;
-    }
-    log.info(
-      `cache-warmer: session=${state.sessionID.slice(0, 16)} marked dead ` +
-        `(survival=${(survivalAtIdle * 100).toFixed(1)}% < ${(DEAD_SESSION_THRESHOLD * 100).toFixed(0)}%)`,
-    );
-  }
+  profile: CacheWarmingProfile,
+  histogram: InterTurnHistogram,
+  now: number,
+): { cacheAgeMs: number; pReturn: number; threshold: number } {
+  const { ttlMs, cacheReadCostPerMTok, cacheMissCostPerMTok } = profile;
+  const extraCostPerMTok = warmupSuffixCostPerMTok(profile);
+  const cacheAgeMs = now - lastWarmingCacheTouch(state);
+  const idleMs = Math.max(
+    0,
+    now -
+      (state.warmingTurn?.accepted?.repliedAt ??
+        state.lastResponseTime ??
+        state.lastRequestTime),
+  );
+  const remainingCacheMs = Math.max(0, ttlMs - cacheAgeMs);
+  return {
+    cacheAgeMs,
+    // A return before the current cache expires would hit without a refresh.
+    pReturn: conditionalReturnProbability(
+      histogram,
+      idleMs,
+      ttlMs,
+      remainingCacheMs,
+    ),
+    threshold: Math.max(
+      costThreshold(
+        cacheReadCostPerMTok + extraCostPerMTok,
+        cacheMissCostPerMTok + extraCostPerMTok,
+      ),
+      loreConfig().cache.warming.minReturnProbability ?? 0,
+    ),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,7 +1821,7 @@ export type WarmingSnapshot = {
   messageCount: number;
   idleMs: number;
   consecutiveTextOnlyTurns: number;
-  ttl: "5m" | "1h" | undefined;
+  ttl: WarmupTTL | undefined;
   // Warmup state
   warmupCount: number;
   totalWarmups: number;
@@ -1831,19 +1836,8 @@ export type WarmingSnapshot = {
   blendedHistogram: InterTurnHistogram;
   sessionWeight: number;
   survivalAtIdle: number;
-  // Commitment model
-  pSessionFinished: number;
   pReturns: number;
-  breakFrac: number;
-  expectedCycles: number;
-  maxCycles: number;
-  cyclesSpent: number;
   warmingPhase: "initial" | "continuation" | "none";
-  threshold: number;
-  // Legacy (kept for backward compat in dashboard)
-  pReturn: number;
-  pReturnDampened: number;
-  costThreshold: number;
   // Tool-call state
   toolCallActive: boolean;
   // Decision
@@ -1872,79 +1866,24 @@ export function computeWarmingSnapshot(
   warmingEnabled: boolean = isWarmingEnabled(),
   suppliedGlobalHistogram?: InterTurnHistogram,
 ): WarmingSnapshot {
-  const cfg = loreConfig();
   const idleMs = now - state.lastRequestTime;
-
-  // Histograms
-  const sessionHist = state.survivalModel ?? createHistogram();
-  let globalHist = suppliedGlobalHistogram;
-  if (!globalHist) {
-    const pid = projectId(state.projectPath);
-    const canonicalPid = pid
-      ? canonicalProjectId(pid, { committed: true })
-      : undefined;
-    globalHist = canonicalPid
-      ? getGlobalHistogramsSnapshot().get(canonicalPid)
-      : undefined;
-  }
-  globalHist ??= createHistogram();
+  const sessionHist = sessionHistogramForWarming(state);
+  const globalHist =
+    suppliedGlobalHistogram ?? globalHistogramForWarmingSnapshot(state);
   const blendedHist = blendHistograms(sessionHist, globalHist);
   const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
+  const survivalAtIdle = survivalFunction(
+    blendedHist,
+    Math.max(0, now - (state.lastResponseTime ?? state.lastRequestTime)),
+  );
 
-  // Survival & return probability
-  const survivalAtIdle = survivalFunction(blendedHist, idleMs);
-
-  // Shared seam with the live warming path (idle.ts) — see resolveProfileForSession.
   const profile = resolveProfileForSession(state);
   const ttlMs = profile?.ttlMs ?? 300_000;
   const warmupMarginMs = profile?.warmupMarginMs ?? 45_000;
-
-  // Legacy: conditional return probability (kept for dashboard backward compat)
-  const pReturn = conditionalReturnProbability(blendedHist, idleMs, ttlMs);
-  const textOnlyRuns = state.consecutiveTextOnlyTurns ?? 0;
-  const pReturnDampened =
-    textOnlyRuns > 0 ? pReturn * 0.5 ** textOnlyRuns : pReturn;
-
-  // Commitment model signals
-  const breakFrac = breakFraction(blendedHist);
-  const totalTurns = Math.floor(state.messageCount / 2);
-  const pFinished = pSessionFinished({
-    survivalAtIdle,
-    consecutiveTextOnlyTurns: textOnlyRuns,
-    breakFraction: breakFrac,
-    totalTurns,
-    lastStopReason: state.lastStopReason,
-  });
-  const pReturns = 1.0 - pFinished;
-
-  // Corrected threshold with floor
-  const autoThreshold = profile
-    ? costThreshold(profile.cacheReadCostPerMTok, profile.cacheMissCostPerMTok)
-    : 0.1;
-  const thresholdVal =
-    cfg.cache.warming.minReturnProbability ??
-    Math.max(MIN_RETURN_PROBABILITY_FLOOR, autoThreshold);
-
-  // Commitment model cost analysis
-  const maxCyclesVal = profile
-    ? maxProfitableCycles(
-        profile.cacheReadCostPerMTok,
-        profile.cacheMissCostPerMTok,
-      )
-    : 0;
+  const { cacheAgeMs, pReturn, threshold } = profile
+    ? automaticWarmingInputs(state, profile, blendedHist, now)
+    : { cacheAgeMs: idleMs, pReturn: 0, threshold: 1 };
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
-  const expectedCycles = profile
-    ? expectedWarmupCycles(blendedHist, idleMs, ttlMs, maxCyclesVal)
-    : 0;
-
-  // Determine warming phase
-  const isFirstWindow = idleMs < ttlMs;
-  const hasWarmed = cyclesSpent > 0;
-  const warmingPhase: "initial" | "continuation" | "none" = isFirstWindow
-    ? "initial"
-    : hasWarmed
-      ? "continuation"
-      : "none";
 
   // Decision + reason
   const bucketKey = warmupBucketKey(state);
@@ -1957,14 +1896,15 @@ export function computeWarmingSnapshot(
       : isWarmupAuthDisabled(state.sessionID)
         ? "Warmup skipped because upstream authentication is unavailable"
         : null;
-  // Match the idle scheduler gates, which run before shouldWarm (including
-  // its forced-keep path).
-  const tooFewTurns = state.messageCount < MIN_TURNS_FOR_WARMING * 2;
+  const tooFewToolTurns =
+    !state.warmup?.forceKeepWarm &&
+    !state.warmup?.disabled &&
+    state.lastStopReason === "tool_use" &&
+    state.messageCount < MIN_TURNS_FOR_TOOL_WARMING * 2;
   const contextTooSmall =
-    (state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING;
+    warmingPrefixTokens(state) < MIN_INPUT_TOKENS_FOR_WARMING;
   const warmNow =
     idleSkipReason === null &&
-    !tooFewTurns &&
     !contextTooSmall &&
     profile != null &&
     shouldWarm(
@@ -1987,7 +1927,10 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Sub-agent session (ephemeral)";
     } else if (!warmingEnabled) {
       notWarmingReason = "Warming disabled (config/override)";
-    } else if (!state.cacheAnalytics.lastRequestBody) {
+    } else if (
+      !profile?.openAIReplay &&
+      !state.cacheAnalytics.lastRequestBody
+    ) {
       notWarmingReason = "No stored request body";
     } else if (state.warmup?.userStopped) {
       notWarmingReason = "Warming stopped by user";
@@ -1999,46 +1942,49 @@ export function computeWarmingSnapshot(
     ) {
       notWarmingReason = `Emergency compaction (layer=${getLastTransformLayer(state.sessionID)} >= ${EMERGENCY_COMPACTION_LAYER}) — prefix re-renders every turn, warmups would land as partials`;
     } else if (!profile) {
-      notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
-    } else if (tooFewTurns) {
-      notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+      notWarmingReason = "No warming profile for this route or model";
+    } else if (tooFewToolTurns) {
+      notWarmingReason = "Too few messages for tool-wait warming";
     } else if (contextTooSmall) {
-      const tokK = Math.floor((state.lastInputTokens ?? 0) / 1000);
+      const tokK = Math.floor(warmingPrefixTokens(state) / 1000);
       notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
+    } else if (cacheAgeMs >= ttlMs) {
+      notWarmingReason = "Cache already expired";
+    } else if (cacheAgeMs >= ttlMs - WARMUP_DISPATCH_HEADROOM_MS) {
+      notWarmingReason = "Cache too close to expiry";
+    } else if (state.warmingTurn && !state.warmingTurn.accepted) {
+      notWarmingReason = "Latest request has no completed response";
+    } else if (state.warmingTurn?.warmupMissed) {
+      notWarmingReason = "Last warmup missed the cache";
     } else if (state.warmup?.forceKeepWarm) {
+      const suffixCost = warmupSuffixCostPerMTok(profile);
       const maxCyc = maxProfitableCycles(
-        profile.cacheReadCostPerMTok,
-        profile.cacheMissCostPerMTok,
+        profile.cacheReadCostPerMTok + suffixCost,
+        profile.cacheMissCostPerMTok + suffixCost,
       );
       if (cyclesSpent >= maxCyc) {
         notWarmingReason = `Force-keep: break-even exceeded (${cyclesSpent} >= ${maxCyc} cycles)`;
       } else {
-        const intoWindow = idleMs % ttlMs;
-        if (intoWindow < ttlMs - warmupMarginMs) {
+        if (cacheAgeMs < ttlMs - warmupMarginMs) {
           notWarmingReason = "Force-keep: not in warmup window yet";
         } else {
           notWarmingReason = "Force-keep: cooldown active";
         }
       }
-    } else if (state.lastStopReason === "tool_use" && !state.warmup?.disabled) {
-      // Mirror shouldWarm()'s tool-call entry: `toolCallActive && !disabled`.
-      // If disabled=true, fall through to the normal path below.
+    } else if (state.warmup?.disabled) {
+      notWarmingReason = "Session paused by survival analysis";
+    } else if (state.lastStopReason === "tool_use") {
+      const { total, hits, hitRate } = toolWarmupHistory(state.warmup);
       if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
         notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > ${Math.round(MAX_TOOL_CALL_WARMING_MS / 60_000)}min)`;
       } else if (
-        (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
-        (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) <
-          MIN_SESSION_HIT_RATE
+        total >= MIN_WARMUPS_FOR_ROI_CHECK &&
+        hitRate < MIN_SESSION_HIT_RATE
       ) {
-        const hitRate = (
-          ((state.warmup?.warmupHits ?? 0) /
-            (state.warmup?.totalWarmups ?? 1)) *
-          100
-        ).toFixed(0);
-        notWarmingReason = `Tool call: session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
+        notWarmingReason = `Tool call: session hit rate too low (${(hitRate * 100).toFixed(0)}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}%)`;
       } else if (
         (state.warmup?.warmupCount ?? 0) >= 1 &&
-        (state.warmup?.warmupHits ?? 0) < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
+        hits < TOOL_CALL_MIN_HITS_FOR_CONTINUATION
       ) {
         notWarmingReason =
           "Tool call: no confirmed hits yet (continuation gated after first probe)";
@@ -2051,37 +1997,16 @@ export function computeWarmingSnapshot(
         if ((state.warmup?.warmupCount ?? 0) >= effectiveMax) {
           notWarmingReason = `Tool call: cycle cap reached (${state.warmup?.warmupCount ?? 0} >= ${effectiveMax})`;
         } else {
-          const intoWindow = idleMs % ttlMs;
           notWarmingReason =
-            intoWindow < ttlMs - warmupMarginMs
+            cacheAgeMs < ttlMs - warmupMarginMs
               ? "Tool call: not in warmup window yet"
               : "Tool call: cooldown active";
         }
       }
-    } else if (
-      state.warmup?.lastWarmupAt &&
-      now - state.warmup.lastWarmupAt <
-        cooldownFor(state, ttlMs, warmupMarginMs)
-    ) {
-      notWarmingReason = "Already warmed in this TTL window";
-    } else if (state.warmup?.disabled) {
-      notWarmingReason = "Session paused by survival analysis";
-    } else if (
-      (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
-      (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) <
-        MIN_SESSION_HIT_RATE
-    ) {
-      const hitRate = (
-        ((state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1)) *
-        100
-      ).toFixed(0);
-      notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
-    } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
+    } else if (cacheAgeMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
-    } else if (!isFirstWindow && cyclesSpent >= maxCyclesVal) {
-      notWarmingReason = `Break-even exceeded (${cyclesSpent} >= ${maxCyclesVal} cycles)`;
-    } else if (!isFirstWindow && pFinished > 0.95) {
-      notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
+    } else if (pReturn <= threshold) {
+      notWarmingReason = `P(returns) ${(pReturn * 100).toFixed(1)}% <= threshold ${(threshold * 100).toFixed(1)}%`;
     } else if (
       decisionDetails.confident &&
       decisionDetails.strategy === "cool-bust"
@@ -2093,33 +2018,6 @@ export function computeWarmingSnapshot(
       decisionDetails.strategy === "cool-full-write"
     ) {
       notWarmingReason = "Cache economics favors a full cache write on return";
-    } else if (
-      !decisionDetails.confident &&
-      isFirstWindow &&
-      pReturns <= thresholdVal
-    ) {
-      notWarmingReason = `P(returns) ${(pReturns * 100).toFixed(1)}% <= threshold ${(thresholdVal * 100).toFixed(1)}%`;
-    } else if (!isFirstWindow && !decisionDetails.confident) {
-      const risingThresh = cumulativeCostThreshold(
-        cyclesSpent + 1,
-        profile.cacheReadCostPerMTok,
-        profile.cacheMissCostPerMTok,
-      );
-      if (pReturns <= risingThresh) {
-        notWarmingReason = `Rising threshold: P(returns) ${(pReturns * 100).toFixed(1)}% <= ${(risingThresh * 100).toFixed(1)}% at cycle ${cyclesSpent + 1}`;
-      } else {
-        const intoWindow = idleMs % ttlMs;
-        notWarmingReason =
-          intoWindow < ttlMs - warmupMarginMs
-            ? "Not in warmup window yet"
-            : "Unknown";
-      }
-    } else if (!isFirstWindow) {
-      const intoWindow = idleMs % ttlMs;
-      notWarmingReason =
-        intoWindow < ttlMs - warmupMarginMs
-          ? "Not in warmup window yet"
-          : "Unknown";
     } else {
       notWarmingReason = "Unknown";
     }
@@ -2130,8 +2028,8 @@ export function computeWarmingSnapshot(
     projectPath: state.projectPath,
     messageCount: state.messageCount,
     idleMs,
-    consecutiveTextOnlyTurns: textOnlyRuns,
-    ttl: state.resolvedConversationTTL,
+    consecutiveTextOnlyTurns: state.consecutiveTextOnlyTurns ?? 0,
+    ttl: profile ? warmupTTLForProfile(profile) : state.resolvedConversationTTL,
     warmupCount: cyclesSpent,
     totalWarmups: state.warmup?.totalWarmups ?? 0,
     warmupHits: state.warmup?.warmupHits ?? 0,
@@ -2145,19 +2043,9 @@ export function computeWarmingSnapshot(
     blendedHistogram: blendedHist,
     sessionWeight,
     survivalAtIdle,
-    // Commitment model
-    pSessionFinished: pFinished,
-    pReturns,
-    breakFrac,
-    expectedCycles,
-    maxCycles: maxCyclesVal,
-    cyclesSpent,
-    warmingPhase,
-    threshold: thresholdVal,
-    // Legacy
-    pReturn,
-    pReturnDampened,
-    costThreshold: thresholdVal,
+    pReturns: pReturn,
+    warmingPhase:
+      cyclesSpent > 0 ? "continuation" : idleMs < ttlMs ? "initial" : "none",
     // Tool-call state
     toolCallActive:
       state.lastStopReason === "tool_use" &&
@@ -2169,15 +2057,6 @@ export function computeWarmingSnapshot(
     notWarmingReason,
     circuitBreaker,
   };
-}
-
-/** Cooldown between warmups — must match shouldWarm() logic. */
-function cooldownFor(
-  _state: SessionState,
-  ttlMs: number,
-  warmupMarginMs: number,
-): number {
-  return Math.max(ttlMs - warmupMarginMs, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2226,36 +2105,62 @@ function responseTokenCount(value: unknown): number {
  *
  * Returns the result for circuit breaker checking and metrics.
  */
+export function invalidateOpenAIWarmup(state: SessionState): void {
+  if (state.warmingTurn) delete state.warmingTurn.openAIReplay;
+  if (state.warmup?.lastWarmupTTL === "30m")
+    creditWarmupHit(state.warmup, 0, OPENAI_CACHE_TTL_MS, 0);
+}
+
+function warmupTTLForProfile(profile: CacheWarmingProfile): WarmupTTL {
+  if (profile.openAIReplay) return "30m";
+  return profile.ttlMs >= 3_600_000 ? "1h" : "5m";
+}
+
 export async function executeWarmup(
   state: SessionState,
   profile: CacheWarmingProfile,
   config: GatewayConfig = loadConfig(),
 ): Promise<WarmupResult> {
+  const replay = profile.openAIReplay;
   const noResult: WarmupResult = {
     ok: false,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    ...(replay ? { ttl: "30m" as const } : {}),
   };
-
   const { lastRequestBody } = state.cacheAnalytics;
-  if (!lastRequestBody) return noResult;
+  const replayBody = replay?.body ?? lastRequestBody;
+  if (!replayBody || (replay && state.warmingTurn?.openAIReplay !== replay))
+    return noResult;
 
-  // Circuit-breaker bucket + cache-liveness, captured BEFORE the warmup state
-  // mutation below overwrites lastWarmupAt. cacheRead=0 only indicates a
-  // body/prefix mismatch when the cached entry should still be alive; if the
-  // last cache write (real turn or prior warmup) is older than the breakpoint
-  // TTL, the entry expired and a fresh write is the warmer re-priming a cold
-  // cache — expected, not a fault. checkCircuitBreaker ignores those.
   const breakerBucket = warmupBucketKey(state);
-  const lastCacheTouch = Math.max(
-    state.lastRequestTime ?? 0,
-    state.warmup?.lastWarmupAt ?? 0,
-  );
-  const cacheLikelyAlive =
-    lastCacheTouch > 0 && Date.now() - lastCacheTouch < profile.ttlMs;
+  const turn = state.warmingTurn;
+  const cachedPrefixTokens = warmingPrefixTokens(state);
+  if (cachedPrefixTokens < MIN_INPUT_TOKENS_FOR_WARMING) return noResult;
+  const lastRequestTime = state.lastRequestTime;
+  const upstream = state.lastUpstream;
+  const resolvedTTL = state.resolvedConversationTTL;
+  const credential = resolveAuth(state.sessionID, upstream?.providerID);
+  const auto =
+    !state.warmup?.forceKeepWarm && state.lastStopReason !== "tool_use";
+  const lastCacheTouch = lastWarmingCacheTouch(state);
+  const isCurrent = () =>
+    state.warmingTurn === turn &&
+    state.lastRequestTime === lastRequestTime &&
+    state.lastUpstream === upstream &&
+    state.resolvedConversationTTL === resolvedTTL &&
+    (replay
+      ? turn?.openAIReplay === replay
+      : state.cacheAnalytics.lastRequestBody === lastRequestBody) &&
+    !state.amnesia &&
+    !state.warmup?.userStopped;
 
   // Decompress the stored body
-  const storedBody = decompressBody(lastRequestBody);
+  const storedBody = decompressBody(replayBody);
+  // A one-token replay is invalid for manual extended thinking, and allowing
+  // the original thinking budget could cost far more than a cache read.
+  if (!replay && JSON.parse(storedBody).thinking?.type === "enabled")
+    return noResult;
 
   // Prepare for warmup (max_tokens:0, strip incompatible fields)
   const warmupBody = profile.prepareWarmupBody(storedBody);
@@ -2272,8 +2177,14 @@ export async function executeWarmup(
   let requestUrl: string;
   let signedBody: string;
 
-  if (profile.authMode === "vertex") {
-    const model = state.lastUpstream?.model;
+  if (replay) {
+    if (!credential) return noResult;
+    headers.Authorization = `Bearer ${credential.value}`;
+    Object.assign(headers, replay.headers);
+    requestUrl = OPENAI_RESPONSES_URL;
+    signedBody = warmupBody;
+  } else if (profile.authMode === "vertex") {
+    const model = upstream?.model;
     if (!model) return noResult;
     const region = vertexRegionFromUrl(profile.upstreamUrl) ?? "global";
     try {
@@ -2287,7 +2198,8 @@ export async function executeWarmup(
         log.warn(
           `cache-warmer: no GCP project for vertex session=${state.sessionID.slice(0, 16)}, skipping`,
         );
-        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+        if (isCurrent())
+          recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
         return noResult;
       }
       const token = await getVertexAccessToken();
@@ -2304,7 +2216,8 @@ export async function executeWarmup(
       log.warn(
         `cache-warmer: vertex auth failed for session=${state.sessionID.slice(0, 16)}`,
       );
-      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      if (isCurrent())
+        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
       return noResult;
     }
     // No cch re-sign for Vertex (no billing header) — send the warmup as-is.
@@ -2312,20 +2225,20 @@ export async function executeWarmup(
   } else {
     // Resolve auth for this session — use the provider from lastUpstream
     // to avoid cross-contamination when the session uses multiple providers.
-    const cred = resolveAuth(state.sessionID, state.lastUpstream?.providerID);
-    if (!cred) {
+    if (!credential) {
       log.warn(
         `cache-warmer: no auth for session=${state.sessionID.slice(0, 16)}, skipping`,
       );
-      recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
+      if (isCurrent())
+        recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
       return noResult;
     }
     headers["anthropic-version"] = "2023-06-01";
-    Object.assign(headers, authHeaders(cred));
+    Object.assign(headers, authHeaders(credential));
 
     // Forward anthropic-beta from the last real request so beta-gated body
     // fields (e.g. context_management) are accepted by the upstream API.
-    const betaHeader = state.lastUpstream?.headers["anthropic-beta"];
+    const betaHeader = upstream?.headers["anthropic-beta"];
     if (betaHeader) {
       headers["anthropic-beta"] = betaHeader;
     }
@@ -2341,14 +2254,31 @@ export async function executeWarmup(
   // Apply gateway-admin headers only after the final warmup URL is known. This
   // keeps cache warming under the same exact configured-base policy as normal
   // foreground and compact dispatches.
-  applyUpstreamExtraHeaders(
-    headers,
-    extraHeadersForUpstream(config, requestUrl),
-  );
+  const extraHeaders = extraHeadersForUpstream(config, requestUrl);
+  if (replay && !openAIWarmupHeadersAllowed(extraHeaders)) return noResult;
+  applyUpstreamExtraHeaders(headers, extraHeaders);
+
+  if (
+    replay &&
+    openAIWarmupScope(headers, replay.model, replay.cacheKey)?.scope !==
+      replay.scope
+  )
+    return noResult;
+
+  const sentCredential = replay ? extractAuth(headers) : credential;
+  const sentAt = Date.now();
+  if (
+    !isCurrent() ||
+    (turn && (!turn.accepted || turn.warmupMissed)) ||
+    !isWarmingEnabled() ||
+    isCircuitBreakerTripped(breakerBucket, sentAt) ||
+    sentAt - lastCacheTouch >= profile.ttlMs - WARMUP_DISPATCH_HEADROOM_MS
+  )
+    return noResult;
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +
-      `model=${state.lastUpstream?.model} ttl=${profile.ttlMs / 1000}s`,
+      `model=${upstream?.model} ttl=${profile.ttlMs / 1000}s`,
   );
 
   try {
@@ -2356,29 +2286,41 @@ export async function executeWarmup(
       method: "POST",
       headers,
       body: signedBody,
+      ...(replay
+        ? { redirect: "error" as const, signal: AbortSignal.timeout(30_000) }
+        : {}),
     });
 
     if (!response.ok) {
+      if (replay) {
+        if (turn && isCurrent()) turn.warmupMissed = true;
+        void response.body?.cancel().catch(() => {});
+      }
       log.error(
         `cache-warmer: upstream error ${response.status} for ` +
           `session=${state.sessionID.slice(0, 16)}`,
       );
       // On auth error, disable future warmups for this session until
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
-      if (response.status === 401 || response.status === 403) {
+      if (
+        (response.status === 401 || response.status === 403) &&
+        isCurrent() &&
+        (!replay || sentCredential?.value === credential?.value) &&
+        resolveAuth(state.sessionID, upstream?.providerID) === credential
+      ) {
         disableWarmupForAuth(state.sessionID);
-        markAuthStale(state.sessionID, state.lastUpstream?.providerID);
+        markAuthStale(state.sessionID, upstream?.providerID);
         recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
           `cache-warmer: auth error ${response.status} — disabling warmup for ` +
             `session=${state.sessionID.slice(0, 16)} until fresh credential`,
         );
       }
-      return { ok: false, cacheReadTokens: 0, cacheCreationTokens: 0 };
+      return noResult;
     }
 
     // Parse the response to extract usage
-    let resp: {
+    let resp: null | {
       usage?: {
         cache_read_input_tokens?: unknown;
         cache_creation_input_tokens?: unknown;
@@ -2393,22 +2335,40 @@ export async function executeWarmup(
         `cache-warmer: upstream returned malformed JSON with status ${response.status} for ` +
           `session=${state.sessionID.slice(0, 16)}`,
       );
+      if (replay && turn && isCurrent()) turn.warmupMissed = true;
       return noResult;
     }
 
-    const inputTokens = responseTokenCount(resp.usage?.input_tokens);
-    const cacheReadTokens = responseTokenCount(
-      resp.usage?.cache_read_input_tokens,
-    );
-    const cacheCreationTokens = responseTokenCount(
-      resp.usage?.cache_creation_input_tokens,
-    );
+    const openAIUsage = replay ? parseOpenAIWarmupUsage(resp) : undefined;
+    if (replay && !openAIUsage) {
+      if (turn && isCurrent()) turn.warmupMissed = true;
+      return noResult;
+    }
+    const inputTokens =
+      openAIUsage?.inputTokens ?? responseTokenCount(resp?.usage?.input_tokens);
+    const cacheReadTokens =
+      openAIUsage?.cacheReadTokens ??
+      responseTokenCount(resp?.usage?.cache_read_input_tokens);
+    const cacheCreationTokens =
+      openAIUsage?.cacheCreationTokens ??
+      responseTokenCount(resp?.usage?.cache_creation_input_tokens);
+    const verifiedOpenAIRefresh =
+      !!replay &&
+      !!openAIUsage &&
+      openAIUsage.completed &&
+      openAIUsage.outputTokens === 0 &&
+      cacheReadTokens >= cachedPrefixTokens &&
+      inputTokens <= replay.uncachedTokens &&
+      cacheCreationTokens === 0;
     const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
 
     const result: WarmupResult = {
       ok: true,
       cacheReadTokens,
       cacheCreationTokens,
+      ...(replay
+        ? { ttl: "30m" as const, verifiedRefresh: verifiedOpenAIRefresh }
+        : {}),
     };
 
     // Compute cost estimate for this warmup
@@ -2416,7 +2376,15 @@ export async function executeWarmup(
       (cacheReadTokens / 1_000_000) * profile.cacheReadCostPerMTok;
     const writeCost =
       (cacheCreationTokens / 1_000_000) * profile.cacheMissCostPerMTok;
-    const warmupCost = readCost + writeCost;
+    const warmupCost =
+      readCost +
+      writeCost +
+      (replay && openAIUsage
+        ? (inputTokens * replay.pricing.input +
+            openAIUsage.outputTokens * replay.pricing.output) /
+          1_000_000
+        : 0);
+    if (replay) result.costUSD = warmupCost;
     const costStr = `$${warmupCost.toFixed(4)}`;
 
     // Log the outcome with full cache statistics
@@ -2430,7 +2398,9 @@ export async function executeWarmup(
     // that collapsed to a single end-of-body breakpoint is the body-divergence
     // bug. Correlating this with the outcome confirms the breakpoint-preserving
     // fix (raw stored body) is working: UNCACHED with breakpoints=1 was the bug.
-    const breakpoints = (signedBody.match(/"cache_control"/g) ?? []).length;
+    const breakpoints = replay
+      ? 0
+      : (signedBody.match(/"cache_control"/g) ?? []).length;
 
     // --- Warmup cache-divergence probe (env-gated) ---
     // The decisive tiebreaker between EVICTION and body DIVERGENCE. Hash the
@@ -2453,7 +2423,7 @@ export async function executeWarmup(
     //
     // Wrapped in try/catch: this is a diagnostic and must never break the warmup
     // path (a throw here would run before cost/circuit-breaker accounting below).
-    if (isWarmupProbeEnabled()) {
+    if (!replay && isCurrent() && isWarmupProbeEnabled()) {
       try {
         const ca = state.cacheAnalytics;
         const dg = cacheSegmentDigest(warmupBody);
@@ -2464,7 +2434,7 @@ export async function executeWarmup(
             hasBaseline: ca.probeHeadSha != null,
             headMatch: dg.headSha === ca.probeHeadSha,
             cacheReadTokens,
-            cacheLikelyAlive,
+            cacheLikelyAlive: true,
           });
           log.info(
             `warmup-probe: WARMUP session=${sid} ` +
@@ -2481,83 +2451,61 @@ export async function executeWarmup(
       }
     }
 
-    if (cacheReadTokens > 0 && cacheCreationTokens === 0) {
+    if (
+      replay
+        ? verifiedOpenAIRefresh
+        : cacheReadTokens > 0 && cacheCreationTokens === 0
+    ) {
       log.info(
         `cache-warmer: ✓ refresh session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} hit=${hitRate} breakpoints=${breakpoints} cost=${costStr}`,
       );
-    } else if (cacheReadTokens > 0 && cacheCreationTokens > 0) {
-      // Partial — read the stable prefix but rewrote the rest. On an idle replay
-      // of the stored body this should NOT happen: a healthy warmup is 100%
-      // read. A partial while the cache should still be alive is a body-divergence
-      // DEFECT (here, almost always the distilled prefix churning) — NOT "fine".
-      // checkCircuitBreaker (below) treats it as a failure when cacheLikelyAlive.
-      const ageSec =
-        lastCacheTouch > 0
-          ? Math.round((Date.now() - lastCacheTouch) / 1000)
-          : -1;
-      const logFn = cacheLikelyAlive ? log.warn : log.info;
-      logFn(
-        `cache-warmer: ~ partial session=${sid} ` +
+    } else {
+      const outcome = cacheReadTokens > 0 ? "partial" : "UNCACHED";
+      const ageSec = Math.round((sentAt - lastCacheTouch) / 1000);
+      log.warn(
+        `cache-warmer: ${outcome} session=${sid} ` +
           `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
           `hit=${hitRate} breakpoints=${breakpoints} cost=${costStr} ` +
-          `cacheLikelyAlive=${cacheLikelyAlive} ageSinceCacheTouch=${ageSec}s` +
-          (cacheLikelyAlive
-            ? " — DIVERGENCE: cache should have been live but warmup only partially " +
-              "matched (warmup body ≠ cached prefix; usually distilled-prefix churn)"
-            : " — partial expired-cache re-prime (some breakpoints aged out)"),
-      );
-    } else {
-      // cacheRead=0: the warmup wrote a fresh cache instead of refreshing an
-      // existing one. `cacheLikelyAlive` (captured before the lastWarmupAt
-      // mutation above) is the diagnostic discriminator:
-      //   - false → the cached prefix had simply expired; this is a benign cold
-      //             re-prime (and is excluded from the circuit breaker).
-      //   - true  → the cache SHOULD still have been live, so the warmup body
-      //             diverged from what the real turn cached. THIS is the genuine
-      //             "divergence" signal worth investigating (issue: warmup body
-      //             ≠ cached prefix). If this never fires in practice, every
-      //             UNCACHED warmup is pure expiry and there is no body bug.
-      const ageSec =
-        lastCacheTouch > 0
-          ? Math.round((Date.now() - lastCacheTouch) / 1000)
-          : -1;
-      log.warn(
-        `cache-warmer: ✗ UNCACHED session=${sid} ` +
-          `input=${totalInput} cacheRead=${cacheReadTokens} cacheWrite=${cacheCreationTokens} ` +
-          `cost=${costStr} cacheLikelyAlive=${cacheLikelyAlive} ` +
           `ageSinceCacheTouch=${ageSec}s ttl=${Math.round(profile.ttlMs / 1000)}s ` +
-          // Buffer.byteLength gives the UTF-8 byte size actually sent over the
-          // wire; signedBody.length would count UTF-16 code units and underreport
-          // for multi-byte content (prose/code-heavy bodies — exactly the ones
-          // this diagnostic targets).
-          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")} breakpoints=${breakpoints}` +
-          (cacheLikelyAlive
-            ? " — DIVERGENCE: cache should have been live but warmup missed " +
-              "(warmup body ≠ cached prefix)"
-            : " — expired-cache re-prime (expected)"),
+          `bodyBytes=${Buffer.byteLength(signedBody, "utf8")}`,
       );
     }
 
     // Accumulate warmup cost for the session
-    const ttl: "5m" | "1h" = profile.ttlMs >= 3_600_000 ? "1h" : "5m";
+    const ttl = warmupTTLForProfile(profile);
     recordWarmupCost(
       state.sessionID,
-      state.lastUpstream?.model ?? "unknown",
+      upstream?.model ?? "unknown",
       cacheReadTokens,
       cacheCreationTokens,
       ttl,
       resolveCostAttribution({
         sessionID: state.sessionID,
-        providerID: state.lastUpstream?.providerID,
-        upstreamURL: state.lastUpstream?.url,
-        credential: resolveAuth(
-          state.sessionID,
-          state.lastUpstream?.providerID,
-        ),
+        providerID: replay ? "openai" : upstream?.providerID,
+        upstreamURL: replay ? OPENAI_RESPONSES_URL : upstream?.url,
+        credential: sentCredential,
         requestHeaders: headers,
       }),
+      replay && openAIUsage
+        ? {
+            pricing: replay.pricing,
+            inputTokens,
+            outputTokens: openAIUsage.outputTokens,
+          }
+        : undefined,
     );
+
+    // A previous wait can finish while a newer turn is already in flight.
+    // Keep its cost, but never publish refresh or auth state into that turn.
+    if (!isCurrent()) return result;
+    if (
+      turn &&
+      (replay
+        ? !verifiedOpenAIRefresh
+        : cacheReadTokens < cachedPrefixTokens * 0.9 || cacheCreationTokens > 0)
+    )
+      turn.warmupMissed = true;
 
     // Update session warmup state
     if (!state.warmup) {
@@ -2569,31 +2517,39 @@ export async function executeWarmup(
         disabled: false,
       };
     }
-    state.warmup.lastWarmupAt = Date.now();
+    if (!replay || verifiedOpenAIRefresh) {
+      state.warmup.lastWarmupAt = cacheReadTokens > 0 ? sentAt : 0;
+      state.warmup.lastWarmupTTL = ttl;
+      state.warmup.lastWarmupWasAutomatic = auto;
+      // Credit at most the prefix this session paid to refresh, even if a
+      // returning turn reads more. Anthropic can retain a partially read prefix.
+      state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
+      state.warmup.openAIRefresh = replay
+        ? {
+            scope: replay.scope,
+            previousExpiry: lastCacheTouch + profile.ttlMs,
+            savingsPerMTok:
+              replay.pricing.cache_write - replay.pricing.cache_read,
+          }
+        : undefined;
+    }
     state.warmup.warmupCount++;
     state.warmup.totalWarmups = (state.warmup.totalWarmups ?? 0) + 1;
-    // 🔴 Record the cache prefix this warmup actually refreshed. Savings on
-    // the returning turn MUST be credited against THIS count (the tokens the
-    // warmup kept alive), NEVER the returning turn's cacheReadInputTokens —
-    // tool-use continuations / breakpoint shifts report a far smaller read,
-    // undercounting savings ~10×. The read portion is the kept-alive prefix
-    // even on a partial warmup (the written portion was a cost, not a save,
-    // already booked via recordWarmupCost). A non-zero value also marks THIS
-    // session as the warmup's payer (see WarmupState invariant), gating hit
-    // attribution to prevent phantom savings.
-    state.warmup.lastWarmupRefreshTokens = cacheReadTokens;
-
+    if (auto)
+      state.warmup.automaticWarmups = (state.warmup.automaticWarmups ?? 0) + 1;
     // Check circuit breaker for this (session, model, upstream) bucket. A
     // partial OR uncached write while the cache should have been alive is a
     // divergence DEFECT (all-or-nothing): it trips the breaker after
     // CIRCUIT_BREAKER_MAX_FAILURES, and only a clean 100% refresh clears it.
-    checkCircuitBreaker(result, breakerBucket, cacheLikelyAlive);
+    if (!replay || verifiedOpenAIRefresh || cacheCreationTokens > 0)
+      checkCircuitBreaker(result, breakerBucket, true);
 
     // Clear worker-health failure state on successful warmup.
     recordWorkerSuccess(state.sessionID, "cache-warmer");
 
     return result;
   } catch {
+    if (replay && turn && isCurrent()) turn.warmupMissed = true;
     // Network errors can include credential-bearing request URLs. Keep the
     // session diagnostic, but never the thrown details.
     log.error(
@@ -2669,12 +2625,16 @@ export function creditWarmupHit(
   if (!warmup?.lastWarmupAt) return noHit;
 
   const refreshTokens = warmup.lastWarmupRefreshTokens ?? 0;
+  const automatic = warmup.lastWarmupWasAutomatic;
   const paidForWarmup = (warmup.totalWarmups ?? 0) > 0 && refreshTokens > 0;
 
   // Consume the warmup unconditionally — it can only benefit the FIRST
   // returning turn, so clear the markers regardless of the outcome.
   warmup.lastWarmupAt = 0;
   warmup.lastWarmupRefreshTokens = 0;
+  delete warmup.lastWarmupWasAutomatic;
+  delete warmup.lastWarmupTTL;
+  delete warmup.openAIRefresh;
 
   // Stale/inherited lastWarmupAt without proof of payment: scrubbed above,
   // record NO hit (prevents phantom savings).
@@ -2701,6 +2661,8 @@ export function creditWarmupHit(
   // pre-#1105 behavior and is no longer true: `creditedTokens` is the capped
   // min() and is the only value booked as savings (pipeline recordWarmupHit).
   warmup.warmupHits++;
+  if (automatic)
+    warmup.automaticWarmupHits = (warmup.automaticWarmupHits ?? 0) + 1;
   // Pro-rata (Bug B): realized savings = what this turn actually read from the
   // warmed prefix, capped at what the warmup refreshed. See the docstring.
   return {
@@ -2722,7 +2684,7 @@ function loadPersistedHistogramCounts(pid: string): bigint[] {
   let merged = emptyWarmupHistogramCounts();
   const rows = db()
     .query(
-      "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ?",
+      "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ? AND time_slot NOT LIKE 'return:%'",
     )
     .all(pid) as Array<{ counts: string; total: string }>;
   for (const row of rows) {
@@ -2884,7 +2846,7 @@ export function flushGlobalHistograms(): void {
           hist = normalizeWarmupHistogram(encoded.weights);
           // Delete old slot-segmented rows (backward compat cleanup)
           d.query(
-            "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
+            "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all' AND time_slot NOT LIKE 'return:%'",
           ).run(resolvedPid);
 
           d.query(
@@ -2940,7 +2902,8 @@ export function recordGlobalGap(projectPath: string, gapMs: number): void {
  * Read-only snapshot of persisted and pending global histograms, keyed by the
  * canonical project_id. This avoids loading or reconciling the process cache
  * and includes history even before an active session touches a project after
- * restart.
+ * restart. Pool the current return segments for display and use the legacy
+ * reply-only histogram only for projects without any current observations.
  */
 export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   string,
@@ -2961,26 +2924,34 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   }
 
   const exactCountsByProject = new Map<string, bigint[]>();
+  const segmentedCounts = new Map<string, bigint[]>();
   const rows = database
     .query(
-      "SELECT project_id, counts, CAST(total AS TEXT) AS total FROM warmup_histograms",
+      "SELECT project_id, time_slot, counts, CAST(total AS TEXT) AS total FROM warmup_histograms",
     )
-    .all() as Array<{ project_id: string; counts: string; total: string }>;
+    .all() as Array<{
+    project_id: string;
+    time_slot: string;
+    counts: string;
+    total: string;
+  }>;
   for (const row of rows) {
     const pid = canonicalProjectId(row.project_id, { committed: true });
     if (!pid) continue;
     const decoded = decodeWarmupHistogram(row.counts, row.total);
     if (!decoded) continue;
-    const current =
-      exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
-    exactCountsByProject.set(pid, mergeWarmupHistogramCounts(current, decoded));
+    const target = row.time_slot.startsWith("return:")
+      ? segmentedCounts
+      : exactCountsByProject;
+    const current = target.get(pid) ?? emptyWarmupHistogramCounts();
+    target.set(pid, mergeWarmupHistogramCounts(current, decoded));
   }
 
   // Dirty histograms contain observations since the persisted base was
   // loaded. Rebase them onto the canonical ID without changing dirty maps.
   for (const [sourceId, dirty] of dirtyHistograms) {
     const pid = canonicalProjectId(sourceId, { committed: true });
-    if (!pid) continue;
+    if (!pid || segmentedCounts.has(pid)) continue;
     const current =
       exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
     const dirtyCounts = dirty.counts.map(BigInt);
@@ -2990,10 +2961,71 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
     );
   }
 
+  for (const [pid, counts] of segmentedCounts) {
+    exactCountsByProject.set(pid, counts);
+  }
+
   for (const [pid, counts] of exactCountsByProject) {
     snapshot.set(pid, normalizeWarmupHistogram(counts));
   }
   return snapshot;
+}
+
+function warmingHistogramKey(pid: string, segment: string): string {
+  return pid + "\x1f" + segment;
+}
+
+export function getSegmentedWarmingHistogramsSnapshot(): ReadonlyMap<
+  string,
+  InterTurnHistogram
+> {
+  const snapshot = new Map<string, InterTurnHistogram>();
+  const rows = db()
+    .query(`
+    SELECT project_id, time_slot, counts, CAST(total AS TEXT) AS total
+    FROM warmup_histograms JOIN projects ON projects.id = project_id
+    WHERE tenant_id = ? AND time_slot LIKE 'return:%'
+  `)
+    .all(currentTenantId()) as Array<{
+    project_id: string;
+    time_slot: string;
+    counts: string;
+    total: string;
+  }>;
+  for (const row of rows) {
+    const counts = decodeWarmupHistogram(row.counts, row.total);
+    if (counts)
+      snapshot.set(
+        warmingHistogramKey(row.project_id, row.time_slot),
+        normalizeWarmupHistogram(counts),
+      );
+  }
+  return snapshot;
+}
+
+export function globalHistogramForWarmingSnapshot(
+  state: SessionState,
+  snapshot?: ReadonlyMap<string, InterTurnHistogram>,
+): InterTurnHistogram {
+  const segment = state.warmingTurn?.segment;
+  if (!segment) return createHistogram();
+  const tenant = state.storageTenantId ?? "";
+  const supplied = currentTenantId() === tenant ? snapshot : undefined;
+  return withTenant(tenant, () => {
+    const pid = projectId(state.projectPath);
+    if (!pid) return createHistogram();
+    if (supplied)
+      return (
+        supplied.get(warmingHistogramKey(pid, segment)) ?? createHistogram()
+      );
+    const row = db()
+      .query(
+        "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ? AND time_slot = ?",
+      )
+      .get(pid, segment) as { counts: string; total: string } | null;
+    const counts = row && decodeWarmupHistogram(row.counts, row.total);
+    return counts ? normalizeWarmupHistogram(counts) : createHistogram();
+  });
 }
 
 // ---------------------------------------------------------------------------

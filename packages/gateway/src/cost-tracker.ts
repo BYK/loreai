@@ -1,3 +1,4 @@
+import type { WarmupTTL } from "./translate/types";
 /**
  * Per-session cost accumulation and counterfactual savings estimation.
  *
@@ -517,24 +518,30 @@ export function recordWarmupCost(
   model: string,
   cacheReadTokens: number,
   cacheCreationTokens: number,
-  ttl?: "5m" | "1h",
+  ttl?: WarmupTTL,
   attribution?: CostAttribution,
+  metered?: { pricing: Pricing; inputTokens: number; outputTokens: number },
 ): void {
   const costs = getOrCreate(sessionID);
-  const pricing = getPricingSync(model);
+  const pricing = metered?.pricing ?? getPricingSync(model);
   const readCost = (cacheReadTokens / 1_000_000) * pricing.cache_read;
   // Anthropic doubles cache_write pricing for 1h TTL
   const cacheWriteRate =
     ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   const writeCost = (cacheCreationTokens / 1_000_000) * cacheWriteRate;
-  const warmupTotal = readCost + writeCost;
+  const warmupTotal =
+    readCost +
+    writeCost +
+    ((metered?.inputTokens ?? 0) * pricing.input +
+      (metered?.outputTokens ?? 0) * pricing.output) /
+      1_000_000;
   costs.workers.warmup.cost += warmupTotal;
   costs.workers.warmup.calls++;
 
   addDailyCost(utcToday(), "warmup", warmupTotal);
   recordProviderCost(attribution, "warmup", warmupTotal, {
-    input_tokens: 0,
-    output_tokens: 0,
+    input_tokens: metered?.inputTokens ?? 0,
+    output_tokens: metered?.outputTokens ?? 0,
     cache_read_input_tokens: cacheReadTokens,
     cache_creation_input_tokens: cacheCreationTokens,
   });
@@ -817,7 +824,8 @@ export function recordWarmupHit(
   sessionID: string,
   model: string,
   cacheReadTokens: number,
-  ttl?: "5m" | "1h",
+  ttl?: WarmupTTL,
+  savingsPerMTok?: number,
 ): void {
   const costs = getOrCreate(sessionID);
   // 🔴 Phantom-savings observability backstop (Bug A): a session should only
@@ -841,7 +849,8 @@ export function recordWarmupHit(
     ttl === "1h" ? pricing.cache_write * 2 : pricing.cache_write;
   // Without warming, these reads would have been writes
   const savings =
-    (cacheReadTokens / 1_000_000) * (cacheWriteRate - pricing.cache_read);
+    (cacheReadTokens / 1_000_000) *
+    (savingsPerMTok ?? cacheWriteRate - pricing.cache_read);
   costs.counterfactual.warmupSavings += savings;
   costs.counterfactual.warmupHits++;
 }

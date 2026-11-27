@@ -939,7 +939,9 @@ export const LoreConfig = z.object({
       conversationTTL: "auto",
       warming: { enabled: true },
     })
-    .describe("Anthropic prompt cache TTL and speculative warming."),
+    .describe(
+      "Anthropic prompt cache TTL and speculative warming, including eligible 30-minute OpenAI Responses caches.",
+    ),
   /** Workspace sub-project paths or globs, relative to the `.lore.json` directory.
    *  At startup, Lore imports `.lore.md` from each resolved sub-project into the
    *  root project's knowledge base. Supports literal paths (`"project-a"`) and
